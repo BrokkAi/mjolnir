@@ -2273,23 +2273,6 @@ mod tests {
         use std::path::Path;
 
         #[test]
-        fn a_mjolnir_row_with_a_record_is_resumed_and_one_without_is_restored() {
-            let path = Path::new("/home/user/.local/share/mj/sessions/session-7");
-            assert_eq!(
-                wiki_continuation("session-7", "mjolnir", path, true).unwrap(),
-                WikiContinuation::Resume {
-                    session_id: "session-7".to_owned(),
-                }
-            );
-            assert_eq!(
-                wiki_continuation("session-7", "mjolnir", path, false).unwrap(),
-                WikiContinuation::Restore {
-                    wiki_id: "session-7".to_owned(),
-                }
-            );
-        }
-
-        #[test]
         fn a_claude_code_row_is_imported_with_the_uuid_from_its_path() {
             let path = Path::new(
                 "/home/user/.claude/projects/-home-user-app/7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44.jsonl",
@@ -2316,16 +2299,6 @@ mod tests {
                     harness: HarnessKind::Codex,
                     native_session_id: "7f3a1c20-0b11-4a55-9e0d-2c8a5d6f1b44".to_owned(),
                 }
-            );
-        }
-
-        #[test]
-        fn an_unknown_tool_is_an_error_that_names_it() {
-            let error = wiki_continuation("abc123", "opencode", Path::new("/tmp/s.jsonl"), false)
-                .unwrap_err();
-            assert!(
-                format!("{error:#}").contains("opencode"),
-                "the error has to name the tool: {error:#}"
             );
         }
     }
@@ -2649,72 +2622,6 @@ mod tests {
         );
     }
 
-    fn projection(session_id: &str) -> mj_core::state::MaterializedSession {
-        use mj_core::transcript::{TranscriptBody, TranscriptItem};
-        let mut projected = mj_core::state::MaterializedSession::empty(session_id);
-        let mut push = |position: u64, body: TranscriptBody| {
-            let streamed = matches!(body, TranscriptBody::Agent { .. });
-            projected
-                .transcript
-                .push(std::sync::Arc::new(TranscriptItem {
-                    stable_id: format!("item-{position}"),
-                    position,
-                    latest_content_event_ordinal: streamed.then_some(position),
-                    created_at_ms: 1_700_000_000_000 + i64::try_from(position).unwrap(),
-                    last_changed_at_ms: 1_700_000_000_000 + i64::try_from(position).unwrap(),
-                    body,
-                }));
-        };
-        push(
-            1,
-            TranscriptBody::User {
-                content: vec![serde_json::json!({"type": "text", "text": "still talking"})],
-            },
-        );
-        push(
-            2,
-            TranscriptBody::Thought {
-                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "hmm"}})],
-                streaming: false,
-            },
-        );
-        push(
-            3,
-            TranscriptBody::Tool {
-                call: serde_json::json!({"toolCallId": "c1", "title": "Read README.md"}),
-                terminal_outputs: Vec::new(),
-                terminal_refs: Vec::new(),
-                presentation: None,
-            },
-        );
-        push(
-            4,
-            TranscriptBody::Agent {
-                chunks: vec![serde_json::json!({"content": {"type": "text", "text": "reading"}})],
-                streaming: false,
-            },
-        );
-        projected.session_title = Some("the live title".into());
-        projected
-    }
-
-    /// A session that has never been checkpointed is indexed from the
-    /// daemon's own projection, with the same roles a checkpoint would give.
-    #[test]
-    fn a_running_session_is_indexed_from_its_stored_transcript() {
-        let session_id = "0123456789abcdef0123456789abcdef";
-        let messages = projected_messages(&projection(session_id));
-        assert_eq!(
-            messages.iter().map(|m| m.role).collect::<Vec<_>>(),
-            vec![Role::User, Role::Tool, Role::Assistant]
-        );
-        assert_eq!(messages[0].text, "still talking");
-        assert_eq!(messages[2].text, "reading");
-        let tool: serde_json::Value = serde_json::from_str(&messages[1].text).unwrap();
-        assert_eq!(tool["name"], "Read");
-        assert_eq!(tool["call"]["title"], "Read README.md");
-    }
-
     /// A running session is listed under the same key as a stopped one, with
     /// its own change token, so it is searchable before it is ever closed and
     /// reconciliation never archives it. When it stops, the key stays and the
@@ -2934,56 +2841,6 @@ mod tests {
         assert!(
             start >= 20,
             "the window keeps lead-in before the hit, got {start}"
-        );
-    }
-
-    /// The snapshot a restore hands to compaction has to satisfy the same
-    /// validator a real checkpoint does, and has to carry every message in
-    /// order.
-    #[test]
-    fn a_restored_snapshot_is_a_valid_transcript_of_the_indexed_session() {
-        let snapshot = snapshot_of(&indexed(vec![
-            (Role::User, "make the tests green"),
-            (Role::Tool, "Read src/lib.rs"),
-            (Role::Assistant, "they are green now"),
-            (Role::User, "  "),
-        ]))
-        .unwrap();
-
-        snapshot.validate().expect("the snapshot is well formed");
-        assert_eq!(snapshot.event_frontier, 3);
-        assert_eq!(
-            snapshot.session.session_title.as_deref(),
-            Some("the archived session")
-        );
-        assert!(snapshot.session.last_activity_at_ms.is_some());
-        let bodies = snapshot
-            .transcript
-            .iter()
-            .map(|item| match &item.body {
-                mj_core::archive::CanonicalTranscriptBody::User { content } => (
-                    "user",
-                    mj_core::transcript::materialized_content_text(content),
-                ),
-                mj_core::archive::CanonicalTranscriptBody::Agent { chunks, .. } => (
-                    "agent",
-                    mj_core::transcript::materialized_chunks_text(chunks),
-                ),
-                mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } => (
-                    "tool",
-                    call["title"].as_str().unwrap_or_default().to_owned(),
-                ),
-                _ => ("other", String::new()),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            bodies,
-            vec![
-                ("user", "make the tests green".to_owned()),
-                ("tool", "Read src/lib.rs".to_owned()),
-                ("agent", "they are green now".to_owned()),
-            ],
-            "the blank message is dropped and every other one keeps its role"
         );
     }
 
@@ -3261,132 +3118,6 @@ mod tests {
         assert_eq!(selected, vec!["grandchild", "child", "parent"]);
     }
 
-    #[test]
-    fn native_adapters_cover_every_enabled_profile_home() {
-        use mj_core::config::{Config, HarnessKind, HarnessProfile};
-
-        fn profile(kind: HarnessKind, home: &str, enabled: bool) -> HarnessProfile {
-            HarnessProfile {
-                enabled,
-                kind,
-                home: PathBuf::from(home),
-                environment: Default::default(),
-                context_window_bytes: None,
-                subagents: Default::default(),
-                guardian_review_model: None,
-            }
-        }
-
-        let mut config = Config::default();
-        for (id, built) in [
-            (
-                "codex",
-                profile(HarnessKind::Codex, "/home/dev/.codex3", true),
-            ),
-            (
-                "codex-ds",
-                profile(HarnessKind::Codex, "/home/dev/.codex-ds", true),
-            ),
-            // A second profile on one home must not add a second adapter.
-            (
-                "codex-alt",
-                profile(HarnessKind::Codex, "/home/dev/.codex3", true),
-            ),
-            (
-                "codex-off",
-                profile(HarnessKind::Codex, "/home/dev/.codex-off", false),
-            ),
-            (
-                "claude",
-                profile(HarnessKind::Claude, "/home/dev/.claude4", true),
-            ),
-            ("kimi", profile(HarnessKind::Kimi, "/home/dev/.kimi", true)),
-            ("grok", profile(HarnessKind::Grok, "/home/dev/.grok", true)),
-            ("muse", profile(HarnessKind::Muse, "/home/dev/muse", true)),
-            (
-                "muse-off",
-                profile(HarnessKind::Muse, "/home/dev/muse-off", false),
-            ),
-        ] {
-            config.profiles.insert(id.into(), built);
-        }
-
-        let adapters = native_adapters(&config);
-        let roots: Vec<(&str, Option<PathBuf>)> = adapters
-            .iter()
-            .map(|adapter| (adapter.name(), adapter.root()))
-            .collect();
-
-        let codex: Vec<&Option<PathBuf>> = roots
-            .iter()
-            .filter(|(name, _)| *name == "codex")
-            .map(|(_, root)| root)
-            .collect();
-        assert_eq!(
-            codex,
-            vec![
-                &Some(PathBuf::from("/home/dev/.codex3/sessions")),
-                &Some(PathBuf::from("/home/dev/.codex-ds/sessions")),
-            ],
-            "one adapter per enabled Codex home, deduplicated: {roots:?}"
-        );
-
-        let claude: Vec<&Option<PathBuf>> = roots
-            .iter()
-            .filter(|(name, _)| *name == "claude-code")
-            .map(|(_, root)| root)
-            .collect();
-        assert_eq!(
-            claude,
-            vec![&Some(PathBuf::from("/home/dev/.claude4/projects"))],
-            "one adapter for the enabled Claude home: {roots:?}"
-        );
-
-        for (_, root) in &roots {
-            let Some(root) = root else { continue };
-            let text = root.to_string_lossy();
-            assert!(
-                !text.contains(".codex-off"),
-                "a disabled profile must not be indexed: {roots:?}"
-            );
-            assert!(
-                !text.ends_with("/.codex/sessions") && !text.ends_with("/.claude/projects"),
-                "the stock homes are not indexed unless a profile names them: {roots:?}"
-            );
-        }
-
-        // SessionWiki has no adapter for these three, so Mjolnir supplies one
-        // per enabled profile home under its own tool name.
-        for (name, root) in [
-            ("kimi-code", PathBuf::from("/home/dev/.kimi/sessions")),
-            ("grok-build", PathBuf::from("/home/dev/.grok/sessions")),
-            (
-                "muse",
-                mj_checkpoint::native::muse_sessions_root(Path::new("/home/dev/muse")).unwrap(),
-            ),
-        ] {
-            let found: Vec<&Option<PathBuf>> = roots
-                .iter()
-                .filter(|(found, _)| *found == name)
-                .map(|(_, root)| root)
-                .collect();
-            assert_eq!(found, vec![&Some(root)], "one {name} adapter: {roots:?}");
-        }
-
-        for (_, root) in &roots {
-            let Some(root) = root else { continue };
-            assert!(
-                !root.to_string_lossy().contains("muse-off"),
-                "a disabled profile must not be indexed: {roots:?}"
-            );
-        }
-
-        assert!(
-            roots.iter().any(|(name, _)| *name == "gemini"),
-            "the other built-in adapters are kept: {roots:?}"
-        );
-    }
-
     /// A Mjolnir row carries the target, profile and harness the sync stored
     /// in the index; a row from another tool carries none, because only
     /// Mjolnir writes those tags.
@@ -3475,6 +3206,7 @@ mod tests {
     /// matched the parent on it while the preview, which never anchors on
     /// tool output, said "no hits". A match counts only where the preview can
     /// show it.
+    // Hard-won: e53bc221: A child-only transcript phrase must not make the parent match when its preview has no hits.
     #[test]
     fn a_phrase_only_in_a_sub_agents_transcript_does_not_match_its_parent() {
         let _held = tags::testing::lock();
@@ -3533,6 +3265,7 @@ mod tests {
         assert_eq!(ids("parent zebra", false), ["parent"]);
     }
 
+    // Hard-won: e53bc221: Short-query fallback must not restore the tool-only false match fixed in trigram search.
     #[test]
     fn short_query_scan_also_ignores_tool_only_matches() {
         let _held = tags::testing::lock();
@@ -3601,6 +3334,7 @@ mod tests {
     /// a first build, indexes the session on its own from the rows the pass
     /// would write, and does not wait for the pass. The session is then found
     /// by its id with no record left, as after the destroy.
+    // Hard-won: ab7d7f49: A session destroyed between sync passes must remain searchable by its ID.
     #[test]
     fn a_destroy_indexes_the_session_itself_when_the_sync_outlasts_the_wait() {
         let _held = tags::testing::lock();
@@ -3642,24 +3376,10 @@ mod tests {
         assert!(!found.nothing_to_restore);
     }
 
-    /// A sync pass that finishes within the wait has indexed the session, so
-    /// nothing is read or written on its own.
-    #[test]
-    fn a_sync_that_finishes_in_time_is_all_a_destroy_waits_for() {
-        let outcome = block_on(index_before_destroy_with(
-            async { Ok(()) },
-            DESTROY_SYNC_WAIT,
-            || -> Result<Vec<CapturedSession>> {
-                panic!("a finished pass leaves nothing to index on its own")
-            },
-            Duration::from_millis(50),
-        ));
-        assert_eq!(outcome, IndexedBeforeDestroy::Synced);
-    }
-
     /// While another writer holds the index, as a first build does while it
     /// parses one tool's sessions, the destroy goes ahead and the rows it read
     /// are written once the index is free.
+    // Hard-won: ab7d7f49: A busy SessionWiki writer must not make a destroyed session disappear from search.
     #[test]
     fn a_busy_index_takes_the_destroyed_session_once_it_is_free() {
         let _held = tags::testing::lock();

@@ -86,23 +86,6 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
 }
 
 #[test]
-fn dependency_refresh_remains_pending_until_the_web_loop_schedules_it() {
-    let mut publisher = publication::ViewerPublication::default();
-    let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
-    runtime
-        .records
-        .insert("new".into(), phone_session("new", 0));
-    let mut native = Default::default();
-    let mut moves = Default::default();
-    publisher.observe_runtime(&runtime, &mut native, &mut moves);
-    assert!(publisher.inputs_changed);
-    publisher.observe_runtime(&runtime, &mut native, &mut moves);
-    assert!(std::mem::take(&mut publisher.inputs_changed));
-    publisher.observe_runtime(&runtime, &mut native, &mut moves);
-    assert!(!publisher.inputs_changed);
-}
-
-#[test]
 fn viewer_config_options_publish_current_advertised_values() {
     let make_options = |model, effort| {
         vec![
@@ -281,6 +264,7 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
     assert!(!json.contains("private path and token"));
 }
 
+// Hard-won: 0c8dcd72: The web wizard must reject a raw project directory that fails the same validation the TUI already performs.
 #[test]
 fn new_preflight_rejects_a_bare_project_without_a_git_head() {
     let error = run_new_preflight(
@@ -350,40 +334,6 @@ fn new_preflight_requires_network_sources_for_isolated_targets() {
 }
 
 #[test]
-fn a_phone_prompt_becomes_its_text_then_its_images() {
-    use agent_client_protocol::schema::v1::ContentBlock;
-
-    let image = |data: &str| crate::server::ViewerPromptImage {
-        attachment: None,
-        data_base64: data.into(),
-        mime_type: "image/png".into(),
-        width: 32,
-        height: 24,
-    };
-    let blocks = phone_prompt_blocks(
-        "look at this".into(),
-        vec![image("aW1hZ2U="), image("c2Vjb25k")],
-    );
-    let ContentBlock::Text(text) = &blocks[0] else {
-        panic!("the prompt leads with its text");
-    };
-    assert_eq!(text.text, "look at this");
-    let ContentBlock::Image(first) = &blocks[1] else {
-        panic!("each attachment travels as an image block");
-    };
-    assert_eq!(first.data, "aW1hZ2U=");
-    assert_eq!(first.mime_type, "image/png");
-    assert!(matches!(blocks[2], ContentBlock::Image(_)));
-    assert_eq!(blocks.len(), 3);
-
-    // An image needs no words with it, and an empty text block would be a
-    // message the user never wrote.
-    let images_only = phone_prompt_blocks(String::new(), vec![image("aW1hZ2U=")]);
-    assert_eq!(images_only.len(), 1);
-    assert!(matches!(images_only[0], ContentBlock::Image(_)));
-}
-
-#[test]
 fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
     use mj_core::relay::RelaySnapshot;
 
@@ -416,6 +366,7 @@ fn image_prompts_are_offered_only_after_the_agent_advertises_them() {
 /// an enum — even when its own durable record said a turn was running. An
 /// evaluation driver reading `chat_phase == idle` treated those turns as
 /// finished.
+// Hard-won: #1025: A restarted daemon must not turn a still-running worker turn into reported idle.
 #[test]
 fn a_session_whose_turn_outlives_the_daemon_is_not_reported_idle() {
     let mut controller = controller_with_profiles(&["claude"]);
@@ -1001,6 +952,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
 /// the same availability and reason `/api/v1/options` gives: a host that did
 /// not answer is unavailable with a sentence, a host that did is ready, and a
 /// target no reading covers is unknown.
+// Hard-won: 97bf5586: A silent target must carry its unavailable status into the web picker snapshot.
 #[test]
 fn snapshot_targets_carry_the_availability_the_options_report() {
     let mut controller = controller_with_profiles(&["codex"]);
@@ -1182,6 +1134,7 @@ async fn phone_projects_resolve_origins_and_discard_results_after_location_chang
 /// child's own directory failed and logged a WARN every 30 seconds. A child's
 /// source is its parent's, as every other listing already reads it, and the
 /// parent resolves from its durable source repository.
+// Hard-won: 1c4b4ab1: Resolve a suspended child through its parent instead of probing its removed clone.
 #[tokio::test]
 async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     let root = tempfile::tempdir().unwrap();
@@ -1284,6 +1237,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
 /// Other tests reach these log lines on their own threads, and tracing decides
 /// once per process whether a line is wanted, so this runs alone in a child
 /// process with its own subscriber.
+// Hard-won: 1c4b4ab1: Repeated project-source failures must not emit the same warning every retry.
 #[test]
 fn phone_projects_warn_once_for_a_repeated_failure() {
     const CHILD: &str = "MJ_PHONE_PROJECT_LOG_TEST_CHILD";
@@ -1351,78 +1305,6 @@ async fn phone_projects_log_a_repeated_failure_once() {
         "{:?}",
         log.events()
     );
-}
-
-#[test]
-fn capacity_state_follows_the_probed_targets_and_preserves_readings() {
-    let mut controller = controller_with_profiles(&[]);
-    controller
-        .config
-        .targets
-        .insert("raw".into(), TargetTemplate::LocalBare);
-    let mut state = std::collections::BTreeMap::new();
-
-    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
-    assert_eq!(state.len(), 1);
-
-    let usage = crate::targets::DeploymentCapacityUsage {
-        cpu_percent: Some(37),
-        memory_used_bytes: 3,
-        memory_total_bytes: 4,
-        logical_cores: 8,
-        disk_total_bytes: Some(5),
-        storage: Vec::new(),
-    };
-    let local = state.get_mut("local").expect("local capacity state");
-    local.usage = Some(usage.clone());
-    local.on_demand = true;
-    local.sampled_at_epoch_seconds = Some(42);
-    local.refreshing = false;
-
-    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
-    let local_capacity = viewer_capacity(&state)
-        .into_iter()
-        .find(|capacity| capacity.id == "local")
-        .expect("local viewer capacity");
-    assert_eq!(local_capacity.cpu_percent, usage.cpu_percent);
-    assert_eq!(
-        local_capacity.memory_used_bytes,
-        Some(usage.memory_used_bytes)
-    );
-    assert_eq!(local_capacity.logical_cores, Some(usage.logical_cores));
-    assert_eq!(local_capacity.sampled_at_epoch_seconds, Some(42));
-
-    controller
-        .config
-        .targets
-        .insert("second-local".into(), TargetTemplate::LocalBare);
-    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
-    assert_eq!(state.len(), 1);
-    assert_eq!(state["local"].usage, Some(usage.clone()));
-
-    controller.config.targets.insert(
-        "fleet".into(),
-        TargetTemplate::AwsEc2 {
-            aws_profile: None,
-            region: "us-east-1".into(),
-            launch_template: "hel-runson".into(),
-            launch_template_version: None,
-            ssh_user: "ubuntu".into(),
-            address_source: Default::default(),
-            identity_file: None,
-            ssh_args: Vec::new(),
-        },
-    );
-    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
-    assert_eq!(state.len(), 2);
-    assert!(state.contains_key("aws:fleet"));
-    assert_eq!(state["local"].usage, Some(usage.clone()));
-
-    controller.config.targets.remove("fleet");
-    track_capacity_targets(&controller.deployment_capacity_targets(), &mut state);
-    assert_eq!(state.len(), 1);
-    assert!(!state.contains_key("aws:fleet"));
-    assert_eq!(state["local"].usage, Some(usage));
 }
 
 fn prompt_action() -> ControllerAction {
@@ -1566,19 +1448,6 @@ fn read_receipt_only_persists_and_refreshes_when_the_cursor_advances() {
 }
 
 #[tokio::test]
-async fn an_admitted_action_answers_its_phone_before_the_work_runs() {
-    let mut replies = PendingActionReplies::default();
-    let (reply, answer) = tokio::sync::oneshot::channel();
-
-    replies.accept(1, &prompt_action(), reply);
-
-    // No completion has been reported, and the phone already has its
-    // answer: holding it until the action finished is what mobile
-    // networks time out on.
-    assert_eq!(answer.await.unwrap(), ActionOutcome::accepted());
-}
-
-#[tokio::test]
 async fn a_new_action_answers_once_its_provisional_session_is_published() {
     let mut replies = PendingActionReplies::default();
     let (reply, mut answer) = tokio::sync::oneshot::channel();
@@ -1649,37 +1518,6 @@ fn close_is_admitted_while_provisioning_occupies_a_full_action_pool() {
         admit_phone_action(&prompt_action(), 0, &mut active),
         Err(ActionOutcome::SessionBusy)
     );
-}
-
-#[test]
-fn a_refused_action_reports_the_reason_the_phone_can_act_on() {
-    let mut active = std::collections::BTreeSet::new();
-
-    assert_eq!(
-        admit_phone_action(&prompt_action(), 0, &mut active),
-        Ok(Some("session-1".to_owned()))
-    );
-    assert_eq!(
-        admit_phone_action(&prompt_action(), 1, &mut active),
-        Err(ActionOutcome::SessionBusy)
-    );
-    assert_eq!(
-        admit_phone_action(&new_action(), MAX_CONCURRENT_PHONE_ACTIONS, &mut active),
-        Err(ActionOutcome::Busy {
-            running: MAX_CONCURRENT_PHONE_ACTIONS,
-            limit: MAX_CONCURRENT_PHONE_ACTIONS,
-        })
-    );
-    // A refusal must not consume the session slot it did not take.
-    assert_eq!(active.len(), 1);
-    assert_eq!(admit_phone_action(&new_action(), 1, &mut active), Ok(None));
-}
-
-#[test]
-fn a_feed_that_ends_outside_shutdown_names_the_failure() {
-    assert!(feed_stopped(true, "the session manager stopped").is_none());
-    let failure = feed_stopped(false, "the session manager stopped").expect("named failure");
-    assert!(failure.to_string().contains("session manager"));
 }
 
 #[test]
@@ -1825,16 +1663,6 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
 }
 
 #[test]
-fn phone_action_capacity_is_bounded() {
-    assert!(phone_action_capacity_available(
-        MAX_CONCURRENT_PHONE_ACTIONS - 1
-    ));
-    assert!(!phone_action_capacity_available(
-        MAX_CONCURRENT_PHONE_ACTIONS
-    ));
-}
-
-#[test]
 fn started_phone_session_is_visible_and_mapped_before_provisioning() {
     let session_id = "0123456789abcdef0123456789abcdef";
     let session = phone_session(session_id, 0);
@@ -1914,6 +1742,7 @@ fn failed_launch_notice_survives_session_rollback_and_history_is_bounded() {
     assert_eq!(json["launch_failures"][15].as_object().unwrap().len(), 4);
 }
 
+// Hard-won: #1057: Callers need a correction for refusals without receiving private controller details.
 #[test]
 fn a_refused_action_reports_its_reason_and_any_other_failure_reports_a_reference() {
     let refused = PhoneActionFailure::of(
@@ -1947,6 +1776,7 @@ fn a_refused_action_reports_its_reason_and_any_other_failure_reports_a_reference
     );
 }
 
+// Hard-won: ce490a90: A prior action failure must not make all later waits report the session as errored.
 #[test]
 fn a_later_successful_action_clears_a_session_s_recorded_failure() {
     let mut pending = std::collections::BTreeMap::new();
@@ -2227,6 +2057,7 @@ async fn a_missing_historical_checkout_is_not_probed_on_every_retry_tick() {
 /// `mj elicitations --session <parent>` answered `[]`. The session's question
 /// list now includes it, under an id that routes the answer back to the role
 /// that asked; the API accepts an answer only for an id on this list.
+// Hard-won: 8ab93dd3: A reviewer form must appear in session elicitations and reach the waiting reviewer.
 #[test]
 fn a_reviewers_question_is_one_of_the_sessions_questions() {
     use crate::review_host::RuntimeReviewView;

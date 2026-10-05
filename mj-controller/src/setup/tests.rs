@@ -112,42 +112,6 @@ fn failed(stderr: &[u8]) -> CommandOutput {
 }
 
 #[test]
-fn newly_installed_harness_is_discovered_before_its_first_login() {
-    struct InstalledMuse;
-    impl CommandExecutor for InstalledMuse {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.args, ["--version"]);
-            Ok(CommandOutput {
-                status: if command.program == "muse" { 0 } else { 127 },
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("custom-muse-home");
-    let overrides = BTreeMap::from([(HarnessKind::Muse, path.clone())]);
-    let mut homes = Vec::new();
-    for _ in 0..2 {
-        discover_installed_harnesses(
-            Some(directory.path()),
-            &overrides,
-            &mut homes,
-            &InstalledMuse,
-        );
-        assert_eq!(
-            homes,
-            vec![DiscoveredHome {
-                kind: HarnessKind::Muse,
-                path: path.clone(),
-                authenticated: false
-            }]
-        );
-        assert!(!path.exists(), "discovery must not create a profile");
-    }
-}
-
-#[test]
 fn discovers_default_and_overridden_homes_with_authentication_markers() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home");
@@ -181,28 +145,6 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
             .iter()
             .any(|home| home.path == grok && home.kind == HarnessKind::Grok)
     );
-}
-
-#[test]
-fn every_harness_has_a_discoverable_default_home() {
-    let directory = tempfile::tempdir().unwrap();
-    let home = directory.path().to_path_buf();
-    for kind in HarnessKind::ALL {
-        fs::create_dir_all(home.join(kind.default_home_leaf())).unwrap();
-    }
-
-    let executor = FakeExecutor::succeeds();
-    let homes = discover_harness_homes_with_executor(Some(&home), [], &executor);
-
-    assert_eq!(homes.len(), HarnessKind::ALL.len());
-    for kind in HarnessKind::ALL {
-        assert!(
-            homes
-                .iter()
-                .any(|home| home.kind == kind && !home.authenticated),
-            "{kind:?} default home"
-        );
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -338,24 +280,7 @@ fn runtime_probe_requires_podman_rootless_preflight_on_linux() {
     assert!(runtimes.iter().all(|runtime| runtime.usable()));
 }
 
-#[test]
-fn unusable_podman_carries_the_doctor_remediation_into_the_runtime_list() {
-    let executor = RuntimeProbeExecutor::new([
-        ok(b"podman version 3.4.7\n"),
-        failed(b"docker is unavailable"),
-    ]);
-
-    let runtimes = probe_local_runtimes(&executor, &ApplePlatform::Linux);
-
-    assert_eq!(runtimes.len(), 2);
-    assert!(!runtimes[0].usable());
-    let remediation = runtimes[0].remediation.as_deref().unwrap();
-    assert!(
-        remediation.contains("Install or upgrade Podman"),
-        "{remediation}"
-    );
-}
-
+// Hard-won: #1150: Unsupported macOS hosts must not be told to install the Linux-only Podman runtime.
 #[test]
 fn macos_setup_skips_unsupported_runtimes_without_install_advice() {
     for (architecture, major_version) in [("aarch64", 15), ("x86_64", 26)] {

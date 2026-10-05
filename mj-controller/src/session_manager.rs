@@ -31,9 +31,6 @@ use mj_core::relay::{RelayCommand, RelayCursor, RelayOperationalState};
 pub use mj_client::session::{
     ManagedSessionView, ReviewerAction, ReviewerOutcome, ViewError, new_command_id,
 };
-#[cfg(test)]
-use mj_core::worker_launch::ReviewerLaunchConfig;
-
 /// Sync cadence while the worker owns work, so streamed events show promptly.
 const SESSION_SYNC_INTERVAL: Duration = Duration::from_millis(150);
 /// Sync cadence while the worker is quiet. See `actor::sync_delay`.
