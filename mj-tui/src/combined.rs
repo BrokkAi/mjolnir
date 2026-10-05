@@ -2192,7 +2192,23 @@ mod tests {
         terminal
             .draw(|frame| crate::render::render(frame, dashboard))
             .unwrap();
-        buffer_lines(terminal.backend().buffer())
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        // Transition spinners use a process-wide clock, so pin their glyph.
+        for line in &mut lines {
+            if line.contains("Transition ·") {
+                *line = line
+                    .chars()
+                    .map(|character| {
+                        if matches!(character, '⠁' | '⠂' | '⠄' | '⡀') {
+                            '?'
+                        } else {
+                            character
+                        }
+                    })
+                    .collect();
+            }
+        }
+        lines
     }
 
     fn append_combined_golden(
@@ -2393,6 +2409,21 @@ mod tests {
             crossterm::event::MouseButton::Left,
         )));
         writeln!(output, "action: {action:?}").unwrap();
+
+        let mut failed_session = running_session();
+        failed_session.state = mj_core::state::SessionState::Destroying;
+        failed_session.last_error = Some("Podman exited before the workspace was removed".into());
+        // A future durable timestamp keeps the rendered elapsed clock at 0s.
+        failed_session.updated_at = "2099-01-01T00:00:00Z".into();
+        let mut failed = dashboard_with_session(failed_session);
+        let lines = render_combined_golden(&mut failed, 100, 40);
+        append_combined_golden(
+            &mut output,
+            "failed destroy transition and recovery guidance",
+            100,
+            40,
+            &lines,
+        );
 
         mj_core::golden::assert_golden(
             env!("CARGO_MANIFEST_DIR"),

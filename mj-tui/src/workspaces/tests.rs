@@ -1,6 +1,9 @@
 use super::*;
-use crate::test_support::{buffer_lines, chord, dashboard_with_session, running_session};
-use crossterm::event::{KeyEvent, KeyModifiers};
+use crate::test_support::{
+    buffer_lines, chord, dashboard_with_session, drawn, key, mouse_at, point, prefix_key, route,
+    running_session,
+};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use mj_core::workspace::WorkspaceRecord;
 
 fn entry(id: &str, name: &str) -> WorkspaceManagementEntry {
@@ -28,6 +31,141 @@ fn draw_manager(dashboard: &DashboardState) -> Vec<String> {
         })
         .unwrap();
     buffer_lines(terminal.backend().buffer())
+}
+
+fn append_workspace_state(output: &mut String, label: &str, lines: &[String]) {
+    use std::fmt::Write as _;
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} (110x32) ===").unwrap();
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+}
+
+fn click_workspace_label(
+    dashboard: &mut DashboardState,
+    lines: &[String],
+    label: &str,
+) -> DashboardAction {
+    let position = point(lines, label);
+    let mut action = DashboardAction::None;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        action = dashboard.handle_mouse(mouse_at(kind, position));
+    }
+    action
+}
+
+#[test]
+fn golden_workspace_manager_drafts() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_workspace_names(std::collections::BTreeMap::from([
+        ("default".into(), "Default".into()),
+        ("alpha".into(), "Alpha".into()),
+        ("beta".into(), "Beta".into()),
+    ]));
+    dashboard.order_workspaces(&["default".into(), "alpha".into(), "beta".into()]);
+    dashboard.set_active_workspace(Some("default".into()));
+
+    let action = chord(&mut dashboard, crate::CommandId::FocusWorkspaces);
+    writeln!(output, "action: {action:?}").unwrap();
+    let action = dashboard.handle_key(key(KeyCode::Right));
+    writeln!(output, "action: {action:?}").unwrap();
+    dashboard.set_active_workspace(Some("alpha".into()));
+    append_workspace_state(
+        &mut output,
+        "dashboard after selecting the next workspace",
+        &drawn(&mut dashboard, 110, 32),
+    );
+    let action = route(
+        &mut dashboard,
+        &[
+            prefix_key(),
+            KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE),
+        ],
+    );
+    writeln!(output, "action: {action:?}").unwrap();
+    dashboard.set_active_workspace(Some("beta".into()));
+    append_workspace_state(
+        &mut output,
+        "dashboard after selecting a numbered workspace",
+        &drawn(&mut dashboard, 110, 32),
+    );
+
+    let action = chord(&mut dashboard, crate::CommandId::Workspaces);
+    writeln!(output, "action: {action:?}").unwrap();
+    let DashboardAction::LoadWorkspaceManagement { generation } = action else {
+        panic!("workspace manager did not request its snapshot");
+    };
+    let mut beta = entry("beta", "Beta");
+    beta.workspace.session_count = 2;
+    beta.drafts = vec![
+        WorkspaceDraftEntry {
+            id: "draft-terminal".into(),
+            session_id: Some("session-1".into()),
+            source: "terminal composer".into(),
+            saved_at: "2026-10-01 12:00".into(),
+            owner_pid: Some(4100),
+        },
+        WorkspaceDraftEntry {
+            id: "draft-web".into(),
+            session_id: None,
+            source: "web viewer".into(),
+            saved_at: "2026-10-02 09:30".into(),
+            owner_pid: None,
+        },
+    ];
+    let mut alpha = entry("alpha", "Alpha");
+    alpha.workspace.session_count = 1;
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![
+            entry("default", "Default"),
+            alpha.clone(),
+            beta.clone(),
+        ]),
+    );
+    let lines = drawn(&mut dashboard, 110, 32);
+    append_workspace_state(&mut output, "workspace manager list", &lines);
+    let action = click_workspace_label(&mut dashboard, &lines, "Drafts");
+    writeln!(output, "action: {action:?}").unwrap();
+    append_workspace_state(
+        &mut output,
+        "drafts for the selected workspace",
+        &drawn(&mut dashboard, 110, 32),
+    );
+    let action = dashboard.handle_key(key(KeyCode::Down));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_workspace_state(
+        &mut output,
+        "second draft selected",
+        &drawn(&mut dashboard, 110, 32),
+    );
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    beta.drafts.clear();
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("default", "Default"), alpha, beta]),
+    );
+    append_workspace_state(
+        &mut output,
+        "draft recovery completed",
+        &drawn(&mut dashboard, 110, 32),
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "workspace-manager-drafts",
+        output.trim_end_matches('\n'),
+    );
 }
 
 #[test]

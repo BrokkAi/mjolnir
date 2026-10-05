@@ -797,6 +797,240 @@ fn append_dialog_render(
     output.push('\n');
 }
 
+fn click_dialog_label(
+    dashboard: &mut DashboardState,
+    lines: &[String],
+    label: &str,
+) -> DashboardAction {
+    let position = point(lines, label);
+    let mut action = DashboardAction::None;
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        action = dashboard.handle_mouse(mouse_at(kind, position));
+    }
+    action
+}
+
+fn normalize_notice_log_ages(lines: &mut [String]) {
+    // The renderer's relative age is intentionally replaced with a same-width
+    // marker so the golden pins the complete modal without pinning wall time.
+    for line in lines {
+        if let Some(ago) = line.find(" ago ") {
+            let token_start = line[..ago].rfind(' ').map_or(0, |space| space + 1);
+            line.replace_range(token_start..ago, &"?".repeat(ago - token_start));
+        }
+    }
+}
+
+#[test]
+fn golden_dashboard_dialogs() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    let mut targets = dashboard_with_session(running_session());
+    targets.cycle_focus(false);
+    targets.cycle_focus(false);
+    let action = targets.handle_key(key(KeyCode::Char('e')));
+    writeln!(output, "action: {action:?}").unwrap();
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "target actions", 120, 34, &lines);
+    let action = click_dialog_label(&mut targets, &lines, "Test");
+    writeln!(output, "action: {action:?}").unwrap();
+    targets.apply_target_test("podman".into(), Ok(()));
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "target test result", 120, 34, &lines);
+
+    let _ = click_dialog_label(&mut targets, &lines, "Rename");
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "target ID editor", 120, 34, &lines);
+    targets.handle_key(key(KeyCode::End));
+    for character in ['-', 'v', '2'] {
+        targets.handle_key(key(KeyCode::Char(character)));
+    }
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "edited target ID", 120, 34, &lines);
+    let action = targets.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    let action = targets.handle_key(key(KeyCode::Char('e')));
+    writeln!(output, "action: {action:?}").unwrap();
+    let lines = drawn(&mut targets, 120, 34);
+    let _ = click_dialog_label(&mut targets, &lines, "Rename");
+    let action = targets.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "cancelled target ID editor returns to actions",
+        120,
+        34,
+        &drawn(&mut targets, 120, 34),
+    );
+
+    let mut changed = dashboard_with_session(running_session());
+    changed.focus_sessions();
+    let action = chord(&mut changed, crate::CommandId::ChangedFiles);
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "changed files while the checkout probe is pending",
+        100,
+        24,
+        &drawn(&mut changed, 100, 24),
+    );
+    let mut numstat = String::new();
+    let mut porcelain = String::new();
+    for index in 0..36 {
+        writeln!(
+            numstat,
+            "{}\t{}\tsrc/module-{index:02}.rs",
+            index + 1,
+            index
+        )
+        .unwrap();
+        writeln!(porcelain, " M src/module-{index:02}.rs").unwrap();
+    }
+    changed.set_git_status(
+        "session-1".into(),
+        Ok(mj_core::local_git::parse_git_status(
+            "/workspace/project".into(),
+            "feature/dialogs",
+            Some("1\t3"),
+            &numstat,
+            &porcelain,
+        )),
+    );
+    let lines = drawn(&mut changed, 100, 24);
+    append_dialog_render(&mut output, "changed files first page", 100, 24, &lines);
+    changed.handle_key(key(KeyCode::PageDown));
+    append_dialog_render(
+        &mut output,
+        "changed files after paging down",
+        100,
+        24,
+        &drawn(&mut changed, 100, 24),
+    );
+    let action = changed.handle_key(key(KeyCode::Char('r')));
+    writeln!(output, "action: {action:?}").unwrap();
+    let action = changed.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "dashboard after closing changed files",
+        100,
+        24,
+        &drawn(&mut changed, 100, 24),
+    );
+
+    let mut notices = dashboard_with_session(running_session());
+    for index in 0..12 {
+        notices.set_failure_notice(format!(
+            "Build step {index:02} failed: the remote worker could not start its checkout or load the requested profile"
+        ));
+    }
+    open_palette(&mut notices);
+    for character in "Recent messages".chars() {
+        notices.handle_key(key(KeyCode::Char(character)));
+    }
+    append_dialog_render(
+        &mut output,
+        "command palette search for recent messages",
+        100,
+        28,
+        &drawn(&mut notices, 100, 28),
+    );
+    let action = notices.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+    let mut lines = drawn(&mut notices, 100, 28);
+    normalize_notice_log_ages(&mut lines);
+    append_dialog_render(&mut output, "recent messages", 100, 28, &lines);
+    notices.handle_key(key(KeyCode::PageDown));
+    let mut lines = drawn(&mut notices, 100, 28);
+    normalize_notice_log_ages(&mut lines);
+    append_dialog_render(
+        &mut output,
+        "recent messages after paging down",
+        100,
+        28,
+        &lines,
+    );
+    notices.handle_key(key(KeyCode::Home));
+    let action = notices.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    let mut cpu = dashboard_with_session(running_session());
+    let mut session_cpu = mj_core::snapshot_map::SnapshotMap::new();
+    session_cpu.insert(
+        "session-1".into(),
+        mj_client::runtime_feed::SessionCpuView::Measured {
+            usage: mj_core::cpu_usage::SessionCpuUsage {
+                recent_permille: 230,
+                hourly_permille: 180,
+                hourly_covered_secs: 3600,
+                online_cpus: 8,
+            },
+        },
+    );
+    for index in 2..=18 {
+        let id = format!("session-{index:02}");
+        let mut session = running_session();
+        session.id = id.clone();
+        session.title = format!("CPU session {index:02}");
+        session.acp_session_title = None;
+        cpu.state.sessions.insert(id.clone(), session);
+        session_cpu.insert(
+            id,
+            mj_client::runtime_feed::SessionCpuView::Measured {
+                usage: mj_core::cpu_usage::SessionCpuUsage {
+                    recent_permille: 100 + index as u16,
+                    hourly_permille: 80 + index as u16,
+                    hourly_covered_secs: 3600,
+                    online_cpus: 8,
+                },
+            },
+        );
+    }
+    cpu.set_session_cpu(session_cpu);
+    open_palette(&mut cpu);
+    for character in "CPU by session".chars() {
+        cpu.handle_key(key(KeyCode::Char(character)));
+    }
+    append_dialog_render(
+        &mut output,
+        "command palette search for CPU by session",
+        120,
+        36,
+        &drawn(&mut cpu, 120, 36),
+    );
+    let action = cpu.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "CPU by session",
+        120,
+        36,
+        &drawn(&mut cpu, 120, 36),
+    );
+    cpu.handle_key(key(KeyCode::PageDown));
+    append_dialog_render(
+        &mut output,
+        "CPU by session after paging down",
+        120,
+        36,
+        &drawn(&mut cpu, 120, 36),
+    );
+    let action = cpu.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "dashboard-dialogs",
+        output.trim_end_matches('\n'),
+    );
+}
+
 #[test]
 fn golden_tui_web_viewer_dialog() {
     let mut output = String::new();
