@@ -379,20 +379,92 @@ pub struct ApiBackend {
     /// The daemon operations the export path needs: session records, and the
     /// checkpoint a bundle export is read from.
     exports: Arc<dyn ExportRuntime>,
-    /// Latest background-refreshed quota reports, used to rank the profiles a
-    /// sub-agent may run on so a child lands on the login with the most quota
-    /// left, without making the parent reason about credential aliases.
+    /// Latest background-refreshed quota reports, used to rank configured
+    /// session and sub-agent profile choices without exposing credential
+    /// aliases to their callers.
     quota_reports: Arc<Mutex<BTreeMap<String, ProfileQuota>>>,
-    /// Profiles whose login the credential sync found refused; a spawn on one
-    /// is refused until its login file changes.
+    /// Profiles whose login the credential sync found refused; session and
+    /// sub-agent selection refuse them until their login file changes.
     rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
-    /// The capabilities `list_profiles` answers with and `spawn` chooses
-    /// from. The catalogue discovers them in the background, so a call only
-    /// ranks what it holds, waiting for a profile the pass has not published.
+    /// The capabilities user-facing selection and sub-agent operations use.
+    /// The catalogue discovers them in the background, so a call waits for a
+    /// profile the pass has not published instead of starting another probe.
     profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
 }
 
 impl ApiBackend {
+    async fn discover_profile_candidates(
+        &self,
+        mut ids: Vec<(String, mj_core::config::HarnessKind)>,
+        candidate_kind: &str,
+    ) -> Result<crate::server::api::SubagentCandidates> {
+        let mut candidates = crate::server::api::SubagentCandidates::default();
+        // A profile whose login the provider has refused would start a
+        // session that dies on its first request, so it remains unavailable
+        // until its login file changes.
+        {
+            let rejected = self
+                .rejected_logins
+                .lock()
+                .map_err(|_| anyhow!("refused logins lock poisoned"))?;
+            ids.retain(|(profile_id, _)| match rejected.refusal(profile_id) {
+                Some(reason) => {
+                    candidates.unavailable.push((profile_id.clone(), reason));
+                    false
+                }
+                None => true,
+            });
+        }
+        // One discovery per profile, so a profile whose harness cannot be
+        // discovered drops out on its own instead of failing the whole answer.
+        let discoveries = futures::future::join_all(
+            ids.iter()
+                .map(|(id, _)| self.profile_catalog.capabilities(std::slice::from_ref(id))),
+        )
+        .await;
+        let quota_reports = self
+            .quota_reports
+            .lock()
+            .map_err(|_| anyhow!("profile quota reports lock poisoned"))?;
+        for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
+            match discovery.map(|mut choices| choices.pop()) {
+                Ok(Some(choices)) => {
+                    let remaining_percent =
+                        profile_remaining_percent(quota_reports.get(&profile_id));
+                    candidates
+                        .offered
+                        .push(crate::server::api::SubagentCandidate {
+                            profile_id,
+                            harness,
+                            choices,
+                            remaining_percent,
+                        });
+                }
+                Ok(None) => candidates
+                    .unavailable
+                    .push((profile_id, "its discovery returned nothing".to_owned())),
+                Err(error) => {
+                    tracing::warn!(profile_id, %error, "profile left out of model selection");
+                    candidates
+                        .unavailable
+                        .push((profile_id, format!("{error:#}")));
+                }
+            }
+        }
+        if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
+            bail!(
+                "no {candidate_kind} profile is available: {}",
+                candidates
+                    .unavailable
+                    .iter()
+                    .map(|(id, reason)| format!("{id} ({reason})"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+        Ok(candidates)
+    }
+
     pub(crate) async fn start_followup_with_id(
         &self,
         session_id: String,
@@ -2337,72 +2409,17 @@ impl SubagentBackend for ApiBackend {
         parent_profile: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let mut candidates = crate::server::api::SubagentCandidates::default();
-            let mut ids = self.profile_catalog.candidates(&parent_profile)?;
-            // A profile whose login the provider has refused would start a
-            // child that dies on its first request (#1160), so it is refused
-            // here, with the fix, until its login file changes.
-            {
-                let rejected = self
-                    .rejected_logins
-                    .lock()
-                    .map_err(|_| anyhow!("refused logins lock poisoned"))?;
-                ids.retain(|(profile_id, _)| match rejected.refusal(profile_id) {
-                    Some(reason) => {
-                        candidates.unavailable.push((profile_id.clone(), reason));
-                        false
-                    }
-                    None => true,
-                });
-            }
-            // One discovery per profile, so a profile whose harness cannot be
-            // discovered drops out on its own instead of failing the answer.
-            let discoveries = futures::future::join_all(
-                ids.iter()
-                    .map(|(id, _)| self.profile_catalog.capabilities(std::slice::from_ref(id))),
-            )
-            .await;
-            let quota_reports = self
-                .quota_reports
-                .lock()
-                .map_err(|_| anyhow!("sub-agent quota reports lock poisoned"))?;
-            for ((profile_id, harness), discovery) in ids.into_iter().zip(discoveries) {
-                match discovery.map(|mut choices| choices.pop()) {
-                    Ok(Some(choices)) => {
-                        let remaining_percent =
-                            profile_remaining_percent(quota_reports.get(&profile_id));
-                        candidates
-                            .offered
-                            .push(crate::server::api::SubagentCandidate {
-                                profile_id,
-                                harness,
-                                choices,
-                                remaining_percent,
-                            });
-                    }
-                    Ok(None) => candidates
-                        .unavailable
-                        .push((profile_id, "its discovery returned nothing".to_owned())),
-                    Err(error) => {
-                        tracing::warn!(profile_id, %error, "sub-agent profile left out");
-                        candidates
-                            .unavailable
-                            .push((profile_id, format!("{error:#}")));
-                    }
-                }
-            }
-            if candidates.offered.is_empty() && !candidates.unavailable.is_empty() {
-                bail!(
-                    "no sub-agent profile is available: {}",
-                    candidates
-                        .unavailable
-                        .iter()
-                        .map(|(id, reason)| format!("{id} ({reason})"))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                );
-            }
-            Ok(candidates)
+            let ids = self.profile_catalog.candidates(&parent_profile)?;
+            self.discover_profile_candidates(ids, "sub-agent").await
+        })
+    }
+
+    fn session_profile_candidates(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
+        Box::pin(async move {
+            let ids = self.profile_catalog.configured_candidates()?;
+            self.discover_profile_candidates(ids, "configured").await
         })
     }
 

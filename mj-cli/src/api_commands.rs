@@ -130,7 +130,7 @@ pub(crate) struct NewArgs {
     /// Title shown in session lists. Defaults to the project and profile.
     #[arg(long)]
     title: Option<String>,
-    /// Choose a quota-ranked eligible profile for this model and optional effort.
+    /// Choose a quota-ranked usable profile for this model and optional effort.
     #[arg(long, conflicts_with = "profile")]
     model: Option<String>,
     /// Harness reasoning effort to select before the first prompt.

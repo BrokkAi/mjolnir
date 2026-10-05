@@ -122,11 +122,11 @@ pub(crate) async fn resolve_subagent_policy_selection(
                 .unwrap_or(EffortRequirement::NoChoices);
             resolve_model_profile_selection_matching(
                 backend,
-                parent_profile,
                 None,
                 fixed_model,
                 effort_requirement,
                 None,
+                ModelProfileCandidateSource::Subagents { parent_profile },
             )
             .await
             .map_err(|error| {
@@ -190,7 +190,7 @@ pub(crate) async fn resolve_subagent_selection(
     } else {
         model.to_owned()
     };
-    resolve_model_profile_selection(
+    resolve_subagent_model_profile_selection(
         backend,
         parent_profile,
         profile_id,
@@ -201,9 +201,9 @@ pub(crate) async fn resolve_subagent_selection(
     .await
 }
 
-/// Choose the eligible profile for an exact model and validate its effort.
-/// New sessions and named-model sub-agent spawns share this quota-ranked path.
-pub(crate) async fn resolve_model_profile_selection(
+/// Choose a profile from the eligible sub-agent set for an exact model and
+/// validate its effort.
+pub(crate) async fn resolve_subagent_model_profile_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     profile_id: Option<&str>,
@@ -216,13 +216,57 @@ pub(crate) async fn resolve_model_profile_selection(
         .unwrap_or(EffortRequirement::Any);
     resolve_model_profile_selection_matching(
         backend,
-        parent_profile,
         profile_id,
         model,
         requirement,
         inherited_effort,
+        ModelProfileCandidateSource::Subagents { parent_profile },
     )
     .await
+}
+
+/// Choose a profile for a user-created session from all enabled, usable
+/// profiles and validate its effort.
+pub(crate) async fn resolve_session_model_profile_selection(
+    backend: &Arc<dyn SubagentBackend>,
+    ranking_anchor: Option<&str>,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<SubagentSelection, ApiFailure> {
+    let requirement = effort
+        .map(EffortRequirement::Exact)
+        .unwrap_or(EffortRequirement::Any);
+    resolve_model_profile_selection_matching(
+        backend,
+        None,
+        model,
+        requirement,
+        None,
+        ModelProfileCandidateSource::Session { ranking_anchor },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ModelProfileCandidateSource<'a> {
+    Session { ranking_anchor: Option<&'a str> },
+    Subagents { parent_profile: &'a str },
+}
+
+impl<'a> ModelProfileCandidateSource<'a> {
+    fn profile_description(self) -> &'static str {
+        match self {
+            Self::Session { .. } => "configured",
+            Self::Subagents { .. } => "eligible",
+        }
+    }
+
+    fn ranking_anchor(self) -> Option<&'a str> {
+        match self {
+            Self::Session { ranking_anchor } => ranking_anchor,
+            Self::Subagents { parent_profile } => Some(parent_profile),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -234,17 +278,22 @@ enum EffortRequirement<'a> {
 
 async fn resolve_model_profile_selection_matching(
     backend: &Arc<dyn SubagentBackend>,
-    parent_profile: &str,
     profile_id: Option<&str>,
     model: &str,
     requirement: EffortRequirement<'_>,
     inherited_effort: Option<&str>,
+    source: ModelProfileCandidateSource<'_>,
 ) -> Result<SubagentSelection, ApiFailure> {
-    let candidates = backend
-        .subagent_candidates(parent_profile.to_owned())
-        .await?;
+    let candidates = match source {
+        ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
+        ModelProfileCandidateSource::Subagents { parent_profile } => {
+            backend
+                .subagent_candidates(parent_profile.to_owned())
+                .await?
+        }
+    };
     if matches!(requirement, EffortRequirement::Any) {
-        let chosen = choose_subagent_profile(candidates, profile_id, parent_profile, model)?;
+        let chosen = choose_model_profile(candidates, profile_id, model, source)?;
         let efforts = model_efforts(backend, &chosen, model).await?;
         let effort = child_effort(model, &efforts, None, inherited_effort)?;
         return Ok(selection(chosen.profile_id, model, effort));
@@ -262,12 +311,18 @@ async fn resolve_model_profile_selection_matching(
         }
         offered.retain(|candidate| candidate.profile_id == requested);
         if offered.is_empty() {
-            return Err(ApiFailure::bad_request(format!(
-                "profile {requested:?} is not eligible for sub-agent use from this session"
-            )));
+            let message = match source {
+                ModelProfileCandidateSource::Session { .. } => {
+                    format!("profile {requested:?} is not available for a new session")
+                }
+                ModelProfileCandidateSource::Subagents { .. } => format!(
+                    "profile {requested:?} is not eligible for sub-agent use from this session"
+                ),
+            };
+            return Err(ApiFailure::bad_request(message));
         }
     } else {
-        rank_candidates(&mut offered, parent_profile);
+        rank_candidates(&mut offered, source.ranking_anchor());
     }
     let all_offered = offered.clone();
     let mut matching_model = false;
@@ -318,6 +373,7 @@ async fn resolve_model_profile_selection_matching(
             model,
             &all_offered,
             &unavailable,
+            source.profile_description(),
         )));
     }
     let required = match requirement {
@@ -329,7 +385,10 @@ async fn resolve_model_profile_selection_matching(
         EffortRequirement::Exact(effort) if !offered_any_effort => format!(
             "model {model:?} offers no effort choices; requested effort {effort:?} is unavailable. "
         ),
-        _ => format!("no eligible profile offers model {model:?} with {required}. "),
+        _ => format!(
+            "no {} profile offers model {model:?} with {required}. ",
+            source.profile_description()
+        ),
     };
     Err(ApiFailure::bad_request(format!(
         "{unavailable_effort}{}",
@@ -372,6 +431,55 @@ fn selection(profile_id: String, model: &str, effort: Option<String>) -> Subagen
         model: model.to_owned(),
         effort,
         fast_mode: mj_core::codex_catalog::is_luna_model(model),
+    }
+}
+
+fn choose_model_profile(
+    candidates: SubagentCandidates,
+    requested_profile: Option<&str>,
+    model: &str,
+    source: ModelProfileCandidateSource<'_>,
+) -> Result<SubagentCandidate, ApiFailure> {
+    match source {
+        ModelProfileCandidateSource::Subagents { parent_profile } => {
+            choose_subagent_profile(candidates, requested_profile, parent_profile, model)
+        }
+        ModelProfileCandidateSource::Session { ranking_anchor } => {
+            let SubagentCandidates {
+                mut offered,
+                unavailable,
+            } = candidates;
+            if let Some(requested) = requested_profile {
+                if let Some((_, reason)) = unavailable.iter().find(|(id, _)| id == requested) {
+                    return Err(ApiFailure::conflict(format!(
+                        "profile {requested:?} is unavailable: {reason}"
+                    )));
+                }
+                let chosen = offered
+                    .into_iter()
+                    .find(|candidate| candidate.profile_id == requested)
+                    .ok_or_else(|| {
+                        ApiFailure::bad_request(format!(
+                            "profile {requested:?} is not available for a new session"
+                        ))
+                    })?;
+                validate_selectors(&chosen.choices, Some(model), None)?;
+                return Ok(chosen);
+            }
+            rank_candidates(&mut offered, ranking_anchor);
+            match offered
+                .iter()
+                .position(|candidate| offers_model(candidate, model))
+            {
+                Some(index) => Ok(offered.swap_remove(index)),
+                None => Err(ApiFailure::bad_request(no_profile_offers(
+                    model,
+                    &offered,
+                    &unavailable,
+                    "configured",
+                ))),
+            }
+        }
     }
 }
 
@@ -445,7 +553,7 @@ pub(crate) fn choose_subagent_profile(
         validate_selectors(&chosen.choices, Some(model), None)?;
         return Ok(chosen);
     }
-    rank_candidates(&mut offered, parent_profile);
+    rank_candidates(&mut offered, Some(parent_profile));
     match offered
         .iter()
         .position(|candidate| offers_model(candidate, model))
@@ -455,20 +563,23 @@ pub(crate) fn choose_subagent_profile(
             model,
             &offered,
             &unavailable,
+            "eligible",
         ))),
     }
 }
 
 /// Order candidates best first: the most quota left, with unknown quota last;
-/// then the parent's own profile; then profile id, so the order never depends
-/// on how the configuration happens to list them.
-pub(crate) fn rank_candidates(candidates: &mut [SubagentCandidate], parent_profile: &str) {
+/// then the optional anchor's own profile; then profile id, so the order never
+/// depends on how the configuration happens to list them.
+pub(crate) fn rank_candidates(candidates: &mut [SubagentCandidate], ranking_anchor: Option<&str>) {
     candidates.sort_by(|left, right| {
         right
             .remaining_percent
             .cmp(&left.remaining_percent)
             .then_with(|| {
-                (left.profile_id != parent_profile).cmp(&(right.profile_id != parent_profile))
+                let left_is_anchor = ranking_anchor == Some(left.profile_id.as_str());
+                let right_is_anchor = ranking_anchor == Some(right.profile_id.as_str());
+                right_is_anchor.cmp(&left_is_anchor)
             })
             .then_with(|| left.profile_id.cmp(&right.profile_id))
     });
@@ -482,7 +593,7 @@ pub(crate) fn merge_same_models(
     mut candidates: Vec<SubagentCandidate>,
     parent_profile: &str,
 ) -> Vec<SubagentCandidate> {
-    rank_candidates(&mut candidates, parent_profile);
+    rank_candidates(&mut candidates, Some(parent_profile));
     let mut seen = std::collections::BTreeSet::new();
     candidates.retain(|candidate| {
         let mut models = candidate
@@ -505,14 +616,15 @@ fn offers_model(candidate: &SubagentCandidate, model: &str) -> bool {
         .any(|choice| choice.value == model)
 }
 
-/// A refusal the parent can act on: which models each eligible profile does
-/// offer, and which profiles could not be checked.
+/// A refusal that lists the models each candidate offers and profiles that
+/// could not be checked.
 fn no_profile_offers(
     model: &str,
     offered: &[SubagentCandidate],
     unavailable: &[(String, String)],
+    profile_description: &str,
 ) -> String {
-    let mut message = format!("no eligible profile offers model {model:?}.");
+    let mut message = format!("no {profile_description} profile offers model {model:?}.");
     if !offered.is_empty() {
         let offers = offered
             .iter()
@@ -829,7 +941,7 @@ mod tests {
             candidate("high", Some(90), &["luna"]),
             candidate("empty", Some(0), &["luna"]),
         ];
-        rank_candidates(&mut candidates, "parent");
+        rank_candidates(&mut candidates, Some("parent"));
         assert_eq!(
             ids(&candidates),
             vec!["high", "parent", "a-other", "b-other", "empty", "unknown"]
@@ -992,6 +1104,7 @@ mod tests {
             _after_seq: u64,
             _limit: usize,
             _role: Option<mj_core::transcript::TranscriptRole>,
+            _finished_only: bool,
         ) -> BoxFuture<'_, AnyResult<Option<TranscriptPage>>> {
             Box::pin(async { Ok(None) })
         }

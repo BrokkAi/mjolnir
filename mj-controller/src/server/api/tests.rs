@@ -503,8 +503,9 @@ struct FakeBackend {
     summary: Option<TurnSummary>,
     /// Follow-ups the start handler asked for.
     followups: Mutex<Vec<(String, StartFollowup)>>,
-    /// A custom quota-ranked candidate set for new-session model selection.
-    model_candidates: Option<SubagentCandidates>,
+    /// Candidate sets stay distinct to model session and sub-agent scope.
+    session_model_candidates: Option<SubagentCandidates>,
+    subagent_model_candidates: Option<SubagentCandidates>,
     start_status: Option<StartStatus>,
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
@@ -638,7 +639,7 @@ impl SubagentBackend for FakeBackend {
         &self,
         parent_profile: String,
     ) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
-        let model_candidates = self.model_candidates.clone();
+        let model_candidates = self.subagent_model_candidates.clone();
         Box::pin(async move {
             if let Some(candidates) = model_candidates {
                 return Ok(candidates);
@@ -655,6 +656,13 @@ impl SubagentBackend for FakeBackend {
                 }],
                 unavailable: Vec::new(),
             })
+        })
+    }
+
+    fn session_profile_candidates(&self) -> BoxFuture<'_, AnyResult<SubagentCandidates>> {
+        let candidates = self.session_model_candidates.clone();
+        Box::pin(async move {
+            candidates.ok_or_else(|| anyhow::anyhow!("session profile candidates are unavailable"))
         })
     }
 
@@ -1626,6 +1634,17 @@ fn model_candidate(profile_id: &str, remaining_percent: u8, model: &str) -> Suba
     model_candidate_with_efforts(profile_id, remaining_percent, model, &["high"])
 }
 
+fn model_candidate_for_harness(
+    profile_id: &str,
+    remaining_percent: u8,
+    model: &str,
+    harness: mj_core::config::HarnessKind,
+) -> SubagentCandidate {
+    let mut candidate = model_candidate(profile_id, remaining_percent, model);
+    candidate.harness = harness;
+    candidate
+}
+
 fn model_candidate_with_efforts(
     profile_id: &str,
     remaining_percent: u8,
@@ -1716,11 +1735,11 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
 }
 
 #[tokio::test]
-async fn start_without_a_profile_uses_the_named_model_quota_selector() {
+async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota() {
     let directory = tempfile::tempdir().unwrap();
     let preferences = directory.path().join("go.json");
     save_global_default(&preferences, "codex-1", "podman");
-    let candidates = SubagentCandidates {
+    let eligible_candidates = SubagentCandidates {
         offered: vec![
             model_candidate("codex-1", 5, "luna"),
             model_candidate_with_efforts("quota-wrong-effort", 99, "luna", &["low"]),
@@ -1728,28 +1747,34 @@ async fn start_without_a_profile_uses_the_named_model_quota_selector() {
         ],
         unavailable: Vec::new(),
     };
+    let mut session_candidates = eligible_candidates.clone();
+    session_candidates.offered.push(model_candidate_for_harness(
+        "claude4",
+        98,
+        "luna",
+        mj_core::config::HarnessKind::Claude,
+    ));
     let backend = Arc::new(FakeBackend {
-        model_candidates: Some(candidates),
+        session_model_candidates: Some(session_candidates),
+        subagent_model_candidates: Some(eligible_candidates),
         ..FakeBackend::default()
     });
-    let selector_backend: Arc<dyn SubagentBackend> = backend.clone();
-    let expected = crate::server::api::resolve_subagent_selection(
-        &selector_backend,
-        "parent-session",
-        "codex-1",
-        None,
-        Some("luna"),
-        Some("high"),
-    )
-    .await
-    .unwrap()
-    .profile_id;
+    let expected = "claude4";
     let (app, mut actions, _, _) = api_app_with_preferences(
         backend.clone(),
         |snapshot| {
             snapshot.profiles.push(crate::server::ViewerProfile {
                 id: "quota-winner".into(),
                 harness_kind: "codex".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                subagents: mj_core::subagent::SubagentPolicy::default(),
+                quota: None,
+            });
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: "claude4".into(),
+                harness_kind: "claude".into(),
                 subagent_discovery_key: String::new(),
                 capabilities_key: String::new(),
                 subagent_profile_ids: Vec::new(),
@@ -1767,7 +1792,7 @@ async fn start_without_a_profile_uses_the_named_model_quota_selector() {
     let ControllerAction::New { profile_id, .. } = &request.action else {
         panic!("expected a New action, got {:?}", request.action);
     };
-    assert_eq!(profile_id, &expected);
+    assert_eq!(profile_id, expected);
     request
         .reply
         .send(ActionOutcome::Accepted {
@@ -1785,12 +1810,157 @@ async fn start_without_a_profile_uses_the_named_model_quota_selector() {
 }
 
 #[tokio::test]
-async fn start_without_a_profile_refuses_a_model_no_eligible_profile_offers() {
+async fn subagent_model_selection_stays_within_eligible_profiles() {
+    let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate("codex-1", 5, "luna"),
+                model_candidate_for_harness(
+                    "claude4",
+                    98,
+                    "luna",
+                    mj_core::config::HarnessKind::Claude,
+                ),
+            ],
+            unavailable: Vec::new(),
+        }),
+        subagent_model_candidates: Some(SubagentCandidates {
+            offered: vec![model_candidate("codex-1", 5, "luna")],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+
+    let selection = crate::server::api::resolve_subagent_selection(
+        &backend,
+        "parent-session",
+        "codex-1",
+        None,
+        Some("luna"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(selection.profile_id, "codex-1");
+}
+
+#[tokio::test]
+async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
     let directory = tempfile::tempdir().unwrap();
     let preferences = directory.path().join("go.json");
     save_global_default(&preferences, "codex-1", "podman");
     let backend = Arc::new(FakeBackend {
-        model_candidates: Some(SubagentCandidates {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate("claude4", 80, "luna"),
+                model_candidate("codex-1", 80, "luna"),
+            ],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","model":"luna"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New { profile_id, .. } = &request.action else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, "codex-1");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target() {
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
+            offered: vec![
+                model_candidate("zeta", 80, "luna"),
+                model_candidate("alpha", 80, "luna"),
+            ],
+            unavailable: Vec::new(),
+        }),
+        ..FakeBackend::default()
+    });
+    let (app, mut actions, _, _) = api_app(backend, |snapshot| {
+        for id in ["alpha", "zeta"] {
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: id.into(),
+                harness_kind: "codex".into(),
+                subagent_discovery_key: String::new(),
+                capabilities_key: String::new(),
+                subagent_profile_ids: Vec::new(),
+                subagents: mj_core::subagent::SubagentPolicy::default(),
+                quota: None,
+            });
+        }
+    });
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"bundle_id":"hel","target_id":"podman","model":"luna"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        profile_id,
+        target_id,
+        ..
+    } = &request.action
+    else {
+        panic!("expected a New action, got {:?}", request.action);
+    };
+    assert_eq!(profile_id, "alpha", "ties without an anchor use profile id");
+    assert_eq!(target_id, "podman");
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn start_without_a_saved_target_requires_an_explicit_target() {
+    let (app, mut actions, _, _) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let response = app
+        .oneshot(start_request(
+            r#"{"bundle_id":"hel","model":"luna"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let message = json_body(response).await["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("target_id"), "{message}");
+    assert!(message.contains("no saved default"), "{message}");
+    assert!(actions.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn start_without_a_profile_reports_configured_profiles_for_an_unavailable_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("go.json");
+    save_global_default(&preferences, "codex-1", "podman");
+    let backend = Arc::new(FakeBackend {
+        session_model_candidates: Some(SubagentCandidates {
             offered: vec![model_candidate("codex-1", 5, "luna")],
             unavailable: vec![("broken-login".into(), "login was rejected".into())],
         }),
@@ -1810,9 +1980,11 @@ async fn start_without_a_profile_refuses_a_model_no_eligible_profile_offers() {
         .unwrap()
         .to_owned();
     assert!(
-        body.contains("no eligible profile offers model \"missing\""),
+        body.contains("no configured profile offers model \"missing\""),
         "{body}"
     );
+    assert!(!body.contains("eligible"), "{body}");
+    assert!(!body.contains("sub-agent"), "{body}");
     assert!(body.contains("broken-login (login was rejected)"), "{body}");
     assert!(actions.try_recv().is_err(), "nothing was launched");
 }
@@ -1823,7 +1995,7 @@ async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_o
     let preferences = directory.path().join("go.json");
     save_global_default(&preferences, "codex-1", "podman");
     let backend = Arc::new(FakeBackend {
-        model_candidates: Some(SubagentCandidates {
+        session_model_candidates: Some(SubagentCandidates {
             offered: vec![model_candidate("codex-1", 80, "luna")],
             unavailable: Vec::new(),
         }),
@@ -1843,9 +2015,10 @@ async fn start_without_a_profile_refuses_an_effort_the_selected_model_does_not_o
         .unwrap()
         .to_owned();
     assert!(
-        body.contains("no eligible profile offers model \"luna\" with effort \"ultra\""),
+        body.contains("no configured profile offers model \"luna\" with effort \"ultra\""),
         "{body}"
     );
+    assert!(!body.contains("eligible"), "{body}");
     assert!(body.contains("codex-1 offers efforts: high"), "{body}");
     assert!(actions.try_recv().is_err(), "nothing was launched");
 }

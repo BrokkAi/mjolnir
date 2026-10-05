@@ -112,20 +112,18 @@ pub(super) async fn start_session(
     if let Some(prompt) = &request.prompt {
         validate_prompt_text(prompt, false)?;
     }
-    let (default_profile_id, target_id) = resolve_launch(&state, &request)?;
+    let (profile_hint, target_id) = resolve_launch(&state, &request)?;
     // An unnamed profile plus a named model is the CLI's model-first path.
-    // Use the saved profile as the same eligibility anchor a sub-agent spawn
-    // uses, then let the shared selector rank its eligible profiles by quota.
+    // Consider every configured, usable profile; a saved default profile is
+    // only the quota ranking anchor for ties.
     let model_selection = if request.profile_id.is_none() {
         match request.model.as_deref() {
             Some(model) => Some(
-                crate::server::api::resolve_model_profile_selection(
+                crate::server::api::resolve_session_model_profile_selection(
                     &backend,
-                    &default_profile_id,
-                    None,
+                    profile_hint.as_deref(),
                     model,
                     request.effort.as_deref(),
-                    None,
                 )
                 .await?,
             ),
@@ -134,9 +132,15 @@ pub(super) async fn start_session(
     } else {
         None
     };
-    let profile_id = model_selection
-        .as_ref()
-        .map_or(default_profile_id, |selection| selection.profile_id.clone());
+    let profile_id = match (&model_selection, profile_hint) {
+        (Some(selection), _) => selection.profile_id.clone(),
+        (None, Some(profile_id)) => profile_id,
+        (None, None) => {
+            return Err(ApiFailure::bad_request(
+                "name a profile_id or model; this instance has no saved default to fall back on",
+            ));
+        }
+    };
     let resource_allocation =
         new_session_allocation(&state, &target_id, request.cpus, request.memory_bytes)?;
     if model_selection.is_none() && (request.model.is_some() || request.effort.is_some()) {
@@ -248,9 +252,9 @@ pub(super) async fn start_session(
 ///
 /// A caller may leave either identifier unnamed, and the two resolve
 /// independently, so naming a profile while taking the saved default target is
-/// allowed. The fallback is the pair the `mj go` workflow saves beside
-/// `config.toml`, which is what lets a caller that has never read that file
-/// create a session at all. Resolution happens here rather than in the
+/// allowed. Model-first requests may also leave the profile unnamed without a
+/// saved default: that value is only a quota tie-break anchor. The target must
+/// still be named or saved. Resolution happens here rather than in the
 /// controller so that every caller of this route behaves the same way and the
 /// controller always receives two explicit identifiers.
 ///
@@ -260,20 +264,28 @@ pub(super) async fn start_session(
 fn resolve_launch(
     state: &ServerState,
     request: &StartSessionRequest,
-) -> Result<(String, String), ApiFailure> {
+) -> Result<(Option<String>, String), ApiFailure> {
     let snapshot = state.snapshot_rx.borrow();
     let saved = saved_default(&state.preferences_path);
-    let profile_id = resolve_launch_id(
-        request.profile_id.as_deref(),
-        saved.as_ref().map(|saved| saved.profile_id.as_str()),
-        "profile_id",
-    )?;
+    let model_first = request.profile_id.is_none() && request.model.is_some();
+    let profile_id = if model_first {
+        saved.as_ref().map(|saved| saved.profile_id.clone())
+    } else {
+        Some(resolve_launch_id(
+            request.profile_id.as_deref(),
+            saved.as_ref().map(|saved| saved.profile_id.as_str()),
+            "profile_id",
+        )?)
+    };
     let target_id = resolve_launch_id(
         request.target_id.as_deref(),
         saved.as_ref().map(|saved| saved.target_id.as_str()),
         "target_id",
     )?;
-    if let Err(error) = crate::server::require_profile(&snapshot, &profile_id) {
+    if !model_first
+        && let Some(profile_id) = profile_id.as_deref()
+        && let Err(error) = crate::server::require_profile(&snapshot, profile_id)
+    {
         return Err(if request.profile_id.is_some() {
             error.into()
         } else {

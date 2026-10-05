@@ -335,12 +335,13 @@ default that [`GET /api/v1/options`](#list-launch-options) reports. Supply `bund
 `project_directory`, or both: a directory with no bundle is bundled the way the
 viewer's own form does it.
 
-When `model` is supplied without `profile_id`, the saved default profile
-anchors the eligible-profile set. Mjolnir chooses the profile with the most
-quota that offers the exact model and, when named, the exact effort. If no
-eligible profile supports that selection, the request fails without changing
-the requested model or effort. Supplying both `profile_id` and `model` pins the
-profile and validates the model and effort on it.
+When `model` is supplied without `profile_id`, Mjolnir checks every enabled,
+usable profile and chooses the one offering the exact model and, when named,
+the exact effort. It ranks by remaining quota, using the saved default profile
+to break ties. If no configured profile supports that selection, the request
+fails without changing the requested model or effort. Supplying both
+`profile_id` and `model` pins the profile and validates the model and effort on
+it.
 
 Three fields choose where the session starts:
 
