@@ -10,6 +10,83 @@ use crate::relay::{
     RelayProtocolError, RelayRequest, RelayResponseBody, RelayResponsePayload,
 };
 
+/// Streamed chunk cost, measured both ways in one process so a loaded
+/// machine cannot flatter either policy. Run with
+/// `cargo test --lib worker::journal::tests::streamed_chunk_append_cost
+/// -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement, not a behavior assertion"]
+fn streamed_chunk_append_cost() {
+    const BACKLOG: usize = 40;
+    const CHUNKS: usize = 200;
+    const ROUNDS: u32 = 3;
+
+    fn stream_chunks(stage_every_append: bool) -> (std::time::Duration, usize) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+        // Give the snapshot the weight a real session carries: a queue of
+        // prompts the checkpoint has not pruned yet.
+        for index in 0..BACKLOG {
+            submit_relay(
+                &mut relay,
+                &format!("backlog-command-{index:04}"),
+                prompt(&"q".repeat(4096)),
+            );
+        }
+        let snapshot_bytes = fs::read(temp.path().join(RELAY_STATE_FILE)).unwrap().len();
+        relay.stage_snapshot_every_append = stage_every_append;
+
+        let chunk = "token ".repeat(40);
+        let started = std::time::Instant::now();
+        for _ in 0..CHUNKS {
+            relay
+                .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                    ContentBlock::from(chunk.clone()),
+                )))
+                .unwrap();
+        }
+        (started.elapsed(), snapshot_bytes)
+    }
+
+    let mut amortized = std::time::Duration::ZERO;
+    let mut every_append = std::time::Duration::ZERO;
+    let mut snapshot_bytes = 0;
+    for _ in 0..ROUNDS {
+        let (elapsed, bytes) = stream_chunks(false);
+        amortized += elapsed;
+        snapshot_bytes = bytes;
+        every_append += stream_chunks(true).0;
+    }
+
+    // What one redundant snapshot write costs: the collection that follows
+    // an advancing acknowledgement used to pay exactly this.
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    for index in 0..BACKLOG {
+        submit_relay(
+            &mut relay,
+            &format!("backlog-command-{index:04}"),
+            prompt(&"q".repeat(4096)),
+        );
+    }
+    let started = std::time::Instant::now();
+    for _ in 0..CHUNKS {
+        relay.persist_snapshot().unwrap();
+    }
+    let persists = started.elapsed();
+
+    let appends = CHUNKS as u32 * ROUNDS;
+    println!(
+        "snapshot {snapshot_bytes} bytes, {appends} chunk appends per policy\n  \
+             snapshot per append: {every_append:?} ({:?}/append)\n  \
+             amortized:           {amortized:?} ({:?}/append)\n  \
+             one snapshot write:  {:?}",
+        every_append / appends,
+        amortized / appends,
+        persists / u32::try_from(CHUNKS).unwrap(),
+    );
+}
+
 fn persisted_relay_snapshot(root: &Path) -> RelaySnapshot {
     serde_json::from_slice(&fs::read(root.join(RELAY_STATE_FILE)).unwrap()).unwrap()
 }
