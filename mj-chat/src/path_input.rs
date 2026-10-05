@@ -205,6 +205,10 @@ impl AsRef<std::ffi::OsStr> for PathInput {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use std::fmt::Write as _;
 
     fn reply(candidates: &[&str], insert: Option<&str>, truncated: bool) -> PathCompletion {
         PathCompletion {
@@ -214,21 +218,70 @@ mod tests {
         }
     }
 
+    fn path_field_screen(input: &PathInput) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).expect("terminal");
+        let mut form = crate::components::Form::<u8>::new();
+        form.declare(1, input.control_kind());
+        form.end_frame(1);
+        terminal
+            .draw(|frame| {
+                form.begin_frame();
+                crate::components::PathField::render(
+                    frame,
+                    Rect::new(0, 1, 24, 1),
+                    input,
+                    &mut form,
+                    1,
+                );
+                form.end_frame(1);
+            })
+            .expect("render path field");
+        crate::golden::buffer_lines(terminal.backend().buffer()).join("\n")
+    }
+
+    fn append_path_state(output: &mut String, label: &str, input: &PathInput) {
+        writeln!(output, "=== {label} (40x14) ===").expect("write heading");
+        writeln!(
+            output,
+            "value: {:?}; cursor: {}; control: {:?}; pending: {:?}; truncated: {}",
+            input.value(),
+            input.cursor(),
+            input.control_kind(),
+            input.completion_pending(),
+            input.completion_truncated()
+        )
+        .expect("write field state");
+        output.push_str(&path_field_screen(input));
+        output.push('\n');
+    }
+
     #[test]
-    fn path_editing_preserves_draft_until_apply() {
+    fn golden_path_field() {
+        let mut output = String::new();
         let mut input = PathInput::new();
-        crate::components::PathField::apply(
+        let edit = crate::components::PathField::apply(
             &mut input,
             crate::components::FieldEdit::Paste("~/.codex4".into()),
         );
-        assert_eq!(input.value(), "~/.codex4");
-        assert_eq!(
-            input.resolve(Some(Path::new("/home/test"))).unwrap(),
-            Path::new("/home/test/.codex4")
-        );
-        assert_eq!(input.value(), "~/.codex4");
-        assert!(input.resolve(None).is_err());
-        assert_eq!(input.value(), "~/.codex4");
+        writeln!(output, "=== edited draft (40x14) ===\nedit: {edit:?}").expect("write edit");
+        append_path_state(&mut output, "before resolution", &input);
+        writeln!(
+            output,
+            "resolved with supplied home: {:?}",
+            input
+                .resolve(Some(Path::new("/workspace/user")))
+                .expect("resolve draft")
+        )
+        .expect("write resolved path");
+        writeln!(
+            output,
+            "missing home rejected: {}",
+            input.resolve(None).is_err()
+        )
+        .expect("write missing-home result");
+        append_path_state(&mut output, "draft after resolution attempts", &input);
+        output.push_str("=== end of rendered states ===\n");
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "path-field", &output);
     }
 
     #[test]
@@ -243,39 +296,37 @@ mod tests {
     }
 
     #[test]
-    fn single_match_is_inserted_without_a_popup() {
-        let mut input = PathInput::from("~/pr");
-        input.request_completion();
-        assert!(
-            input.apply_completion("~/pr", reply(&["~/projects/"], Some("~/projects/"), false))
-        );
-        assert_eq!(input.value(), "~/projects/");
-        assert_eq!(input.cursor(), input.value().len());
-        assert!(!input.is_completing());
-    }
+    fn golden_path_completion() {
+        let mut output = String::new();
 
-    #[test]
-    fn common_prefix_is_inserted_and_popup_opens() {
+        let mut input = PathInput::from("~/pr");
+        let request = input.request_completion();
+        let applied =
+            input.apply_completion("~/pr", reply(&["~/projects/"], Some("~/projects/"), false));
+        writeln!(
+            output,
+            "single completion request: {request:?}; reply applied: {applied}"
+        )
+        .expect("write single completion");
+        append_path_state(&mut output, "single match inserts without popup", &input);
+
         let mut input = PathInput::from("~/p");
-        input.request_completion();
-        assert!(input.apply_completion(
+        let request = input.request_completion();
+        let applied = input.apply_completion(
             "~/p",
             reply(&["~/projects/", "~/provision/"], Some("~/pro"), false),
-        ));
-        assert_eq!(input.value(), "~/pro");
-        assert!(input.is_completing());
-        assert_eq!(input.completions().len(), 2);
-        assert_eq!(input.completion_selected(), 0);
-        assert!(!input.completion_truncated());
-    }
+        );
+        writeln!(
+            output,
+            "common-prefix request: {request:?}; reply applied: {applied}"
+        )
+        .expect("write common-prefix completion");
+        append_path_state(&mut output, "common prefix and two candidates", &input);
 
-    #[test]
-    fn edit_dismisses_the_popup() {
         let mut input = PathInput::from("~/p");
         input.request_completion();
         input.apply_completion("~/p", reply(&["~/projects/", "~/provision/"], None, true));
-        assert!(input.is_completing());
-        assert!(input.completion_truncated());
+        append_path_state(&mut output, "truncated candidates before edit", &input);
         let outcome = crate::components::PathField::apply(
             &mut input,
             crate::components::FieldEdit::Key(KeyEvent::new(
@@ -283,23 +334,24 @@ mod tests {
                 KeyModifiers::NONE,
             )),
         );
-        assert!(outcome.changed());
-        assert!(!input.is_completing());
-        assert!(!input.completion_truncated());
-    }
+        writeln!(output, "edit outcome: {outcome:?}").expect("write edit outcome");
+        append_path_state(&mut output, "popup dismissed after edit", &input);
 
-    #[test]
-    fn accept_replaces_the_value() {
         let mut input = PathInput::from("~/p");
         input.request_completion();
         input.apply_completion("~/p", reply(&["~/projects/", "~/provision/"], None, false));
         input.select_completion(9);
-        assert_eq!(input.completion_selected(), 1);
-        assert!(input.accept_completion());
-        assert_eq!(input.value(), "~/provision/");
-        assert_eq!(input.cursor(), input.value().len());
-        assert!(!input.is_completing());
-        assert!(!input.accept_completion());
+        append_path_state(&mut output, "selected candidate is clamped", &input);
+        let accepted = input.accept_completion();
+        let accepted_again = input.accept_completion();
+        writeln!(
+            output,
+            "accepted: {accepted}; accepting closed popup: {accepted_again}"
+        )
+        .expect("write acceptance result");
+        append_path_state(&mut output, "accepted candidate", &input);
+        output.push_str("=== end of rendered states ===\n");
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "path-completion", &output);
     }
 
     #[test]
