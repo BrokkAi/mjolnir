@@ -399,36 +399,91 @@ async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_p
         .unwrap();
 }
 
+// Hard-won: f822699: API validation refused a listed saved model and killed the worker before users could change it.
 #[tokio::test]
-async fn a_saved_selector_the_harness_refuses_fails_before_ready_or_prompt_delivery() {
+async fn a_refused_saved_model_keeps_the_worker_live_for_model_changes() {
     let root = tempfile::tempdir().unwrap();
     let spec = launch(
         root.path(),
         dropped_model_harness(root.path()),
         AcceptedSessionConfig {
-            // Listed by the harness, and rejected when it is selected. That
-            // is a real failure, not a withdrawn model, so startup keeps it.
             model: Some("broken".into()),
             effort: None,
         },
     );
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    prompt(&commands, "must-not-run").await;
-    let error = tokio::time::timeout(Duration::from_secs(10), run(spec, requests, events_tx))
+    let saved = spec.accepted_config.clone();
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let mut configured = false;
+    let mut warned = false;
+    let request = loop {
+        match next(&mut events).await {
+            RuntimeEvent::SessionConfigured { config_options } => {
+                assert_eq!(reported(&config_options, "model"), "default");
+                configured = true;
+            }
+            RuntimeEvent::Warning { message } => {
+                assert!(message.contains("broken"), "{message}");
+                assert!(
+                    message.contains("this model is listed but unusable"),
+                    "{message}"
+                );
+                warned = true;
+            }
+            RuntimeEvent::ElicitationRequested { request } => {
+                assert!(configured && warned);
+                break request;
+            }
+            RuntimeEvent::Stopped => panic!("a refused model must not stop the worker"),
+            _ => {}
+        }
+    };
+    answer_recovery(&commands, &request.id, ElicitationResponse::Decline).await;
+    commands
+        .send(CommandRequest::SetConfig {
+            request_id: "refused-live".into(),
+            key: "model".into(),
+            value: "broken".into(),
+        })
+        .await
+        .unwrap();
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::CommandRejected {
+                request_id,
+                message,
+                ..
+            } if request_id == "refused-live" => {
+                assert!(message.contains("this model is listed but unusable"));
+                break;
+            }
+            RuntimeEvent::Stopped => panic!("a live model refusal must not stop the worker"),
+            _ => {}
+        }
+    }
+    assert_eq!(saved.lock().unwrap().model.as_deref(), Some("broken"));
+    let options = set_config(&commands, &mut events, "model", "chosen").await;
+    assert_eq!(reported(&options, "model"), "chosen");
+    assert_eq!(saved.lock().unwrap().model.as_deref(), Some("chosen"));
+    prompt(&commands, "after-model-change").await;
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::PromptFinished { request_id, .. }
+                if request_id == "after-model-change" =>
+            {
+                break;
+            }
+            RuntimeEvent::Stopped => panic!("the repaired session must run its prompt"),
+            _ => {}
+        }
+    }
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
         .await
         .unwrap()
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("restore this session's accepted model"),
-        "{error:#}"
-    );
-    while let Some(event) = events.recv().await {
-        assert!(!matches!(
-            event,
-            RuntimeEvent::SessionConfigured { .. } | RuntimeEvent::PromptFinished { .. }
-        ));
-    }
+        .unwrap()
+        .unwrap();
 }
 
 /// Drive startup until it raises the recovery question, checking on the way

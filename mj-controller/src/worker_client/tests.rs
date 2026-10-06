@@ -695,6 +695,68 @@ async fn a_timed_out_call_abandons_the_connection_instead_of_desynchronizing_it(
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn credential_sync_pushes_a_refreshed_github_token_to_a_running_worker() {
+    let script = r#"
+import base64, hashlib, json, sys
+session = sys.argv[1]
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request["request"]["method"]
+    if method == "hello":
+        payload = {"type": "hello", "data": {
+            "negotiated": 1, "relay_version": "github-token-test", "session_id": session
+        }}
+    elif method == "github_token_state":
+        payload = {"type": "github_token_state", "data": {"present": False, "fingerprint": ""}}
+    elif method == "install_github_token":
+        token = base64.b64decode(request["request"]["params"]["data"])
+        payload = {"type": "github_token_state", "data": {
+            "present": True, "fingerprint": hashlib.sha256(token).hexdigest()
+        }}
+    else:
+        raise AssertionError(method)
+    print(json.dumps({
+        "request_id": request["request_id"], "protocol_version": 1,
+        "result": "ok", "payload": payload
+    }), flush=True)
+"#;
+    let spec = CommandSpec::new(
+        "python3",
+        [
+            "-u".to_owned(),
+            "-c".to_owned(),
+            script.to_owned(),
+            SESSION_ID.to_owned(),
+        ],
+    )
+    .purpose("GitHub token sync test relay");
+    let mut relay = RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(10))
+        .await
+        .expect("test worker relay connects");
+    let target = CredentialSyncTarget {
+        session_id: SESSION_ID.into(),
+        profile_id: "codex".into(),
+        harness: mj_core::config::HarnessKind::Codex,
+        profile_home: std::path::PathBuf::new(),
+        authenticates_with_api_key: true,
+        sync_github_token: true,
+        github_app_configured: false,
+        skills_scope: mj_core::skills::SkillsScope::Isolated,
+        spec,
+    };
+
+    let action = credential_sync::reconcile_github_token(
+        &mut relay,
+        &target,
+        Some("refreshed-installation-token"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(action, Some(CredentialSyncAction::GithubTokenPushed));
+}
+
 #[test]
 fn an_unsupported_method_answer_still_reads_as_missing_skills_sync() {
     // Workers that predate skills sync answer the unknown method with an
@@ -721,6 +783,7 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
@@ -744,6 +807,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -877,6 +941,7 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         profile_home: profile_home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
@@ -1191,6 +1256,7 @@ fn codex_sync_target(
         profile_home: home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -1312,6 +1378,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
     };

@@ -343,31 +343,8 @@ fn claude_credentials_contain_login(credentials: &[u8]) -> bool {
 }
 
 pub fn github_repository_from_origin(origin: &str) -> Option<GithubRepository> {
-    let origin = origin.trim();
-    let path = origin
-        .strip_prefix("https://github.com/")
-        .or_else(|| origin.strip_prefix("http://github.com/"))
-        .or_else(|| origin.strip_prefix("git@github.com:"))
-        .or_else(|| origin.strip_prefix("ssh://git@github.com/"))
-        // Config accepts owner/repository shorthand, and import uses the same
-        // parser to compare that configured source with `git remote` output.
-        .unwrap_or(origin);
-    let path = path.trim_end_matches(".git");
-    let mut parts = path.split('/');
-    let owner = parts.next()?;
-    let repository = parts.next()?;
-    if owner.is_empty()
-        || repository.is_empty()
-        || parts.next().is_some()
-        || owner.chars().any(char::is_whitespace)
-        || repository.chars().any(char::is_whitespace)
-    {
-        return None;
-    }
-    Some(GithubRepository {
-        owner: owner.to_owned(),
-        repository: repository.to_owned(),
-    })
+    let (owner, repository) = mj_core::remote_git::github_owner_repo(origin)?;
+    Some(GithubRepository { owner, repository })
 }
 
 /// Read the current directory's GitHub origin, through the same executor every

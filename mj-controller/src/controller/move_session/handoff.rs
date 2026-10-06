@@ -37,7 +37,13 @@ impl Controller {
         operation.checkpoint = previous.checkpoint.clone();
         operation.updated_at = now();
         crate::database::save_move_operation(operation)?;
-        if let Err(error) = self.validate_move_checkpoint(operation, preparation, executor) {
+        let validation = match self.github_token_for_repository_preflight(id).await {
+            Ok(token) => {
+                self.validate_move_checkpoint(operation, preparation, token.as_deref(), executor)
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = validation {
             latched.relay.cancel_abandoned_barrier().await?;
             return Err(error);
         }

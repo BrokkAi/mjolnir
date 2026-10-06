@@ -384,6 +384,7 @@ pub(super) async fn serve_session(
     // Claude Code started on, so a mode asked for first was judged against
     // the wrong model and Claude Code refused it (R8-2).
     let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
+    let mut selector_failures = Vec::new();
     {
         let accepted = spec
             .accepted_config
@@ -403,21 +404,24 @@ pub(super) async fn serve_session(
             )
             .await;
             if let Err(error) = applied {
-                // A stored value the harness no longer lists is an ordinary
-                // consequence of a model being renamed or withdrawn, and it is
-                // unrepairable from outside: the worker dispatches queued
-                // commands only once the session is configured, so failing here
-                // strands the session forever. Keep the reported configuration
-                // and ask the operator below. Asking the catalogue after
-                // the attempt rather than before keeps every dialect's own
-                // availability rule, including Grok's legacy model list.
-                if spec.clear_context_request.is_some()
-                    || selector_value_is_offered(&config_options, key, &value)
+                // Model selection is recoverable even when the catalogue lists
+                // it: API validation can refuse a listed model. Keep the worker
+                // reachable so the operator can choose another model below.
+                if key != "model"
+                    && (spec.clear_context_request.is_some()
+                        || selector_value_is_offered(&config_options, key, &value))
                 {
                     return Err(
                         error.context(format!("restore this session's accepted {key} {value:?}"))
                     );
                 }
+                tracing::warn!(
+                    selector = key,
+                    value,
+                    error = format!("{error:#}"),
+                    "could not restore saved session selector"
+                );
+                selector_failures.push(format!("{key} {value:?}: {error:#}"));
                 dropped_selectors.push((key, value));
             }
         }
@@ -447,6 +451,7 @@ pub(super) async fn serve_session(
             // bridge's own value. The rollback after a failed clear never
             // fails on a selector: it must leave a usable session.
             if spec.clear_context_request.is_some()
+                && key != "model"
                 && selector_value_is_offered(&config_options, key, value)
             {
                 return Err(error.context(format!("restore {key} after clear")));
@@ -457,13 +462,26 @@ pub(super) async fn serve_session(
                 error = format!("{error:#}"),
                 "kept the bridge's value after clear because the reported value could not be restored"
             );
+            if key == "model" {
+                emit_runtime_event(
+                    events,
+                    RuntimeEvent::Warning {
+                        message: format!(
+                            "Could not restore model {value:?} after clear ({error:#}). You can change the model while this worker is running."
+                        ),
+                    },
+                )
+                .await?;
+            }
         }
     }
     if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
+        let selector = enforcement.and_then(ExecutionEnforcement::acp_mode_selector);
         let enforced = enforce_execution_mode(
             connection,
             &session_id,
             spec.harness,
+            selector,
             desired_mode,
             &mut config_options,
             &mut modes,
@@ -488,6 +506,7 @@ pub(super) async fn serve_session(
                 RuntimeEvent::Warning {
                     message: refused_mode_warning(
                         spec.harness,
+                        selector,
                         desired_mode,
                         &refusal,
                         modes.as_ref(),
@@ -497,6 +516,18 @@ pub(super) async fn serve_session(
             )
             .await?;
         }
+    }
+    // Muse's auto-review is off in every session muse-acp opens, so it is
+    // selected on every open, resumed or not.
+    if let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting) {
+        enforce_policy_setting(
+            connection,
+            &session_id,
+            spec.harness,
+            setting,
+            &mut config_options,
+        )
+        .await?;
     }
     if let Some(mode) = spec
         .clear_context_request
@@ -508,6 +539,7 @@ pub(super) async fn serve_session(
             connection,
             &session_id,
             spec.harness,
+            None,
             mode,
             &mut config_options,
             &mut modes,
@@ -601,7 +633,11 @@ pub(super) async fn serve_session(
         emit_runtime_event(
             events,
             RuntimeEvent::Warning {
-                message: dropped_selector_warning(&dropped_selectors, &config_options),
+                message: format!(
+                    "{} You can change the selection while this worker is running. {}",
+                    dropped_selector_warning(&dropped_selectors, &config_options),
+                    selector_failures.join("; ")
+                ),
             },
         )
         .await?;
@@ -1448,6 +1484,7 @@ pub(super) async fn serve_session(
                             connection,
                             &session_id,
                             spec.harness,
+                            None,
                             &desired,
                             &mut config_options,
                             &mut modes,

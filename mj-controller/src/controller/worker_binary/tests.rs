@@ -1905,10 +1905,6 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             memory.root,
             "{kind:?} retains its memory replica in the dedicated launch field"
         );
-        if kind == HarnessKind::Muse {
-            assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
-            assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
-        }
     }
 }
 
@@ -3255,45 +3251,44 @@ fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
     (staged, path)
 }
 
-fn stage_muse_settings(profile_stage: &Path) {
-    apply_staged_execution_setting(
-        HarnessKind::Muse,
-        ExecutionPolicy::Unconstrained,
-        profile_stage,
-    )
-    .unwrap();
-}
-
 // Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile
 #[test]
-fn muse_staged_settings_select_the_unrestricted_profile() {
-    let (staged, path) = staged_muse_settings(
-        r#"{
-            "schema_version": 1,
-            "provider": "anthropic",
-            "model": "muse-1",
-            "tui": {"theme": "dark"},
-            "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
-        }"#,
-    );
+fn muse_staged_settings_replace_the_auto_review_profile_under_every_policy() {
+    for (policy, profile) in [
+        (ExecutionPolicy::Unconstrained, ":unrestricted"),
+        (ExecutionPolicy::ConfiguredApprovals, ":ask-me"),
+    ] {
+        let (staged, path) = staged_muse_settings(
+            r#"{
+                "schema_version": 1,
+                "provider": "anthropic",
+                "model": "muse-1",
+                "tui": {"theme": "dark"},
+                "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
+            }"#,
+        );
 
-    stage_muse_settings(staged.path());
+        apply_staged_execution_setting(HarnessKind::Muse, policy, staged.path()).unwrap();
 
-    let document: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["provider"], "anthropic");
-    assert_eq!(document["model"], "muse-1");
-    assert_eq!(document["tui"]["theme"], "dark");
-    assert_eq!(document["schema_version"], 1);
-    assert_eq!(document["permissions"]["schema_version"], 1);
-    assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["provider"], "anthropic");
+        assert_eq!(document["model"], "muse-1");
+        assert_eq!(document["tui"]["theme"], "dark");
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["permissions"]["schema_version"], 1);
+        assert_eq!(
+            document["permissions"]["default_profile"], profile,
+            "{policy:?}"
+        );
+    }
 }
 
-/// Muse has no guardian mode, so even a raw local target launches it
-/// unconstrained.
+/// A raw local target keeps configured approvals for Muse: muse-acp's
+/// auto-review is its guardian, and Muse keeps its sandbox.
 // Hard-won: 4a9dcb5: raw local Muse sessions used a permission profile Muse serve refused
 #[test]
-fn raw_local_muse_launches_unconstrained() {
+fn raw_local_muse_launches_with_guardian_approvals() {
     let project = tempfile::tempdir().unwrap();
     let mut session = crate::controller::test_support::checkpoint_test_session("session-muse");
     session.harness_kind = HarnessKind::Muse;
@@ -3329,9 +3324,12 @@ fn raw_local_muse_launches_unconstrained() {
     )
     .unwrap();
 
-    assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
-    assert_eq!(launch.environment["MUSE_APPROVAL_MODE"], "allowAll");
-    assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
+    assert_eq!(
+        launch.execution_policy,
+        ExecutionPolicy::ConfiguredApprovals
+    );
+    assert_eq!(launch.environment["MUSE_APPROVAL_MODE"], "promptUnmatched");
+    assert!(!launch.environment.contains_key("MUSE_SERVE_ARGS"));
 }
 
 #[test]

@@ -200,11 +200,6 @@ pub(crate) fn exclude_from_harness_environment(
 /// method on [`WorkerLaunchConfig`] in the crate that defines it.
 #[cfg(unix)]
 pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Result<()> {
-    // Applied here as well as in the controller so a launch config persisted
-    // by an older Hel converges on the harness's effective policy.
-    config.execution_policy = config
-        .harness
-        .effective_execution_policy(config.execution_policy);
     config
         .harness
         .configure_execution_environment(config.execution_policy, &mut config.environment)

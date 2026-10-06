@@ -2662,11 +2662,12 @@ fn autoscrolling_a_transcript_drag_selects_rows_the_viewport_scrolled_past() {
         .transcript_selection_text(&range)
         .expect("the selection has text");
     let start = rows.len() - (span + 1);
+    // Copying leaves out the role gutter, which only decorates a row.
     assert_eq!(
         copied.split('\n').collect::<Vec<_>>(),
         rows[start..]
             .iter()
-            .map(|row| row.trim_end())
+            .map(|row| row.strip_prefix(role_gutter()).unwrap_or(row).trim_end())
             .collect::<Vec<_>>()
     );
 }
@@ -3984,5 +3985,40 @@ fn golden_rich_transcript_tool_presentation() {
         env!("CARGO_MANIFEST_DIR"),
         "rich-transcript-tool-presentation",
         &output,
+    );
+}
+
+/// Wrapping is only how a row fits the pane, so copying a wrapped message
+/// gives back its source lines: no gutter, no wrap indent, and no newline
+/// where a URL or a sentence was split across rows.
+#[test]
+fn copying_wrapped_rows_rejoins_the_lines_wrapping_split() {
+    let url = "https://github.com/organizations/BrokkAi/settings/apps/mergecopbot/permissions";
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        format!("1. Open {url}. You can also get there through BrokkAi settings.\n\nThen save."),
+    ));
+    drawn_transcript(&mut chat, 40, 24);
+    let width = chat.render_cache.width;
+    let rows = render_transcript_entry(
+        &chat.entries[0],
+        usize::from(width),
+        TranscriptRenderMode::Rich,
+    );
+    assert!(rows.len() > 5, "the fixture must wrap");
+    // Skip the header row, and stop before the entry's trailing blank row.
+    let body = transcript_pane(&chat).top_row + 1;
+    let last = body + rows.len() - 3;
+
+    assert_eq!(
+        chat.transcript_selection_text(&SelectionRange {
+            start: ContentPos::new(body, 0),
+            end: ContentPos::new(last, width - 1),
+        }),
+        Some(format!(
+            "1. Open {url}. You can also get there through BrokkAi settings.\n\nThen save."
+        ))
     );
 }

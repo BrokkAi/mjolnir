@@ -1093,12 +1093,13 @@ pub(crate) async fn apply_dashboard_action(
                 move |cancelled| {
                     let executor = CancellableProcessExecutor::new(cancelled);
                     let mut controller = Controller::load()?;
-                    let preflight = controller.replace_resume_repository_origin(
-                        &session_id,
-                        &repository_id,
-                        &replacement,
-                        &executor,
-                    )?;
+                    let preflight =
+                        mj_core::runtime::block_on(controller.replace_resume_repository_origin(
+                            &session_id,
+                            &repository_id,
+                            &replacement,
+                            &executor,
+                        ))??;
                     Ok(ResumeRepositoryPreflightApply { preflight })
                 },
                 move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
@@ -1614,13 +1615,10 @@ pub(crate) fn start_resume_repository_preflight(
         move |cancelled| {
             let executor = CancellableProcessExecutor::new(cancelled);
             let controller = Controller::load()?;
-            Ok(ResumeRepositoryPreflightApply {
-                preflight: controller.preflight_resume_repository_sources(
-                    &session_id,
-                    &target_id,
-                    &executor,
-                )?,
-            })
+            let preflight = mj_core::runtime::block_on(
+                controller.preflight_resume_repository_sources(&session_id, &target_id, &executor),
+            )??;
+            Ok(ResumeRepositoryPreflightApply { preflight })
         },
         move |result| DashboardIoUpdate::ResumeRepositoryPreflight {
             generation,

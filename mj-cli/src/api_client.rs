@@ -14,9 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use mj_controller::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
-    ExportRequest, PromptRequest, PromptResponse, PushedBranch, ResumeSessionRequest,
-    ResumeSessionResponse, SessionListResponse, StartSessionRequest, StartSessionResponse,
-    SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
+    ExportRequest, GithubTokenResponse, PromptRequest, PromptResponse, PushedBranch,
+    ResumeSessionRequest, ResumeSessionResponse, SessionListResponse, StartSessionRequest,
+    StartSessionResponse, SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse,
+    WorkspaceListResponse,
 };
 use mj_controller::server::api_token_path;
 use serde::Serialize;
@@ -295,6 +296,29 @@ impl ApiClient {
             .send(self.http.get(self.url(path)).timeout(REQUEST_TIMEOUT))
             .await?;
         decode(response).await
+    }
+
+    pub(crate) async fn github_token(
+        &self,
+        owner: Option<&str>,
+        repositories: &[String],
+    ) -> Result<String> {
+        let mut query = Vec::with_capacity(repositories.len() + usize::from(owner.is_some()));
+        if let Some(owner) = owner {
+            query.push(("owner", owner));
+        }
+        query.extend(
+            repositories
+                .iter()
+                .map(|repository| ("repo", repository.as_str())),
+        );
+        let request = self
+            .http
+            .get(self.url("/github-token"))
+            .query(&query)
+            .timeout(REQUEST_TIMEOUT);
+        let response = self.send(request).await?;
+        Ok(decode::<GithubTokenResponse>(response).await?.token)
     }
 
     async fn post_json<B: Serialize, T: DeserializeOwned>(

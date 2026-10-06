@@ -57,9 +57,9 @@ pub(super) use mj_transcript::transcript::{
 
 use super::ChatState;
 use super::rendering::{
-    LinkSpan, LogicalLine, TranscriptRenderMode, append_trimmed_ellipsis, display_width,
+    LinkSpan, LogicalLine, RowCopy, TranscriptRenderMode, append_trimmed_ellipsis, display_width,
     markdown_lines, raw_lines, sanitize_terminal_text, truncate_line_to_width, wrap_styled_line,
-    wrap_styled_line_until, wrap_styled_line_with_sources,
+    wrap_styled_line_for_copy, wrap_styled_line_until,
 };
 
 #[derive(Debug, Clone)]
@@ -1305,12 +1305,13 @@ impl ChatState {
                     // A collapsed streak draws a summary, not entry text.
                     _ => return None,
                 };
-                return transcript_entry_links(
+                return track_transcript_entry(
                     &self.entries[index],
                     usize::from(self.render_cache.width),
                     mode,
                     tool,
                 )
+                .links
                 .into_iter()
                 .find(|link| link.row == entry_row && (link.start..link.end).contains(&column))
                 .map(|link| link.url);
@@ -1462,16 +1463,21 @@ impl ChatState {
         Some(AnchorRow { entry, row })
     }
 
-    /// `count` rendered rows starting at `start`, from the render cache.
+    /// `count` rendered rows starting at `start`, from the render cache, with
+    /// how copying each gives back its text.
+    ///
+    /// Copies come from rendering each entry again with tracking, as
+    /// [`Self::transcript_link_at`] does.
     fn transcript_rows_from(
         &mut self,
         start: AnchorRow,
         count: usize,
-    ) -> Option<Vec<Line<'static>>> {
+    ) -> Option<Vec<(Line<'static>, RowCopy)>> {
         if start.entry >= self.entries.len() || count > SELECTION_WALK_BUDGET {
             return None;
         }
         self.prepare_entry_rows();
+        let width = usize::from(self.render_cache.width);
         let mut rows = Vec::with_capacity(count);
         let mut skip = start.row;
         for index in start.entry..self.entries.len() {
@@ -1479,11 +1485,29 @@ impl ChatState {
                 return None;
             }
             let lines = cached_entry_lines(&self.entries, &mut self.render_cache, index);
-            for line in lines.iter().skip(skip) {
-                if rows.len() == count {
-                    break;
+            let wanted = lines.len().saturating_sub(skip).min(count - rows.len());
+            if wanted == 0 {
+                skip = 0;
+                continue;
+            }
+            let lines = lines[skip..skip + wanted].to_vec();
+            // The view `cached_entry_lines` drew the entry with. A collapsed
+            // streak draws a summary, not entry text, so its rows copy as drawn.
+            let view = match self.render_cache.collapse[index] {
+                EntryCollapse::None => {
+                    Some((self.render_cache.mode, self.render_cache.tools.view()))
                 }
-                rows.push(line.clone());
+                EntryCollapse::Expanded => Some((TranscriptRenderMode::Rich, ToolView::Expanded)),
+                _ => None,
+            };
+            let copies = view
+                .map(|(mode, tool)| {
+                    track_transcript_entry(&self.entries[index], width, mode, tool).copies
+                })
+                .unwrap_or_default();
+            for (offset, line) in lines.into_iter().enumerate() {
+                let copy = copies.get(skip + offset).copied().unwrap_or_default();
+                rows.push((line, copy));
             }
             skip = 0;
             if rows.len() == count {
@@ -1509,25 +1533,45 @@ impl ChatState {
         let start = self.anchor_offset_by(space.base, offset)?;
         let count = range.end.row.checked_sub(range.start.row)?.checked_add(1)?;
         let rows = self.transcript_rows_from(start, count)?;
-        let text = rows
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
+        Some(copied_rows_text(
+            rows.iter().enumerate().map(|(index, (line, copy))| {
                 let row = range.start.row.saturating_add(index);
-                match range.columns_on(row, width) {
-                    Some((first, last)) if first > 0 || last + 1 < width => {
-                        sliced_row_text(line, width, first, last)
-                    }
-                    _ => row_text(line),
-                }
-            })
-            .collect::<Vec<_>>();
-        Some(text.join("\n"))
+                (line, *copy, range.columns_on(row, width))
+            }),
+            width,
+        ))
     }
 }
 
+/// The text of selected rows: each row without its decoration cells, and a
+/// row that wrapping split from the one above joined back onto it rather
+/// than starting a new line. Each row comes with its selected cells, or
+/// `None` for the whole row.
+pub(super) fn copied_rows_text<'row>(
+    rows: impl IntoIterator<Item = (&'row Line<'static>, RowCopy, Option<(u16, u16)>)>,
+    width: u16,
+) -> String {
+    let mut text = String::new();
+    for (index, (line, copy, columns)) in rows.into_iter().enumerate() {
+        if index > 0 {
+            text.push_str(copy.joins.unwrap_or("\n"));
+        }
+        let (first, last) = columns.unwrap_or((0, width.saturating_sub(1)));
+        let first = first.max(u16::try_from(copy.lead).unwrap_or(u16::MAX));
+        if first > last {
+            continue;
+        }
+        if first > 0 || last + 1 < width {
+            text.push_str(&sliced_row_text(line, width, first, last));
+        } else {
+            text.push_str(&row_text(line));
+        }
+    }
+    text
+}
+
 /// One cached transcript row as plain text.
-fn row_text(line: &Line<'_>) -> String {
+pub(super) fn row_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())

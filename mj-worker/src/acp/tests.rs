@@ -2757,6 +2757,33 @@ async fn stalled_prompt_bridge(
     }
 }
 
+/// muse-acp 0.10's policy selectors as a fake bridge reports them: approvals
+/// on `approval_mode`, apart from Mode, and auto-review off in every session
+/// it opens. A guardian Muse session selects `promptUnmatched` and `on`.
+pub(crate) fn muse_policy_options() -> serde_json::Value {
+    serde_json::json!([
+        {"id": "approval_mode", "name": "Approvals", "type": "select",
+         "currentValue": "allowAll", "options": [
+            {"value": "allowAll", "name": "Allow all"},
+            {"value": "promptUnmatched", "name": "Prompt unmatched"}
+        ]},
+        {"id": "auto_review", "name": "Auto-review", "type": "select",
+         "currentValue": "off", "options": [
+            {"value": "off", "name": "Off"},
+            {"value": "on", "name": "On"}
+        ]}
+    ])
+}
+
+/// Apply a `session/set_config_option` request's params to `options`.
+pub(crate) fn select_option(options: &mut serde_json::Value, params: &serde_json::Value) {
+    for option in options.as_array_mut().expect("config options are a list") {
+        if option["id"] == params["configId"] {
+            option["currentValue"] = params["value"].clone();
+        }
+    }
+}
+
 /// A bridge that accepts a prompt, optionally announces one tool call, and
 /// then goes silent for good. This is what a harness blocked in a long build
 /// looks like from Mjolnir: an open tool call and no protocol traffic at all.
@@ -2783,6 +2810,7 @@ async fn silent_after_prompt_bridge_with_late_reply(
     let mut prior_prompt = None;
     let mut traffic = tokio::time::interval(Duration::from_millis(100));
     let mut child_started = false;
+    let mut options = muse_policy_options();
     loop {
         let line = tokio::select! {
             line = lines.next_line() => match line.expect("read bridge input") {
@@ -2825,8 +2853,12 @@ async fn silent_after_prompt_bridge_with_late_reply(
             "session/new" | "session/load" => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": {"sessionId": "scripted"},
+                "result": {"sessionId": "scripted", "configOptions": options},
             }),
+            "session/set_config_option" => {
+                select_option(&mut options, &request["params"]);
+                serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"configOptions":options}})
+            }
             "session/prompt" => {
                 if child_traffic && !child_started {
                     let spawn = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"subagent_spawned", "subagentSessionId":"heap", "name":"heap", "task":"Independent heap analysis", "capabilities":{}}}});
@@ -6918,6 +6950,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
         let (read, mut write) = tokio::io::split(bridge_stream);
         let mut lines = BufReader::new(read).lines();
         let mut prompt_id = None;
+        let mut options = muse_policy_options();
         while let Some(line) = lines.next_line().await.expect("read bridge input") {
             let message: serde_json::Value = serde_json::from_str(&line).expect("valid JSON-RPC");
             let id = message
@@ -6940,8 +6973,13 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                 Some("initialize") => {
                     serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"protocolVersion":1}})
                 }
-                Some("session/new") => {
-                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"sessionId":"scripted"}})
+                Some("session/new") => serde_json::json!({
+                    "jsonrpc":"2.0", "id":id,
+                    "result":{"sessionId":"scripted", "configOptions":options},
+                }),
+                Some("session/set_config_option") => {
+                    select_option(&mut options, &message["params"]);
+                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"configOptions":options}})
                 }
                 Some("session/prompt") => {
                     prompt_id = Some(id);

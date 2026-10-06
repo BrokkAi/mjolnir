@@ -636,6 +636,9 @@ pub struct CredentialSyncTarget {
     pub authenticates_with_api_key: bool,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
+    /// The controller has GitHub App configuration and should resolve a
+    /// session-scoped installation token for this target.
+    pub github_app_configured: bool,
     /// Target-derived availability of the host CLI skill.
     pub skills_scope: crate::skills::SkillsScope,
     /// Reconnect command for the session's worker proxy.

@@ -44,9 +44,9 @@ that copy. See [What a session's staged home holds](#what-a-sessions-staged-home
 conventional location. A detected home becomes the explicit `home` path in
 `config.toml`; subsequent sessions use that configured path.
 
-Kimi Code and Muse Code do not expose a guardian approval mode. Mjolnir warns
-before using either on a raw target. Muse always runs unconstrained, regardless
-of the target's configured policy; see [Harness limitations](#harness-limitations).
+Kimi Code does not expose a guardian approval mode. Mjolnir warns before using
+it on a raw target. Muse's guardian is muse-acp's auto-review; see
+[Harness limitations](#harness-limitations).
 Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
 boundary. See
@@ -642,16 +642,20 @@ the primary coding session to another profile.
 ## Harness limitations
 
 Muse supports streamed chat and tools, images, model and effort selectors,
-approval questions, cancellation, and native resume. `/plan` invokes Muse's
-advertised planning skill; it is not an approval-mode toggle, so no plan-mode
-indicator appears and plan approval arrives as chat text rather than a choice
-dialog. Muse has no guardian mode: every Muse session runs unconstrained,
-whatever the target's policy says. Mjolnir writes the `:unrestricted`
-permission profile into the staged Muse settings and uses `allowAll` approvals
-and `--disable-sandbox`. Muse decides a session's permission profile from its
-settings file and nothing on the wire can change it, so the staged profile is
-what lets the session start. The target wizard warns when you pair Muse with a
-raw target.
+approval questions, cancellation, and native resume. `/plan` and `/implement`
+switch muse-acp's Plan mode, which moves the session to a Muse host that cannot
+write files or run shell commands; plan approval arrives as chat text rather
+than a choice dialog.
+
+Muse decides a session's permission profile from its settings file, so
+Mjolnir writes it into the staged Muse settings. With guardian approvals it
+stages `:ask-me`, keeps Muse's sandbox on, selects `promptUnmatched`
+approvals, and turns on muse-acp's auto-review for every session: a second,
+read-only Muse model reviews each approval request with a Codex-style safety
+policy, and a failed or unusable review denies the action. Muse's own
+`:auto-review` profile is never staged, because `muse serve` refuses it.
+Unconstrained sessions stage `:unrestricted` and use `allowAll` approvals and
+`--disable-sandbox`.
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session
@@ -660,16 +664,15 @@ other sessions or credentials. External Muse sessions normally come from
 `~/.local/share/muse/sessions` (`XDG_DATA_HOME/muse/sessions` when set); mj
 restores them into the destination profile’s isolated data directory.
 
-Muse reads and writes its session's project-memory files directly because its
-sandbox is disabled. It receives Mjolnir's session-history and review MCP tools
+Unconstrained Muse reads and writes its session's project-memory files
+directly because its sandbox is disabled; with guardian approvals, writes
+outside the workspace go to auto-review. It receives Mjolnir's session-history and review MCP tools
 through muse-acp 0.8.0 or newer with Muse Code 1.3.0 or newer, which managed
 targets and the agent-dev image install. A session whose Muse runtime does not
 accept MCP servers, such as one in a container created from an older image,
 continues without those tools and says so; suspend and resume it once the image
 has updated. A Muse reviewer needs its review MCP tools, so it does not start
-without them. Because Muse always runs unconstrained, it reviews only sessions
-that already run unconstrained, such as sessions on container targets and Muse
-sessions. Muse Spark can also supply utility inference for cross-harness
+without them. Muse Spark can also supply utility inference for cross-harness
 handoffs; see
 [Durability and recovery](/durability/).
 

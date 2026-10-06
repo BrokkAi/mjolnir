@@ -8,8 +8,7 @@ is therefore a set of explicit boundaries, not a promise that agent-generated
 commands are harmless.
 
 **Bare runtimes preserve approvals where the harness supports them; isolated
-runtimes run unrestricted.** Muse always runs unrestricted, including on bare
-targets. A disposable boundary limits damage to the
+runtimes run unrestricted.** A disposable boundary limits damage to the
 runtime, but it does not prevent the agent or its model provider from reading
 data and credentials intentionally placed inside that boundary.
 
@@ -66,10 +65,12 @@ controls:
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
-Codex, Claude Code, Grok Build, and OpenCode can preserve guardian-style
-approvals on a bare runtime. Kimi Code cannot, and neither can Muse Code: its permission
-profile is a host-lifetime setting that the wire cannot select,
-so every Muse session runs unconstrained. Mjolnir warns when a harness without
+Codex, Claude Code, Grok Build, OpenCode, and Muse Code can preserve
+guardian-style approvals on a bare runtime. Muse's guardian is muse-acp's auto-review: Mjolnir
+stages the `:ask-me` permission profile, keeps Muse's sandbox on, selects
+`promptUnmatched` approvals, and turns auto-review on, so a read-only Muse
+reviewer answers each approval and a failed review denies the action. Kimi Code
+cannot preserve approvals. Mjolnir warns when a harness without
 guardian support is paired with a raw target, but a warning is not a
 sandbox—choose a container or instance instead.
 

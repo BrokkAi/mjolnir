@@ -44,6 +44,7 @@ libc.workspace = true
 rayon.workspace = true
 reedline = { version = "0.51", default-features = false }
 reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
+ring.workspace = true
 rustls.workspace = true
 rusqlite.workspace = true
 sessionwiki.workspace = true
