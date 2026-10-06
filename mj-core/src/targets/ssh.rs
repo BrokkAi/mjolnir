@@ -2439,7 +2439,6 @@ mod tests {
         name.rsplit('-').next().unwrap().to_owned()
     }
 
-    #[cfg(unix)]
     fn plain_target(destination: &str) -> SshTarget {
         SshTarget {
             destination: destination.to_owned(),

@@ -1,5 +1,5 @@
 === search hits on each tab (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -15,7 +15,7 @@
 │         │                                                                                                  │         │
 │         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
@@ -41,7 +41,7 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 tab hit counts: [0, 1, 2, 1]
 === search result on another tab (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -84,7 +84,7 @@ tab hit counts: [0, 1, 2, 1]
 tab hit counts after refresh: [0, 0, 1, 0]
 empty tab message: "No matches here · 1 on Import"
 === preview opens at first matching passage (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -100,8 +100,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 1/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -125,7 +125,7 @@ empty tab message: "No matches here · 1 on Import"
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === n selects and scrolls to second match (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -141,8 +141,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 2/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -166,7 +166,7 @@ empty tab message: "No matches here · 1 on Import"
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === previous-hit arrow (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -182,8 +182,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 1/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -207,7 +207,7 @@ empty tab message: "No matches here · 1 on Import"
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === next-hit arrow (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -223,8 +223,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 2/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -248,7 +248,7 @@ empty tab message: "No matches here · 1 on Import"
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === archived briefing without a query (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -264,7 +264,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ Archived sessions · newest first ────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Aug 31, 2026    archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
@@ -290,7 +290,7 @@ empty tab message: "No matches here · 1 on Import"
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 briefing request action: None
 === archived hit query (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -306,7 +306,7 @@ briefing request action: None
 │         │                                                                                                  │         │
 │         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Aug 31, 2026    archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
@@ -335,7 +335,7 @@ duplicate hit request: None
 cached hit request: None
 new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other" }
 === new archived hit query (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -351,7 +351,7 @@ new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other
 │         │                                                                                                  │         │
 │         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Aug 31, 2026    archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │

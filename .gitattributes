@@ -1,0 +1,4 @@
+# Check text out as it is committed, with LF, on every platform. Golden files
+# and fixtures are compared byte for byte, and Git on Windows would otherwise
+# convert them to CRLF.
+* text=auto eol=lf

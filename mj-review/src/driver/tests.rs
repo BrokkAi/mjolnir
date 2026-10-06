@@ -4,7 +4,6 @@ use mj_core::review::lanes::UserMessage;
 
 fn seed() -> TurnReviewSeed {
     TurnReviewSeed {
-        tier: ReviewTier::Quick,
         task: "add a retry".to_string(),
         user_messages: vec![UserMessage::prompt("add a retry")],
         baselines: BTreeMap::from([(PathBuf::from("/w/app"), "base-tree".to_string())]),
@@ -71,7 +70,7 @@ fn prompt_text(requests: &[ReviewRequest], role: &str) -> String {
         .unwrap_or_else(|| panic!("{role} was not prompted in {requests:?}"))
 }
 
-/// Drives a quick review to the point where the reviewer has been prompted.
+/// Drives a review to the point where the reviewer has been prompted.
 fn running() -> (TurnReviewDriver, String) {
     let (mut driver, requests) = TurnReviewDriver::start(seed());
     assert_eq!(
@@ -87,48 +86,17 @@ fn running() -> (TurnReviewDriver, String) {
             role: REVIEWER_ROLE.to_string(),
             fresh: true
         }],
-        "the quick tier starts its one reviewer and runs no change analysis"
+        "the review starts its one reviewer"
     );
     let requests = driver.role_started(REVIEWER_ROLE);
     let command_id = prompted(&requests, REVIEWER_ROLE);
     let prompt = prompt_text(&requests, REVIEWER_ROLE);
-    assert!(prompt.contains("+retry"), "the prompt carries the capture");
+    assert!(prompt.contains("git -C /w/app diff --no-ext-diff base-tree new-tree"));
+    assert!(
+        !prompt.contains("+retry"),
+        "the prompt does not embed the diff"
+    );
     assert!(prompt.contains("add a retry"));
-    (driver, command_id)
-}
-
-/// Drives an extended review to the point where the supervisor is working.
-fn supervising() -> (TurnReviewDriver, String) {
-    let mut seed = seed();
-    seed.tier = ReviewTier::Extended;
-    // Two governing messages: the supervisor reads both itself.
-    seed.user_messages
-        .push(UserMessage::prompt("bound the retry"));
-    let (mut driver, _) = TurnReviewDriver::start(seed);
-    let requests = driver.delta_captured(changed_delta());
-    assert_eq!(
-        requests,
-        vec![ReviewRequest::StartRole {
-            role: SUPERVISOR_ROLE.to_string(),
-            fresh: true
-        }],
-        "the supervisor starts straight after the capture: no intent analyst \
-         and no change analysis runs ahead of it"
-    );
-    let requests = driver.role_started(SUPERVISOR_ROLE);
-    let prompt = prompt_text(&requests, SUPERVISOR_ROLE);
-    assert!(
-        prompt.contains("bound the retry"),
-        "the supervisor reads the user's messages"
-    );
-    assert!(prompt.contains(crate::lanes::INTENT_CONTEXT));
-    assert!(
-        prompt.contains("<changed_files") && prompt.contains("src/lib.rs"),
-        "the supervisor reads Git's per-file line counts"
-    );
-    assert!(!prompt.contains("changed_functions"));
-    assert!(prompt.contains("spawn_specialist"));
-    let command_id = prompted(&requests, SUPERVISOR_ROLE);
     (driver, command_id)
 }
 
@@ -181,7 +149,66 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
 }
 
 #[test]
-fn an_empty_quick_report_fails_the_review_and_leaves_the_baseline_alone() {
+
+fn a_clean_review_runs_one_reviewer_and_advances_the_baseline_itself() {
+    let (mut driver, command_id) = running();
+    let requests = driver.role_turn_completed(&command_id, r#"{"findings":[]}"#);
+    assert_eq!(
+        requests,
+        vec![
+            ReviewRequest::PauseRole {
+                role: REVIEWER_ROLE.to_string()
+            },
+            ReviewRequest::AdvanceBaseline {
+                trees: BTreeMap::from([(PathBuf::from("/w/app"), "new-tree".to_string())]),
+                reviewed_through_ordinal: 12,
+            },
+            ReviewRequest::Close,
+        ],
+        "a clean reviewer releases the turn itself"
+    );
+    assert!(driver.finished());
+    assert_eq!(
+        driver.last_verdict(),
+        Some(&ReviewVerdict::Clean),
+        "the clean verdict remains available for the close notice"
+    );
+}
+
+#[test]
+fn findings_are_the_verdict_without_a_second_pass() {
+    let (mut driver, command_id) = running();
+    let requests =
+        driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
+    assert_eq!(
+        requests,
+        vec![ReviewRequest::PauseRole {
+            role: REVIEWER_ROLE.to_string()
+        }],
+        "findings reap the reviewer and start nothing else"
+    );
+    assert!(driver.can_forward());
+    assert!(!driver.finished(), "findings wait to be forwarded");
+    assert_eq!(
+        driver.last_verdict(),
+        Some(&ReviewVerdict::Findings {
+            synthesis: "[P1] src/lib.rs:1 -- unbounded retry loop".to_string(),
+            evidence: ReviewPassEvidence::default(),
+        })
+    );
+    assert_eq!(
+        driver.roles(),
+        vec![RoleStatus {
+            role: REVIEWER_ROLE.to_string(),
+            label: "Reviewer".to_string(),
+            state: RoleState::Findings,
+        }],
+        "a verdict keeps the completed role state available to surfaces"
+    );
+}
+
+#[test]
+fn an_empty_report_fails_the_review_and_leaves_the_baseline_alone() {
     let (mut driver, command_id) = running();
     let requests = driver.role_turn_completed(&command_id, "  \n ");
     assert!(
@@ -198,6 +225,27 @@ fn an_empty_quick_report_fails_the_review_and_leaves_the_baseline_alone() {
     };
     assert!(reason.contains("empty report"), "{reason}");
     assert!(!driver.can_forward());
+}
+
+/// The primary is told what it is getting: one reviewer's findings that
+/// nobody checked, which it verifies against source before acting.
+#[test]
+fn a_single_reviewer_forward_says_the_findings_are_unverified() {
+    let (mut driver, command_id) = running();
+    driver.role_turn_completed(&command_id, "[P2] src/lib.rs:1 -- weak test");
+    let requests = driver.forward("test-forward-command".to_owned());
+    let [ReviewRequest::PromptPrimary { prompt, .. }] = requests.as_slice() else {
+        panic!("forward submits one primary prompt, got {requests:?}");
+    };
+    assert!(prompt.starts_with("[HARNESS NOTE: an independent review"));
+    assert!(prompt.contains("nobody has checked them"), "{prompt}");
+    assert!(prompt.contains("not independently verified"), "{prompt}");
+    assert!(!prompt.contains("validated by"), "{prompt}");
+    assert!(prompt.contains("[P2] src/lib.rs:1 -- weak test"));
+    assert_eq!(
+        driver.pending_forward().map(|pending| pending.provenance),
+        Some(FindingsProvenance::SingleReviewer)
+    );
 }
 
 #[test]
@@ -339,7 +387,7 @@ fn a_completion_for_another_command_is_ignored() {
     let (mut driver, _) = running();
     assert!(
         driver
-            .role_turn_completed("turn-review-reviewer-999", "No findings.")
+            .role_turn_completed("turn-review-reviewer-999", r#"{"findings":[]}"#)
             .is_empty(),
         "a replayed completion for another command cannot advance the review"
     );
@@ -377,203 +425,13 @@ fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
     let requests = driver.role_started(REVIEWER_ROLE);
     let prompt = prompt_text(&requests, REVIEWER_ROLE);
     assert!(
-        prompt.contains("This is a verification pass"),
+        prompt.contains("This is a corrective pass"),
         "a review after a forward verifies the prior findings"
     );
     let command_id = prompted(&requests, REVIEWER_ROLE);
-    let requests = driver.role_turn_completed(&command_id, "No findings.");
+    let requests = driver.role_turn_completed(&command_id, r#"{"findings":[]}"#);
     assert!(
         requests.contains(&ReviewRequest::ClearPriorReview),
         "a resolved verification pass consumes the prior review: {requests:?}"
-    );
-}
-
-#[test]
-fn the_supervisor_launches_the_lanes_it_asks_for_and_waits_for_each() {
-    let (mut driver, supervisor) = supervising();
-    let requests = driver.lanes_dispatched(vec![
-        ReviewSubagentRequest {
-            agent_type: "tests".to_string(),
-            hypothesis: "the new test cannot fail for the reason it claims".to_string(),
-        },
-        ReviewSubagentRequest {
-            agent_type: "error_handling".to_string(),
-            hypothesis: "the retry may swallow cancellation".to_string(),
-        },
-    ]);
-    assert_eq!(
-        requests,
-        vec![
-            ReviewRequest::StartRole {
-                role: "tests".to_string(),
-                fresh: true
-            },
-            ReviewRequest::StartRole {
-                role: "error_handling".to_string(),
-                fresh: true
-            },
-        ]
-    );
-    // A lane already launched is not launched again.
-    assert!(
-        driver
-            .lanes_dispatched(vec![ReviewSubagentRequest {
-                agent_type: "tests".to_string(),
-                hypothesis: "the same lane again".to_string(),
-            }])
-            .is_empty()
-    );
-
-    let tests = prompted(&driver.role_started("tests"), "tests");
-    let error_handling = prompted(&driver.role_started("error_handling"), "error_handling");
-
-    // The supervisor ends its turn while both lanes are still running: it
-    // may not conclude, and nothing is injected until a report exists.
-    assert!(
-        driver
-            .role_turn_completed(&supervisor, "Waiting on the specialists.")
-            .is_empty()
-    );
-    assert!(driver.verdict().is_none(), "a verdict is blocked");
-
-    // Reports arrive out of order; each is injected as it lands.
-    let requests = driver.role_turn_completed(&error_handling, "[P1] src/lib.rs:3 -- swallowed");
-    let injection = prompt_text(&requests, SUPERVISOR_ROLE);
-    assert!(injection.contains("lane=\"error_handling\""));
-    assert!(
-        injection.contains("do not issue the final verdict yet"),
-        "one lane is still outstanding"
-    );
-    let supervisor = prompted(&requests, SUPERVISOR_ROLE);
-    assert!(requests.contains(&ReviewRequest::PauseRole {
-        role: "error_handling".to_string()
-    }));
-
-    // The supervisor ends that turn before the last lane reports.
-    assert!(
-        driver
-            .role_turn_completed(&supervisor, "Still waiting.")
-            .is_empty()
-    );
-    let requests = driver.role_turn_completed(&tests, "No findings.");
-    let injection = prompt_text(&requests, SUPERVISOR_ROLE);
-    assert!(injection.contains("All currently selected reviewers have now reported"));
-    let supervisor = prompted(&requests, SUPERVISOR_ROLE);
-
-    let requests = driver.role_turn_completed(&supervisor, "[P1] src/lib.rs:3 -- swallowed");
-    assert!(driver.can_forward(), "the synthesis is the verdict");
-    assert!(
-        requests
-            .iter()
-            .all(|request| matches!(request, ReviewRequest::PauseRole { .. })),
-        "every role is reaped before the verdict waits for the user: {requests:?}"
-    );
-    let ReviewVerdict::Findings { evidence, .. } = driver.verdict().unwrap() else {
-        panic!("a findings verdict carries its lane coverage");
-    };
-    assert_eq!(evidence.lanes.len(), 2);
-}
-
-#[test]
-fn a_lane_that_cannot_start_reaches_the_supervisor_as_a_coverage_gap() {
-    let (mut driver, supervisor) = supervising();
-    driver.lanes_dispatched(vec![ReviewSubagentRequest {
-        agent_type: "dead_code".to_string(),
-        hypothesis: "the new helper may be unused".to_string(),
-    }]);
-    assert!(
-        driver
-            .role_turn_completed(&supervisor, "Waiting.")
-            .is_empty()
-    );
-    let requests = driver.lane_failed("dead_code", "the harness could not start");
-    let injection = prompt_text(&requests, SUPERVISOR_ROLE);
-    assert!(injection.contains("outcome=\"failed: the harness could not start\""));
-    assert!(injection.contains("All currently selected reviewers have now reported"));
-}
-
-#[test]
-fn a_dispatch_of_an_unknown_or_duplicate_lane_is_refused() {
-    let (mut driver, _) = supervising();
-    assert!(
-        driver
-            .lanes_dispatched(vec![ReviewSubagentRequest {
-                agent_type: "quick".to_string(),
-                hypothesis: "the quick reviewer is not a lane".to_string(),
-            }])
-            .is_empty()
-    );
-    assert!(
-        driver
-            .lanes_dispatched(vec![
-                ReviewSubagentRequest {
-                    agent_type: "tests".to_string(),
-                    hypothesis: "first".to_string(),
-                },
-                ReviewSubagentRequest {
-                    agent_type: "tests".to_string(),
-                    hypothesis: "second".to_string(),
-                },
-            ])
-            .is_empty(),
-        "a dispatch that names one lane twice is refused whole"
-    );
-}
-
-#[test]
-fn cancelling_mid_fanout_reaps_every_role_and_keeps_the_baseline() {
-    let (mut driver, _) = supervising();
-    driver.lanes_dispatched(vec![ReviewSubagentRequest {
-        agent_type: "duplication".to_string(),
-        hypothesis: "the helper may already exist".to_string(),
-    }]);
-    driver.role_started("duplication");
-    let requests = driver.cancel();
-    let paused = requests
-        .iter()
-        .filter_map(|request| match request {
-            ReviewRequest::PauseRole { role } => Some(role.clone()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        paused,
-        BTreeSet::from([SUPERVISOR_ROLE.to_string(), "duplication".to_string()]),
-        "every started role is reaped"
-    );
-    assert!(
-        !requests
-            .iter()
-            .any(|request| matches!(request, ReviewRequest::AdvanceBaseline { .. }))
-    );
-}
-
-/// A supervisor's synthesis keeps the wording it always had, which is also what
-/// a handoff persisted before provenance was recorded retries with.
-#[test]
-fn an_extended_forward_keeps_the_vetted_wording() {
-    let (mut driver, command_id) = supervising();
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
-    assert!(driver.can_forward(), "{:?}", driver.phase());
-    let requests = driver.forward("test-forward-command".to_owned());
-    let [ReviewRequest::PromptPrimary { prompt, .. }] = requests.as_slice() else {
-        panic!("forward submits one primary prompt, got {requests:?}");
-    };
-    assert_eq!(
-        prompt,
-        &correction_note(
-            "[P1] src/lib.rs:1 -- unbounded retry loop",
-            FindingsProvenance::Vetted
-        )
-    );
-    assert!(prompt.contains("validated by a reviewing agent"));
-    let pending = driver
-        .pending_forward()
-        .expect("forwarding state is durable");
-    assert_eq!(pending.provenance, FindingsProvenance::Vetted);
-    let stored = serde_json::to_value(&pending).unwrap();
-    assert!(
-        stored.get("provenance").is_none(),
-        "a vetted handoff is stored exactly as before provenance existed: {stored}"
     );
 }

@@ -326,7 +326,6 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
             name: mj_core::subagent::SUBAGENT_MCP_SERVER,
             instructions,
             tools,
-            dispatch: crate::mcp_stdio::Dispatch::Concurrent,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
                 call(&socket, harness, role, params, progress)

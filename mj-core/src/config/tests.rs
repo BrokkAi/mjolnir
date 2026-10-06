@@ -471,20 +471,29 @@ fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
 }
 
 #[test]
-fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
-    let home = Path::new("/private/session/muse");
-    let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
-    HarnessKind::Muse.configure_home_environment(home, &mut environment);
-    assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
-    assert_eq!(environment["XDG_DATA_HOME"], "/private/session/muse/.data");
-    assert_eq!(
-        HarnessKind::Muse.home_from_environment(&environment["XDG_CONFIG_HOME"]),
-        home
-    );
-    assert_eq!(
-        harness_authentication_marker(HarnessKind::Muse, home),
-        home.join("auth.json")
-    );
+fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
+    for (kind, credential) in [
+        (HarnessKind::Muse, "auth.json"),
+        (HarnessKind::OpenCode, ".data/opencode/auth.json"),
+    ] {
+        let home = Path::new("/private/session").join(kind.id());
+        let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
+        kind.configure_home_environment(&home, &mut environment);
+        assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
+        assert_eq!(
+            environment["XDG_DATA_HOME"],
+            home.join(".data").to_string_lossy()
+        );
+        assert_eq!(
+            kind.home_from_environment(&environment["XDG_CONFIG_HOME"]),
+            home
+        );
+        assert_eq!(
+            harness_authentication_marker(kind, &home),
+            home.join(credential),
+            "{kind:?}"
+        );
+    }
 }
 
 fn sample_config() -> Config {
@@ -497,6 +506,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
@@ -554,8 +564,8 @@ fn sample_config() -> Config {
 fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
-        let home = Path::new("/private/session/muse");
-        kind.configure_home_environment(home, &mut environment);
+        let home = Path::new("/private/session").join(kind.id());
+        kind.configure_home_environment(&home, &mut environment);
         assert!(environment.contains_key(kind.home_env()), "{kind:?}");
         assert_eq!(
             kind.home_from_environment(&environment[kind.home_env()]),
@@ -736,6 +746,140 @@ fn bundle_rejects_traversal_and_duplicate_destinations() {
 }
 
 #[test]
+fn bundle_requires_existing_primary_repository() {
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().primary_repo = "missing".into();
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist")
+    );
+}
+
+#[test]
+fn bundle_rejects_non_github_sources() {
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().repositories[0].github =
+        Some("https://example.com/owner/repo".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not a supported GitHub source")
+    );
+}
+
+#[test]
+fn bundle_accepts_one_absolute_local_source() {
+    let mut config = sample_config();
+    {
+        let repository = &mut config.bundles.get_mut("hel").unwrap().repositories[0];
+        repository.github = None;
+        repository.local = Some(PathBuf::from("/home/test/src/app"));
+    }
+    config.validate().unwrap();
+
+    config.bundles.get_mut("hel").unwrap().repositories[0].local =
+        Some(PathBuf::from("relative/app"));
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("absolute")
+    );
+}
+
+#[test]
+fn bundle_requires_exactly_one_repository_source() {
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().repositories[0].local =
+        Some(PathBuf::from("/home/test/src/app"));
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one")
+    );
+}
+
+#[test]
+fn config_toml_round_trip_is_atomic() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested/config.toml");
+    let config = sample_config();
+    config.save_to(&path).unwrap();
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+    assert!(!fs::read_to_string(&path).unwrap().contains("pull_policy"));
+    assert_eq!(
+        fs::read_to_string(path)
+            .unwrap()
+            .matches("kind = \"podman\"")
+            .count(),
+        1
+    );
+    assert!(
+        fs::read_dir(directory.path().join("nested"))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+    );
+}
+
+#[test]
+fn github_app_configuration_is_optional_and_round_trips() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "version = 1\n").unwrap();
+    let legacy = Config::load_from(&path).unwrap();
+    assert_eq!(legacy.github, GithubConfig::default());
+    legacy.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("[github"));
+
+    let mut configured = Config::default();
+    configured.github.app = Some(GithubAppConfig {
+        app_id: 1234,
+        private_key_path: PathBuf::from("/controller/keys/app.pem"),
+        installations: BTreeMap::from([("Acme".into(), 5678)]),
+        session_permissions: Some(BTreeMap::from([(
+            "contents".into(),
+            GithubPermissionLevel::Write,
+        )])),
+        token_permissions: Some(BTreeMap::from([(
+            "statuses".into(),
+            GithubPermissionLevel::Read,
+        )])),
+    });
+    configured.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("[github.app.installations]"), "{body}");
+    assert!(body.contains("[github.app.session_permissions]"), "{body}");
+    assert!(body.contains("[github.app.token_permissions]"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), configured);
+
+    fs::write(
+        &path,
+        "version = 14\n[github.app]\napp_id = 0\nprivate_key_path = 'app.pem'\n",
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.contains("app_id must be a positive integer"),
+        "{error}"
+    );
+}
+
+#[test]
 fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -756,7 +900,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
 
     let review = ReviewConfig {
         enabled: true,
-        tier: crate::review::lanes::ReviewTier::Extended,
+        tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
         effort: Some("high".into()),
@@ -1024,7 +1168,7 @@ fn legacy_dracula_theme_loads_and_saves_as_darcula() {
 
     let config = Config::load_from(&path).unwrap();
     assert_eq!(config.theme, UiTheme::Darcula);
-    assert_eq!(UiTheme::ALL.len(), 5);
+    assert_eq!(UiTheme::ALL.len(), 12);
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(saved.contains("theme = \"darcula\""), "{saved}");
@@ -1487,8 +1631,7 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
             tier: None,
         }
     );
-    // A choice stored before tiers could be set per session reads back
-    // unchanged; a tier is stored only when one was chosen.
+    // Existing records may include a deprecated tier and remain readable.
     assert_eq!(
         serde_json::from_str::<SessionReview>(
             r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
@@ -1503,16 +1646,35 @@ fn a_session_review_choice_is_stored_in_a_stable_shape() {
     let extended = SessionReview::On {
         model: None,
         effort: None,
-        tier: Some(crate::review::lanes::ReviewTier::Extended),
+        tier: Some("extended".into()),
     };
     assert_eq!(
         serde_json::to_string(&extended).unwrap(),
-        r#"{"mode":"on","tier":"extended"}"#
+        r#"{"mode":"on"}"#
     );
     assert_eq!(
         serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
         extended
     );
+}
+
+#[test]
+fn deprecated_review_tier_is_accepted_but_omitted_from_serialization() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n\n[profiles.reviewer]\nkind = \"claude\"\nhome = \"/profiles/reviewer\"\n\n[review]\nenabled = true\ntier = \"extended\"\nprofile = \"reviewer\"\n"
+        ),
+    )
+    .unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.review.tier.as_deref(), Some("extended"));
+
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    assert!(!serialized.contains("tier"), "{serialized}");
 }
 
 #[test]

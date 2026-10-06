@@ -1008,6 +1008,7 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn profile_block_selects_and_updates_the_login_shell_file_idempotently() {
         use std::os::unix::fs::PermissionsExt;
@@ -1213,6 +1214,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn profile_selection_falls_back_to_shell_then_sh() {
         use std::os::unix::fs::PermissionsExt;

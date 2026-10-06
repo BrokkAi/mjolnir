@@ -1,5 +1,5 @@
 === notice takes over the one-row footer (120x24) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -24,7 +24,7 @@
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Transient dashboard message
 === footer hints after notice (120x24) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -49,7 +49,7 @@ Transient dashboard message
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === footer at Sessions focus (200x24) ===
-╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ☰ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
@@ -74,7 +74,7 @@ Transient dashboard message
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 === footer at Targets focus (200x24) ===
-╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ☰ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
@@ -99,7 +99,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
 === footer at Quota focus (200x24) ===
-╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ☰ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
@@ -124,7 +124,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
 === footer at Prompt focus (200x24) ===
-╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                      ☰ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                          ✦  M J O L N I R                                                          │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
@@ -2009,7 +2009,7 @@ Need at least 60 columns.
 
 
 === footer at 60 columns (60x30) ===
-╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                ☰ │
 ╰──────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────────────────────────────── ▁   ▪ ╮
@@ -2040,7 +2040,7 @@ Need at least 60 columns.
 ╰──────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 61 columns (61x30) ===
-╭ Workspaces ──────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ───────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                 ☰ │
 ╰───────────────────────────────────────────────────────────╯
 ╭ Sessions ────────────────────────────────────────── ▁   ▪ ╮
@@ -2071,7 +2071,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰───────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 62 columns (62x30) ===
-╭ Workspaces ───────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                  ☰ │
 ╰────────────────────────────────────────────────────────────╯
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪ ╮
@@ -2102,7 +2102,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 63 columns (63x30) ===
-╭ Workspaces ────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ─────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                   ☰ │
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Sessions ──────────────────────────────────────────── ▁   ▪ ╮
@@ -2133,7 +2133,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 64 columns (64x30) ===
-╭ Workspaces ─────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                    ☰ │
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────────────────────────────────── ▁   ▪ ╮
@@ -2164,7 +2164,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 65 columns (65x30) ===
-╭ Workspaces ──────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ───────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                     ☰ │
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Sessions ────────────────────────────────────────────── ▁   ▪ ╮
@@ -2195,7 +2195,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰───────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 66 columns (66x30) ===
-╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                      ☰ │
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Sessions ─────────────────────────────────────────────── ▁   ▪ ╮
@@ -2226,7 +2226,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 67 columns (67x30) ===
-╭ Workspaces ────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ─────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                       ☰ │
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Sessions ──────────────────────────────────────────────── ▁   ▪ ╮
@@ -2257,7 +2257,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 68 columns (68x30) ===
-╭ Workspaces ─────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                        ☰ │
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────────────────────────────────────── ▁   ▪ ╮
@@ -2288,7 +2288,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 69 columns (69x30) ===
-╭ Workspaces ──────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ───────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                         ☰ │
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Sessions ────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2319,7 +2319,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰───────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 70 columns (70x30) ===
-╭ Workspaces ───────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                          ☰ │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ─────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2350,7 +2350,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰────────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 71 columns (71x30) ===
-╭ Workspaces ────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ─────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                           ☰ │
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ──────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2381,7 +2381,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 72 columns (72x30) ===
-╭ Workspaces ─────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                            ☰ │
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2412,7 +2412,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────────────────╯
 Enter open │ ctrl+b then : palette · ? keys
 === footer at 73 columns (73x30) ===
-╭ Workspaces ──────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ───────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                             ☰ │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2443,7 +2443,7 @@ Enter open │ ctrl+b then : palette · ? keys
 ╰───────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 74 columns (74x30) ===
-╭ Workspaces ───────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                              ☰ │
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ─────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2474,7 +2474,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 75 columns (75x30) ===
-╭ Workspaces ────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ─────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                               ☰ │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ──────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2505,7 +2505,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 76 columns (76x30) ===
-╭ Workspaces ─────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                ☰ │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ───────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2536,7 +2536,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 77 columns (77x30) ===
-╭ Workspaces ──────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ───────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                 ☰ │
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2567,7 +2567,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰───────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 78 columns (78x30) ===
-╭ Workspaces ───────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                  ☰ │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ─────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2598,7 +2598,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 79 columns (79x30) ===
-╭ Workspaces ────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                                   ☰ │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ──────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2629,7 +2629,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === footer at 80 columns (80x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -2661,7 +2661,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 Sessions prefix action: Consumed
 === Sessions pending chord (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -2702,7 +2702,7 @@ Sessions prefix action: Consumed
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
  PREFIX  esc cancel · ctrl+b send · ? keys
 === Sessions after cancelling chord (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -2744,7 +2744,7 @@ Sessions prefix action: Consumed
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 Prompt prefix action: Consumed
 === Prompt pending chord (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -2785,7 +2785,7 @@ Prompt prefix action: Consumed
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
  PREFIX  esc cancel · ctrl+b send · ? keys
 === Prompt after cancelling chord (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │

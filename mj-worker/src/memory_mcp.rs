@@ -26,7 +26,6 @@ fn serve<R: io::BufRead, W: io::Write + Send + Sync + 'static>(
             name: "mj-memory",
             instructions: history::GUIDANCE,
             tools,
-            dispatch: crate::mcp_stdio::Dispatch::Concurrent,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, _: &crate::mcp_stdio::Progress| {
                 client.call(params.context("tools/call is missing params")?)

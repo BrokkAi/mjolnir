@@ -17,6 +17,7 @@
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
 mod document;
+mod github;
 mod harness;
 mod keys;
 mod loading;
@@ -25,6 +26,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use github::*;
 pub use harness::*;
 pub use keys::*;
 pub use loading::*;
@@ -143,13 +145,13 @@ pub struct ReviewConfig {
     /// a reviewer.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "is_default_tier")]
-    pub tier: crate::review::lanes::ReviewTier,
+    /// Deprecated review tier. Accepted for old configurations and ignored.
+    #[serde(default, skip_serializing)]
+    pub tier: Option<String>,
     /// The harness profile the reviewing agents run under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Main reviewer overrides for a named profile. Auto uses its fixed policy;
-    /// specialist lanes use provider-specific models.
+    /// Main reviewer overrides for a named profile. Auto uses its fixed policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,11 +174,10 @@ pub enum SessionReview {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Quick or extended, for this session's automatic reviews and its
-        /// `/review`. Stored only when chosen, so choices made before tiers
-        /// could be set per session read back unchanged.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tier: Option<crate::review::lanes::ReviewTier>,
+        /// Deprecated review tier. Accepted in old session records and API
+        /// requests, ignored, and omitted from newly serialized values.
+        #[serde(default, skip_serializing)]
+        tier: Option<String>,
     },
 }
 
@@ -188,20 +189,13 @@ impl ReviewConfig {
         match session {
             None => {}
             Some(SessionReview::Off) => config.enabled = false,
-            Some(SessionReview::On {
-                model,
-                effort,
-                tier,
-            }) => {
+            Some(SessionReview::On { model, effort, .. }) => {
                 config.enabled = true;
                 if model.is_some() {
                     config.model.clone_from(model);
                 }
                 if effort.is_some() {
                     config.effort.clone_from(effort);
-                }
-                if let Some(tier) = tier {
-                    config.tier = *tier;
                 }
             }
         }
@@ -251,10 +245,6 @@ impl SessionWikiConfig {
 
 const fn is_false(value: &bool) -> bool {
     !*value
-}
-
-fn is_default_tier(tier: &crate::review::lanes::ReviewTier) -> bool {
-    *tier == crate::review::lanes::ReviewTier::default()
 }
 
 impl ReviewConfig {
@@ -487,6 +477,7 @@ pub struct Config {
     pub spinner: SpinnerStyle,
     pub theme: UiTheme,
     pub phone: PhoneConfig,
+    pub github: GithubConfig,
     pub review: ReviewConfig,
     pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
@@ -529,6 +520,8 @@ struct StoredConfig {
     theme: UiTheme,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     phone: PhoneConfig,
+    #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
+    github: GithubConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     review: ReviewConfig,
     #[serde(
@@ -692,6 +685,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            github,
             review,
             continuation,
             sessionwiki,
@@ -705,6 +699,9 @@ impl TryFrom<StoredConfig> for Config {
             mut machines,
             targets,
         } = stored;
+        if let Some(app) = &github.app {
+            app.validate()?;
+        }
         for profile in profiles.values_mut() {
             profile.inherit_provider_key();
         }
@@ -756,6 +753,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            github,
             review,
             continuation,
             sessionwiki,
@@ -794,6 +792,7 @@ impl From<Config> for StoredConfig {
             spinner: config.spinner,
             theme: config.theme,
             phone: config.phone,
+            github: config.github,
             review: config.review,
             continuation: config.continuation,
             sessionwiki: config.sessionwiki,
@@ -820,6 +819,7 @@ impl Default for Config {
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
             phone: PhoneConfig::default(),
+            github: GithubConfig::default(),
             review: ReviewConfig::default(),
             continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),
@@ -965,8 +965,9 @@ impl Config {
             workspace_storage: Default::default(),
         };
         let mut defaults: Vec<(&str, TargetTemplate)> = Vec::new();
-        #[cfg(unix)]
-        defaults.push(("localhost", TargetTemplate::LocalBare));
+        if crate::targets::HOST_RUNS_WORKERS {
+            defaults.push(("localhost", TargetTemplate::LocalBare));
+        }
         defaults.push((
             "podman",
             TargetTemplate::LocalPodman {

@@ -1,5 +1,5 @@
 === grouped Settings root (140x42) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────                                                                                                                       │
@@ -88,15 +88,15 @@ root footer alignment: save=(24,34); body=(26,12)
   │   Activity animation                                                                 scan ▾  │
   │   Theme                           Midnight ▾                                                 │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
-  │                                   │Midnight                                │                 │
-  │                                   │Light                                   │                 │
-  │                                   │Darcula                                 │                 │
-  │                                   │High Contrast                           │                 │
-  │                                   │Monochrome                              │                 │
+  │                                   │Midnight                               ▐│                 │
+  │                                   │Light                                  ▐│                 │
+  │                                   │Darcula                                ▐│                 │
+  │                                   │High Contrast                          ▐│                 │
+  │                                   │Campbell                               ▐│                 │
+  │                                   │One Half Dark                          ││                 │
+  │                                   │One Half Light                         ││                 │
+  │                                   │Solarized Dark                         ││                 │
   │                                   ╰────────────────────────────────────────╯                 │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -219,15 +219,15 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Activity animation                                                                 scan ▾  │
   │   Theme                           Midnight ▾                                                 │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
-  │                                   │Midnight                                │                 │
-  │                                   │Light                                   │                 │
-  │                                   │Darcula                                 │                 │
-  │                                   │High Contrast                           │                 │
-  │                                   │Monochrome                              │                 │
+  │                                   │Midnight                               ▐│                 │
+  │                                   │Light                                  ▐│                 │
+  │                                   │Darcula                                ▐│                 │
+  │                                   │High Contrast                          ▐│                 │
+  │                                   │Campbell                               ▐│                 │
+  │                                   │One Half Dark                          ││                 │
+  │                                   │One Half Light                         ││                 │
+  │                                   │Solarized Dark                         ││                 │
   │                                   ╰────────────────────────────────────────╯                 │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -244,14 +244,14 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Advanced                                                                          │
-  │ Optional diagnostics and display details for the activity surface.                           │
+  │ Display options: activity clocks, session order, symbols, and how tool calls show.           │
   │                                                                                              │
   │                                                                                              │
   │   Detailed activity clocks                                                                ☐  │
   │   Session order                                                                   project ▾  │
   │   Symbols                                                            Follows the terminal ▾  │
-  │                                                                                              │
-  │                                                                                              │
+  │   Tool calls                                                                      Grouped ▾  │
+  │   Tool output lines                                                                       5  │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -310,11 +310,10 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │☐ Automatic review                                                                            │
-  │Tier      Quick ▾                                                                             │
-  │          One general reviewer; the agent checks its findings as it fixes them.               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
@@ -322,8 +321,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.                            │
   │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -750,7 +750,7 @@ saved theme: Light
 rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(157, 229, 202)
 
 === Light theme after save acknowledgement (100x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
@@ -795,15 +795,15 @@ rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35
   │   Activity animation                                                                 scan ▾  │
   │   Theme                           Light ▾                                                    │
   │                                   ╭ values · ↑/↓ select · Tab/Enter accept ╮                 │
-  │                                   │Midnight                                │                 │
-  │                                   │Light                                   │                 │
-  │                                   │Darcula                                 │                 │
-  │                                   │High Contrast                           │                 │
-  │                                   │Monochrome                              │                 │
+  │                                   │Midnight                               ▐│                 │
+  │                                   │Light                                  ▐│                 │
+  │                                   │Darcula                                ▐│                 │
+  │                                   │High Contrast                          ▐│                 │
+  │                                   │Campbell                               ▐│                 │
+  │                                   │One Half Dark                          ││                 │
+  │                                   │One Half Light                         ││                 │
+  │                                   │Solarized Dark                         ││                 │
   │                                   ╰────────────────────────────────────────╯                 │
-  │                                                                                              │
-  │                                                                                              │
-  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -814,3 +814,17 @@ rendered colors: text fg=Rgb(38, 51, 46) bg=Rgb(251, 250, 247); accent fg=Rgb(35
 
 
 reopened selected theme: "light"
+saved theme: Campbell
+Campbell after save acknowledgement: rendered colors: text fg=Rgb(204, 204, 204) bg=Rgb(19, 19, 19); accent fg=Rgb(97, 214, 214)
+saved theme: OneHalfDark
+One Half Dark after save acknowledgement: rendered colors: text fg=Rgb(220, 223, 228) bg=Rgb(44, 49, 58); accent fg=Rgb(94, 186, 197)
+saved theme: OneHalfLight
+One Half Light after save acknowledgement: rendered colors: text fg=Rgb(56, 58, 66) bg=Rgb(255, 255, 255); accent fg=Rgb(1, 108, 154)
+saved theme: SolarizedDark
+Solarized Dark after save acknowledgement: rendered colors: text fg=Rgb(238, 232, 213) bg=Rgb(3, 47, 59); accent fg=Rgb(91, 183, 176)
+saved theme: SolarizedLight
+Solarized Light after save acknowledgement: rendered colors: text fg=Rgb(7, 54, 66) bg=Rgb(255, 250, 236); accent fg=Rgb(28, 108, 102)
+saved theme: TerminalDark
+Terminal Dark after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(6)
+saved theme: TerminalLight
+Terminal Light after save acknowledgement: rendered colors: text fg=Reset bg=Reset; accent fg=Indexed(4)

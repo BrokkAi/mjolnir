@@ -1048,6 +1048,7 @@ pub(super) fn install_worker_over_ssh(
 mod mbx_shim_tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     fn execute_script(
         script: &str,
         arguments: impl IntoIterator<Item = String>,
@@ -1073,6 +1074,7 @@ mod mbx_shim_tests {
         targets::ProcessExecutor.execute(&command).unwrap()
     }
 
+    #[cfg(target_os = "linux")]
     fn run_script(script: &str, arguments: impl IntoIterator<Item = String>) {
         let output = execute_script(script, arguments, None, None);
         assert_eq!(
@@ -1084,7 +1086,7 @@ mod mbx_shim_tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn only_marked_mbx_shims_are_removed() {
         let root = tempfile::tempdir().unwrap();
         let generated = root.path().join("generated");
@@ -1128,7 +1130,7 @@ mod mbx_shim_tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn legacy_detection_distinguishes_grep_miss_match_and_failure() {
         use std::os::unix::fs::PermissionsExt;
 

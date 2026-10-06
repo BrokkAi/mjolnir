@@ -4,6 +4,7 @@ mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod git_cache;
+mod github_app;
 mod lifecycle;
 pub mod local_profile_homes;
 pub(crate) mod mbx;
@@ -78,6 +79,10 @@ pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
 pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
+pub use github_app::GithubBundleSelectionError;
+pub(crate) use github_app::{
+    GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
+};
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };
@@ -1443,8 +1448,9 @@ fn finish_config_map_rename<T>(
 ///
 /// This is the per-session root [`removable_profile_root`] names, on every
 /// target: a session always runs from a staged copy of its profile, never from
-/// the profile home itself. Muse keeps its state in a `muse` subdirectory of
-/// the root, because its ACP adapter owns the directory it is given.
+/// the profile home itself. A harness with a nested home keeps its state in a
+/// subdirectory of the root named after it, the leaf its XDG configuration
+/// directory must have.
 #[cfg(test)]
 pub(crate) fn target_profile_home_for_test(
     locator: &targets::TargetLocator,
@@ -1460,9 +1466,9 @@ fn target_profile_home(
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
     let root = removable_profile_root(locator, session_id, profile);
-    if profile.kind == mj_core::config::HarnessKind::Muse {
+    if profile.kind.nested_home() {
         PathBuf::from(root)
-            .join("muse")
+            .join(profile.kind.id())
             .to_string_lossy()
             .into_owned()
     } else {
@@ -1474,18 +1480,17 @@ fn target_profile_home(
 /// the session owns and an in-place harness replacement or teardown may delete.
 ///
 /// This is the root that [`target_profile_home`] derives its answer from, not
-/// that answer itself: a Muse session's home is a `muse` subdirectory of a
-/// per-session root, and the whole root is what belongs to the session.
+/// that answer itself: a harness with an XDG-nested home keeps its home in a
+/// subdirectory of a per-session root under the data directory, and the whole
+/// root is what belongs to the session.
 pub(super) fn removable_profile_root(
     locator: &targets::TargetLocator,
     session_id: &str,
     profile: &mj_core::config::HarnessProfile,
 ) -> String {
     match locator {
-        targets::TargetLocator::LocalBare { .. }
-            if profile.kind == mj_core::config::HarnessKind::Muse =>
-        {
-            targets::local_muse_profile_root(session_id)
+        targets::TargetLocator::LocalBare { .. } if profile.kind.nested_home() => {
+            targets::local_nested_profile_root(session_id)
                 .to_string_lossy()
                 .into_owned()
         }

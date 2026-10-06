@@ -77,7 +77,7 @@ The only accepted top-level keys are:
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
-| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, or `mono` (no colors). A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
@@ -88,6 +88,7 @@ The only accepted top-level keys are:
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
+| `github` | table | no | empty | Optional GitHub App credentials shared by the controller. |
 | `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
 | `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
 | `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
@@ -286,7 +287,7 @@ title = true
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
-| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS or `notify-send` on Linux. `off` reports nothing. |
+| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS, `notify-send` on Linux, or a PowerShell toast on Windows. `off` reports nothing. |
 | `bell` | boolean | `true` | Whether each notification rings the terminal bell. Turn it off with `mode = "system"` for silent desktop notifications. |
 | `delay_seconds` | integer | `2` | How long a session must keep needing you before it is reported, so a question the agent answers itself stays quiet. |
 | `title` | boolean | `true` | Keep the terminal window title showing the counts, for example `mj · 2 waiting · 1 unread`, independently of `mode`. |
@@ -335,7 +336,6 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 ```toml
 [review]
 enabled = true
-tier = "quick"
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -344,15 +344,14 @@ profile = "reviewer"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `false` | Examines each eligible completed turn after queued work drains; an unchanged delta resolves without a review prompt. |
-| `tier` | string enum | no | `"quick"` | `quick` or `extended`. |
+| `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Main-reviewer override for a named profile. Auto uses fixed model-family defaults; specialist lanes use provider-specific overrides. |
-| `effort` | string | no | unset (harness default) | Main-reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
+| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
 
-These settings also select the plan second-opinion reviewer. Auto prefers another provider, falling back to another profile or the primary profile when needed. The
-quick tier runs one general reviewer and validates reported findings. Extended
-review may add intent analysis, a supervisor, and specialist lanes. See
-[Independent turn review](/turn-review/).
+These settings also select the plan second-opinion reviewer. Auto prefers
+another provider, falling back to another profile or the primary profile when
+needed. Turn review uses one reviewer. See [Independent turn review](/turn-review/).
 
 `mj new --review-model <model>` and `--review-effort <effort>` review every turn
 of one new session with that model or effort, even when `enabled` is false. In
@@ -360,6 +359,11 @@ Auto, Mjolnir picks the first enabled profile that offers the model.
 `mj new --no-review` turns off automatic review for one session, even when
 `enabled` is true; `/review` still works. Sessions created without these flags
 follow `[review]`.
+
+The deprecated `mj new --review-tier quick|extended` option still accepts
+either value and enables automatic review for that session, but the value is
+ignored. `mj import <harness>` accepts the same compatibility option. Existing
+`tier` values in session settings are also ignored.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
@@ -602,6 +606,40 @@ A configuration that uses a reference needs a Mjolnir that understands it;
 an older build reports the entry as an invalid type. Plain strings keep
 working everywhere.
 
+## GitHub App `[github.app]`
+
+An optional GitHub App can provide installation tokens for private bundle
+repositories without putting a long-lived user token in the daemon environment.
+The daemon reads the App's private PEM key from the controller host. The key
+and installation tokens are not stored in the database or session checkpoints.
+Without this section, Mjolnir keeps using `GH_TOKEN`, `GITHUB_TOKEN`, or
+`gh auth token` as before.
+
+```toml
+[github.app]
+app_id = 1234
+private_key_path = "/home/me/.config/mjolnir/github-app.pem"
+
+[github.app.installations]
+acme = 987654
+```
+
+`app_id` is the GitHub App ID, and `private_key_path` names its RSA PEM private
+key on the controller host. The optional `installations` table maps GitHub
+owner logins (organizations or users) to installation IDs. Owners not listed
+there are discovered through GitHub's API and cached by the daemon. Find the
+installation ID on the installed App's settings page.
+
+Each managed session may use repositories from only one App installation. A
+bundle that resolves to multiple installations is rejected when the session is
+created. App tokens are refreshed before they approach expiry and are delivered
+to running remote/container sessions during credential sync. Local bare
+sessions do not receive periodic refresh; an App token used there expires
+within at most one hour.
+
+See [GitHub App credentials](/github-app/) for creating an App and setting up
+its repository permissions.
+
 ## Bundles `[bundles.<id>]`
 
 A bundle is a non-empty repository set. The primary repository becomes the
@@ -824,8 +862,8 @@ permissions = "guardian"
 
 The new-session wizard asks for an existing absolute Git project directory on
 the runtime's machine. On `local` supported harnesses retain configured
-approvals because there is no container or instance boundary. Muse always runs
-unconstrained; see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
+approvals because there is no container or instance boundary; Muse's guardian
+is muse-acp's auto-review, see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
 the wizard separately asks for an existing absolute remote Git directory; when
 **Create isolated checkout** is checked on the final review, the new checkout is
 created below the repository's own `.mj/clones/` tree. A bare runtime on an
@@ -974,7 +1012,6 @@ tailscale_detect = true
 
 [review]
 enabled = false
-tier = "quick"
 profile = "claude-review"
 
 [profiles.codex-work]
@@ -1021,7 +1058,6 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
-| `MJ_BIFROST_BIN` | Path or command name of the Bifrost that turn review runs. Set it on the daemon; the daemon passes it to each new session's worker (a profile's `[environment]` table does not reach the review). The path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. `mj doctor` checks its version. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
 | `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |

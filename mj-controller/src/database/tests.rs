@@ -757,7 +757,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        71
+        74
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -798,7 +798,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        71
+        74
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
@@ -1214,14 +1214,22 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     record.review = Some(mj_core::config::SessionReview::On {
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
-        tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+        tier: Some("extended".into()),
     });
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
-    assert_eq!(loaded.sessions["session-1"].review, record.review);
+    assert_eq!(
+        loaded.sessions["session-1"].review,
+        Some(mj_core::config::SessionReview::On {
+            model: Some("gpt-6-astra".into()),
+            effort: Some("high".into()),
+            tier: None,
+        }),
+        "writes omit the legacy tier while preserving the review choice"
+    );
 }
 
 // Hard-won: d92ab7ce: the lifecycle UPDATE omitted build_cache_json and live sessions reloaded without their mounted cache

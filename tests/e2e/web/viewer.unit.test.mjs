@@ -283,7 +283,6 @@ globalThis.harness = {
 
 function review() {
   return {
-    tier: 'extended',
     status: 'Choose what to do with the findings.',
     roles: [],
     verdict: {
@@ -334,6 +333,38 @@ test('a failed review resolution restores every action allowed by the snapshot',
   assert.ok(
     descendants(restoredCard, 'button').every(button => !button.disabled),
     'an allowed resolution stayed disabled after failure',
+  );
+});
+
+
+test('phone review status exactly mirrors the shared status sentences', () => {
+  const statusSource = sourceBetween(
+    'function reviewStatusLine(review, open) {',
+    '\n/// Run a local command, or report that nothing here can.',
+  );
+  const context = vm.createContext({});
+  vm.runInContext(`${statusSource}\nglobalThis.reviewStatusLineForTest = reviewStatusLine;`, context);
+  const status = context.reviewStatusLineForTest;
+
+  assert.equal(
+    status({ enabled: true, profile: 'reviewer' }, false),
+    'Reviewing every completed turn with [review] profile "reviewer"',
+  );
+  assert.equal(
+    status({ enabled: true }, false),
+    'Reviewing every completed turn with Auto',
+  );
+  assert.equal(
+    status({ enabled: false, profile: 'reviewer' }, false),
+    'Automatic review is off; /review reviews one turn with "reviewer"',
+  );
+  assert.equal(
+    status({ enabled: false, profile: null }, false),
+    'Automatic review is off; /review uses Auto',
+  );
+  assert.equal(
+    status({ enabled: false, profile: 'reviewer' }, true),
+    'Automatic review is off; /review reviews one turn with "reviewer". A review is open now.',
   );
 });
 
@@ -935,7 +966,7 @@ test('a review published without roles renders and clears when it ends', () => {
   const harness = turnReviewHarness();
   const preparing = {
     id: 'session-a',
-    turn_review: { tier: 'quick', status: 'Preparing reviewer' },
+    turn_review: { status: 'Preparing reviewer' },
   };
   harness.setActive(preparing);
   assert.doesNotThrow(() => harness.renderTurnReview(preparing));

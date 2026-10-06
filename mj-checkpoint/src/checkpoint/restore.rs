@@ -384,7 +384,11 @@ pub(super) fn restored_native_relative_path(
             rewritten.extend(components);
             Ok(rewritten)
         }
-        HarnessKind::Codex | HarnessKind::Muse => Ok(relative_path.to_path_buf()),
+        // OpenCode's database records session directories itself; it has no
+        // per-workspace path key to rewrite.
+        HarnessKind::Codex | HarnessKind::Muse | HarnessKind::OpenCode => {
+            Ok(relative_path.to_path_buf())
+        }
     }
 }
 

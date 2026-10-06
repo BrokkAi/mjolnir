@@ -795,7 +795,7 @@ mod tests {
             );
         }
 
-        mj_core::golden::assert_golden(
+        mj_core::golden::assert_platform_golden(
             env!("CARGO_MANIFEST_DIR"),
             "config-selection-render",
             &output,

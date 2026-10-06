@@ -109,9 +109,8 @@ use mj_core::worker_launch::{
 };
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
-/// Where the worker keeps one directory per reviewing role, inside
-/// [`REVIEWER_DIR`]. Each holds that role's own copy of the staged profile and
-/// its own relay journal.
+/// Per-role directories inside [`REVIEWER_DIR`], holding the role's private
+/// profile copy and relay journal.
 #[cfg(unix)]
 pub(crate) const REVIEWER_ROLES_DIR: &str = "roles";
 
@@ -201,11 +200,6 @@ pub(crate) fn exclude_from_harness_environment(
 /// method on [`WorkerLaunchConfig`] in the crate that defines it.
 #[cfg(unix)]
 pub(crate) fn enforce_execution_policy(config: &mut WorkerLaunchConfig) -> Result<()> {
-    // Applied here as well as in the controller so a launch config persisted
-    // by an older Hel converges on the harness's effective policy.
-    config.execution_policy = config
-        .harness
-        .effective_execution_policy(config.execution_policy);
     config
         .harness
         .configure_execution_environment(config.execution_policy, &mut config.environment)
@@ -375,7 +369,7 @@ fn credential_endpoint(
 
 #[cfg(unix)]
 fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
-    if config.harness == mj_core::config::HarnessKind::Muse
+    if config.harness.nested_home()
         && let Some(value) = config.environment.get_mut("XDG_DATA_HOME")
         && Path::new(value).is_relative()
     {

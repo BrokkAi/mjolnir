@@ -92,6 +92,7 @@ impl DashboardState {
             &name,
             &["stopped"],
         );
+        let tools = mj_chat::chat::ToolDisplay::from_config(&self.config.advanced);
         let Some(pane) = self.stopped_subagents.get_mut(id) else {
             return;
         };
@@ -117,8 +118,12 @@ impl DashboardState {
                 frame.render_widget(Paragraph::new("This sub-agent left no transcript."), inner)
             }
             (Some(transcript), None) => {
-                let (lines, scroll) =
-                    transcript.rich_tail_scrolled(inner.width, inner.height as usize, pane.scroll);
+                let (lines, scroll) = transcript.rich_tail_scrolled(
+                    inner.width,
+                    inner.height as usize,
+                    pane.scroll,
+                    tools,
+                );
                 pane.scroll = scroll;
                 frame.render_widget(Paragraph::new(lines), inner);
             }

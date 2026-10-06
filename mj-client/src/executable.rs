@@ -10,8 +10,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-// Only the Linux and macOS answers inspect files; Windows returns "unknown".
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use anyhow::Context as _;
 
 /// A file, identified by what it is rather than by what it is called.
@@ -62,7 +61,7 @@ pub fn process_runs_this_executable(pid: u32) -> Result<Option<bool>> {
     Ok(Some(current == other))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn process_runs_this_executable(pid: u32) -> Result<Option<bool>> {
     let process_id = sysinfo::Pid::from_u32(pid);
     let mut system = sysinfo::System::new();
@@ -83,21 +82,34 @@ pub fn process_runs_this_executable(pid: u32) -> Result<Option<bool>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Some(false)),
         Err(error) => return Err(error).context("inspect process executable"),
     };
-    // macOS reports a pathname, not Linux's reference to the running inode.
-    // A newer file at that same pathname also means a different build.
+    // macOS and Windows report a pathname, not Linux's reference to the
+    // running inode. A newer file at that same pathname also means a
+    // different build.
     let modified = metadata
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     Ok(Some(
-        executable_file_identity(&current)? == executable_file_identity(path)?
-            && modified <= process.start_time(),
+        same_executable_file(&current, path)? && modified <= process.start_time(),
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn same_executable_file(current: &Path, other: &Path) -> std::io::Result<bool> {
+    Ok(executable_file_identity(current)? == executable_file_identity(other)?)
+}
+
+/// Windows refuses to overwrite or remove a running executable and only
+/// lets it be renamed, so a process's own pathname still names its file
+/// unless a newer file was put there, which the caller's time check catches.
+#[cfg(target_os = "windows")]
+fn same_executable_file(current: &Path, other: &Path) -> std::io::Result<bool> {
+    Ok(std::fs::canonicalize(current)? == std::fs::canonicalize(other)?)
 }
 
 /// Platforms that do not expose a process's executable answer "unknown", so
 /// every caller has one shape to handle.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub fn process_runs_this_executable(pid: u32) -> Result<Option<bool>> {
     let _ = pid;
     Ok(None)

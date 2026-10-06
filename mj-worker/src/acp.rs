@@ -1,7 +1,7 @@
 //! ACP runtime and normalized session controls used by a Hel session worker.
 //!
 //! The worker owns exactly one harness process and one foreground session.  It
-//! deliberately does not know about orchestration, review lanes, or subagents;
+//! deliberately does not know about orchestration, turn reviews, or subagents;
 //! [`surface`] projects protocol capabilities for the chat control surface.
 
 mod claude_tasks;
@@ -841,4 +841,4 @@ const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the n
 #[cfg(all(test, unix))]
 pub(crate) mod muse_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

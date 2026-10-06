@@ -103,7 +103,7 @@ impl DashboardState {
         wizard.preparation_request_id = Some(request_id);
         wizard.preparing = true;
         wizard.preparation_error = None;
-        let subagents = wizard.subagent_change(self);
+        let subagents = wizard.subagent_selection(self);
         let action = DashboardAction::MoveSession {
             subagents,
             workspace_selection: wizard.files.selection.clone(),
@@ -175,6 +175,17 @@ impl DashboardState {
                 return self.start_move_preparation(wizard, profile_id);
             }
             let selection = &wizard.preparation.as_ref().unwrap().selection;
+            if let Some(drafted) = wizard.subagent_selection(self) {
+                let prepared = selection.subagents.clone().unwrap_or_else(|| {
+                    self.session_record(&wizard.session_id)
+                        .and_then(|session| session.subagents.clone())
+                        .unwrap_or_default()
+                });
+                if prepared != drafted {
+                    wizard.preparation = None;
+                    return self.start_move_preparation(wizard, profile_id);
+                }
+            }
             if wizard
                 .preparation
                 .as_ref()

@@ -242,18 +242,6 @@ impl RelayClient {
         }
     }
 
-    /// Collect the specialist lanes the review supervisor asked for since the
-    /// last call.
-    pub async fn take_lane_dispatches(
-        &mut self,
-    ) -> Result<Vec<mj_core::review::lanes::ReviewSubagentRequest>> {
-        let request = self.reviewer_request(None, ReviewerRequest::TakeLaneDispatches)?;
-        match self.call(request).await? {
-            RelayResponsePayload::LaneDispatches { requests } => Ok(requests),
-            _ => bail!("relay returned an unexpected lane dispatch response"),
-        }
-    }
-
     /// Wraps a reviewer action, refusing it on a worker too old to know what a
     /// reviewer is rather than sending a method it would reject as unknown.
     pub(super) fn reviewer_request(

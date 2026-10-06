@@ -234,6 +234,7 @@ pub(crate) fn config() -> Config {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
@@ -613,6 +614,7 @@ pub(crate) fn test_capacity_target() -> DeploymentCapacityTarget {
         kind: DeploymentCapacityKind::Host,
         local: true,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }
 }

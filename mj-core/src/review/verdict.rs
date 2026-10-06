@@ -1,17 +1,9 @@
 //! What a review concluded, and how a reviewing agent's reply is classified.
 //!
-//! Ported from mjolnir (`mj-agents/src/discrete_review.rs` and
-//! `mj-core/src/orchestrator_contract.rs`) with its semantics intact: the
-//! classification is deliberately conservative in one direction. A reply that
-//! is malformed, contradictory, or carries any priority marker degrades toward
-//! findings; only an unambiguous clean sentinel releases the turn unchecked.
+//! The durable verdict and compatibility evidence shared by review drivers,
+//! storage and client projections.
 
 use serde::{Deserialize, Serialize};
-
-/// Exact supervisor or validator reply that means "nothing survived vetting".
-pub const CLEAN_SENTINEL: &str = "No material findings.";
-/// Exact lane reply that means "nothing qualified in this lane".
-pub const LANE_CLEAN_SENTINEL: &str = "No findings.";
 
 /// What one review concluded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,23 +30,22 @@ impl ReviewVerdict {
     }
 }
 
-/// What the review gathered on its way to a verdict, kept so a corrective pass
-/// can say what was already covered.
+/// Legacy lane evidence retained so persisted pending forwards still decode.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReviewPassEvidence {
+    /// Specialist lane outcomes from older review records.
     pub lanes: Vec<ReviewLaneEvidence>,
 }
 
-/// How one specialist lane ended.
+/// A specialist lane outcome from a legacy review record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewLaneEvidence {
     pub id: String,
     pub outcome: LaneOutcome,
 }
 
-/// A lane's terminal state, which is deterministic runtime evidence rather
-/// than anything a model claimed.
+/// A legacy lane's terminal state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum LaneOutcome {

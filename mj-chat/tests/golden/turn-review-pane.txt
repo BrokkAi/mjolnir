@@ -1,6 +1,6 @@
 === findings default action (64x14) ===
 ╭ Conversation · Reviewing ────╮╭ Turn review · findings ──────╮
-│ No messages yet — send a pro▐││General running Verdict       │
+│ No messages yet — send a pro▐││Reviewer running Verdict      │
 │                             ▐││[P1] src/lib.rs:1 -- unbounded│
 │                             ▐││retry                         │
 │                             ▐││                              │
@@ -18,8 +18,8 @@ action: TurnReview(Resolve(Forwarded))
 
 === failed verdict allowed actions (64x14) ===
 ╭ Conversation · Reviewing ────╮╭ Turn review · failed ────────╮
-│ No messages yet — send a pro▐││General running Verdict       │
-│                             ▐││bifrost exited with 1         │
+│ No messages yet — send a pro▐││Reviewer running Verdict      │
+│                             ▐││reviewer exited with 1        │
 │                             ▐││                              │
 │                             ▐││                              │
 │                             ▐││                              │
@@ -37,15 +37,15 @@ action: TurnReview(Resolve(Dismissed))
 
 === review running overview (64x14) ===
 ╭ Turn review ─────────────────────────────────────────────────╮
-│Overview General running                                      │
+│Overview Reviewer running                                     │
 │                                                              │
 │Stage: the reviewer is reading the change…                    │
 │                                                              │
-│Reviewers                                                     │
-│  General  running                                            │
+│Reviewer                                                      │
+│  Reviewer  running                                           │
 │                                                              │
-│Prompt paused during review. Esc cancels; Tab opens           │
-│transcripts.                                                  │
+│Prompt paused during review. Esc cancels; Tab changes view.   │
+│                                                              │
 │                                                              │
 │                                                              │
 │                                                              │
@@ -53,7 +53,7 @@ action: TurnReview(Resolve(Dismissed))
 
 === verdict selects first enabled action and panel (64x14) ===
 ╭ Conversation · Reviewing ────╮╭ Turn review · findings ──────╮
-│ No messages yet — send a pro▐││General running Verdict       │
+│ No messages yet — send a pro▐││Reviewer running Verdict      │
 │                             ▐││[P1] src/lib.rs:1 -- unbounded│
 │                             ▐││retry                         │
 │                             ▐││                              │
@@ -71,15 +71,15 @@ verdict selected: true
 
 === running progress and held prompt (64x14) ===
 ╭ Turn review ─────────────────────────────────────────────────╮
-│Overview General running                                      │
+│Overview Reviewer running                                     │
 │                                                              │
 │Stage: the reviewer is reading the change…                    │
 │                                                              │
-│Reviewers                                                     │
-│  General  running                                            │
+│Reviewer                                                      │
+│  Reviewer  running                                           │
 │                                                              │
-│Prompt paused during review. Esc cancels; Tab opens           │
-│transcripts.                                                  │
+│Prompt paused during review. Esc cancels; Tab changes view.   │
+│                                                              │
 │                                                              │
 │                                                              │
 │                                                              │
@@ -88,23 +88,23 @@ percentage displayed: false
 
 === short overview scrolled to held prompt (32x6) ===
 ╭ Turn review ─────────────────╮
-│Overview General running      │
+│Overview Reviewer running     │
+│                              │
 │Prompt paused during review.  │
-│Esc cancels; Tab opens        │
-│transcripts.                  │
+│Esc cancels; Tab changes view.│
 ╰──────────────────────────────╯
 
 === clean reviewer role (64x14) ===
 ╭ Turn review ─────────────────────────────────────────────────╮
-│Overview General done                                         │
+│Overview Reviewer done                                        │
 │                                                              │
 │Stage: the reviewer is reading the change…                    │
 │                                                              │
-│Reviewers                                                     │
-│  General  done                                               │
+│Reviewer                                                      │
+│  Reviewer  done                                              │
 │                                                              │
-│Prompt paused during review. Esc cancels; Tab opens           │
-│transcripts.                                                  │
+│Prompt paused during review. Esc cancels; Tab changes view.   │
+│                                                              │
 │                                                              │
 │                                                              │
 │                                                              │
@@ -112,7 +112,7 @@ percentage displayed: false
 
 === verdict tab (64x14) ===
 ╭ Turn review · findings ──────────────────────────────────────╮
-│General running Verdict                                       │
+│Reviewer running Verdict                                      │
 │[P1] src/lib.rs:1 -- unbounded retry                          │
 │                                                              │
 │                                                              │
@@ -126,27 +126,9 @@ percentage displayed: false
 │                                                              │
 ╰──────────────────────────────────────────────────────────────╯
 
-=== reviewer transcript tab (64x14) ===
-╭ Turn review · findings ──────────────────────────────────────╮
-│General running Verdict                                       │
-│● Agent · 18:00                                               │
-││ reviewer transcript                                         │
-│                                                              │
-│                                                              │
-│                                                              │
-│                                                              │
-│                                                              │
-│                                                              │
-│                                                              │
-│                                                              │
-│                                                              │
-╰──────────────────────────────────────────────────────────────╯
-selected role: "reviewer"
-verdict selected: false
-
 === return to verdict tab (64x14) ===
 ╭ Turn review · findings ──────────────────────────────────────╮
-│General running Verdict                                       │
+│Reviewer running Verdict                                      │
 │[P1] src/lib.rs:1 -- unbounded retry                          │
 │                                                              │
 │                                                              │
@@ -163,7 +145,7 @@ verdict selected: true
 
 === long verdict top (48x10) ===
 ╭ Turn review · findings ──────────────────────╮
-│General running Verdict                       │
+│Reviewer running Verdict                      │
 │finding line 0                                │
 │finding line 1                                │
 │finding line 2                                │
@@ -175,7 +157,7 @@ verdict selected: true
 
 === long verdict scrolled (48x10) ===
 ╭ Turn review · findings ──────────────────────╮
-│General running Verdict                       │
+│Reviewer running Verdict                      │
 │finding line 17                               │
 │finding line 18                               │
 │finding line 19                               │

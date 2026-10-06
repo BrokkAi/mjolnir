@@ -1905,10 +1905,6 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             memory.root,
             "{kind:?} retains its memory replica in the dedicated launch field"
         );
-        if kind == HarnessKind::Muse {
-            assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
-            assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
-        }
     }
 }
 
@@ -2486,7 +2482,9 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
                 "skills/.system/.codex-system-skills.marker",
                 "skills/.system/imagegen/SKILL.md",
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
+                &[]
+            }
         };
         let home = tempfile::tempdir().unwrap();
         for relative in std::iter::once(&"skills/review/SKILL.md").chain(owned) {
@@ -3253,45 +3251,44 @@ fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
     (staged, path)
 }
 
-fn stage_muse_settings(profile_stage: &Path) {
-    apply_staged_execution_setting(
-        HarnessKind::Muse,
-        ExecutionPolicy::Unconstrained,
-        profile_stage,
-    )
-    .unwrap();
-}
-
 // Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile
 #[test]
-fn muse_staged_settings_select_the_unrestricted_profile() {
-    let (staged, path) = staged_muse_settings(
-        r#"{
-            "schema_version": 1,
-            "provider": "anthropic",
-            "model": "muse-1",
-            "tui": {"theme": "dark"},
-            "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
-        }"#,
-    );
+fn muse_staged_settings_replace_the_auto_review_profile_under_every_policy() {
+    for (policy, profile) in [
+        (ExecutionPolicy::Unconstrained, ":unrestricted"),
+        (ExecutionPolicy::ConfiguredApprovals, ":ask-me"),
+    ] {
+        let (staged, path) = staged_muse_settings(
+            r#"{
+                "schema_version": 1,
+                "provider": "anthropic",
+                "model": "muse-1",
+                "tui": {"theme": "dark"},
+                "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
+            }"#,
+        );
 
-    stage_muse_settings(staged.path());
+        apply_staged_execution_setting(HarnessKind::Muse, policy, staged.path()).unwrap();
 
-    let document: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["provider"], "anthropic");
-    assert_eq!(document["model"], "muse-1");
-    assert_eq!(document["tui"]["theme"], "dark");
-    assert_eq!(document["schema_version"], 1);
-    assert_eq!(document["permissions"]["schema_version"], 1);
-    assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["provider"], "anthropic");
+        assert_eq!(document["model"], "muse-1");
+        assert_eq!(document["tui"]["theme"], "dark");
+        assert_eq!(document["schema_version"], 1);
+        assert_eq!(document["permissions"]["schema_version"], 1);
+        assert_eq!(
+            document["permissions"]["default_profile"], profile,
+            "{policy:?}"
+        );
+    }
 }
 
-/// Muse has no guardian mode, so even a raw local target launches it
-/// unconstrained.
+/// A raw local target keeps configured approvals for Muse: muse-acp's
+/// auto-review is its guardian, and Muse keeps its sandbox.
 // Hard-won: 4a9dcb5: raw local Muse sessions used a permission profile Muse serve refused
 #[test]
-fn raw_local_muse_launches_unconstrained() {
+fn raw_local_muse_launches_with_guardian_approvals() {
     let project = tempfile::tempdir().unwrap();
     let mut session = crate::controller::test_support::checkpoint_test_session("session-muse");
     session.harness_kind = HarnessKind::Muse;
@@ -3327,9 +3324,12 @@ fn raw_local_muse_launches_unconstrained() {
     )
     .unwrap();
 
-    assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
-    assert_eq!(launch.environment["MUSE_APPROVAL_MODE"], "allowAll");
-    assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
+    assert_eq!(
+        launch.execution_policy,
+        ExecutionPolicy::ConfiguredApprovals
+    );
+    assert_eq!(launch.environment["MUSE_APPROVAL_MODE"], "promptUnmatched");
+    assert!(!launch.environment.contains_key("MUSE_SERVE_ARGS"));
 }
 
 #[test]
@@ -3565,7 +3565,6 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -3627,6 +3626,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     assert!(rendered.contains("worker' 'prepare-harness' '--config'"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     struct CacheLinkExecutor {
@@ -3695,7 +3695,6 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         target_environment: Default::default(),
         seed_image_environment: true,
         harness: HarnessKind::Codex,
@@ -3789,7 +3788,6 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -3868,6 +3866,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
 }
 
 // Hard-won: 5461a2c: recovery kept relaunching an incompatible remote worker that could not start
+
 #[test]
 fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
     let directory = tempfile::tempdir().unwrap();
@@ -4149,6 +4148,16 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             ("cache/models.json", false),
             ("logs/muse.log", false),
         ],
+        HarnessKind::OpenCode => &[
+            ("opencode.json", true),
+            ("AGENTS.md", true),
+            (".data/opencode/auth.json", true),
+            ("skills/review/SKILL.md", true),
+            (".data/opencode/opencode.db", false),
+            (".data/opencode/opencode.db-wal", false),
+            (".data/opencode/log/opencode.log", false),
+            (".data/opencode/repos/native", false),
+        ],
     }
 }
 
@@ -4247,6 +4256,16 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
             }
         }),
         HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+        // OpenCode stores one grant per provider under the provider id, with
+        // the OAuth expiry in epoch milliseconds.
+        HarnessKind::OpenCode => serde_json::json!({
+            "anthropic": {
+                "type": "oauth",
+                "refresh": format!("refresh-{generation}"),
+                "access": format!("access-{generation}"),
+                "expires": 1_790_000_000_000_i64 + generation * 1000,
+            }
+        }),
     };
     serde_json::to_vec(&login).unwrap()
 }

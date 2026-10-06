@@ -14,11 +14,8 @@ use mj_core::relay::RepoDelta;
 
 /// Line and file totals parsed straight from a unified diff.
 ///
-/// Ported from mjolnir's `RawDiffSummary` (`mj-agents/src/discrete_review.rs`),
-/// where it summarized a patch when Bifrost analysis was disabled. Hel always
-/// runs Bifrost, so this survives only as the worker's own diffstat: it is
-/// computed from the untruncated patch, which keeps a bounded patch from making
-/// a change look smaller than it is.
+/// Computed from the untruncated patch so bounding capture data cannot make a
+/// change look smaller than it is.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RawDiffSummary {
     pub files: usize,
@@ -91,35 +88,6 @@ impl RawDiffSummary {
 #[must_use]
 pub fn has_changes(deltas: &[RepoDelta]) -> bool {
     deltas.iter().any(|delta| !delta.patch.trim().is_empty())
-}
-
-/// The `<workspace_diff>` body every reviewing role sees: one section per
-/// repository, each headed by its root so a lane can tell which Bifrost server
-/// answers for a path.
-#[must_use]
-pub fn workspace_diff(deltas: &[RepoDelta]) -> String {
-    deltas
-        .iter()
-        .filter(|delta| !delta.patch.trim().is_empty())
-        .map(|delta| format!("Repository: {}\n{}", delta.root.display(), delta.patch))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Combined diffstat across repositories, for the prompts that show totals
-/// rather than the patch itself.
-#[must_use]
-pub fn combined_diffstat(deltas: &[RepoDelta]) -> String {
-    let lines = deltas
-        .iter()
-        .filter(|delta| !delta.patch.trim().is_empty())
-        .map(|delta| format!("{}: {}", delta.root.display(), delta.diffstat))
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        "No files changed.".to_string()
-    } else {
-        lines.join("\n")
-    }
 }
 
 /// Every changed file with its added and removed line counts, one section per
@@ -224,20 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn golden_review_change_packet() {
-        use std::fmt::Write as _;
-
-        let mut output = String::new();
-        let changed = vec![delta("/w/app", PATCH), delta("/w/lib", "")];
-        writeln!(
-            output,
-            "=== one changed repository (review change packet) ==="
-        )
-        .unwrap();
-        writeln!(output, "diffstat: {}", combined_diffstat(&changed)).unwrap();
-        writeln!(output, "changed lines: {}", changed_line_count(&changed)).unwrap();
-        writeln!(output, "workspace diff:\n{}", workspace_diff(&changed)).unwrap();
-
+    fn changed_files_table_lists_changed_repositories_without_the_patch() {
         let mut app = delta("/w/app", PATCH);
         app.files = vec![
             mj_core::relay::FileLineChange {
@@ -259,32 +214,32 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let file_deltas = vec![app, delta("/w/lib", PATCH), delta("/w/quiet", "")];
-        writeln!(
-            output,
-            "\n=== changed files by repository (review change packet) ==="
-        )
-        .unwrap();
-        output.push_str(&changed_files_table(&file_deltas));
-        output.push('\n');
 
-        let empty = [delta("/w/quiet", "")];
-        writeln!(output, "\n=== no changes (review change packet) ===").unwrap();
-        writeln!(output, "diffstat: {}", combined_diffstat(&empty)).unwrap();
-        writeln!(output, "changed lines: {}", changed_line_count(&empty)).unwrap();
-        let empty_workspace_diff = workspace_diff(&empty);
-        writeln!(
-            output,
-            "workspace diff: {}",
-            if empty_workspace_diff.is_empty() {
-                "<empty>"
-            } else {
-                &empty_workspace_diff
-            }
-        )
-        .unwrap();
-        writeln!(output, "changed files: {}", changed_files_table(&empty)).unwrap();
-
-        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "review-change-packet", &output);
+        let old_worker = delta("/w/lib", PATCH);
+        let changed = [app, old_worker, delta("/w/quiet", "")];
+        let table = changed_files_table(&changed);
+        let lines = table.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("Repository: /w/app -- "), "{table}");
+        assert!(lines[1].ends_with("+12      -3  src/lib.rs"), "{table}");
+        assert!(lines[2].ends_with("src/old.rs -> src/new.rs"), "{table}");
+        assert!(lines[3].contains("binary  logo.png"), "{table}");
+        assert!(
+            table.contains("Repository: /w/lib -- ")
+                && table.contains("did not report per-file counts"),
+            "{table}"
+        );
+        assert!(
+            !table.contains("/w/quiet"),
+            "an unchanged repository is left out"
+        );
+        assert!(
+            !table.contains("+added"),
+            "the change packet does not embed the patch"
+        );
+        assert_eq!(changed_line_count(&changed), 8);
+        assert_eq!(
+            changed_files_table(&[delta("/w/quiet", "")]),
+            "No files changed."
+        );
     }
 }

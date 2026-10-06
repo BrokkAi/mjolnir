@@ -92,7 +92,6 @@ pub enum ReviewerAction {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    TakeLaneDispatches,
 }
 
 impl ReviewerAction {
@@ -107,7 +106,6 @@ impl ReviewerAction {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
         }
     }
 }
@@ -116,21 +114,14 @@ impl ReviewerAction {
 #[serde(rename_all = "snake_case")]
 pub enum ReviewerOutcome {
     Started(Box<StartedReviewer>),
-    Accepted {
-        ordinal: u64,
-    },
+    Accepted { ordinal: u64 },
     Attached(Box<RelayAttachment>),
     Acknowledged(RelayCursor),
     Status(Box<RelayOperationalState>),
     ElicitationResolved,
     Paused,
-    Delta {
-        repositories: Vec<RepoDelta>,
-    },
+    Delta { repositories: Vec<RepoDelta> },
     BaselineAdvanced,
-    LaneDispatches {
-        requests: Vec<mj_core::review::lanes::ReviewSubagentRequest>,
-    },
 }
 
 /// Preserve whether a submit failed before delivery or lost its acknowledgement.
@@ -254,6 +245,11 @@ pub trait SessionHandleBackend: Send + Sync {
         response: ElicitationResponse,
     ) -> BoxFuture<'_, Result<()>>;
     fn stop_background_task(&self, background_task_id: String) -> BoxFuture<'_, Result<()>>;
+    /// Replace the worker's ephemeral GitHub token before a controller-owned
+    /// operation that needs the newest installation credential.
+    fn install_github_token(&self, _token: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { anyhow::bail!("GitHub token refresh is unavailable") })
+    }
     fn reviewer(
         &self,
         role: Option<String>,
@@ -444,6 +440,10 @@ impl SessionHandle {
 
     pub async fn stop_background_task(&self, background_task_id: String) -> Result<()> {
         self.backend.stop_background_task(background_task_id).await
+    }
+
+    pub async fn install_github_token(&self, token: String) -> Result<()> {
+        self.backend.install_github_token(token).await
     }
 
     pub async fn reviewer(&self, action: ReviewerAction) -> Result<ReviewerOutcome> {

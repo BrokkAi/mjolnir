@@ -142,9 +142,8 @@ struct Opened {
 }
 
 /// Open a session through a fake muse-acp whose host grants session MCP,
-/// withholds it, or could not start. A session carries history tools; a
-/// reviewer carries its analyzer server instead.
-async fn open_muse(host: &str, reviewer: bool) -> Opened {
+/// withholds it, or could not start. A session carries project memory.
+async fn open_muse(host: &str) -> Opened {
     let root = tempfile::tempdir().unwrap();
     let script = root.path().join("muse_acp.py");
     let log = root.path().join("mcp.jsonl");
@@ -153,6 +152,7 @@ async fn open_muse(host: &str, reviewer: bool) -> Opened {
         r#"
 import json, os, sys
 host, log = os.environ['MJ_FAKE_MUSE_HOST'], os.environ['MJ_FAKE_MUSE_LOG']
+options = json.loads(os.environ['MJ_FAKE_MUSE_OPTIONS'])
 for line in sys.stdin:
     request = json.loads(line)
     method, ident = request.get('method'), request.get('id')
@@ -168,7 +168,12 @@ for line in sys.stdin:
         if host == 'failed':
             reply = {'error': {'code': -32000, 'message': 'Muse Code is not logged in'}}
         else:
-            reply = {'result': {'sessionId': 'native'}}
+            reply = {'result': {'sessionId': 'native', 'configOptions': options}}
+    elif method == 'session/set_config_option':
+        for option in options:
+            if option['id'] == params['configId']:
+                option['currentValue'] = params['value']
+        reply = {'result': {'configOptions': options}}
     else:
         reply = {'result': {}}
     print(json.dumps({'jsonrpc': '2.0', 'id': ident, **reply}), flush=True)
@@ -187,13 +192,17 @@ for line in sys.stdin:
         environment: BTreeMap::from([
             ("MJ_FAKE_MUSE_HOST".into(), host.into()),
             (
+                "MJ_FAKE_MUSE_OPTIONS".into(),
+                super::tests::muse_policy_options().to_string(),
+            ),
+            (
                 "MJ_FAKE_MUSE_LOG".into(),
                 log.to_string_lossy().into_owned(),
             ),
         ]),
         cwd: root.path().to_path_buf(),
         additional_directories: Vec::new(),
-        project_memory: (!reviewer).then(|| ProjectMemoryLaunchConfig {
+        project_memory: Some(ProjectMemoryLaunchConfig {
             history_socket: None,
             project_key: "abc".into(),
             root: root.path().join("memory"),
@@ -201,18 +210,7 @@ for line in sys.stdin:
             repository_roots: BTreeMap::new(),
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
-        extra_mcp_servers: if reviewer {
-            vec![ReviewerMcpServer::new(
-                mj_core::worker_launch::ReviewMcpServer {
-                    name: "bifrost".into(),
-                    command: "bifrost".into(),
-                    args: Vec::new(),
-                },
-                Path::new("/worker"),
-            )]
-        } else {
-            Vec::new()
-        },
+        extra_mcp_servers: Vec::new(),
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
@@ -268,7 +266,7 @@ for line in sys.stdin:
 // Hard-won: c5deb2a: Older Muse containers stopped working after upgrades when their adapter withheld MCP servers.
 #[tokio::test]
 async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them() {
-    let opened = open_muse("granted", false).await;
+    let opened = open_muse("granted").await;
     opened.outcome.unwrap();
     assert!(opened.configured);
     assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
@@ -276,7 +274,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
 
     // A container keeps the adapter it was created with. Its session keeps
     // working without the tools, and the person is told why.
-    let opened = open_muse("withheld", false).await;
+    let opened = open_muse("withheld").await;
     opened.outcome.unwrap();
     assert!(opened.configured);
     assert_eq!(opened.received, [["mj-memory"]]);
@@ -292,23 +290,10 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
 
 // Hard-won: c5deb2a: A Muse reviewer could run without the analyzer tools required to review safely.
 #[tokio::test]
-async fn a_muse_reviewer_without_its_analyzer_tools_does_not_start() {
-    let opened = open_muse("granted", true).await;
-    opened.outcome.unwrap();
-    assert!(opened.configured);
-    assert_eq!(opened.received, [["bifrost"]]);
-
-    let opened = open_muse("withheld", true).await;
-    let error = format!("{:#}", opened.outcome.unwrap_err());
-    assert!(error.contains("without its analyzer tools"), "{error}");
-    assert!(!opened.configured);
-}
-
-#[tokio::test]
 async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
     // A host that never started also withholds the grant; its diagnostic, not
     // the missing grant, is what the person has to act on.
-    let opened = open_muse("failed", true).await;
+    let opened = open_muse("failed").await;
     let error = format!("{:#}", opened.outcome.unwrap_err());
     assert!(error.contains("Muse Code is not logged in"), "{error}");
     assert!(!error.contains("MCP"), "{error}");
@@ -316,21 +301,25 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.8.1"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.10.0"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));
     let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/muse_host.py");
-    for (scenario, choice, resume) in [
-        ("chat", "", false),
-        ("chat", "", true),
-        ("permission", "allow", false),
-        ("permission", "deny", false),
-        ("question", "accept", false),
-        ("question", "cancel", false),
-        ("quiet", "", false),
+    use ExecutionPolicy::{ConfiguredApprovals, Unconstrained};
+    for (scenario, choice, resume, policy) in [
+        ("chat", "", false, ConfiguredApprovals),
+        ("chat", "", true, ConfiguredApprovals),
+        ("chat", "", false, Unconstrained),
+        ("permission", "allow", false, ConfiguredApprovals),
+        ("permission", "deny", false, ConfiguredApprovals),
+        ("question", "accept", false, ConfiguredApprovals),
+        ("question", "cancel", false, ConfiguredApprovals),
+        ("quiet", "", false, ConfiguredApprovals),
     ] {
-        eprintln!("Muse scenario: {scenario}, choice: {choice}, resume: {resume}");
+        eprintln!(
+            "Muse scenario: {scenario}, choice: {choice}, resume: {resume}, policy: {policy:?}"
+        );
         let temp = tempfile::tempdir().unwrap();
         let log = temp.path().join("host.jsonl");
         let environment = BTreeMap::from([
@@ -340,6 +329,11 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                 log.to_string_lossy().into_owned(),
             ),
             ("MJ_MUSE_TEST_SCENARIO".into(), scenario.into()),
+            // The verdict the fake auto-review host returns.
+            (
+                "MJ_MUSE_TEST_REVIEW".into(),
+                if choice == "deny" { "deny" } else { "allow" }.into(),
+            ),
         ]);
         let spec = LaunchSpec {
             bridge_spec_path: None,
@@ -360,7 +354,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Muse,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            execution_policy: policy,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -439,26 +433,18 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                     replied |= update.to_string().contains("Muse test reply");
                 }
                 RuntimeEvent::ElicitationRequested { request } => {
+                    // Guardian answers Muse permissions with auto-review.
+                    assert_eq!(scenario, "question", "{request:?}");
                     let field = &request.fields[0];
-                    let response = if scenario == "permission" {
+                    let response = if choice == "accept" {
                         ElicitationResponse::Accept {
                             content: BTreeMap::from([(
-                                "choice".into(),
-                                ElicitationValue::String(choice.into()),
+                                field.id.clone(),
+                                ElicitationValue::String("First".into()),
                             )]),
                         }
                     } else {
-                        assert_eq!(scenario, "question");
-                        if choice == "accept" {
-                            ElicitationResponse::Accept {
-                                content: BTreeMap::from([(
-                                    field.id.clone(),
-                                    ElicitationValue::String("First".into()),
-                                )]),
-                            }
-                        } else {
-                            ElicitationResponse::Cancel
-                        }
+                        ElicitationResponse::Cancel
                     };
                     let (resolved, result) = oneshot::channel();
                     commands
@@ -485,7 +471,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         if scenario == "chat" {
             assert!(replied);
         }
-        if matches!(scenario, "permission" | "question") {
+        if scenario == "question" {
             assert!(answered, "scenario {scenario} did not request user input");
         }
         commands
@@ -502,6 +488,19 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             .unwrap();
         let trace = std::fs::read_to_string(log).unwrap();
         assert!(trace.contains("QUJDQUJD"));
+        // muse-acp 0.10 keeps the approval policy on `approval_mode`, apart
+        // from its session modes.
+        let approval_modes: Vec<serde_json::Value> = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|message| message["method"] == "session/setApprovalMode")
+            .map(|message| message["params"]["mode"].clone())
+            .collect();
+        let approval_mode = match policy {
+            Unconstrained => "allowAll",
+            ConfiguredApprovals => "promptUnmatched",
+        };
+        assert_eq!(approval_modes, [serde_json::json!(approval_mode)]);
         assert!(trace.contains("reasoningEffort"));
         if scenario == "question" {
             let method = if choice == "accept" {

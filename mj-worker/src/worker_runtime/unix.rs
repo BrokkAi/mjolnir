@@ -76,7 +76,6 @@ struct RunningHarness {
     acp_shutdown: CancellationToken,
     commands: mpsc::Sender<CommandRequest>,
     reviewer: Arc<ReviewerSidecar>,
-    dispatch_socket: ReviewDispatchGuard,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
@@ -156,7 +155,6 @@ struct PreparedAcpSetup {
     events_rx: mpsc::Receiver<RuntimeEvent>,
     user_shells: crate::user_shell::UserShellRegistry,
     reviewer: Arc<ReviewerSidecar>,
-    dispatch_socket: ReviewDispatchGuard,
     subagents: Option<super::subagents::SubagentEndpoint>,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
     acp_spec: LaunchSpec,
@@ -172,7 +170,6 @@ struct StartedBridgeTasks {
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     commands: Option<mpsc::Sender<CommandRequest>>,
     reviewer: Option<Arc<ReviewerSidecar>>,
-    dispatch_socket: Option<ReviewDispatchGuard>,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
     subagents: Option<super::subagents::SubagentEndpoint>,
     shell_cleanup: Option<tokio_util::task::TaskTracker>,
@@ -193,10 +190,6 @@ impl StartedBridgeTasks {
                 .take()
                 .expect("ACP command sender was prepared"),
             reviewer: self.reviewer.take().expect("reviewer was prepared"),
-            dispatch_socket: self
-                .dispatch_socket
-                .take()
-                .expect("review dispatch socket was prepared"),
             subagent_socket_guard: self.subagent_socket_guard.take(),
             subagents: self.subagents.take(),
             shell_cleanup: self
@@ -270,7 +263,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         },
         relay.clone(),
     ));
-    let dispatch_socket = serve_review_dispatch_on(&runtime, &root, reviewer.clone())?;
     let (subagents, subagent_socket_guard) = if subagent_role.is_some() {
         let (endpoint, guard) = super::subagents::serve(&runtime, &root, relay.clone())?;
         (Some(endpoint), Some(guard))
@@ -366,7 +358,6 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         events_rx,
         user_shells,
         reviewer,
-        dispatch_socket,
         subagents,
         subagent_socket_guard,
         acp_spec,
@@ -391,7 +382,6 @@ fn start_bridge(
         events_rx,
         user_shells,
         reviewer,
-        dispatch_socket,
         subagents,
         subagent_socket_guard,
         acp_spec,
@@ -408,7 +398,6 @@ fn start_bridge(
             .map(|root| super::harness::spawn_gc_on(&runtime, root, harness)),
         commands: Some(commands_tx.clone()),
         reviewer: Some(reviewer),
-        dispatch_socket: Some(dispatch_socket),
         subagent_socket_guard,
         subagents,
         shell_cleanup: Some(shell_cleanup),
@@ -1057,7 +1046,6 @@ pub async fn run_daemon_owned(
         acp_shutdown,
         commands: acp_commands_tx,
         reviewer,
-        dispatch_socket,
         subagent_socket_guard,
         harness_gc,
         shell_cleanup,
@@ -1163,7 +1151,6 @@ pub async fn run_daemon_owned(
     shell_cleanup.close();
     shell_cleanup.wait().await;
     reviewer.pause_all().await;
-    drop(dispatch_socket);
     drop(subagent_socket_guard);
     if let Some(task) = harness_gc {
         task.abort();
@@ -1721,7 +1708,6 @@ async fn shutdown_running_harness(mut running: RunningHarness) {
     running.shell_cleanup.close();
     running.shell_cleanup.wait().await;
     running.reviewer.pause_all().await;
-    drop(running.dispatch_socket);
     drop(running.subagent_socket_guard);
     if let Some(task) = running.harness_gc {
         task.abort();

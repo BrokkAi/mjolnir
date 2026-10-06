@@ -10,24 +10,15 @@ pub struct SubagentMcpSocket {
     pub profile_registration: bool,
 }
 
-/// Approval ownership is resolved from the worker root before harness launch.
-/// This is local state, not an extension of the persisted reviewer wire format.
+/// One configured MCP server exposed to the reviewer harness.
 #[derive(Debug, Clone)]
 pub struct ReviewerMcpServer {
     server: mj_core::worker_launch::ReviewMcpServer,
-    auto_approve: bool,
 }
 
 impl ReviewerMcpServer {
-    pub fn new(
-        server: mj_core::worker_launch::ReviewMcpServer,
-        worker_root: &std::path::Path,
-    ) -> Self {
-        let auto_approve = server.is_review_dispatch(&worker_root.join("hel"));
-        Self {
-            server,
-            auto_approve,
-        }
+    pub fn new(server: mj_core::worker_launch::ReviewMcpServer) -> Self {
+        Self { server }
     }
 }
 
@@ -43,9 +34,9 @@ pub struct LaunchSpec {
     pub cwd: PathBuf,
     pub additional_directories: Vec<PathBuf>,
     pub project_memory: Option<ProjectMemoryLaunchConfig>,
-    /// Extra stdio MCP servers this session gets, beyond session history. A
-    /// turn review's reviewing agents get Bifrost this way; the primary
-    /// session gets none.
+
+    /// Extra stdio MCP servers this session gets beyond project memory.
+    /// Reviewers can receive configured servers here; the primary gets none.
     pub extra_mcp_servers: Vec<ReviewerMcpServer>,
     /// Delegation policy independently controls native tool suppression.
     pub subagent_policy: mj_core::subagent::SubagentPolicy,
@@ -221,12 +212,6 @@ pub(super) fn session_request_meta(
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
             );
         }
-        allowed.extend(
-            spec.extra_mcp_servers
-                .iter()
-                .filter(|server| server.auto_approve)
-                .map(|server| format!("mcp__{}__*", server.server.name)),
-        );
         if !allowed.is_empty() {
             options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
         }
@@ -238,7 +223,7 @@ pub(super) fn session_request_meta(
     )]))
 }
 
-/// The reviewing agents' analyzer servers, for harnesses that accept a server
+/// The reviewer's configured MCP servers, for harnesses that accept a server
 /// over ACP. Claude and Kimi read their staged profile instead, which the
 /// controller writes while staging the reviewer.
 pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
@@ -251,11 +236,7 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
                 let server = &entry.server;
                 let registration = McpServerStdio::new(server.name.clone(), server.command.clone())
                     .args(server.args.clone());
-                McpServer::Stdio(if entry.auto_approve {
-                    approve_owned_mcp(spec, registration)
-                } else {
-                    registration
-                })
+                McpServer::Stdio(registration)
             })
             .collect()
     } else {

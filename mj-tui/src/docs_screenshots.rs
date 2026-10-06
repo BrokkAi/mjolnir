@@ -42,9 +42,6 @@ const PADDING: u16 = 14;
 const TERMINAL_BACKGROUND: &str = "#0f1214";
 const CONVERSATION_ID: &str = "terminal-polish";
 const CONVERSATION_TITLE: &str = "Polish the terminal workspace";
-/// Stands in for the build number on every capture. It reads as a placeholder
-/// so nobody mistakes a screenshot for a claim about the version they run.
-const DOCUMENTATION_VERSION: &str = "vX.Y.Z";
 
 #[tokio::test]
 #[ignore = "writes the committed documentation screenshots"]
@@ -218,11 +215,6 @@ fn documentation_dashboard() -> DashboardState {
         },
         quotas,
     );
-    // A capture is committed documentation, so it names a placeholder rather
-    // than whichever build happened to render it: the real version would be
-    // wrong in these files from the next release onwards, and it would make
-    // every regeneration a diff even when the surface had not changed.
-    dashboard.version_label = DOCUMENTATION_VERSION.into();
     dashboard.set_workspace_name("Mjolnir".into());
     dashboard.set_workspace_names(BTreeMap::from([
         ("default".into(), "Mjolnir".into()),
@@ -262,6 +254,7 @@ fn documentation_dashboard() -> DashboardState {
         kind: DeploymentCapacityKind::Host,
         local: true,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(

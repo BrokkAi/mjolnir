@@ -482,6 +482,7 @@ pub(super) fn collect_native_tree(
         HarnessKind::Kimi => inside && kimi_session_artifact(relative, session_id),
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
         HarnessKind::Muse => inside && name == "session.jsonl",
+        HarnessKind::OpenCode => is_opencode_native_artifact(relative),
     };
     if !selected || is_secret_like_path(relative) {
         return Ok(());
@@ -497,6 +498,32 @@ pub(super) fn collect_native_tree(
         mode: file_mode(&metadata),
     });
     Ok(())
+}
+
+/// OpenCode keeps every session of a data directory in one SQLite database,
+/// `opencode.db`, with uncommitted pages in the write-ahead log beside it. A
+/// session home has exactly one data directory, so the database is the
+/// session's native state; the `-shm` shared-memory file is rebuilt on open
+/// and is not captured.
+pub(super) fn is_opencode_native_artifact(relative_path: &Path) -> bool {
+    let mut components = relative_path.components();
+    let (
+        Some(Component::Normal(data)),
+        Some(Component::Normal(opencode)),
+        Some(Component::Normal(file)),
+        None,
+    ) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    )
+    else {
+        return false;
+    };
+    data == ".data"
+        && opencode == "opencode"
+        && matches!(file.to_str(), Some("opencode.db" | "opencode.db-wal"))
 }
 
 pub(super) fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {

@@ -89,9 +89,9 @@ pub(crate) struct NativeImportArgs {
     /// Review every turn of the imported session at this reasoning effort.
     #[arg(long)]
     review_effort: Option<String>,
-    /// Review every turn of the imported session at this tier: `quick` or
-    /// `extended`.
-    #[arg(long, value_parser = ["quick", "extended"])]
+    /// Deprecated compatibility option. Either accepted value enables review;
+    /// the value is ignored.
+    #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
     /// Do not review the imported session's turns automatically.
     #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
@@ -241,6 +241,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Kimi => "Kimi",
         HarnessKind::Grok => "Grok Build",
         HarnessKind::Muse => "Muse Code",
+        HarnessKind::OpenCode => "OpenCode",
     }
 }
 
@@ -855,6 +856,7 @@ fn import_session_from_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     // Hard-won: 1fe0c7aa4f: Launch finding I2-16 saw one native Grok session twice in import discovery; this checks the deduplicated session listing.
     #[test]
@@ -933,6 +935,14 @@ mod tests {
         assert!(reason.contains("bad config"), "{reason}");
     }
 
+    fn parse_import(arguments: &[&str]) -> (HarnessKind, NativeImportArgs) {
+        let cli = crate::Cli::try_parse_from(arguments).expect("import subcommand parses");
+        let Some(crate::Command::Import(args)) = cli.command else {
+            panic!("{arguments:?} did not parse as an import command");
+        };
+        args.command.split()
+    }
+
     /// All harnesses share one implementation, so each subcommand must
     /// still name its own harness and take the same selection arguments.
     // Hard-won: 03066cfabb: Finding F-18 showed import scanning the stock home instead of the selected profile home; the test checks profile-specific discovery and refuses ambiguous profile guessing.
@@ -980,6 +990,91 @@ mod tests {
         assert!(
             import_source(&config, HarnessKind::Codex, Some("claude")).is_err(),
             "a profile for another harness holds none of its sessions"
+        );
+    }
+
+    /// An imported session can choose its own turn review, with the flags
+    /// `mj new` takes, and they build the same stored choice.
+    #[test]
+    fn an_import_can_choose_the_sessions_review() {
+        let (_, args) = parse_import(&[
+            "mj",
+            "import",
+            "codex",
+            "--session",
+            "native-1",
+            "--review-model",
+            "gpt-6-luna",
+            "--review-effort",
+            "max",
+            "--review-tier",
+            "extended",
+        ]);
+        assert_eq!(
+            crate::api_commands::session_review(
+                args.no_review,
+                args.review_model.as_deref(),
+                args.review_effort.as_deref(),
+                args.review_tier.as_deref(),
+            ),
+            Some(mj_core::config::SessionReview::On {
+                model: Some("gpt-6-luna".into()),
+                effort: Some("max".into()),
+                tier: None,
+            })
+        );
+        let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
+        assert_eq!(
+            crate::api_commands::session_review(
+                plain.no_review,
+                plain.review_model.as_deref(),
+                plain.review_effort.as_deref(),
+                plain.review_tier.as_deref(),
+            ),
+            None,
+            "an import that names nothing follows [review]"
+        );
+        let (_, tier_only) = parse_import(&[
+            "mj",
+            "import",
+            "codex",
+            "--session",
+            "native-1",
+            "--review-tier",
+            "extended",
+        ]);
+        assert_eq!(
+            crate::api_commands::session_review(
+                tier_only.no_review,
+                tier_only.review_model.as_deref(),
+                tier_only.review_effort.as_deref(),
+                tier_only.review_tier.as_deref(),
+            ),
+            Some(mj_core::config::SessionReview::On {
+                model: None,
+                effort: None,
+                tier: None,
+            })
+        );
+        assert!(
+            crate::Cli::try_parse_from([
+                "mj",
+                "import",
+                "codex",
+                "--session",
+                "native-1",
+                "--no-review",
+                "--review-tier",
+                "quick",
+            ])
+            .is_err()
+        );
+        let help = crate::Cli::try_parse_from(["mj", "import", "codex", "--help"])
+            .expect_err("help exits parsing")
+            .to_string();
+        assert!(
+            !help.contains("--review-tier"),
+            "deprecated option is hidden"
         );
     }
 

@@ -19,8 +19,7 @@ use super::worker_binary::{
 use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use mj_core::worker_launch::{
-    REVIEWER_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
-    reviewer_staging_profile_home,
+    ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig, reviewer_staging_profile_home,
 };
 
 /// Build the capability used by client-side chat views to stage reviewers.
@@ -76,35 +75,6 @@ impl Controller {
         )
     }
 
-    /// Stage a reviewer that also gets `mcp_servers`, which is how a turn
-    /// review attaches its analyzer tools.
-    ///
-    /// `dispatch_tool` adds the review supervisor's own tool, which is this
-    /// worker's binary in another mode. Only the controller knows where that
-    /// binary and its socket sit on the target, so it is built here rather
-    /// than by the caller.
-    pub fn stage_reviewer_profile_with_mcp(
-        &self,
-        session_id: &str,
-        profile_id: &str,
-        generation: u64,
-        mcp_servers: &[ReviewMcpServer],
-        dispatch_tool: bool,
-    ) -> Result<ReviewerLaunchConfig> {
-        let mut servers = mcp_servers.to_vec();
-        if dispatch_tool {
-            let (_, worker_root) = self.worker_placement(session_id)?;
-            servers.push(review_dispatch_server(&worker_root));
-        }
-        self.stage_reviewer_profile_controlled(
-            session_id,
-            profile_id,
-            generation,
-            &servers,
-            &ProcessExecutor,
-        )
-    }
-
     pub fn stage_reviewer_profile_controlled(
         &self,
         session_id: &str,
@@ -128,30 +98,7 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
         let target = session.target_runtime_settings(&self.config)?;
-        let execution_policy = profile
-            .kind
-            .effective_execution_policy(target.execution_policy);
-        // A reviewer reads a change another agent wrote, so it must not run
-        // with more authority than the session it reviews. Muse has no
-        // guardian mode and always runs unconstrained.
-        if execution_policy.is_unconstrained() && !target.execution_policy.is_unconstrained() {
-            let session_unconstrained = self
-                .config
-                .profiles
-                .get(&session.last_profile)
-                .is_some_and(|session_profile| {
-                    session_profile
-                        .kind
-                        .effective_execution_policy(target.execution_policy)
-                        .is_unconstrained()
-                });
-            ensure!(
-                session_unconstrained,
-                "{} cannot review this session: it has no guardian approval mode, so it would run unconstrained while the session runs with approvals on target {:?}. Choose another reviewer, or run the session on a container target",
-                profile.kind.display_name(),
-                session.target_template_id
-            );
-        }
+        let execution_policy = target.execution_policy;
         let (backend, worker_root) = self.worker_placement(session_id)?;
 
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;
@@ -180,6 +127,14 @@ impl Controller {
         // A reviewer on a ChatGPT Codex profile must not fall back to an API
         // key any more than a session may.
         let excluded_environment = profile.exclude_harness_environment(&mut environment);
+        // A Podman session runs as uid 0, where Claude Code rejects
+        // bypassPermissions unless told it is already sandboxed. The session's
+        // own launch sets this only when the session itself runs Claude.
+        if backend.container_engine() == Some("podman")
+            && profile.kind == mj_core::config::HarnessKind::Claude
+        {
+            environment.insert("IS_SANDBOX".into(), "1".into());
+        }
         Ok(ReviewerLaunchConfig {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
@@ -266,27 +221,6 @@ fn configure_staged_review_mcp(
     body.push(b'\n');
     mj_core::config::atomic_write(&path, &body)
         .with_context(|| format!("write staged reviewer configuration {}", path.display()))
-}
-
-/// The review supervisor's dispatch tool, as it runs inside the container:
-/// this worker's own binary in `review-mcp` mode, talking to the socket the
-/// worker serves in its reviewer directory.
-fn review_dispatch_server(worker_root: &str) -> ReviewMcpServer {
-    let socket = format!(
-        "{worker_root}/{}/{}",
-        REVIEWER_DIR,
-        mj_core::review::mcp::REVIEW_DISPATCH_SOCKET
-    );
-    ReviewMcpServer {
-        name: mj_core::review::mcp::REVIEW_MCP_SERVER_NAME.to_owned(),
-        command: Path::new(worker_root).join("hel"),
-        args: vec![
-            "worker".to_owned(),
-            "review-mcp".to_owned(),
-            "--socket".to_owned(),
-            socket,
-        ],
-    }
 }
 
 /// Where one immutable reviewer profile snapshot lives on the target.
@@ -726,63 +660,97 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_staging_preserves_owned_approval_for_both_mcp_delivery_paths() {
+
+    fn local_container_targets_stage_the_reviewer_through_their_engine() {
         let directory = tempfile::tempdir().unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        let mut servers =
-            mj_review::bifrost::review_mcp_servers(&[directory.path().to_owned()], "review");
-        servers.push(review_dispatch_server("/worker"));
-        for profile in ["codex", "claude"] {
+        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
+        for (locator, engine) in [
+            (
+                mj_core::state::TargetLocator::LocalPodman {
+                    borrowed_from: None,
+                    container_id: container_id.clone(),
+                    workspace_storage: Default::default(),
+                },
+                "podman",
+            ),
+            (
+                mj_core::state::TargetLocator::LocalDocker {
+                    borrowed_from: None,
+                    container_id: container_id.clone(),
+                },
+                "docker",
+            ),
+        ] {
+            let (controller, session_id) = fixture(directory.path(), locator);
             let executor = RecordingExecutor::new();
-            let config = controller
-                .stage_reviewer_profile_controlled(&session_id, profile, 1, &servers, &executor)
+
+            controller
+                .stage_reviewer_profile_controlled(&session_id, "codex", 3, &[], &executor)
                 .unwrap();
-            assert_eq!(config.mcp_servers, servers);
-            assert!(!config.mcp_servers[0].is_review_dispatch(Path::new("/worker/hel")));
-            assert!(config.mcp_servers[1].is_review_dispatch(Path::new("/worker/hel")));
+
+            let script = executor.script();
+            assert!(
+                script
+                    .iter()
+                    .all(|line| line.starts_with(&format!("{engine} "))),
+                "a container target is reached only through its engine: {script:?}"
+            );
+            let home = script
+                .iter()
+                .find_map(|line| {
+                    line.split(' ')
+                        .find(|word| word.contains("/reviewer/profile"))
+                })
+                .expect("the reviewer profile is placed")
+                .to_owned();
+            assert!(
+                home.contains(&format!("/{session_id}")),
+                "the reviewer lives under this session's worker root: {home}"
+            );
+            // Nothing here provisions a target, a checkout, or another session.
+            assert!(
+                !script.iter().any(|line| {
+                    line.contains("run") || line.contains("git") || line.contains("create")
+                }),
+                "staging a reviewer provisions nothing: {script:?}"
+            );
         }
     }
 
-    // Hard-won: c5deb2a59c0c: an unconstrained Muse reviewer could bypass Guardian approvals on the host.
     #[test]
-    fn an_unconstrained_reviewer_is_refused_for_a_session_that_runs_with_approvals() {
+    fn a_claude_reviewer_in_a_podman_session_is_told_it_is_sandboxed() {
         let directory = tempfile::tempdir().unwrap();
-        let (mut controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        controller.config.profiles.insert(
-            "muse".into(),
-            HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Muse,
-                home: directory.path().join("muse"),
-                environment: BTreeMap::new().into(),
-                context_window_bytes: None,
-                subagents: Default::default(),
-                guardian_review_model: None,
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        // The fixture's Codex session runs with guardian approvals on a bare
-        // target; Muse would review it with none.
-        let error = controller
-            .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &executor)
-            .unwrap_err();
-
-        assert!(
-            format!("{error:#}").contains("cannot review this session"),
-            "{error:#}"
-        );
-        assert!(executor.commands.borrow().is_empty());
+        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
+        let podman = mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+            workspace_storage: Default::default(),
+        };
+        let docker = mj_core::state::TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id,
+        };
+        for (locator, profile_id, sandboxed) in [
+            (podman.clone(), "claude", true),
+            (podman, "codex", false),
+            (docker, "claude", false),
+        ] {
+            let (controller, session_id) = fixture(directory.path(), locator);
+            let config = controller
+                .stage_reviewer_profile_controlled(
+                    &session_id,
+                    profile_id,
+                    0,
+                    &[],
+                    &RecordingExecutor::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                config.environment.get("IS_SANDBOX").map(String::as_str),
+                sandboxed.then_some("1"),
+                "{profile_id}"
+            );
+        }
     }
 
     #[test]
@@ -816,15 +784,6 @@ mod tests {
                 guardian_review_model: None,
             },
         );
-        // A Muse session already runs unconstrained, so a Muse reviewer gains
-        // nothing over it.
-        controller
-            .state
-            .sessions
-            .get_mut(&session_id)
-            .unwrap()
-            .last_profile = "muse".into();
-
         controller
             .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &ProcessExecutor)
             .unwrap();
@@ -833,7 +792,8 @@ mod tests {
             &std::fs::read(worker_root.join("reviewer/profile/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(staged["permissions"]["default_profile"], ":unrestricted");
+        // The fixture's bare target keeps configured approvals.
+        assert_eq!(staged["permissions"]["default_profile"], ":ask-me");
     }
 
     #[test]

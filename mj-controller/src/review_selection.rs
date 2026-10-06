@@ -79,7 +79,6 @@ fn rank(candidates: &mut [Candidate]) {
 pub(crate) async fn resolve(
     handle: ManagedSessionHandle,
     settings: Option<ReviewConfig>,
-    specialists: bool,
     cancelled: Arc<AtomicBool>,
     offered: Option<mj_core::profile_capabilities::ProfileCapabilitiesSnapshot>,
 ) -> Result<ResolvedReviewSettings> {
@@ -202,7 +201,6 @@ pub(crate) async fn resolve(
             &handle,
             &candidate,
             &settings,
-            specialists,
             &cancelled,
         )
         .await;
@@ -312,8 +310,7 @@ fn select_models(
     provider: ReviewProvider,
     settings: &ReviewConfig,
     catalog: &ReviewCapabilityChoices,
-    specialists: bool,
-) -> Result<(ReviewModelSettings, ReviewModelSettings)> {
+) -> Result<ReviewModelSettings> {
     let automatic = settings.profile.is_none();
     let main = if automatic {
         // Auto takes its model and effort from the provider's policy, except
@@ -344,20 +341,7 @@ fn select_models(
             fast_mode: false,
         }
     };
-    let specialist = if specialists {
-        if let Some((family, effort)) = provider.specialist_policy() {
-            ReviewModelSettings {
-                model: Some(family_model(catalog, family)?),
-                effort: Some(effort.into()),
-                fast_mode: provider == ReviewProvider::Codex,
-            }
-        } else {
-            main.clone()
-        }
-    } else {
-        main.clone()
-    };
-    Ok((main, specialist))
+    Ok(main)
 }
 
 async fn resolve_candidate(
@@ -365,30 +349,18 @@ async fn resolve_candidate(
     handle: &ManagedSessionHandle,
     candidate: &Candidate,
     settings: &ReviewConfig,
-    specialists: bool,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<ResolvedReviewSettings> {
     let automatic = settings.profile.is_none();
     let catalog = discover(controller.clone(), handle, &candidate.id, None, cancelled).await?;
-    let (main, specialist) = select_models(candidate.provider, settings, &catalog, specialists)?;
+    let main = select_models(candidate.provider, settings, &catalog)?;
     if main.model.is_some() || main.effort.is_some() {
         validate_model(controller.clone(), handle, &candidate.id, &main, cancelled).await?;
-    }
-    if specialists && specialist != main {
-        validate_model(
-            controller.clone(),
-            handle,
-            &candidate.id,
-            &specialist,
-            cancelled,
-        )
-        .await?;
     }
     Ok(ResolvedReviewSettings {
         profile: candidate.id.clone(),
         generation: crate::review_host::next_review_generation().map_err(anyhow::Error::msg)?,
         main,
-        specialist,
         automatic,
         same_provider: false,
     })
@@ -523,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn review_selection_uses_models_and_efforts_from_an_acp_config_fixture() {
+    fn review_selection_uses_one_model_and_effort_from_an_acp_config_fixture() {
         // ACP v1 documents session options as id/name/type/currentValue/options.
         let options: Vec<agent_client_protocol::schema::v1::SessionConfigOption> =
             serde_json::from_str(include_str!(
@@ -536,19 +508,12 @@ mod tests {
             effort_capabilities_discovered: true,
         };
 
-        let (main, specialist) = select_models(
-            ReviewProvider::Codex,
-            &ReviewConfig::default(),
-            &catalog,
-            true,
-        )
-        .expect("select advertised Codex review models");
+        let reviewer = select_models(ReviewProvider::Codex, &ReviewConfig::default(), &catalog)
+            .expect("select the advertised Codex review model");
 
-        assert_eq!(main.model.as_deref(), Some("gpt-6.10-astra"));
-        assert_eq!(main.effort.as_deref(), Some("medium"));
-        assert_eq!(specialist.model.as_deref(), Some("gpt-6.10-luna"));
-        assert_eq!(specialist.effort.as_deref(), Some("xhigh"));
-        assert!(specialist.fast_mode);
+        assert_eq!(reviewer.model.as_deref(), Some("gpt-6.10-astra"));
+        assert_eq!(reviewer.effort.as_deref(), Some("medium"));
+        assert!(!reviewer.fast_mode);
     }
 
     fn catalog(ids: &[&str]) -> ReviewCapabilityChoices {

@@ -1,5 +1,5 @@
 === grouped session summary (120x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ✓1                         ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -30,7 +30,7 @@
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === Unicode unfiltered Sessions title (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -71,7 +71,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === Unicode working filter (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions · working × ───── ▁   ▪   □ ╮│                                                                              │
@@ -112,7 +112,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === Unicode blocked filter at wide size (240x40) ===
-╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                    ☰ ││                                                                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                                                                                                                                              │
 ╭ Sessions · blocked × ───────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                                              │
@@ -153,7 +153,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
 === Unicode cleared filter (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -195,7 +195,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 Unicode title markers: ('×', '·')
 === ASCII unfiltered Sessions title (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + Sessions ----------------- -   =   + +|                                                                              |
@@ -236,7 +236,7 @@ Unicode title markers: ('×', '·')
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
 === ASCII working filter (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + Sessions - working x ----- -   =   + +|                                                                              |
@@ -277,7 +277,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 +--------------------------------------++------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
 === ASCII blocked filter at wide size (240x40) ===
-+ Workspaces ----------------------------------------------- * MJOLNIR v2.28.0 ++ Browse | Conversation ------------------------------------------------------------------------------------------------------------------------------ +   .---+
++ Workspaces ------------------------------------------------ * MJOLNIR vX.Y.Z ++ Browse | Conversation ------------------------------------------------------------------------------------------------------------------------------ +   .---+
 | default                                                                    = ||                                                                                                                                                              |
 +------------------------------------------------------------------------------+|                                                                                                                                                              |
 + Sessions - blocked x --------------------------------------------- -   =   + +|                                                                                                                                                              |
@@ -318,7 +318,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 +------------------------------------------------------------------------------++--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - q detach - u web - shift+r refresh - s settings - t rendering - : palette - ? keys
 === ASCII cleared filter (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + Sessions ----------------- -   =   + +|                                                                              |
@@ -360,7 +360,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
 ASCII title markers: ('x', '-')
 === expanded rows, 80 left (80x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -401,7 +401,7 @@ ASCII title markers: ('x', '-')
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === expanded rows, 80 right (80x40) ===
-╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                      ││ default                            ☰ │
 │                                      │╰──────────────────────────────────────╯
 │                                      │╭ Sessions ───────────────────── ▁   ▪ ╮
@@ -442,7 +442,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === expanded rows, 120 left (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -483,7 +483,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === expanded rows, 120 right (120x40) ===
-╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                                              ││ default                            ☰ │
 │                                                                              │╰──────────────────────────────────────╯
 │                                                                              │╭ Sessions ───────────────── ▁   ▪   □ ╮
@@ -524,7 +524,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === expanded rows, 180 left (180x40) ===
-╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                ☰ ││                                                                                                                      │
 ╰──────────────────────────────────────────────────────────╯│                                                                                                                      │
 ╭ Sessions ───────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                      │
@@ -565,7 +565,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 === expanded rows, 180 right (180x40) ===
-╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                                                                                      ││ default                                                ☰ │
 │                                                                                                                      │╰──────────────────────────────────────────────────────────╯
 │                                                                                                                      │╭ Sessions ───────────────────────────────────── ▁   ▪   □ ╮
@@ -647,7 +647,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰──────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 === expanded session row (120x44) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │

@@ -564,10 +564,10 @@ pub(super) fn container_run_args(
     let temporary_volume = temporary_volume_argument(name, additional_mounts);
     if !temporary_volume.is_empty() {
         match engine {
-            "podman" => args.extend([
-                "--volume".to_owned(),
-                format!("{temporary_volume}:/tmp:rw,nocopy"),
-            ]),
+            // No `nocopy`: Podman passes it to the OCI runtime as bind-mount
+            // data, which runc rejects. The volume is new, so copy-up is
+            // harmless, and `start_container` resets /tmp ownership and mode.
+            "podman" => args.extend(["--volume".to_owned(), format!("{temporary_volume}:/tmp:rw")]),
             "docker" => args.extend([
                 "--mount".to_owned(),
                 format!("type=volume,source={temporary_volume},target=/tmp,volume-nocopy"),

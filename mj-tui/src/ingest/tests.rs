@@ -155,7 +155,6 @@ fn runtime_review_projection_restores_and_removes_session_activity() {
     let review = mj_client::review::RuntimeReviewView {
         session_id: "session-1".into(),
         questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),
         status: "starting the reviewer…".into(),

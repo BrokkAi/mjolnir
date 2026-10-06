@@ -2662,11 +2662,12 @@ fn autoscrolling_a_transcript_drag_selects_rows_the_viewport_scrolled_past() {
         .transcript_selection_text(&range)
         .expect("the selection has text");
     let start = rows.len() - (span + 1);
+    // Copying leaves out the role gutter, which only decorates a row.
     assert_eq!(
         copied.split('\n').collect::<Vec<_>>(),
         rows[start..]
             .iter()
-            .map(|row| row.trim_end())
+            .map(|row| row.strip_prefix(role_gutter()).unwrap_or(row).trim_end())
             .collect::<Vec<_>>()
     );
 }
@@ -3460,7 +3461,11 @@ fn golden_transcript_navigation() {
         );
     }
 
-    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "transcript-navigation", &output);
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "transcript-navigation",
+        &output,
+    );
 }
 
 #[test]
@@ -3520,7 +3525,7 @@ fn golden_transcript_link_routing() {
         );
     }
 
-    mj_core::golden::assert_golden(
+    mj_core::golden::assert_platform_golden(
         env!("CARGO_MANIFEST_DIR"),
         "transcript-link-routing",
         &output,
@@ -3566,7 +3571,6 @@ fn golden_conversation_title() {
     let mut view = RuntimeReviewView {
         session_id: "session".to_owned(),
         questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),
         status: "starting the reviewer".to_owned(),
@@ -3895,9 +3899,126 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
 
-    mj_core::golden::assert_golden(
+    // Settings › Advanced › Tool calls: Inline. Every call keeps its own
+    // row with its full command, thoughts are not folded, and output shows
+    // its head and tail around a count of the lines left out.
+    let kind_tool = |seq: u64, title: &str, kind: ToolKind, status: ToolStatus| {
+        let call = ToolCall::new(format!("call-{seq}"), title).kind(kind);
+        let presentation = tool_call_presentation(&call);
+        let mut entry = ChatEntry::tool(seq, title, None, status);
+        entry.tool_summary = Some(presentation.summary.clone());
+        entry.tool_presentation = Some(presentation);
+        entry
+    };
+    let mut tests = kind_tool(
+        2,
+        "cargo test -p brokk-mj-chat --lib",
+        ToolKind::Execute,
+        ToolStatus::Completed,
+    );
+    tests.tool_content = vec![format!(
+        "running 12 tests\n{}\ntest result: ok. 12 passed\nexited 0",
+        (1..=10)
+            .map(|test| format!("test case_{test} ... ok"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )];
+    let mut read = kind_tool(4, "Read src/lib.rs", ToolKind::Read, ToolStatus::Completed);
+    read.tool_content = vec!["fn main() {}".into()];
+    let mut edit = kind_tool(5, "Edit src/lib.rs", ToolKind::Edit, ToolStatus::Completed);
+    edit.tool_diffstats = vec!["src/lib.rs +3 -1".into()];
+    let mut failed = kind_tool(6, "cat missing.txt", ToolKind::Execute, ToolStatus::Failed);
+    failed.tool_content = vec![format!(
+        "cat: missing.txt: No such file or directory {}\nexited 1",
+        "x".repeat(80)
+    )];
+    let mut running = kind_tool(
+        7,
+        "sleep 30 && echo done",
+        ToolKind::Execute,
+        ToolStatus::Running,
+    );
+    running.tool_content = vec!["waiting".into()];
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_tool_display(ToolDisplay {
+        layout: mj_core::config::ToolOutput::Inline,
+        output_lines: 5,
+    });
+    chat.entries.extend([
+        thought(1, "first thought"),
+        tests,
+        thought(3, "second thought"),
+        read,
+        edit,
+        failed,
+        running,
+    ]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36));
+    append_transcript_golden_state(&mut output, "inline tool calls", 80, 36, &rows, &[]);
+    click_rendered_text(&mut chat, &rows, "cargo test -p brokk-mj-chat");
+    append_transcript_golden_state(
+        &mut output,
+        "inline call expanded",
+        80,
+        36,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36)),
+        &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+    );
+    chat.expanded_tool_calls.clear();
+    chat.set_tool_display(ToolDisplay {
+        layout: mj_core::config::ToolOutput::Inline,
+        output_lines: 1,
+    });
+    let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36))
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "inline with one output line and ASCII symbols",
+        80,
+        36,
+        &rows,
+        &[],
+    );
+
+    mj_core::golden::assert_platform_golden(
         env!("CARGO_MANIFEST_DIR"),
         "rich-transcript-tool-presentation",
         &output,
+    );
+}
+
+/// Wrapping is only how a row fits the pane, so copying a wrapped message
+/// gives back its source lines: no gutter, no wrap indent, and no newline
+/// where a URL or a sentence was split across rows.
+#[test]
+fn copying_wrapped_rows_rejoins_the_lines_wrapping_split() {
+    let url = "https://github.com/organizations/BrokkAi/settings/apps/mergecopbot/permissions";
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        format!("1. Open {url}. You can also get there through BrokkAi settings.\n\nThen save."),
+    ));
+    drawn_transcript(&mut chat, 40, 24);
+    let width = chat.render_cache.width;
+    let rows = render_transcript_entry(
+        &chat.entries[0],
+        usize::from(width),
+        TranscriptRenderMode::Rich,
+    );
+    assert!(rows.len() > 5, "the fixture must wrap");
+    // Skip the header row, and stop before the entry's trailing blank row.
+    let body = transcript_pane(&chat).top_row + 1;
+    let last = body + rows.len() - 3;
+
+    assert_eq!(
+        chat.transcript_selection_text(&SelectionRange {
+            start: ContentPos::new(body, 0),
+            end: ContentPos::new(last, width - 1),
+        }),
+        Some(format!(
+            "1. Open {url}. You can also get there through BrokkAi settings.\n\nThen save."
+        ))
     );
 }

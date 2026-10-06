@@ -158,14 +158,9 @@ fn golden_review_settings() {
     );
     writeln!(output, "action: {entry_action:?}").expect("write entry action");
 
-    // Enabled -> Tier -> Profile, then choose the first configured profile.
-    dashboard.handle_key(key(KeyCode::Tab));
+    // Enabled -> Profile, then choose the first configured profile.
     dashboard.handle_key(key(KeyCode::Tab));
     let probe = choose_next(&mut dashboard);
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    choose_next(&mut dashboard);
     while dialog(&dashboard).focused() != ReviewSettingsFocus::Save {
         dashboard.handle_key(key(KeyCode::Tab));
     }
@@ -215,16 +210,25 @@ fn review_selectors_render_as_comboboxes_and_escape_closes_only_the_popup() {
         .draw(|frame| crate::render::render(frame, &mut dashboard))
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.matches(ComboBox::GLYPH).count() >= 4, "{text}");
+    assert!(text.matches(ComboBox::GLYPH).count() >= 3, "{text}");
+    assert!(!text.contains("Tier"), "{text}");
+    assert!(
+        !text.contains("Quick") && !text.contains("Extended"),
+        "{text}"
+    );
 
-    while dialog(&dashboard).focused() != ReviewSettingsFocus::Tier {
+    while dialog(&dashboard).focused() != ReviewSettingsFocus::Profile {
         dashboard.handle_key(key(KeyCode::Tab));
     }
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::None
     );
-    assert!(dialog(&dashboard).combo.is_open(ReviewSettingsFocus::Tier));
+    assert!(
+        dialog(&dashboard)
+            .combo
+            .is_open(ReviewSettingsFocus::Profile)
+    );
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Esc)),
         DashboardAction::None
@@ -278,7 +282,6 @@ fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
     open(&mut dashboard);
     dashboard.handle_key(key(KeyCode::Char(' ')));
     dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
     assert!(matches!(
         choose_next(&mut dashboard),
         DashboardAction::DiscoverReviewSettings { .. }
@@ -301,6 +304,7 @@ fn clearing_the_profile_cancels_discovery_without_closing_the_draft() {
 }
 
 #[test]
+
 fn stale_discovery_does_not_replace_choices_after_model_change() {
     let mut config = config();
     config.review.profile = Some("codex-1".into());

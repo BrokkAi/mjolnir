@@ -183,7 +183,7 @@ mj doctor
 
 ## First run
 
-Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, or Muse Code), so install and sign in to one first. Then go to a project directory and run `mj`:
+Mjolnir runs a coding agent you already have (Claude Code, Codex, Kimi Code, Grok Build, Muse Code, or OpenCode), so install and sign in to one first. Then go to a project directory and run `mj`:
 
 ```sh
 cd path/to/your/repository

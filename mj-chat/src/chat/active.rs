@@ -5,7 +5,7 @@
 mod render;
 pub(crate) use render::*;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -510,10 +510,8 @@ pub struct ActiveChat {
     /// Cancellation for background resolution and startup of a second opinion.
     reviewer_preparation: Option<Arc<std::sync::atomic::AtomicBool>>,
     reviewer_preparation_sequence: u64,
-    /// Reviewing roles whose journals this chat is already reading. The
-    /// daemon runs the review; the terminal only displays it, so this is
-    /// display bookkeeping and nothing more.
-    reviewed_roles: BTreeSet<String>,
+    /// The single reviewer journal this chat is already reading.
+    reviewed_role: Option<String>,
     persistence: Option<tokio::sync::mpsc::UnboundedSender<ChatDaemonRequest>>,
     /// A cached question may arrive in the newly attached review stream a few
     /// ticks after the chat itself opens. Keep it here until that exact source
@@ -737,6 +735,7 @@ impl ActiveChat {
                 state.set_spinner_style(context.config.spinner);
                 state
                     .set_detailed_activity_clocks(context.config.advanced.detailed_activity_clocks);
+                state.set_tool_display(super::ToolDisplay::from_config(&context.config.advanced));
             }
             state.set_session_modes(
                 snapshot
@@ -862,7 +861,7 @@ impl ActiveChat {
             reviewer_generation,
             reviewer_preparation: None,
             reviewer_preparation_sequence: 0,
-            reviewed_roles: BTreeSet::new(),
+            reviewed_role: None,
             persistence,
             deferred_elicitation_draft: None,
             paste_in_flight: false,
@@ -1042,6 +1041,8 @@ impl ActiveChat {
         self.state.set_spinner_style(config.spinner);
         self.state
             .set_detailed_activity_clocks(config.advanced.detailed_activity_clocks);
+        self.state
+            .set_tool_display(super::ToolDisplay::from_config(&config.advanced));
         self.refresh_voice_availability();
     }
 

@@ -576,6 +576,11 @@ async fn refresh_profile(
                 refreshed_at_epoch_seconds,
                 rate_limited_until_epoch_seconds: None,
             }),
+        // OpenCode talks to many third-party providers through its own
+        // gateway; it publishes no quota endpoint of its own to poll.
+        HarnessKind::OpenCode => Err(anyhow::anyhow!(
+            "OpenCode does not publish a quota endpoint"
+        )),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         banked_resets: None,

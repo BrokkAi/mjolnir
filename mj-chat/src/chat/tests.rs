@@ -7,7 +7,6 @@ use base64::Engine;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mj_client::review::RuntimeReviewView;
 use mj_core::review::driver::TurnReviewPhase;
-use mj_core::review::lanes::ReviewTier;
 
 #[test]
 fn activity_animation_stops_when_foreground_and_background_work_settle() {
@@ -55,13 +54,26 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
     chat.set_turn_review(Some(RuntimeReviewView {
         session_id: "session-1".into(),
         questions: Vec::new(),
-        tier: ReviewTier::Quick,
         phase: TurnReviewPhase::CapturingDelta,
         roles: Vec::new(),
         status: "capturing the turn".into(),
         verdict: None,
     }));
     assert!(chat.needs_animation());
+}
+
+#[test]
+fn review_status_omits_the_deprecated_tier() {
+    let review = mj_core::config::ReviewConfig {
+        enabled: true,
+        tier: Some("extended".into()),
+        profile: Some("reviewer".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        review_status_line(&review, true),
+        "Reviewing every completed turn with [review] profile \"reviewer\". A review is open now."
+    );
 }
 
 /// Mirrors what `ActiveChat::open` does for a session with no warm view:
@@ -925,6 +937,20 @@ fn a_current_mode_update_corrects_the_locally_tracked_plan_mode() {
 
 // Hard-won: 6a66a7d0: Refused slash commands remained in the draft and contaminated the next command.
 #[test]
+fn review_tier_slash_args_are_not_config_gestures() {
+    for tier in ["quick", "extended"] {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input(format!("/review {tier}"));
+        assert_eq!(
+            chat.handle_key(key(crossterm::event::KeyCode::Enter)),
+            ChatAction::None
+        );
+        assert_eq!(chat.notice().as_deref(), Some("usage: /review [status]"));
+        assert!(chat.input.is_empty());
+    }
+}
+
+#[test]
 fn a_refused_slash_command_clears_the_draft_so_the_next_command_stands_alone() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.input = "/model".into();
@@ -1434,12 +1460,7 @@ mod golden_cases {
     }
 
     fn save(name: &str, output: &str) {
-        let name = if cfg!(target_os = "macos") {
-            format!("{name}-macos")
-        } else {
-            name.to_owned()
-        };
-        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), &name, output);
+        mj_core::golden::assert_platform_golden(env!("CARGO_MANIFEST_DIR"), name, output);
     }
 
     #[test]
@@ -2729,6 +2750,30 @@ mod golden_cases {
         state(
             &mut output,
             "Muse advertised plan skill",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_harness_kind(HarnessKind::Muse);
+        advertise(&mut chat, 1, &["plan"]);
+        chat.set_config_options(&[
+            select_config_option("mode", "default", &["default", "readOnly", "plan"])
+                .category(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Mode),
+            select_config_option(
+                "approval_mode",
+                "allowAll",
+                &["allowAll", "promptUnmatched", "onRequest", "denyUnmatched"],
+            ),
+        ]);
+        chat.set_input("/plan the migration".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Muse plan mode selector",
             &mut chat,
             WIDTH,
             HEIGHT,

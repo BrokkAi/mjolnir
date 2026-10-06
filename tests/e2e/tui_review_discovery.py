@@ -35,12 +35,11 @@ def exercise_choices(lab, tmux, evidence):
     """The caller leaves a loaded fake profile selected in an unsaved draft."""
     tmux.wait_for("Choices loaded")
     offset = len(requests(lab))
-    select_on_row(tmux, "Tier", "Quick")
     select_on_row(tmux, "Effort", "High")
     tmux.send_key("Enter")
     time.sleep(0.8)
     expect_discoveries(lab, offset, 0)
-    record(tmux, evidence, "review-local-edits", "change tier and effort; Enter on effort", "no adapter starts, prompts, or effort applications")
+    record(tmux, evidence, "review-local-edits", "change effort; Enter on effort", "no adapter starts, prompts, or effort applications")
 
     offset = len(requests(lab))
     select_on_row(tmux, "Model", "Tiny fixture")

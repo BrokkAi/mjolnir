@@ -157,6 +157,8 @@ enum Command {
     StopTask(api_commands::StopTaskArgs),
     /// Print the API base URL and where its bearer token lives.
     ApiInfo(api_commands::ApiInfoArgs),
+    /// Print a valid GitHub App token for an owner or repository.
+    GithubToken(api_commands::GithubTokenArgs),
     /// Discover available models and efforts for a profile.
     Models(api_commands::ModelsArgs),
     /// Apply a session configuration setting.
@@ -533,6 +535,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Review(_)) => "review",
         Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
+        Some(Command::GithubToken(_)) => "github-token",
         Some(Command::Models(_)) => "models",
         Some(Command::SetConfig(_)) => "set-config",
         Some(Command::Close(_)) => "close",
@@ -763,6 +766,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::GithubToken(args)) => api_commands::github_token(args)
             .await
             .map(|()| DashboardExit::Normal),
         // Answered in `main` before anything starts.

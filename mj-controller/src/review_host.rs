@@ -20,7 +20,6 @@
 //! two reviews can interleave their state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -36,11 +35,10 @@ use mj_core::state::{MaterializedExecutionState, MaterializedSession};
 
 use mj_core::relay::{RelayCommand, RelayEvent, RelayObservation};
 
-use mj_core::review::lanes::{ReviewTier, UserMessage};
+use mj_core::review::lanes::UserMessage;
 use mj_core::review::verdict::ReviewVerdict;
 use mj_review::driver::{
-    PendingForward, Resolution, ReviewRequest, SUPERVISOR_ROLE, TurnReviewDriver, TurnReviewPhase,
-    TurnReviewSeed,
+    PendingForward, Resolution, ReviewRequest, TurnReviewDriver, TurnReviewPhase, TurnReviewSeed,
 };
 
 pub use mj_client::review::{

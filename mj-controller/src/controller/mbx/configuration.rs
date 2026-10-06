@@ -5,7 +5,7 @@ use super::*;
 use mj_core::state::BuildCacheApplication;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 
 /// Already reachable through every session's cache mount, including sessions
@@ -57,7 +57,7 @@ pub(super) fn read_file(
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct Document<'a> {
@@ -186,13 +186,11 @@ pub(super) fn application(previous: Option<&str>, desired: Option<&str>) -> Buil
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
     use std::os::unix::fs::{MetadataExt, symlink};
 
-    #[cfg(target_os = "linux")]
     fn cache(directory: &Path, previous: Option<String>, text: String) -> ResolvedBuildCache {
         ResolvedBuildCache {
             directory: directory.to_owned(),
@@ -208,7 +206,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn both_consumers_see_atomic_budget_updates_without_relinking() {
         let temporary = tempfile::tempdir().unwrap();
         let executor = targets::ProcessExecutor;
@@ -275,7 +272,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn existing_cache_mounts_receive_machine_changes_without_changing_the_source() {
         let temporary = tempfile::tempdir().unwrap();
         let host = CacheHost::Local;
@@ -297,7 +293,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn stale_application_cannot_overwrite_a_newer_machine_policy() {
         let temporary = tempfile::tempdir().unwrap();
         let executor = targets::ProcessExecutor;

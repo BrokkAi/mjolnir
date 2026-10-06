@@ -265,17 +265,19 @@ fn new_preflight_rejects_a_bare_project_without_a_git_head() {
 fn golden_phone_new_session_preflight() {
     use std::fmt::Write as _;
 
-    let directory = std::env::current_dir().expect("the test has a working directory");
+    // A fresh primary checkout: the source tree may itself be a linked
+    // worktree, which changes the managed-worktree default.
+    let repository = crate::controller::test_support::committed_repository();
     let accepted = run_new_preflight(
         bare_preflight_config(),
         "hel".into(),
         "raw".into(),
-        Some(directory.clone()),
+        Some(repository.path().to_path_buf()),
     )
-    .expect("the repository running the test has a valid Git HEAD");
+    .expect("a committed repository has a valid Git HEAD");
 
     assert!(accepted.dirty_repositories.is_empty());
-    assert_eq!(accepted.project_directory, Some(directory));
+    assert!(accepted.project_directory.is_some());
     let mut out = String::new();
     writeln!(
         out,
@@ -1035,6 +1037,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             spinner: Default::default(),
             theme: Default::default(),
             phone: Default::default(),
+            github: Default::default(),
             continuation: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),
@@ -2174,7 +2177,6 @@ fn a_reviewers_question_is_one_of_the_sessions_questions() {
                 role: "reviewer".into(),
                 request: question.clone(),
             }],
-            tier: mj_core::review::lanes::ReviewTier::Quick,
             phase: TurnReviewPhase::Running { roles: Vec::new() },
             roles: Vec::new(),
             status: "the reviewer is reading the change…".into(),

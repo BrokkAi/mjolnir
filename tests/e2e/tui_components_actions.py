@@ -88,22 +88,20 @@ def open_review_settings(tmux):
 def save_review_settings(lab, tmux, evidence):
     original = lab.snapshot()["review_config"]
     open_review_settings(tmux)
-    # The fixture starts disabled, so changing tier can be saved independently
-    # of target discovery. Validate persistence and disappearance separately.
-    click(tmux, "Extended" if original["tier"].lower() == "extended" else "Quick")
-    tmux.send_key("Home")
-    tmux.send_key("Enter")
-    tmux.wait_for("One general reviewer;")
+    expected = not original["enabled"]
+    click(tmux, "Automatic review")
     click(tmux, "  Save Setup  ")
     absent(tmux, "× Setup")
-    lab.wait_snapshot(lambda value: value["review_config"]["tier"].lower() == "quick", "review tier persisted")
-    record(tmux, evidence, "review-save-dismissed", "choose Quick and click Save", "settings close and persisted tier changes")
+    lab.wait_snapshot(lambda value: value["review_config"]["enabled"] is expected, "review setting persisted")
+    record(
+        tmux,
+        evidence,
+        "review-save-dismissed",
+        "toggle automatic review and click Save",
+        "settings close and automatic review setting changes",
+    )
     open_review_settings(tmux)
-    click(tmux, "Quick")
-    tmux.send_key("End" if original["tier"].lower() == "extended" else "Home")
-    tmux.send_key("Enter")
-    if original["tier"].lower() == "extended":
-        tmux.wait_for("A supervisor selects specialist reviewers")
+    click(tmux, "Automatic review")
     click(tmux, "  Save Setup  ")
     absent(tmux, "× Setup")
     lab.wait_snapshot(lambda value: value["review_config"] == original, "original review settings restored")

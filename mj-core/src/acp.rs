@@ -481,7 +481,7 @@ pub fn error_reports_missing_native_session(
         HarnessKind::Claude => error.contains(&format!(
             "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
         )),
-        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => false,
+        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => false,
     }
 }
 
@@ -785,8 +785,11 @@ impl AcceptedSessionConfig {
             self.effort = current("effort");
         } else if is_selector("effort") {
             self.effort = Some(value.to_owned());
-            if let Some(model) = current("model") {
-                self.model = Some(model);
+            // An effort response may describe the running model by its
+            // transcript ID rather than the selectable alias we accepted.
+            // Only a model selection owns replacing that accepted value.
+            if self.model.is_none() {
+                self.model = current("model");
             }
         } else {
             return false;
@@ -973,7 +976,12 @@ mod missing_thread_tests {
 
     #[test]
     fn harnesses_that_always_materialize_a_session_never_report_one_missing() {
-        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::Muse] {
+        for harness in [
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+            HarnessKind::Muse,
+            HarnessKind::OpenCode,
+        ] {
             assert!(!error_reports_missing_native_session(
                 harness,
                 "native",

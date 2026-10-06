@@ -3,11 +3,10 @@
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │☐ Automatic review                                                                            │
-  │Tier      Quick ▾                                                                             │
-  │          One general reviewer; the agent checks its findings as it fixes them.               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
@@ -15,8 +14,9 @@
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.                            │
   │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -70,11 +70,10 @@ Setup command available: true
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │☐ Automatic review                                                                            │
-  │Tier      Quick ▾                                                                             │
-  │          One general reviewer; the agent checks its findings as it fixes them.               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
@@ -82,8 +81,9 @@ Setup command available: true
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.                            │
   │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -130,18 +130,17 @@ action: None
 
 
 discovery action: DiscoverReviewSettings { generation: 1, profile_id: "claude-1", model: None }
-saved global review: {"tier":"extended","profile":"claude-1"}
+saved global review: {"profile":"claude-1"}
 
 === Auto profile leaves manual overrides disabled (100x30) ===
 
 
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │☐ Automatic review                                                                            │
-  │Tier      Quick ▾                                                                             │
-  │          One general reviewer; the agent checks its findings as it fixes them.               │
   │Profile   Auto ▾                                                                              │
   │Model     Auto policy ▾                                                                       │
   │Effort    Auto policy ▾                                                                       │
+  │                                                                                              │
   │                                                                                              │
   │Changes stay in the Settings draft until you save Settings.                                   │
   │Auto resolves a reviewer when review starts                                                   │
@@ -149,8 +148,9 @@ saved global review: {"tier":"extended","profile":"claude-1"}
   │Healthy quota before reserve/unknown; exhausted profiles are skipped.                         │
   │Order: Codex → Claude → DeepSeek → Kimi. Other providers: manual only.                        │
   │Main: Astra/medium · Fable/medium · Flash/max · newest K-series/max.                          │
-  │Specialists: Luna/xhigh (fast) · Sonnet/xhigh · Flash/high · main.                            │
   │These settings also choose the plan second-opinion reviewer.                                  │
+  │                                                                                              │
+  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

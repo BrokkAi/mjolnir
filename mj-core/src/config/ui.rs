@@ -97,6 +97,21 @@ pub enum UiTheme {
     #[serde(rename = "darcula", alias = "dracula")]
     Darcula,
     HighContrast,
+    /// Windows Terminal's default scheme.
+    Campbell,
+    /// Windows Terminal's One Half Dark scheme.
+    OneHalfDark,
+    /// Windows Terminal's One Half Light scheme.
+    OneHalfLight,
+    /// Solarized's dark scheme, as Windows Terminal ships it.
+    SolarizedDark,
+    /// Solarized's light scheme, as Windows Terminal ships it.
+    SolarizedLight,
+    /// The terminal's own background, foreground, and 16 ANSI colors, picked
+    /// for a dark scheme. Selection and focus use reverse video.
+    TerminalDark,
+    /// As [`Self::TerminalDark`], with ANSI colors picked for a light scheme.
+    TerminalLight,
     /// No colors at all: the terminal's own foreground and background, with
     /// bold and reverse video carrying focus and selection. Chosen
     /// automatically when the `NO_COLOR` environment variable is set.
@@ -104,11 +119,18 @@ pub enum UiTheme {
 }
 
 impl UiTheme {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 12] = [
         Self::Midnight,
         Self::Light,
         Self::Darcula,
         Self::HighContrast,
+        Self::Campbell,
+        Self::OneHalfDark,
+        Self::OneHalfLight,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::TerminalDark,
+        Self::TerminalLight,
         Self::Mono,
     ];
 
@@ -118,6 +140,13 @@ impl UiTheme {
             Self::Light => "Light",
             Self::Darcula => "Darcula",
             Self::HighContrast => "High Contrast",
+            Self::Campbell => "Campbell",
+            Self::OneHalfDark => "One Half Dark",
+            Self::OneHalfLight => "One Half Light",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::TerminalDark => "Terminal Dark",
+            Self::TerminalLight => "Terminal Light",
             Self::Mono => "Monochrome",
         }
     }
@@ -145,7 +174,7 @@ impl SessionsSide {
 ///
 /// The section is optional on disk so configurations written before it was
 /// introduced retain their existing representation and behavior.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
     #[serde(skip_serializing_if = "is_false")]
@@ -157,6 +186,50 @@ pub struct AdvancedConfig {
     /// Unicode otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbols: Option<SymbolSet>,
+    #[serde(skip_serializing_if = "ToolOutput::is_default")]
+    pub tool_output: ToolOutput,
+    /// How many output rows an inline tool call shows, the omission marker
+    /// included. Zero shows none.
+    #[serde(skip_serializing_if = "is_default_tool_output_lines")]
+    pub tool_output_lines: usize,
+}
+
+impl Default for AdvancedConfig {
+    fn default() -> Self {
+        Self {
+            detailed_activity_clocks: false,
+            session_order: SessionOrder::default(),
+            symbols: None,
+            tool_output: ToolOutput::default(),
+            tool_output_lines: DEFAULT_TOOL_OUTPUT_LINES,
+        }
+    }
+}
+
+pub const DEFAULT_TOOL_OUTPUT_LINES: usize = 5;
+
+fn is_default_tool_output_lines(lines: &usize) -> bool {
+    *lines == DEFAULT_TOOL_OUTPUT_LINES
+}
+
+/// How the conversation draws tool calls.
+///
+/// `Grouped` folds a run of finished calls into one row of short names and
+/// keeps only the newest thought of the run. `Inline` gives every call its
+/// own row with its full command and a few lines of its output, and keeps
+/// every thought, the way Codex draws a turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolOutput {
+    #[default]
+    Grouped,
+    Inline,
+}
+
+impl ToolOutput {
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The character set the dashboard draws status symbols, borders, and
@@ -173,7 +246,8 @@ pub enum SymbolSet {
 ///
 /// `Terminal` rings the terminal bell and works over SSH and inside a
 /// multiplexer, which is why it is the default. `System` also posts a desktop
-/// notification through `osascript` on macOS or `notify-send` on Linux.
+/// notification through `osascript` on macOS, `notify-send` on Linux, or a
+/// PowerShell toast on Windows.
 /// `Off` reports nothing. Independently of the mode, `title` keeps the
 /// terminal window title showing how many sessions are waiting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

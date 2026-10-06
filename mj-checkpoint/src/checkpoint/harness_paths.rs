@@ -89,9 +89,11 @@ pub(super) fn rewrite_kimi_session_index(
 pub(super) fn harness_storage_cwd(harness: HarnessKind, launch_cwd: &Path) -> PathBuf {
     match harness {
         HarnessKind::Grok => launch_cwd.to_path_buf(),
-        HarnessKind::Claude | HarnessKind::Codex | HarnessKind::Kimi | HarnessKind::Muse => {
-            launch_cwd.components().collect()
-        }
+        HarnessKind::Claude
+        | HarnessKind::Codex
+        | HarnessKind::Kimi
+        | HarnessKind::Muse
+        | HarnessKind::OpenCode => launch_cwd.components().collect(),
     }
 }
 

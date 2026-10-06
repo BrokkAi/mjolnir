@@ -48,6 +48,16 @@ pub fn assert_golden(manifest_dir: &str, name: &str, actual: &str) {
     }
 }
 
+/// Like [`assert_golden`] for surfaces that show platform key names (Cmd-V on
+/// macOS): macOS compares with `<name>-macos.txt`.
+pub fn assert_platform_golden(manifest_dir: &str, name: &str, actual: &str) {
+    if cfg!(target_os = "macos") {
+        assert_golden(manifest_dir, &format!("{name}-macos"), actual);
+    } else {
+        assert_golden(manifest_dir, name, actual);
+    }
+}
+
 fn normalize_one_trailing_newline(text: &str) -> &str {
     text.strip_suffix('\n').unwrap_or(text)
 }

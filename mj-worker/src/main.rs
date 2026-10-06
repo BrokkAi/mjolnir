@@ -104,11 +104,6 @@ enum WorkerCommand {
         #[arg(long)]
         history_socket: Option<PathBuf>,
     },
-    /// Serve the turn review's specialist-dispatch tool over MCP stdio.
-    ReviewMcp {
-        #[arg(long)]
-        socket: PathBuf,
-    },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
         #[arg(long)]
@@ -485,7 +480,7 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             _root: _,
             history_socket,
         } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
-        WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
+
         WorkerCommand::SubagentMcp {
             socket,
             harness,

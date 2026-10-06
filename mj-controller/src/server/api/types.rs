@@ -1,5 +1,20 @@
 use super::*;
 
+/// Query selecting the GitHub App installation whose token should be returned.
+#[derive(Debug, Default)]
+pub struct GithubTokenQuery {
+    pub owner: Option<String>,
+    pub repo: Vec<String>,
+}
+
+/// A currently valid installation access token. Callers must keep it out of
+/// logs and persistent session state.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubTokenResponse {
+    pub token: String,
+}
+
 /// Comparison and representation requested for a session's working-tree diff.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

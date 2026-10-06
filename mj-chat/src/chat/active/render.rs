@@ -822,7 +822,7 @@ pub(crate) fn prompt_title_parts(chat: &ChatState) -> Vec<String> {
     // says it is armed rather than surprising the user with a pane.
     let review = chat.review_config();
     if review.enabled {
-        parts.push(format!("review {}", review.tier.label()));
+        parts.push("review".to_owned());
     }
     parts
 }

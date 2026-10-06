@@ -38,15 +38,6 @@ impl ReviewProvider {
             Self::Other => None,
         }
     }
-
-    pub fn specialist_policy(self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Self::Codex => Some(("luna", "xhigh")),
-            Self::Claude => Some(("sonnet", "xhigh")),
-            Self::DeepSeek => Some(("flash", "high")),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +53,6 @@ pub struct ResolvedReviewSettings {
     pub profile: String,
     pub generation: u64,
     pub main: ReviewModelSettings,
-    pub specialist: ReviewModelSettings,
     pub automatic: bool,
     pub same_provider: bool,
 }

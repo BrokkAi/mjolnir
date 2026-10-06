@@ -3654,7 +3654,13 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         // The retry the guidance names, as the web sends it: without the
         // large-transfer acknowledgement, which an in-place Move does not use.
         let mut operation = operation;
+        operation.selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+        crate::database::save_move_operation(&operation).unwrap();
         let mut requested = operation.selection.clone();
+        // Hard-won: 5390a50d: omitted retry fields used source settings and stranded a sealed Move.
+        requested.profile_id = None;
+        requested.target_template_id = None;
+        requested.subagents = None;
         requested.workspace.acknowledge_large_transfer = false;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -226,7 +226,6 @@ pub fn run_with_config_path(
     checks.push(daemon_build_check());
     checks.extend(worker_freshness_checks(offered));
     checks.extend(review_residue_checks(config));
-    checks.extend(bifrost_check(config, executor));
     // Reported last, where it has always been.
     checks.push(apple_container);
     checks
@@ -1909,9 +1908,9 @@ fn ssh_podman_limits_check(
 }
 
 /// One check per host Mjolnir writes to: does the tightest filesystem it
-/// writes to there have room? The probe is the daemon capacity service's own
-/// host probe, and the verdict is the storage owner's rule, so doctor and the
-/// daemon judge a disk the same way.
+/// writes to there have room? The measurement is the daemon capacity
+/// service's own, and the verdict is the storage owner's rule, so doctor and
+/// the daemon judge a disk the same way.
 fn storage_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
     use mj_core::targets::storage::{StorageCondition, TargetStorageView};
     let Ok(config) = config else {
@@ -1926,37 +1925,48 @@ fn storage_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .into_iter()
         .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
         .filter_map(|target| {
-            let probe = target.probes.first()?;
             let check_id = format!("storage.{}", target.id);
             let title = format!("Free space on {}", target.host);
-            let output = match executor.execute(probe) {
-                Ok(output) if output.status == 0 => output,
-                // An unreachable host is reported by its access check.
-                Ok(output) if probe.ssh_destination.is_some() && output.status == 255 => {
-                    return None;
+            let unmeasured = |detail: String, remediation: &str| {
+                Some(DoctorCheck::warning(
+                    check_id.clone(),
+                    title.clone(),
+                    format!("Could not measure free space: {detail}"),
+                    remediation,
+                ))
+            };
+            let (home, filesystems) = if target.local {
+                match crate::targets::measure_local_storage(&target.local_storage_paths, executor)
+                {
+                    Ok(measured) => measured,
+                    Err(error) => {
+                        return unmeasured(format!("{error:#}"), "Check that `df` runs here.");
+                    }
                 }
-                Ok(output) => {
-                    return Some(DoctorCheck::warning(
-                        check_id,
-                        title,
-                        format!(
-                            "Could not measure free space: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ),
-                        "Check that `df` runs on the host.",
-                    ));
-                }
-                Err(error) => {
-                    return Some(DoctorCheck::warning(
-                        check_id,
-                        title,
-                        format!("Could not measure free space: {error:#}"),
-                        "Check that the host is reachable and `df` runs on it.",
-                    ));
+            } else {
+                let probe = target.probes.first()?;
+                match executor.execute(probe) {
+                    Ok(output) if output.status == 0 => {
+                        mj_core::targets::storage::parse_storage_lines(&output.stdout)
+                    }
+                    // An unreachable host is reported by its access check.
+                    Ok(output) if probe.ssh_destination.is_some() && output.status == 255 => {
+                        return None;
+                    }
+                    Ok(output) => {
+                        return unmeasured(
+                            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                            "Check that `df` runs on the host.",
+                        );
+                    }
+                    Err(error) => {
+                        return unmeasured(
+                            format!("{error:#}"),
+                            "Check that the host is reachable and `df` runs on it.",
+                        );
+                    }
                 }
             };
-            let (home, filesystems) =
-                mj_core::targets::storage::parse_storage_lines(&output.stdout);
             let view =
                 TargetStorageView::evaluate(&target.host, home, &filesystems, None, |_| None, None);
             // Every filesystem, with its free space and root reserve, one
@@ -2394,10 +2404,15 @@ fn worker_freshness_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
         .ok()
         .filter(|metadata| mj_client::daemon::process_is_alive(metadata.pid));
     let pinned = pinned_worker_digests();
-    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = vec![(
-        "this host".to_owned(),
-        crate::controller::native_worker_binary_prerequisite(),
-    )];
+    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = Vec::new();
+    // A machine that runs no worker, such as Windows, has none of its own
+    // to resolve; its sessions use the Linux workers checked below.
+    if mj_core::targets::HOST_RUNS_WORKERS {
+        sources.push((
+            "this host".to_owned(),
+            crate::controller::native_worker_binary_prerequisite(),
+        ));
+    }
     for arch in container_worker_architectures(config) {
         sources.push((
             format!("{arch} Linux targets"),
@@ -3104,82 +3119,4 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
         format!("Mjolnir left these in repositories it does not own: {detail}."),
         format!("Remove them yourself when you are ready:\n{commands}"),
     )]
-}
-
-/// The Bifrost a turn review would run on this machine, and whether it is new
-/// enough. Every reviewing agent navigates the code through Bifrost's MCP
-/// tools, and an old `bifrost` on the login `PATH` is otherwise found only when
-/// a review's agents cannot use them. This is a warning: containers carry their own Bifrost,
-/// and reviews may be off. The check reads `MJ_BIFROST_BIN` from the
-/// environment `mj doctor` runs in, which is the daemon's environment when the
-/// daemon was started from the same shell.
-fn bifrost_check(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Option<DoctorCheck> {
-    let config = config.ok()?;
-    if !mj_core::review::settings::can_review(config) {
-        return None;
-    }
-    Some(bifrost_check_for(
-        &mj_review::bifrost::bifrost_binary(),
-        executor,
-    ))
-}
-
-fn bifrost_check_for(binary: &Path, executor: &impl CommandExecutor) -> DoctorCheck {
-    const ID: &str = "review.bifrost";
-    const TITLE: &str = "Bifrost for turn review";
-    let required = mj_review::bifrost::REQUIRED_BIFROST_VERSION;
-    let shown = binary.display();
-    let remediation = format!(
-        "Install Bifrost {required} or later (`cargo install brokk-bifrost@{required} --locked --bin bifrost`), or start the daemon with {env} set to a newer binary (`{env}=/path/to/bifrost mj daemon restart`), then rerun `mj doctor`.",
-        env = mj_review::bifrost::BIFROST_BIN_ENV,
-    );
-    let command = CommandSpec::new(binary.display().to_string(), ["--version"])
-        .purpose("read the Bifrost version used by turn review");
-    let output = match executor.execute(&command) {
-        Ok(output) if output.status == 0 => output,
-        Ok(output) => {
-            return DoctorCheck::warning(
-                ID,
-                TITLE,
-                format!("`{shown} --version` exited with status {}.", output.status),
-                remediation,
-            );
-        }
-        Err(error) => {
-            return DoctorCheck::warning(
-                ID,
-                TITLE,
-                format!("Could not run `{shown}` for the turn review: {error}"),
-                remediation,
-            );
-        }
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let first_line = text.lines().next().unwrap_or_default().trim();
-    let version = first_line
-        .split_whitespace()
-        .next_back()
-        .and_then(|token| semver::Version::parse(token).ok());
-    let minimum = semver::Version::parse(required).expect("the required Bifrost version is semver");
-    match version {
-        Some(version) if version >= minimum => DoctorCheck::ready(
-            ID,
-            TITLE,
-            format!("`{shown}` is Bifrost {version}; turn review needs {required} or later."),
-        ),
-        Some(version) => DoctorCheck::warning(
-            ID,
-            TITLE,
-            format!(
-                "`{shown}` is Bifrost {version}, older than the {required} turn review needs, so every review would fail."
-            ),
-            remediation,
-        ),
-        None => DoctorCheck::warning(
-            ID,
-            TITLE,
-            format!("`{shown} --version` printed {first_line:?}, which does not name a version."),
-            remediation,
-        ),
-    }
 }

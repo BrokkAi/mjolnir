@@ -1,7 +1,6 @@
 //! Review data shared by Mjolnir's control surfaces.
 
 use mj_core::review::driver::{Resolution, RoleStatus, TurnReviewPhase};
-use mj_core::review::lanes::ReviewTier;
 use mj_core::review::verdict::ReviewVerdict;
 
 /// What the host tells a surface about one running review.
@@ -9,7 +8,6 @@ use mj_core::review::verdict::ReviewVerdict;
 #[serde(deny_unknown_fields)]
 pub struct RuntimeReviewView {
     pub session_id: String,
-    pub tier: ReviewTier,
     pub phase: TurnReviewPhase,
     pub roles: Vec<RoleStatus>,
     /// What the review is doing, in one line.

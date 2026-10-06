@@ -562,7 +562,7 @@ impl ResumeDialog {
                 brief
                     .lines()
                     .skip(1)
-                    .map(|line| Line::raw(localize_brief_date(line, &chrono::Local)))
+                    .map(|line| Line::raw(localize_brief_date(line, &display_now().timezone())))
                     .collect(),
                 Vec::new(),
             ));
@@ -678,6 +678,17 @@ fn hel_row_status(state: SessionState) -> ResumeRowStatus {
         SessionState::DestroyedWithDataLoss => ResumeRowStatus::DataLoss,
         _ => ResumeRowStatus::Resumable,
     }
+}
+
+/// The zone resume times display in: local time, except UTC under test so
+/// goldens do not follow the machine's time zone.
+#[cfg(not(test))]
+type DisplayZone = chrono::Local;
+#[cfg(test)]
+type DisplayZone = chrono::Utc;
+
+pub(crate) fn display_now() -> chrono::DateTime<DisplayZone> {
+    DisplayZone::now()
 }
 
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
@@ -2328,7 +2339,7 @@ pub(crate) fn render_resume_dialog(
         Paragraph::new(resume_header_line(&layout, dialog.tab)),
         header_area,
     );
-    let now = chrono::Local::now();
+    let now = display_now();
     if list_rows.is_empty() {
         let message = match (dialog.tab, dialog.is_scanning(), dialog.search.is_empty()) {
             (ResumeTab::Import, true, _) => "Scanning native sessions…".to_owned(),

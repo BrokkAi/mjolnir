@@ -116,24 +116,19 @@ impl ActiveChat {
         self.run_workflow_request(request);
     }
 
-    /// Shows whatever review the daemon is running for this session.
+    /// Shows the review the daemon is running for this session.
     ///
     /// The terminal hosts no part of a review: it renders this view, reads the
-    /// reviewing roles' journals to show their transcripts, and sends
-    /// resolutions back. A review therefore survives this view closing.
+    /// reviewer's journal to show its transcript, and sends resolutions back.
+    /// A review therefore survives this view closing.
     pub fn apply_review_view(&mut self, view: Option<mj_client::review::RuntimeReviewView>) {
-        let roles = view
+        let role = view
             .as_ref()
-            .map(|view| {
-                view.roles
-                    .iter()
-                    .map(|role| role.role.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+            .and_then(|view| view.roles.first())
+            .map(|role| role.role.clone());
         self.state.set_turn_review(view);
         if self.state.turn_review().is_none() {
-            self.reviewed_roles.clear();
+            self.reviewed_role = None;
             // The daemon's review projection is also the authority for
             // reviewer elicitations. Reconcile here so a form disappears as
             // soon as an external answer closes the review, even when no
@@ -141,11 +136,15 @@ impl ActiveChat {
             self.surface_reviewer_elicitations();
             return;
         }
-        // One reader per role, started the first time the daemon names it.
-        for role in roles {
-            if self.reviewed_roles.insert(role.clone()) {
-                self.poll_turn_review_role(&role);
-            }
+        if let Some(role) = role
+            && self
+                .state
+                .turn_review()
+                .is_some_and(|review| review.role_is_active(&role))
+            && self.reviewed_role.as_deref() != Some(role.as_str())
+        {
+            self.reviewed_role = Some(role.clone());
+            self.poll_turn_review_role(&role);
         }
         self.surface_reviewer_elicitations();
     }

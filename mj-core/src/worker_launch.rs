@@ -166,13 +166,6 @@ pub struct WorkerLaunchConfig {
     /// in a large working tree cheap.
     #[serde(default)]
     pub review_capture: bool,
-    /// The Bifrost executable the turn review runs on the target, taken from
-    /// the daemon's `MJ_BIFROST_BIN`. The review runs inside the worker, whose
-    /// environment is the target's login environment, so the daemon's own
-    /// variable never reaches it unless the controller states it here. `None`
-    /// means the `bifrost` found on the target's `PATH`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bifrost_binary: Option<PathBuf>,
     /// Explicit target settings shared by primary and reviewer processes.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub target_environment: std::collections::BTreeMap<String, String>,
@@ -223,8 +216,7 @@ pub struct WorkerLaunchConfig {
     pub project_memory: Option<ProjectMemoryLaunchConfig>,
     /// Target-level policy translated into harness-specific controls by the
     /// worker. Raw localhost and guardian SSH targets preserve configured
-    /// approvals for harnesses that support them; Muse has no guardian mode
-    /// and is forced unconstrained on every target. Other targets run
+    /// approvals for harnesses that support them. Other targets run
     /// unconstrained.
     #[serde(
         alias = "force_unrestricted_mode",
@@ -329,8 +321,7 @@ pub struct ReviewerLaunchConfig {
     /// resume one.
     #[serde(default)]
     pub generation: u64,
-    /// Analyzer and navigation servers this reviewer gets over MCP. A turn
-    /// review attaches Bifrost here; plan review attaches nothing.
+    /// Additional configured MCP servers this reviewer gets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<ReviewMcpServer>,
 }
@@ -348,19 +339,6 @@ pub struct ReviewMcpServer {
     pub command: PathBuf,
     #[serde(default)]
     pub args: Vec<String>,
-}
-
-impl ReviewMcpServer {
-    /// Recognize our private dispatcher by its executable and invocation, not
-    /// just its name. Keep the existing wire shape: older workers reject new
-    /// fields, and saved registrations must work after a worker upgrade.
-    #[must_use]
-    pub fn is_review_dispatch(&self, worker_executable: &Path) -> bool {
-        self.name == crate::review::mcp::REVIEW_MCP_SERVER_NAME
-            && self.command == worker_executable
-            && self.args.first().is_some_and(|arg| arg == "worker")
-            && self.args.get(1).is_some_and(|arg| arg == "review-mcp")
-    }
 }
 
 /// How a harness learns about a reviewing agent's MCP servers.
@@ -413,9 +391,11 @@ impl WorkerLaunchConfig {
         let parse = || -> serde_json::Result<Self> {
             let mut value: serde_json::Value = serde_json::from_slice(&body)?;
             // Shipped workers keep launch.json across upgrades. The removed
-            // constraint has no effect, but must not block loading that file.
+            // runtime constraint and turn review's former Bifrost binary have
+            // no effect, but must not block loading that file.
             if let Some(fields) = value.as_object_mut() {
                 fields.remove("expected_runtime_identity");
+                fields.remove("bifrost_binary");
             }
             serde_json::from_value(value)
         };
@@ -535,27 +515,6 @@ pub struct ProfileConfig {
 mod tests {
     use super::*;
 
-    #[test]
-    fn saved_review_dispatch_keeps_its_wire_shape_and_requires_our_executable() {
-        let saved = serde_json::json!({
-            "name": "mj-review", "command": "/worker/hel",
-            "args": ["worker", "review-mcp", "--socket", "/worker/reviewer/review-dispatch.sock", "--generation", "1"]
-        });
-        let server: ReviewMcpServer = serde_json::from_value(saved.clone()).unwrap();
-        assert!(server.is_review_dispatch(Path::new("/worker/hel")));
-        assert_eq!(serde_json::to_value(&server).unwrap(), saved);
-        assert!(!server.is_review_dispatch(Path::new("/another/hel")));
-        let mut other = server.clone();
-        other.command = "/third-party/analyzer".into();
-        assert!(!other.is_review_dispatch(Path::new("/worker/hel")));
-        other = server.clone();
-        other.args[1] = "other-mcp".into();
-        assert!(!other.is_review_dispatch(Path::new("/worker/hel")));
-        other = server;
-        other.name = "mj-third-party".into();
-        assert!(!other.is_review_dispatch(Path::new("/worker/hel")));
-    }
-
     fn launch_json() -> serde_json::Value {
         serde_json::json!({
             "session_id": "session",
@@ -598,6 +557,20 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(saved.get("expected_runtime_identity").is_none());
+    }
+
+    #[test]
+    fn saved_launch_drops_the_retired_bifrost_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("launch.json");
+        let mut value = launch_json();
+        value["bifrost_binary"] = serde_json::json!("/usr/local/bin/bifrost");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let launch = WorkerLaunchConfig::read(&path).unwrap();
+        launch.write(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("bifrost_binary").is_none());
     }
 
     #[test]

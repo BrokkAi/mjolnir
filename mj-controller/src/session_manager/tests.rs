@@ -2138,7 +2138,6 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
     }
 }
 
-#[cfg(unix)]
 const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
 
 #[cfg(unix)]

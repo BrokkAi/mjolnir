@@ -78,8 +78,8 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     assert!(notice.unwrap().contains("fresh-child; parked"));
 }
 
-#[test]
-fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reload() {
+#[tokio::test]
+async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reload() {
     const CHILD: &str = "MJ_ACCEPTED_SOURCE_REPAIR_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -133,7 +133,8 @@ fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reloa
     };
     assert!(matches!(
         controller
-            .replace_resume_repository_origin(id, "project", "acme/moved", &SourceExists)
+            .replace_resume_repository_origin(id, "project", "acme/moved", &SourceExists,)
+            .await
             .unwrap(),
         ResumeRepositorySourcePreflight::Ready(_)
     ));
@@ -157,8 +158,8 @@ fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reloa
 /// A person choosing a container for a local session has to see what the
 /// move does before it happens, and a person resuming the same session in
 /// place must not be asked anything.
-#[test]
-fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
+#[tokio::test]
+async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
     let (checkout, _remote_parent, remote) = checkout_with_network_remote();
     std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
     let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
@@ -180,6 +181,7 @@ fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
 
     let converting = controller
         .preflight_resume_repository_sources(&session_id, "podman", &executor)
+        .await
         .unwrap();
     let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } = converting
     else {
@@ -194,6 +196,7 @@ fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
         matches!(
             controller
                 .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
+                .await
                 .unwrap(),
             ResumeRepositorySourcePreflight::Ready(_)
         ),
@@ -302,8 +305,8 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     );
 }
 
-#[test]
-fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
+#[tokio::test]
+async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
     let directory = tempfile::tempdir().unwrap();
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -330,12 +333,14 @@ fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
     };
     assert!(matches!(
         controller
-            .preflight_resume_repository_sources(session_id, "podman", &ProcessExecutor,)
+            .preflight_resume_repository_sources(session_id, "podman", &ProcessExecutor)
+            .await
             .unwrap(),
         ResumeRepositorySourcePreflight::Ready(_)
     ));
     let result = controller
         .preflight_resume_repository_sources(session_id, "local-bare", &ProcessExecutor)
+        .await
         .unwrap();
     let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = result else {
         panic!("moving into a host checkout must detect its missing archive base");
@@ -344,8 +349,8 @@ fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it() {
     assert!(!repository.path().join(".mj/worktrees").exists());
 }
 
-#[test]
-fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
+#[tokio::test]
+async fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
@@ -377,6 +382,7 @@ fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
             "localhost",
             &RefusingExecutor("raw in-place preflight"),
         )
+        .await
         .unwrap();
     let ResumeRepositorySourcePreflight::Ready(receipt) = preflight else {
         panic!("raw in-place resume unexpectedly needs a repository replacement");
@@ -566,8 +572,9 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
         .unwrap();
     let preflight = pool
         .install(|| {
-            controller
-                .preflight_verified_repository_sources(session_id, verified, None, false, &executor)
+            controller.preflight_verified_repository_sources(
+                session_id, verified, None, false, None, &executor,
+            )
         })
         .unwrap();
     let ResumeRepositorySourcePreflight::Ready(receipt) = preflight else {

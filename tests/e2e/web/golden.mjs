@@ -3,7 +3,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const goldenDirectory = join(dirname(fileURLToPath(import.meta.url)), 'golden');
+const here = dirname(fileURLToPath(import.meta.url));
+const goldenDirectory = join(here, 'golden');
+// CI uploads test-results/, so a mismatch there keeps the whole actual output.
+const actualDirectory = join(here, 'test-results', 'golden-actual');
 
 function normalizeOneTrailingNewline(text) {
   return text.endsWith('\n') ? text.slice(0, -1) : text;
@@ -23,9 +26,14 @@ export function assertGolden(name, actual) {
     );
   }
   const expected = normalizeOneTrailingNewline(readFileSync(path, 'utf8'));
+  const normalized = normalizeOneTrailingNewline(actual);
+  if (normalized === expected) return;
+  const actualPath = join(actualDirectory, `${name}.txt`);
+  mkdirSync(actualDirectory, { recursive: true });
+  writeFileSync(actualPath, `${normalized}\n`);
   assert.strictEqual(
-    normalizeOneTrailingNewline(actual),
+    normalized,
     expected,
-    `Golden output differs at ${path}; set MJ_UPDATE_GOLDEN=1 to update it`,
+    `Golden output differs at ${path} (actual output: ${actualPath}); set MJ_UPDATE_GOLDEN=1 to update it`,
   );
 }

@@ -35,8 +35,9 @@ fn control_style<K: Copy + Eq>(form: &Form<K>, id: K, enabled: bool) -> Style {
         let style = normal_style()
             .fg(theme::palette().accent)
             .add_modifier(Modifier::BOLD);
-        // Bold reverse video is reserved for actual focus in monochrome.
-        if theme::is_mono() {
+        // Bold reverse video is reserved for actual focus without painted
+        // surfaces.
+        if theme::reverse_video() {
             style.remove_modifier(Modifier::REVERSED)
         } else {
             style

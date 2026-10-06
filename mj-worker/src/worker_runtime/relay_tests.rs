@@ -65,7 +65,6 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         handback_tool: false,
         initial_model: None,
         review_capture: true,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -768,33 +767,6 @@ fn muse_relative_roots_resolve_before_credential_and_history_access() {
     assert_eq!(
         config.environment["XDG_DATA_HOME"],
         "/home/remote/profiles/session/muse/.data"
-    );
-}
-
-/// Muse has no guardian mode, so a launch config written before that rule
-/// existed is upgraded when the worker enforces it.
-#[test]
-fn enforcing_the_policy_upgrades_a_persisted_muse_guardian_config() {
-    let mut config = launch_config("/profile");
-    config.harness = HarnessKind::Muse;
-    config.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-
-    super::enforce_execution_policy(&mut config).unwrap();
-
-    assert_eq!(config.execution_policy, ExecutionPolicy::Unconstrained);
-    assert_eq!(
-        config
-            .environment
-            .get("MUSE_APPROVAL_MODE")
-            .map(String::as_str),
-        Some("allowAll")
-    );
-    assert_eq!(
-        config
-            .environment
-            .get("MUSE_SERVE_ARGS")
-            .map(String::as_str),
-        Some("--disable-sandbox")
     );
 }
 
