@@ -243,6 +243,10 @@ pub struct Glyphs {
     pub role_plan_proposal: &'static str,
 }
 
+/// Every glyph is a code point whose width terminals agree with ratatui on.
+/// `🎙︎` (ratatui one column, Windows Terminal two) and `☰` (wide since
+/// Unicode 16, narrow in most terminals) were not, and shifted the rows they
+/// were drawn on.
 pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     pin: "◇",
     pinned: "◆",
@@ -263,7 +267,7 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     selected: "› ",
     ellipsis: "…",
     row_menu: " ⋯ ",
-    workspace_menu: " ☰ ",
+    workspace_menu: " ≡ ",
     close: " × ",
     size_minimized: "▁",
     size_standard: "▪",
@@ -287,9 +291,7 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     bar_right: "▏",
     arrows_vertical: "↑↓",
     role_gutter: "│ ",
-    // The text variation selector is intentional: a terminal should keep this
-    // as a compact text button rather than an emoji of a different width.
-    microphone: "🎙︎",
+    microphone: "◉",
     role_user: "❯",
     role_agent: "●",
     role_thought: "○",

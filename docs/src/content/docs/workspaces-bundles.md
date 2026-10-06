@@ -28,9 +28,9 @@ mj --workspace "Release work"
 ```
 
 `--workspace` matches names case-insensitively. In the terminal surface, a
-bordered three-row Workspaces pane sits above Sessions. Its right-hand `☰`
+bordered three-row Workspaces pane sits above Sessions. Its right-hand `≡`
 button opens the workspace manager. From the keyboard, focus the Workspaces
-pane, move from the tabs to `☰` with `Tab` or `Right`, then press `Enter`;
+pane, move from the tabs to `≡` with `Tab` or `Right`, then press `Enter`;
 `Shift-Tab` from the Sessions pane also lands on it. The command palette also
 lists **Workspaces** (`prefix+shift+n`). Selecting a tab, or
 pressing an arrow while the workspace tabs have focus, changes the live-session

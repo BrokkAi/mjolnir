@@ -16,7 +16,7 @@ pub fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
 
 #[cfg(test)]
 fn normalize_clocked_activity(line: String) -> String {
-    if !line.contains("🎙︎") && !line.contains("Reviewing") {
+    if !line.contains(crate::theme::UNICODE_GLYPHS.microphone) && !line.contains("Reviewing") {
         return line;
     }
 

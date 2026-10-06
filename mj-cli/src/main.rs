@@ -18,6 +18,7 @@ mod logging;
 mod pollers;
 mod session_presentation;
 mod splash;
+mod terminal_backend;
 
 #[cfg(test)]
 mod test_support;
@@ -42,7 +43,6 @@ use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
 use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 use crate::dashboard::{DashboardExit, run_dashboard_for_workspace};
 use crate::import::{ImportArgs, import};
@@ -2056,7 +2056,7 @@ fn doctor_failure(json: bool) -> anyhow::Error {
 pub(crate) use mj_core::state::short_id;
 
 pub(crate) struct TerminalGuard {
-    pub(crate) terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    pub(crate) terminal: Terminal<terminal_backend::PositionedBackend<io::Stdout>>,
     keyboard_enhancement: bool,
     /// The window title last written, so it is only rewritten when it
     /// changes and cleared on exit only if it was ever set.
@@ -2092,7 +2092,7 @@ impl TerminalGuard {
             EnableBracketedPaste
         )
         .context("enter alternate screen and enable terminal input modes")?;
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        let terminal = Terminal::new(terminal_backend::PositionedBackend::new(stdout))?;
         Ok(Self {
             terminal,
             keyboard_enhancement,

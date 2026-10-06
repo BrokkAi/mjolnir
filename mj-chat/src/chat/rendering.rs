@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    fn microphone_button_uses_text_presentation_and_matches_line_width() {
+    fn microphone_button_matches_line_width() {
         let line = voice_button_line(true, false);
         assert_eq!(
             line.spans
@@ -1340,7 +1340,6 @@ mod tests {
             format!(" {} ", voice_button_glyph())
         );
         assert_eq!(line.width(), 3);
-        assert_eq!(display_width(voice_button_glyph()), display_width("🎙︎"));
     }
 
     /// The ASCII set reaches the composer's border, where the microphone was

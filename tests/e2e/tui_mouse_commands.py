@@ -40,7 +40,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         tmux.send_raw("\x1b[200~" + value + "\x1b[201~")
 
     def workspace_manager() -> None:
-        click("☰")
+        click("≡")
         tmux.wait_for("New workspace")
         tmux.wait_for("Current", "workspace manager finishes loading")
 
@@ -104,7 +104,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
     )
     tmux.wait_for("Mouse secondary")
     absent("New workspace")
-    record("workspace-created", "☰; New workspace; name; Create", "Create adds a durable workspace tab and selects it")
+    record("workspace-created", "≡; New workspace; name; Create", "Create adds a durable workspace tab and selects it")
 
     # Confirm the selected tab through the manager's initial selection, rather
     # than waiting for a name that was already visible on an inactive tab.
@@ -231,7 +231,7 @@ def exercise(lab: Lab, tmux: TmuxController, evidence: Evidence, port: int) -> N
         "workspace delete completes in manager",
     )
     close_workspace_manager()
-    record("workspace-delete", "☰; Delete; confirm suspension; ×", "the workspace is removed, its session is stopped, and the remaining tab stays open")
+    record("workspace-delete", "≡; Delete; confirm suspension; ×", "the workspace is removed, its session is stopped, and the remaining tab stays open")
 
 
 
