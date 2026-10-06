@@ -899,7 +899,10 @@ garbage\n";
         ];
         let filesystems = measure_windows_filesystems(&paths);
         assert_eq!(filesystems.len(), 1, "{filesystems:?}");
-        assert!(missing.starts_with(&filesystems[0].mount), "{filesystems:?}");
+        assert!(
+            missing.starts_with(&filesystems[0].mount),
+            "{filesystems:?}"
+        );
         assert!(filesystems[0].available_bytes <= filesystems[0].total_bytes);
         assert_eq!(filesystems[0].paths, paths[..2]);
     }
