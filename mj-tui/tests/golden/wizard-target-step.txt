@@ -536,7 +536,7 @@ action: None
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
-action: MoveSession { subagents: None, workspace_selection: WorkspaceSelection { exclusions: [], acknowledge_large_transfer: false }, session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
+action: MoveSession { subagents: Some(Native), workspace_selection: WorkspaceSelection { exclusions: [], acknowledge_large_transfer: false }, session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │

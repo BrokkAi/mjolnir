@@ -5011,12 +5011,13 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
         };
         let DashboardAction::MoveSession {
             preparation_request_id: Some(request),
-            subagents: None,
+            subagents: Some(ref policy),
             ..
         } = dashboard.begin_move()
         else {
             panic!("prepare retains session policy");
         };
+        assert_eq!(policy, &stored);
         assert_eq!(resume_wizard(&dashboard).step, WizardStep::Review);
         assert_eq!(resume_wizard(&dashboard).subagents.policy, stored);
         let mut preparation = move_preparation();
@@ -5148,7 +5149,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         *dashboard.config = single_raw_config();
         let DashboardAction::MoveSession {
             preparation_request_id: Some(request),
-            subagents: None,
+            subagents: Some(SubagentPolicy::AllModels),
             ..
         } = dashboard.begin_move()
         else {
@@ -5199,7 +5200,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             captured_drawn(&mut dashboard, width, height);
         }
         let lines = captured_drawn(&mut dashboard, width, height);
-        let (x, y) = point(&lines, "None");
+        let (x, y) = point(&lines, "Native");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
@@ -5209,7 +5210,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         }
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
-            SubagentPolicy::None
+            SubagentPolicy::Native
         );
         assert!(resume_wizard(&dashboard).preparation.is_none());
         assert_eq!(
@@ -5217,13 +5218,42 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
             Some(SubagentPolicy::AllModels),
             "draft does not change recorded policy"
         );
+        let Some(DashboardAction::MoveSession {
+            subagents: Some(SubagentPolicy::Native),
+            preparation_request_id: Some(request),
+            ..
+        }) = dashboard.take_prerequisite_check()
+        else {
+            panic!("the committed Native choice must reach preparation");
+        };
+        // Hard-won: 5390a50d: the displayed Native choice was sealed as an omitted override.
+        let mut wrong = move_preparation();
+        wrong.selection.profile_id = Some("claude-1".into());
+        wrong.selection.target_template_id = Some("local".into());
+        assert!(dashboard.apply_move_preparation(request, wrong.clone()));
+        if let Mode::Resume(wizard) = &mut dashboard.mode {
+            wizard.form.get_mut().focus(WizardControl::Submit);
+        }
+        let DashboardAction::MoveSession {
+            subagents: Some(SubagentPolicy::Native),
+            preparation_request_id: Some(retry),
+            ..
+        } = ready_key(&mut dashboard, key(KeyCode::Enter))
+        else {
+            panic!("a preparation that lost Native must be prepared again");
+        };
+        wrong.selection.subagents = Some(SubagentPolicy::Native);
+        assert!(dashboard.apply_move_preparation(retry, wrong));
+        if let Mode::Resume(wizard) = &mut dashboard.mode {
+            wizard.form.get_mut().focus(WizardControl::Submit);
+        }
         assert!(matches!(
-            dashboard.take_prerequisite_check(),
-            Some(DashboardAction::MoveSession {
-                subagents: Some(SubagentPolicy::None),
-                preparation_request_id: Some(_),
+            ready_key(&mut dashboard, key(KeyCode::Enter)),
+            DashboardAction::MoveSession {
+                subagents: Some(SubagentPolicy::Native),
+                preparation_request_id: None,
                 ..
-            })
+            }
         ));
     }
 }

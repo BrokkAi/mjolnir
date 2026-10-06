@@ -1009,10 +1009,6 @@ impl Controller {
         mut selection: MoveSelection,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MovePreparation> {
-        ensure!(
-            selection.profile_id.is_some() || selection.target_template_id.is_some(),
-            "move requires a target or profile selection"
-        );
         let source = self
             .state
             .sessions
@@ -1023,6 +1019,29 @@ impl Controller {
             "sub-agent sessions cannot move independently of their parent"
         );
         let previous = crate::database::load_move_operation(&source.id)?;
+        // The sealed selection owns retry defaults. Reconstructing them from
+        // the source can change the destination or lose an explicit policy.
+        if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
+            selection.profile_id = selection
+                .profile_id
+                .or(retained.selection.profile_id.clone());
+            selection.target_template_id = selection
+                .target_template_id
+                .or(retained.selection.target_template_id.clone());
+            selection.subagents = selection.subagents.or(retained.selection.subagents.clone());
+            // Legacy selections omitted an unchanged policy. A viewer may
+            // send that same effective policy explicitly; it changes nothing.
+            if retained.selection.subagents.is_none()
+                && selection.subagents.as_ref()
+                    == Some(&source.subagents.clone().unwrap_or_default())
+            {
+                selection.subagents = None;
+            }
+        }
+        ensure!(
+            selection.profile_id.is_some() || selection.target_template_id.is_some(),
+            "move requires a target or profile selection"
+        );
         ensure!(
             previous
                 .as_ref()
@@ -1125,7 +1144,9 @@ impl Controller {
             profile.enabled,
             "destination profile {profile_id:?} is disabled"
         );
-        if let Some(policy) = &selection.subagents {
+        if let Some(policy) = &selection.subagents
+            && policy != &source.subagents.clone().unwrap_or_default()
+        {
             super::profile_config::validate_session_subagent_policy(
                 &self.config,
                 profile_id,
