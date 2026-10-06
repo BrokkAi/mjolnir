@@ -3513,13 +3513,41 @@ fn retiring_a_podman_generation_preserves_the_destination_temporary_volume() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires rootless Podman, a cached agent-dev image, and MJ_INSTANCE=tmp1212"]
+#[ignore = "requires rootless Podman with runc installed, a cached agent-dev image, and MJ_INSTANCE=tmp1212"]
 fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace() {
     assert_eq!(mj_core::config::instance_name().as_deref(), Some("tmp1212"));
-    for storage in [
-        PodmanWorkspaceStorage::ContainerLayer,
-        PodmanWorkspaceStorage::PodmanVolume,
-    ] {
+    let runc_conf = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(runc_conf.path(), "[engine]\nruntime = \"runc\"\n").unwrap();
+    let runtimes = [
+        None,
+        // Hard-won: #1246: Podman passed `nocopy` to runc, which rejects options on bind mounts.
+        Some(runc_conf.path()),
+    ];
+    for (runtime_conf, storage) in runtimes.into_iter().flat_map(|conf| {
+        [
+            PodmanWorkspaceStorage::ContainerLayer,
+            PodmanWorkspaceStorage::PodmanVolume,
+        ]
+        .map(|storage| (conf, storage))
+    }) {
+        let with_runtime = |mut command: CommandSpec| {
+            if let Some(conf) = runtime_conf {
+                command.env.insert(
+                    "CONTAINERS_CONF_OVERRIDE".to_owned(),
+                    conf.to_string_lossy().into_owned(),
+                );
+            }
+            command
+        };
+        if runtime_conf.is_some() {
+            let info = ProcessExecutor
+                .execute(&with_runtime(CommandSpec::new(
+                    "podman",
+                    ["info", "--format", "{{.Host.OCIRuntime.Name}}"],
+                )))
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&info.stdout).trim(), "runc");
+        }
         let session = mj_core::state::new_session_id().unwrap();
         let name = resource_name(&session).unwrap();
         let template = ContainerTemplate {
@@ -3537,12 +3565,19 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
         let result = (|| -> Result<()> {
             execute_checked(
                 &ProcessExecutor,
-                &podman_container_run(&template, &name, &session, &[], None, "/workspace")?,
+                &with_runtime(podman_container_run(
+                    &template,
+                    &name,
+                    &session,
+                    &[],
+                    None,
+                    "/workspace",
+                )?),
             )?;
             let script = "set -eu; test \"$(id -u)\" = 0; test \"$(id -g)\" = 0; test \"$(stat -c %a /tmp)\" = 1777; test \"$(stat -c %u /tmp)\" = 0; test \"$(stat -f -c %T /tmp)\" != overlayfs; awk '$5 == \"/tmp\" { print; found=1 } END { exit !found }' /proc/self/mountinfo; dd if=/dev/zero of=/tmp/payload bs=131072 count=2 status=none; test \"$(stat -c %s /tmp/payload)\" = 262144";
             execute_checked(
                 &ProcessExecutor,
-                &container_exec("podman", &name, ["sh", "-c", script]),
+                &with_runtime(container_exec("podman", &name, ["sh", "-c", script])),
             )?;
             ensure!(
                 has_managed_temporary_volume(&locator, &ProcessExecutor)?,
@@ -3552,7 +3587,7 @@ fn podman_temporary_volume_is_native_and_writable_by_root_in_default_namespace()
         })();
         let cleanup = close_plan(&locator, &session).unwrap();
         for command in &cleanup.commands {
-            execute_checked(&ProcessExecutor, command).unwrap();
+            execute_checked(&ProcessExecutor, &with_runtime(command.clone())).unwrap();
         }
         result.unwrap();
         assert!(cleanup_target_is_confirmed_absent(&locator, &session, &ProcessExecutor).unwrap());
