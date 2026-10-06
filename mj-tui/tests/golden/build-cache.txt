@@ -526,7 +526,7 @@ returned page path: ["machines", "local"]
 Enter open · / searc                                                                                                     : palette · ? keys
 
 === Build cache summary before keyboard open (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────                                                                                                                                 │
@@ -568,7 +568,7 @@ Enter open · / searc                                                           
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === Build cache opened by keyboard (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────                                                                                                                                 │
@@ -610,7 +610,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === disabled cache summary after keyboard journey (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────                                                                                                                                 │
@@ -653,7 +653,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 summary contains changed state: true
 
 === Build cache summary before mouse open (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────                                                                                                                                 │
@@ -695,7 +695,7 @@ summary contains changed state: true
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === Build cache opened by mouse (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────                                                                                                                                 │
@@ -737,7 +737,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === disabled cache summary after mouse journey (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────                                                                                                                                 │

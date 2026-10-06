@@ -2,7 +2,7 @@ action: None
 action: SelectWorkspace { workspace_id: "alpha" }
 
 === dashboard after selecting the next workspace (110x32) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Alpha  Beta               ☰ ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                    │
@@ -37,7 +37,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 action: SelectWorkspace { workspace_id: "beta" }
 
 === dashboard after selecting a numbered workspace (110x32) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Alpha  Beta               ☰ ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                    │
@@ -72,7 +72,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 action: LoadWorkspaceManagement { generation: 1 }
 
 === workspace manager list (110x32) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Alpha  Beta               ☰ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
@@ -107,7 +107,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 action: None
 
 === drafts for the selected workspace (110x32) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Alpha  Beta               ☰ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
@@ -142,7 +142,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 action: None
 
 === second draft selected (110x32) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Alpha  Beta               ☰ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
@@ -177,7 +177,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 
 === draft recovery completed (110x32) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Default  Alpha  Beta               ☰ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │

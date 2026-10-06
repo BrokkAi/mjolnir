@@ -42,8 +42,9 @@ from the tagged dependency graph, and packages those notices in every release
 archive. CI and the builds run side by side; archive assembly waits only for
 the binaries and notices it needs. The GitHub Release is published only once
 CI and every archive pass, followed by crates.io and npm publication. If CI
-fails, nothing is published; fix the problem, prepare a new version, and tag
-that. Existing environment approvals still apply. Prerelease tags create
+fails, nothing is published: cancel the run, commit the fix on top of the
+release commit, delete the unpublished tag, and tag the fixed commit with the
+same version. Existing environment approvals still apply. Prerelease tags create
 GitHub prereleases and use npm's `next` channel; stable versions use `latest`.
 
 A release request authorizes the normal tag push and publication. Registry

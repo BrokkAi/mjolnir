@@ -1,5 +1,5 @@
 === empty standby composer (100x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation  Transition · Resuming ─── ◇   ⋯ ? ╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Resuming ─── ◇   ⋯ ? ╮
 │ default                            ☰ ││podman · ACP pretty name                                  │
 ╰──────────────────────────────────────╯│Operation: Resuming                                       │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│Current stage: waiting                                    │
@@ -42,7 +42,7 @@ Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel resuming · : p
 layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 26 }; prompt=Rect { x: 40, y: 26, width: 60, height: 4 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
 
 === suspending status panel (100x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation  Transition · Suspending ─ ◇   ⋯ ? ╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Suspending ─ ◇   ⋯ ? ╮
 │ default                            ☰ ││podman · ACP pretty name                                  │
 ╰──────────────────────────────────────╯│Operation: Suspending                                     │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│Current stage: waiting                                    │
@@ -85,7 +85,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 27 }; prompt=Rect { x: 40, y: 27, width: 60, height: 3 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
 
 === wrapped standby draft (100x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation  Transition · Starting ─── ◇   ⋯ ? ╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Starting ─── ◇   ⋯ ? ╮
 │ default                            ☰ ││podman · ACP pretty name                                  │
 ╰──────────────────────────────────────╯│Operation: Starting                                       │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│Current stage: waiting                                    │
@@ -130,7 +130,7 @@ desired prompt height: 9
 standby prompt during suspension: false
 
 === prompt then maximized then standard pane allocation (100x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation  Transition · Starting ─── ◇   ⋯ ? ╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Starting ─── ◇   ⋯ ? ╮
 │ default                            ☰ ││podman · ACP pretty name                                  │
 ╰──────────────────────────────────────╯│Operation: Starting                                       │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│Current stage: waiting                                    │
@@ -346,7 +346,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 0, y: 3, width: 20, height: 36 }; transcript=Rect { x: 20, y: 0, width: 460, height: 26 }; prompt=Rect { x: 20, y: 26, width: 460, height: 4 }; targets=Rect { x: 20, y: 30, width: 460, height: 3 }; quota=Rect { x: 20, y: 33, width: 460, height: 6 }
 
 === support panes side=Left sessions=Standard threshold=96 (95x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                     │
 ╰──────────────────────────────────────╯│                                                     │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                     │
@@ -389,7 +389,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette 
 layout: sessions=Rect { x: 0, y: 3, width: 40, height: 27 }; transcript=Rect { x: 40, y: 0, width: 55, height: 26 }; prompt=Rect { x: 40, y: 26, width: 55, height: 4 }; targets=Rect { x: 0, y: 30, width: 95, height: 3 }; quota=Rect { x: 0, y: 33, width: 95, height: 6 }
 
 === support panes side=Left sessions=Standard threshold=96 (96x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                      │
 ╰──────────────────────────────────────╯│                                                      │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                      │
@@ -432,7 +432,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 56, height: 26 }; prompt=Rect { x: 40, y: 26, width: 56, height: 4 }; targets=Rect { x: 40, y: 30, width: 56, height: 3 }; quota=Rect { x: 40, y: 33, width: 56, height: 6 }
 
 === support panes side=Left sessions=Standard threshold=96 (80x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -475,7 +475,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 layout: sessions=Rect { x: 0, y: 3, width: 40, height: 27 }; transcript=Rect { x: 40, y: 0, width: 40, height: 26 }; prompt=Rect { x: 40, y: 26, width: 40, height: 4 }; targets=Rect { x: 0, y: 30, width: 80, height: 3 }; quota=Rect { x: 0, y: 33, width: 80, height: 6 }
 
 === support panes side=Left sessions=Standard threshold=96 (480x40) ===
-╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                    ☰ ││                                                                                                                                                                                                                                                                                                                                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                                                                                                                                                                                                                                                                                                                                                                                              │
 ╭ Sessions ───────────────────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                                                                                                                                                                                                                                                                                              │
@@ -518,7 +518,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 0, y: 3, width: 80, height: 36 }; transcript=Rect { x: 80, y: 0, width: 400, height: 26 }; prompt=Rect { x: 80, y: 26, width: 400, height: 4 }; targets=Rect { x: 80, y: 30, width: 400, height: 3 }; quota=Rect { x: 80, y: 33, width: 400, height: 6 }
 
 === support panes side=Left sessions=Maximized threshold=111 (110x40) ===
-╭ Workspaces ────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
+╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ default                                           ☰ ││                                                     │
 ╰─────────────────────────────────────────────────────╯│                                                     │
 ╭ Sessions ──────────────────────────────── ▁   ▪   □ ╮│                                                     │
@@ -561,7 +561,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 0, y: 3, width: 55, height: 27 }; transcript=Rect { x: 55, y: 0, width: 55, height: 26 }; prompt=Rect { x: 55, y: 26, width: 55, height: 4 }; targets=Rect { x: 0, y: 30, width: 110, height: 3 }; quota=Rect { x: 0, y: 33, width: 110, height: 6 }
 
 === support panes side=Left sessions=Maximized threshold=111 (111x40) ===
-╭ Workspaces ────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────── ◇   ⋯───╮
+╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────── ◇   ⋯───╮
 │ default                                           ☰ ││                                                      │
 ╰─────────────────────────────────────────────────────╯│                                                      │
 ╭ Sessions ──────────────────────────────── ▁   ▪   □ ╮│                                                      │
@@ -604,7 +604,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 0, y: 3, width: 55, height: 36 }; transcript=Rect { x: 55, y: 0, width: 56, height: 26 }; prompt=Rect { x: 55, y: 26, width: 56, height: 4 }; targets=Rect { x: 55, y: 30, width: 56, height: 3 }; quota=Rect { x: 55, y: 33, width: 56, height: 6 }
 
 === support panes side=Left sessions=Maximized threshold=111 (80x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -647,7 +647,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 layout: sessions=Rect { x: 0, y: 3, width: 40, height: 27 }; transcript=Rect { x: 40, y: 0, width: 40, height: 26 }; prompt=Rect { x: 40, y: 26, width: 40, height: 4 }; targets=Rect { x: 0, y: 30, width: 80, height: 3 }; quota=Rect { x: 0, y: 33, width: 80, height: 6 }
 
 === support panes side=Left sessions=Maximized threshold=111 (480x40) ===
-╭ Workspaces ─────────────────────────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────────────────────────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                                                                        ☰ ││                                                                                                                                                                                                                                                                                                                                                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                                                                                                                                                                                                                                                                                                                                                          │
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                                                                                                                                                                                                                                                                          │
@@ -862,7 +862,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 460, y: 3, width: 20, height: 36 }; transcript=Rect { x: 0, y: 0, width: 460, height: 26 }; prompt=Rect { x: 0, y: 26, width: 460, height: 4 }; targets=Rect { x: 0, y: 30, width: 460, height: 3 }; quota=Rect { x: 0, y: 33, width: 460, height: 6 }
 
 === support panes side=Right sessions=Standard threshold=96 (95x40) ===
-╭ Browse | Conversation ───────────────────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ───────────────────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                     ││ default                            ☰ │
 │                                                     │╰──────────────────────────────────────╯
 │                                                     │╭ Sessions ───────────────── ▁   ▪   □ ╮
@@ -905,7 +905,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette 
 layout: sessions=Rect { x: 55, y: 3, width: 40, height: 27 }; transcript=Rect { x: 0, y: 0, width: 55, height: 26 }; prompt=Rect { x: 0, y: 26, width: 55, height: 4 }; targets=Rect { x: 0, y: 30, width: 95, height: 3 }; quota=Rect { x: 0, y: 33, width: 95, height: 6 }
 
 === support panes side=Right sessions=Standard threshold=96 (96x40) ===
-╭ Browse | Conversation ────────────────────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────────────────────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                      ││ default                            ☰ │
 │                                                      │╰──────────────────────────────────────╯
 │                                                      │╭ Sessions ───────────────── ▁   ▪   □ ╮
@@ -948,7 +948,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 56, y: 3, width: 40, height: 36 }; transcript=Rect { x: 0, y: 0, width: 56, height: 26 }; prompt=Rect { x: 0, y: 26, width: 56, height: 4 }; targets=Rect { x: 0, y: 30, width: 56, height: 3 }; quota=Rect { x: 0, y: 33, width: 56, height: 6 }
 
 === support panes side=Right sessions=Standard threshold=96 (80x40) ===
-╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                      ││ default                            ☰ │
 │                                      │╰──────────────────────────────────────╯
 │                                      │╭ Sessions ───────────────────── ▁   ▪ ╮
@@ -991,7 +991,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 layout: sessions=Rect { x: 40, y: 3, width: 40, height: 27 }; transcript=Rect { x: 0, y: 0, width: 40, height: 26 }; prompt=Rect { x: 0, y: 26, width: 40, height: 4 }; targets=Rect { x: 0, y: 30, width: 80, height: 3 }; quota=Rect { x: 0, y: 33, width: 80, height: 6 }
 
 === support panes side=Right sessions=Standard threshold=96 (480x40) ===
-╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                                                                                                                                                                                                                                                                                                                                                                              ││ default                                                                    ☰ │
 │                                                                                                                                                                                                                                                                                                                                                                                                              │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                                                                                                                                                                                                                                                                                                                                                                                              │╭ Sessions ───────────────────────────────────────────────────────── ▁   ▪   □ ╮
@@ -1034,7 +1034,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 400, y: 3, width: 80, height: 36 }; transcript=Rect { x: 0, y: 0, width: 400, height: 26 }; prompt=Rect { x: 0, y: 26, width: 400, height: 4 }; targets=Rect { x: 0, y: 30, width: 400, height: 3 }; quota=Rect { x: 0, y: 33, width: 400, height: 6 }
 
 === support panes side=Right sessions=Maximized threshold=111 (110x40) ===
-╭ Browse | Conversation ───────────────────── ◇   ⋯───╮╭ Workspaces ────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ───────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                     ││ default                                           ☰ │
 │                                                     │╰─────────────────────────────────────────────────────╯
 │                                                     │╭ Sessions ──────────────────────────────── ▁   ▪   □ ╮
@@ -1077,7 +1077,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 55, y: 3, width: 55, height: 27 }; transcript=Rect { x: 0, y: 0, width: 55, height: 26 }; prompt=Rect { x: 0, y: 26, width: 55, height: 4 }; targets=Rect { x: 0, y: 30, width: 110, height: 3 }; quota=Rect { x: 0, y: 33, width: 110, height: 6 }
 
 === support panes side=Right sessions=Maximized threshold=111 (111x40) ===
-╭ Browse | Conversation ────────────────────── ◇   ⋯───╮╭ Workspaces ────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                      ││ default                                           ☰ │
 │                                                      │╰─────────────────────────────────────────────────────╯
 │                                                      │╭ Sessions ──────────────────────────────── ▁   ▪   □ ╮
@@ -1120,7 +1120,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 layout: sessions=Rect { x: 56, y: 3, width: 55, height: 36 }; transcript=Rect { x: 0, y: 0, width: 56, height: 26 }; prompt=Rect { x: 0, y: 26, width: 56, height: 4 }; targets=Rect { x: 0, y: 30, width: 56, height: 3 }; quota=Rect { x: 0, y: 33, width: 56, height: 6 }
 
 === support panes side=Right sessions=Maximized threshold=111 (80x40) ===
-╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮
 │                                      ││ default                            ☰ │
 │                                      │╰──────────────────────────────────────╯
 │                                      │╭ Sessions ───────────────────── ▁   ▪ ╮
@@ -1163,7 +1163,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 layout: sessions=Rect { x: 40, y: 3, width: 40, height: 27 }; transcript=Rect { x: 0, y: 0, width: 40, height: 26 }; prompt=Rect { x: 0, y: 26, width: 40, height: 4 }; targets=Rect { x: 0, y: 30, width: 80, height: 3 }; quota=Rect { x: 0, y: 33, width: 80, height: 6 }
 
 === support panes side=Right sessions=Maximized threshold=111 (480x40) ===
-╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ──────────────────────────────────────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │                                                                                                                                                                                                                                                                                                                                                                                          ││ default                                                                                        ☰ │
 │                                                                                                                                                                                                                                                                                                                                                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                                                                                                                                                                                                                                                                                                                                          │╭ Sessions ───────────────────────────────────────────────────────────────────────────── ▁   ▪   □ ╮
@@ -1209,7 +1209,7 @@ layout: sessions=Rect { x: 380, y: 3, width: 100, height: 36 }; transcript=Rect 
 current · codex-1 · podman
 Source: /projects/current
 Working: /actual/checkout · branch: feature-x · shared folder
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1254,7 +1254,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 action: GoLaunch { recipe: GoRecipe { profile_id: "codex-1", target_id: "podman", bundle_id: Some("hel"), project_directory: None, create_managed_worktree: Some(false), subagents: Some(AllModels), additional_mounts: [], resource_allocation: None } }
 
 === failed destroy transition and recovery guidance (100x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation  Transition · Destroying ─ ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Destroying ─ ◇   ⋯───╮
 │ default ×1                         ☰ ││podman · ACP pretty name                                  │
 ╰──────────────────────────────────────╯│Operation: Destroying                                     │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│Current stage: waiting                                    │

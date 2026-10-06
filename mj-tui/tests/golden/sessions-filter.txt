@@ -1,5 +1,5 @@
 === Unicode state filter and title clear chip (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ S · /ses · blocked × ───── ▁   ▪   □ ╮│                                                                              │
@@ -41,7 +41,7 @@
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 
 === Unicode click on first label cell leaves filter active (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ S · /ses · blocked × ───── ▁   ▪   □ ╮│                                                                              │
@@ -84,7 +84,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 click=(6,3); action=None; filter retained=true
 
 === Unicode click on last label cell leaves filter active (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ S · /ses · blocked × ───── ▁   ▪   □ ╮│                                                                              │
@@ -127,7 +127,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 click=(19,3); action=None; filter retained=true
 
 === Unicode clear chip drops search and state filters (120x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -170,7 +170,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 chip=(21,3) glyph='×'; action=None; filter active=false
 
 === ASCII state filter and title clear chip (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + S - /ses - blocked x ----- -   =   + +|                                                                              |
@@ -212,7 +212,7 @@ chip=(21,3) glyph='×'; action=None; filter active=false
 Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
 
 === ASCII click on first label cell leaves filter active (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + S - /ses - blocked x ----- -   =   + +|                                                                              |
@@ -255,7 +255,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 click=(6,3); action=None; filter retained=true
 
 === ASCII click on last label cell leaves filter active (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + S - /ses - blocked x ----- -   =   + +|                                                                              |
@@ -298,7 +298,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 click=(19,3); action=None; filter retained=true
 
 === ASCII clear chip drops search and state filters (120x40) ===
-+ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
++ Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ---------------------------------------------- +   .---+
 | default                            = ||                                                                              |
 +--------------------------------------+|                                                                              |
 + Sessions ----------------- -   =   + +|                                                                              |
@@ -341,7 +341,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 chip=(21,3) glyph='x'; action=None; filter active=false
 
 === inactive filter input follows buttons at 140 columns (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -384,7 +384,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Sessions action row: "│ Create   Open   Filter: ___________________│"; filter active: false
 
 === inactive filter input follows buttons at 80 columns (80x40) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -471,7 +471,7 @@ action row: "│ Create   Open    │"; hidden sessions: 0
 click Filter input: None; editing: true
 
 === typed filter narrows the Sessions list (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /nomatch × ────────── ▁   ▪   □ ╮│                                                                                            │
@@ -514,7 +514,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 query/cursor: ("nomatch", 7); hidden sessions: 0; row: "│ Create   Open   Filter: nomatch ___________│"
 
 === Esc clears the filter input (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -557,7 +557,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 filter active: false
 
 === readline Left (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -600,7 +600,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@15
 
 === readline Right (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -643,7 +643,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@16
 
 === readline Home (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -686,7 +686,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@0
 
 === readline End (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -729,7 +729,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@16
 
 === readline Ctrl-A (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -772,7 +772,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@0
 
 === readline Ctrl-E (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -815,7 +815,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@16
 
 === readline Ctrl-B (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -858,7 +858,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@15
 
 === readline Ctrl-F (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -901,7 +901,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@16
 
 === readline Alt-B (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -944,7 +944,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@11
 
 === readline Alt-B again (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -987,7 +987,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@6
 
 === readline Alt-F (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha beta gamma × ─ ▁   ▪   □ ╮│                                                                                            │
@@ -1030,7 +1030,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha beta gamma"@10
 
 === readline Delete (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha betagamma × ── ▁   ▪   □ ╮│                                                                                            │
@@ -1073,7 +1073,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha betagamma"@10
 
 === readline Backspace (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha betgamma × ─── ▁   ▪   □ ╮│                                                                                            │
@@ -1116,7 +1116,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha betgamma"@9
 
 === readline Ctrl-H (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha begamma × ──── ▁   ▪   □ ╮│                                                                                            │
@@ -1159,7 +1159,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha begamma"@8
 
 === readline Ctrl-W (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha gamma × ────── ▁   ▪   □ ╮│                                                                                            │
@@ -1202,7 +1202,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha gamma"@6
 
 === readline Ctrl-K (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha × ──────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1245,7 +1245,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha "@6
 
 === readline Ctrl-A before insert (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha × ──────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1288,7 +1288,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha "@0
 
 === readline insert x (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /xalpha × ─────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1331,7 +1331,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "xalpha "@1
 
 === readline Ctrl-U (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha × ──────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1374,7 +1374,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 input/cursor: "alpha "@0
 
 === Up leaves text editing for the Sessions pane (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /alpha × ──────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1417,7 +1417,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 query/cursor after Up: ("alpha ", 0)
 
 === slash opens filter input (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /q × ──────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1460,7 +1460,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 editing after slash: true
 
 === Enter keeps text and leaves editing (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /q × ──────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1503,7 +1503,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 query after Enter: ("q", 1); editing: false
 
 === slash returns focus to the filter input (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /q × ──────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1546,7 +1546,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 editing after slash: true
 
 === Esc after slash removes filter (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1589,7 +1589,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 filter active: false
 
 === ASCII symbols keep the filter row ASCII (140x40) ===
-+ Workspaces ------------- * MJOLNIR v2.28.0 ++ Browse | Conversation ------------------------------------------------------------ +   .---+
++ Workspaces -------------- * MJOLNIR vX.Y.Z ++ Browse | Conversation ------------------------------------------------------------ +   .---+
 | default                                  = ||                                                                                            |
 +--------------------------------------------+|                                                                                            |
 + Sessions - /q x ---------------- -   =   + +|                                                                                            |
@@ -1632,7 +1632,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 filter row: "| Create   Open   Filter: q _________________|"; ASCII: true
 
 === branch name matches without regard to case (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /OCTOPUS × ────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1675,7 +1675,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 hidden sessions: 0
 
 === additional text hides the branch match (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions · /OCTOPUSx × ───────── ▁   ▪   □ ╮│                                                                                            │
