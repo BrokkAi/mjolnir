@@ -13,13 +13,13 @@ use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 
 /// Delegation policy is delivered through initialization, never a tool description.
-const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before collecting that context yourself. Keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice yourself only when it needs your whole context, briefing a child would exceed doing it yourself, or a child has already failed it once; state the reason in one sentence. Re-task a wrong or incomplete handback once with the correction and failing evidence; take over a second failed handback and note it in your report. Children running suites report test names, reasons and log paths; run a suite yourself only to reproduce a reported failure, and do not repeat green suites. You own design, integrated review, the commit and final acceptance. Children can profile and measure, but performance design is usually beyond their abilities: have them collect profiles and timings, then decide the design yourself. Do not duplicate assignments while children work on them. Give a focused outcome, constraints, ownership boundaries and required evidence in instructions; point to relevant files, symbols, line ranges and earlier reports. Children share your target and filesystem but do not receive your full conversation automatically. Starting files are pointers, not a whitelist. Before spawning, give follow-up work through send_input to an idle child that already has useful context; spawn for independent work or when the old context would mislead it.";
+const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before gathering that context yourself; keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices, each with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice only when it needs your whole context, briefing would cost more than doing it, or a child already failed it once; say why in one sentence. You own design, integrated review, the commit and final acceptance. Collect reports with wait or list_agents; nothing is pushed to you, and a prompt saying children finished has no child output. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Re-task a wrong or incomplete handback once with the correction and failing evidence; take over a second failure and note it in your report. In instructions, give the outcome, constraints, ownership boundaries and required evidence, with pointers to files, symbols, line ranges and earlier reports. Children share your target and filesystem, not your conversation; named files are pointers, not a whitelist. Children running suites report test names, reasons and log paths; run a suite yourself only to reproduce a reported failure, never to repeat a green one. Children can collect profiles and timings; decide performance design yourself. Do not duplicate work children are doing. Before spawning, give follow-up work through send_input to an idle child that already has useful context; spawn for independent work or when old context would mislead.";
 
 /// Reports reach the model through `wait`; a prompt can tell the parent one is
 /// ready without including the child's output.
 static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{DELEGATION_ROUTING} Collect reports through wait or list_agents. A prompt may tell you that one or more children finished; call wait to collect their reports. That prompt contains no child output. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Finished children are parked and hold no processes. send_input resumes one with its conversation intact. Close children you no longer need, including failed children after reading their error. The user can see children in the Sub-agents workspace."
+        "{DELEGATION_ROUTING} Finished children are parked and hold no processes; send_input resumes one with its conversation intact. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
     )
 });
 
@@ -684,6 +684,15 @@ mod tests {
                     replies.iter().find(|r| r["id"] == 1).unwrap()["result"]["instructions"]
                         .as_str()
                         .unwrap();
+                // Claude Code keeps only the first 2,048 characters of a
+                // server's instructions and drops the rest unseen.
+                if harness != HarnessKind::Codex {
+                    assert!(
+                        instructions.chars().count() <= 2048,
+                        "{role} {harness:?} instructions are {} characters",
+                        instructions.chars().count()
+                    );
+                }
                 let tools = replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["tools"]
                     .as_array()
                     .unwrap();
