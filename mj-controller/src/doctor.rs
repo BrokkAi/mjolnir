@@ -2393,10 +2393,15 @@ fn worker_freshness_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
         .ok()
         .filter(|metadata| mj_client::daemon::process_is_alive(metadata.pid));
     let pinned = pinned_worker_digests();
-    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = vec![(
-        "this host".to_owned(),
-        crate::controller::native_worker_binary_prerequisite(),
-    )];
+    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = Vec::new();
+    // A machine that runs no worker, such as Windows, has none of its own
+    // to resolve; its sessions use the Linux workers checked below.
+    if mj_core::targets::HOST_RUNS_WORKERS {
+        sources.push((
+            "this host".to_owned(),
+            crate::controller::native_worker_binary_prerequisite(),
+        ));
+    }
     for arch in container_worker_architectures(config) {
         sources.push((
             format!("{arch} Linux targets"),
