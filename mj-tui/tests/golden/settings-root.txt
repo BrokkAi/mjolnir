@@ -244,14 +244,14 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Advanced                                                                          │
-  │ Optional diagnostics and display details for the activity surface.                           │
+  │ Display options: activity clocks, session order, symbols, and how tool calls show.           │
   │                                                                                              │
   │                                                                                              │
   │   Detailed activity clocks                                                                ☐  │
   │   Session order                                                                   project ▾  │
   │   Symbols                                                            Follows the terminal ▾  │
-  │                                                                                              │
-  │                                                                                              │
+  │   Tool calls                                                                      Grouped ▾  │
+  │   Tool output lines                                                                       5  │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
