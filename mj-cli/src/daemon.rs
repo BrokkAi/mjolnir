@@ -1115,8 +1115,7 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
         }
         // SAFETY: the handle is open with PROCESS_TERMINATE.
         if unsafe { TerminateProcess(handle.0, 1) } == 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("stop superseded Mjolnir daemon");
+            return Err(std::io::Error::last_os_error()).context("stop superseded Mjolnir daemon");
         }
     }
     wait_for_exit(metadata.pid).await.with_context(|| {
