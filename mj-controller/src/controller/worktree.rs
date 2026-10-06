@@ -724,10 +724,15 @@ pub fn local_project_repository(
 pub(super) fn apply_raw_to_workspace(
     record: &mut SessionRecord,
     conversion: &RawToWorkspaceConversion,
-) {
+) -> Result<()> {
+    let bundle_id = conversion
+        .bundle_id
+        .clone()
+        .context("raw-to-workspace bundle was not saved")?;
     record.project_directory = None;
     record.managed_worktree = None;
-    record.bundle_id.clone_from(&conversion.bundle_id);
+    record.bundle_id = bundle_id;
+    Ok(())
 }
 
 /// A resume that changes how a session is represented, resolved before the
@@ -740,6 +745,13 @@ pub(super) enum ResumeConversion {
 
 impl ResumeConversion {
     pub(super) fn raw_to_workspace(&self) -> Option<&RawToWorkspaceConversion> {
+        match self {
+            Self::RawToWorkspace(conversion) => Some(conversion),
+            Self::WorkspaceToRaw(_) => None,
+        }
+    }
+
+    pub(super) fn raw_to_workspace_mut(&mut self) -> Option<&mut RawToWorkspaceConversion> {
         match self {
             Self::RawToWorkspace(conversion) => Some(conversion),
             Self::WorkspaceToRaw(_) => None,
@@ -776,8 +788,8 @@ pub(super) fn apply_workspace_to_raw(
     record.managed_worktree = Some(conversion.worktree.clone());
 }
 
-/// Everything a raw-to-workspace resume needs, resolved before the session
-/// record or the configuration changes.
+/// Everything a raw-to-workspace resume needs before the session record or
+/// configuration changes. The bundle id is filled after the config update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RawToWorkspaceConversion {
     /// The checkout whose branch, head commit, and dirty state move into the
@@ -790,18 +802,81 @@ pub(super) struct RawToWorkspaceConversion {
     /// workspace always clones from a network remote, so the checkout's own
     /// remote becomes the converted session's provenance.
     pub(super) source: mj_core::remote_git::NetworkGitSource,
-    pub(super) bundle_id: String,
-    /// Set when the configuration does not already describe this checkout.
-    pub(super) new_bundle: Option<ProjectBundle>,
+    /// Set by the config transaction that saves or reuses the bundle.
+    pub(super) bundle_id: Option<String>,
+    /// The bundle definition to resolve against the latest config.
+    pub(super) planned_bundle: PlannedRawWorkspaceBundle,
     /// Removed once the target holds the checkout, and only then.
     pub(super) retire: Option<ManagedWorktree>,
 }
 
-/// Resolve where a raw session's checkout lives and which bundle will stand in
-/// for it. Reads Git; changes nothing.
+/// An id-free bundle definition for a raw checkout moving into a workspace.
+/// Its final id is chosen only while the config lock is held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PlannedRawWorkspaceBundle {
+    base_id: String,
+    repository: PathBuf,
+    destination: PathBuf,
+}
+
+impl PlannedRawWorkspaceBundle {
+    pub(super) fn new(repository: &Path, destination: &Path) -> Self {
+        let name = repository
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            base_id: crate::import::setup_style_id(&name),
+            repository: repository.to_path_buf(),
+            destination: destination.to_path_buf(),
+        }
+    }
+
+    /// Reuse an identical source/layout, or add it under the first free id.
+    /// Call this from the same `Config::update` closure that persists config.
+    pub(super) fn save_to(&self, config: &mut Config) -> String {
+        let describes_checkout = |bundle: &ProjectBundle| {
+            bundle.repositories.len() == 1
+                && bundle.repositories[0].github.is_none()
+                && bundle.repositories[0].local.as_deref() == Some(self.repository.as_path())
+                && bundle.repositories[0].destination == self.destination
+        };
+        if let Some((id, _)) = config
+            .bundles
+            .iter()
+            .find(|(_, bundle)| describes_checkout(bundle))
+        {
+            return id.clone();
+        }
+
+        let id = crate::import::unique_bundle_id(config, &self.base_id);
+        let bundle = ProjectBundle {
+            primary_repo: id.clone(),
+            repositories: vec![mj_core::config::ProjectRepository {
+                id: id.clone(),
+                github: None,
+                local: Some(self.repository.clone()),
+                destination: self.destination.clone(),
+                git_ref: None,
+            }],
+        };
+        config.bundles.insert(id.clone(), bundle);
+        id
+    }
+}
+
+impl RawToWorkspaceConversion {
+    pub(super) fn resolved_bundle_id(&self) -> Result<&str> {
+        self.bundle_id
+            .as_deref()
+            .context("raw-to-workspace bundle was not saved")
+    }
+}
+
+/// Resolve where a raw session's checkout lives and the bundle definition that
+/// will stand in for it. Reads Git; changes nothing.
 pub(super) fn plan_raw_to_workspace(
     session: &SessionRecord,
-    config: &Config,
     executor: &impl CommandExecutor,
 ) -> Result<RawToWorkspaceConversion> {
     let project_directory = session
@@ -846,8 +921,7 @@ pub(super) fn plan_raw_to_workspace(
             .file_name()
             .context("a raw project directory cannot be the filesystem root")?,
     );
-    let (bundle_id, new_bundle) =
-        converted_raw_bundle(config, &session.bundle_id, &repository, &destination);
+    let planned_bundle = PlannedRawWorkspaceBundle::new(&repository, &destination);
     // An isolated workspace is always a fresh network clone, so a checkout
     // with no network remote cannot become one. Resolve it here, while nothing
     // has changed yet, and say what to do about it.
@@ -863,57 +937,10 @@ pub(super) fn plan_raw_to_workspace(
         checkout,
         repository,
         source,
-        bundle_id,
-        new_bundle,
+        bundle_id: None,
+        planned_bundle,
         retire,
     })
-}
-
-/// The bundle a converted raw session references: one the configuration already
-/// has for exactly this checkout, or a new one for the caller to install.
-/// Reusing a match keeps a retried conversion from piling up bundles.
-fn converted_raw_bundle(
-    config: &Config,
-    session_bundle_id: &str,
-    repository: &Path,
-    destination: &Path,
-) -> (String, Option<ProjectBundle>) {
-    let describes_checkout = |bundle: &ProjectBundle| {
-        bundle.repositories.len() == 1
-            && bundle.repositories[0].github.is_none()
-            && bundle.repositories[0].local.as_deref() == Some(repository)
-            && bundle.repositories[0].destination == destination
-    };
-    if config
-        .bundles
-        .get(session_bundle_id)
-        .is_some_and(describes_checkout)
-    {
-        return (session_bundle_id.to_owned(), None);
-    }
-    if let Some((id, _)) = config
-        .bundles
-        .iter()
-        .find(|(_, bundle)| describes_checkout(bundle))
-    {
-        return (id.clone(), None);
-    }
-    let name = repository
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let id = crate::import::unique_bundle_id(config, &crate::import::setup_style_id(&name));
-    let bundle = ProjectBundle {
-        primary_repo: id.clone(),
-        repositories: vec![mj_core::config::ProjectRepository {
-            id: id.clone(),
-            github: None,
-            local: Some(repository.to_path_buf()),
-            destination: destination.to_path_buf(),
-            git_ref: None,
-        }],
-    };
-    (id, Some(bundle))
 }
 
 /// The repository id a converted raw session's archive uses. A raw checkpoint

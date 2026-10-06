@@ -817,9 +817,7 @@ impl Controller {
         {
             ResumePlan::RawToWorkspace => {
                 return Ok(Some(super::worktree::plan_raw_to_workspace(
-                    source,
-                    &self.config,
-                    executor,
+                    source, executor,
                 )?));
             }
             ResumePlan::WorkspaceToRaw => {

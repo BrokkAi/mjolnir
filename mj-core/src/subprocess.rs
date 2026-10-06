@@ -320,12 +320,48 @@ pub fn spawn_detached(command: &mut Command, log_path: &Path) -> Result<u32> {
     {
         spawn_detached_unix(command)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        disinherit_standard_handles();
+        // A hidden console and a process group of its own, as `setsid` gives
+        // a Unix child its own session: Ctrl-C in the launcher's terminal and
+        // closing it do not reach the child, and the console programs it runs
+        // open no window.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         // Windows has no zombie state: dropping the handle releases it while
         // the process keeps running.
         let child = command.spawn().context("spawn detached child process")?;
         Ok(child.id())
+    }
+}
+
+/// Keep this process's standard handles out of every child that is not
+/// handed them explicitly. Windows passes a child every inheritable handle,
+/// and of a Rust process's handles only the ones it inherited are
+/// inheritable: Rust creates its own non-inheritable and gives each child
+/// inheritable duplicates of exactly its stdio. A detached child that kept
+/// the launcher's stdout pipe would hold it open for its whole life, so a
+/// script reading `mj daemon restart` output would wait for the daemon to
+/// exit. Children given these handles still get them, as duplicates.
+#[cfg(windows)]
+fn disinherit_standard_handles() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle takes no pointers, and SetHandleInformation
+        // only clears a flag on a handle this process holds.
+        unsafe {
+            let handle = GetStdHandle(id);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 }
 
@@ -991,5 +1027,59 @@ mod tests {
         assert!(group_signal_error_is_ignorable(&denied));
         #[cfg(not(target_os = "macos"))]
         assert!(!group_signal_error_is_ignorable(&denied));
+    }
+
+    // Hard-won: #1235: A detached Windows daemon kept its launcher's stdout pipe, so capturing `mj daemon restart` output hung until the daemon exited.
+    #[cfg(windows)]
+    #[test]
+    fn spawn_detached_child_keeps_no_standard_handle_of_its_launcher() {
+        // This test binary is its own launcher: run with this variable, the
+        // test detaches a long-lived child and exits, as `mj daemon restart`
+        // does, while its stdout is a pipe the outer test reads.
+        const LAUNCHER_LOG: &str = "MJ_TEST_DETACHED_LAUNCHER_LOG";
+        if let Some(log) = std::env::var_os(LAUNCHER_LOG) {
+            let mut child = std::process::Command::new("ping");
+            child.args(["-n", "60", "127.0.0.1"]);
+            let pid = super::spawn_detached(&mut child, std::path::Path::new(&log))
+                .expect("detach the long-lived child");
+            println!("detached={pid}");
+            return;
+        }
+        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::Duration;
+
+        let log_dir = tempfile::tempdir().expect("create log directory");
+        let mut launcher = std::process::Command::new(std::env::current_exe().unwrap());
+        launcher
+            .args([
+                "--exact",
+                "subprocess::tests::spawn_detached_child_keeps_no_standard_handle_of_its_launcher",
+                "--nocapture",
+            ])
+            .env(LAUNCHER_LOG, log_dir.path().join("child.log"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut launcher = launcher.spawn().expect("start the launcher");
+        let mut stdout = launcher.stdout.take().expect("take the launcher's stdout");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = sender.send(stdout.read_to_string(&mut output).map(|_| output));
+        });
+        // The detached child pings for about a minute; EOF must come first.
+        let outcome = receiver.recv_timeout(Duration::from_secs(30));
+        launcher.wait().expect("reap the launcher");
+        let output = outcome
+            .expect("the pipe must reach EOF while the detached child is still running")
+            .expect("read the launcher's output");
+        let pid = output
+            .lines()
+            .find_map(|line| line.strip_prefix("detached="))
+            .unwrap_or_else(|| panic!("the launcher reports its child: {output}"));
+        let mut stop = std::process::Command::new("taskkill");
+        stop.args(["/PID", pid, "/F"]);
+        super::run_with_input(&mut stop, b"").expect("stop the detached child");
     }
 }

@@ -731,6 +731,7 @@ fn capacity_target(id: &str) -> DeploymentCapacityTarget {
         kind: DeploymentCapacityKind::Host,
         local: true,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }
 }

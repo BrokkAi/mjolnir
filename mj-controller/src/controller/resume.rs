@@ -205,7 +205,7 @@ impl Controller {
             // unreachable remote, a dirty submodule) are this preflight's
             // error, which every surface already reports.
             if describe_conversion && plan == ResumePlan::RawToWorkspace {
-                let preview = raw_conversion_preview_for(session, &self.config, executor)?;
+                let preview = raw_conversion_preview_for(session, executor)?;
                 return Ok(ResumeRepositorySourcePreflight::ConvertingRawCheckout {
                     receipt,
                     preview: Box::new(preview),
@@ -1135,10 +1135,9 @@ pub(super) fn verify_resume_checkpoint(
 
 pub fn raw_conversion_preview_for(
     session: &SessionRecord,
-    config: &Config,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::RawConversionPreview> {
-    let conversion = plan_raw_to_workspace(session, config, executor)?;
+    let conversion = plan_raw_to_workspace(session, executor)?;
     raw_conversion_preview(session, &conversion, executor)
 }
 
@@ -1599,10 +1598,10 @@ impl Controller {
             self.validate_project_directory(target_id, project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
-        let conversion = match plan {
+        let mut conversion = match plan {
             ResumePlan::InPlace => None,
             ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(
-                plan_raw_to_workspace(&previous, &self.config, executor)
+                plan_raw_to_workspace(&previous, executor)
                     .context("prepare the raw checkout for its new target")?,
             )),
             ResumePlan::WorkspaceToRaw => Some(ResumeConversion::WorkspaceToRaw(
@@ -1729,28 +1728,18 @@ impl Controller {
         });
         let github_token = self.github_token_for_session(session_id).await?;
 
-        // The configuration gains the bundle before the record points at it, so
-        // no persisted session ever names a bundle that is not there.
+        // Choose the bundle id against the latest config and save the bundle
+        // under the same lock before the record starts referring to it.
         if let Some(conversion) = conversion
-            .as_ref()
-            .and_then(ResumeConversion::raw_to_workspace)
-            && let Some(bundle) = &conversion.new_bundle
+            .as_mut()
+            .and_then(ResumeConversion::raw_to_workspace_mut)
         {
-            let (config, ()) = Config::update(|config| {
-                if let Some(existing) = config.bundles.get(&conversion.bundle_id) {
-                    ensure!(
-                        existing == bundle,
-                        "bundle {:?} was configured concurrently with a different definition; retry the resume",
-                        conversion.bundle_id
-                    );
-                } else {
-                    config
-                        .bundles
-                        .insert(conversion.bundle_id.clone(), bundle.clone());
-                }
-                Ok(())
+            let planned_bundle = conversion.planned_bundle.clone();
+            let (config, bundle_id) = Config::update(|config| {
+                Ok(planned_bundle.save_to(config))
             })
             .context("save the bundle for a converted raw session")?;
+            conversion.bundle_id = Some(bundle_id);
             self.config = config;
         }
 
@@ -1776,7 +1765,7 @@ impl Controller {
                 crate::project_catalog::snapshot(
                     self.config
                         .bundles
-                        .get(&conversion.bundle_id)
+                        .get(conversion.resolved_bundle_id()?)
                         .context("converted project is missing")?,
                     executor,
                     true,
@@ -1807,7 +1796,7 @@ impl Controller {
         record.last_error = None;
         match &conversion {
             Some(ResumeConversion::RawToWorkspace(conversion)) => {
-                apply_raw_to_workspace(record, conversion);
+                apply_raw_to_workspace(record, conversion)?;
                 record.project = converted_project;
             }
             Some(ResumeConversion::WorkspaceToRaw(conversion)) => {
@@ -1838,8 +1827,10 @@ impl Controller {
             // an existing project (an imported checkout of a repository another
             // bundle covers). The context then holds the canonical project, and
             // the record follows it so publication sees an unchanged context.
-            let bundle_id =
-                crate::database::rebind_session_bundle(session_id, &conversion.bundle_id)?;
+            let bundle_id = crate::database::rebind_session_bundle(
+                session_id,
+                conversion.resolved_bundle_id()?,
+            )?;
             self.state
                 .sessions
                 .get_mut(session_id)

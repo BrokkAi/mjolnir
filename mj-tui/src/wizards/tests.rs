@@ -3051,6 +3051,7 @@ fn new_session_defaults_to_the_latest_size_on_its_host_and_clamps_to_capacity() 
         kind: mj_core::targets::DeploymentCapacityKind::Host,
         local: true,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(

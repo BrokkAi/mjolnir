@@ -1,6 +1,7 @@
 use super::*;
 use crate::fit_session_name;
-use mj_chat::components::{ChoiceList, ControlKind, TabStrip};
+use crate::session_cpu_report::CpuMetric;
+use mj_chat::components::{ButtonColumn, ChoiceList, ColumnSplit, ControlKind, TabStrip};
 
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
 /// action last. This is the single declaration used by both key handling and
@@ -532,12 +533,16 @@ pub(crate) fn render_session_cpu_report(
     dialog: &SessionCpuReportDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let groups = crate::session_cpu_report::report_groups(dashboard);
+    let metric = dialog.metric.get();
+    let groups = crate::session_cpu_report::report_groups(dashboard, metric);
     let group_index = super::reconcile_session_cpu_report(dashboard, dialog, &groups);
+    // Sized for the longest machine, so switching tabs never resizes it.
     let popup_height = u16::try_from(
-        group_index
-            .and_then(|index| groups.get(index))
-            .map_or(9, |group| group.lines.len().saturating_add(7).clamp(9, 30)),
+        groups
+            .iter()
+            .map(|group| group.lines.len())
+            .max()
+            .map_or(9, |lines| lines.saturating_add(8).clamp(9, 30)),
     )
     .unwrap_or(30);
     let popup = centered_modal(frame, surfaces, 80, popup_height, area);
@@ -555,17 +560,40 @@ pub(crate) fn render_session_cpu_report(
         dismissible_modal_title(&mut form, popup, "CPU by session", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
     let tabs_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let list_area = Rect::new(
+    // A blank row parts the tabs from the list.
+    let body_area = Rect::new(
         inner.x,
-        inner.y.saturating_add(1),
+        inner.y.saturating_add(2),
         inner.width,
-        inner.height - 3,
+        inner.height - 4,
     );
     let hint_area = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let check = theme::glyphs().check;
+    let mark = |shown: CpuMetric, label: &str| {
+        if shown == metric {
+            format!("{check} {label}")
+        } else {
+            format!(
+                "{} {label}",
+                " ".repeat(ratatui::text::Span::raw(check).width())
+            )
+        }
+    };
+    let hourly = mark(CpuMetric::Hourly, "Hourly");
+    let recent = mark(CpuMetric::Recent, "Recent");
+    let metric_buttons = [
+        (DialogControl::SessionCpuReportHourly, hourly.as_str(), true),
+        (DialogControl::SessionCpuReportRecent, recent.as_str(), true),
+    ];
+    let ColumnSplit {
+        body: list_area,
+        actions: metric_area,
+    } = ButtonColumn::split(body_area, &metric_buttons);
+    // Padded like a button, so each tab reads as one.
     let labels = groups
         .iter()
-        .map(crate::session_cpu_report::MachineReport::tab_label)
+        .map(|group| format!("  {}  ", group.tab_label()))
         .collect::<Vec<_>>();
     let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
     let selected_tab = group_index.unwrap_or(0);
@@ -612,6 +640,7 @@ pub(crate) fn render_session_cpu_report(
             DialogControl::SessionCpuReportRows,
         );
     }
+    ButtonColumn::render(frame, metric_area, &metric_buttons, &mut form);
     if form.focused().is_none() && !groups.is_empty() {
         form.focus(DialogControl::SessionCpuReportRows);
     }
