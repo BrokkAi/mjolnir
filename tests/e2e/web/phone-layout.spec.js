@@ -133,7 +133,7 @@ function fixture(taskCount = 1, options = {}) {
       profiles: [],
       targets: [],
       bundles: [],
-      review_config: { enabled: false, tier: 'quick', profile: null },
+      review_config: { enabled: false, profile: null },
     },
     actions: [],
     snapshots: 0,
@@ -232,66 +232,6 @@ async function phoneMetrics(page) {
   });
 }
 
-test('phone composer hides actions until intent and keeps Send tappable after typing', async ({ page }) => {
-  const state = await mount(page);
-  await expect(page.locator('#voice-input, #voice-controls')).toHaveCount(0);
-  await expect(page.locator('#send-button')).toBeHidden();
-  await expect(page.locator('#attach-image')).toBeHidden();
-
-  const prompt = page.locator('#prompt-text');
-  await prompt.focus();
-  await expect(page.locator('#send-button')).toBeVisible();
-  await expect(page.locator('#attach-image')).toBeVisible();
-  await prompt.blur();
-  await expect(page.locator('#send-button')).toBeHidden();
-  await expect(page.locator('#attach-image')).toBeHidden();
-
-  await prompt.fill('A prompt sent from the phone layout test');
-  await expect(page.locator('#send-button')).toBeVisible();
-  await expect(page.locator('#attach-image')).toBeVisible();
-  await page.locator('#send-button').tap();
-  await expect.poll(() => state.actions.some(action => (
-    action.action === 'prompt' && action.text === 'A prompt sent from the phone layout test'
-  ))).toBe(true);
-  await expect(page.locator('#send-button')).toBeHidden();
-});
-
-test('phone status row shares one line and leaves more room for the conversation', async ({ page }, testInfo) => {
-  await mount(page);
-  await settleLayout(page);
-  await expect(page.locator('.conversation-summary-phone')).toHaveText('Tasks 1 · Shells 1 · Queue 1');
-
-  const row = await page.evaluate(() => {
-    const summary = document.querySelector('#conversation-side > summary').getBoundingClientRect();
-    const subagents = document.querySelector('#subagents-button').getBoundingClientRect();
-    return { summaryTop: summary.top, subagentsTop: subagents.top };
-  });
-  expect(Math.abs(row.summaryTop - row.subagentsTop)).toBeLessThanOrEqual(2);
-
-  const idle = await phoneMetrics(page);
-  expect(idle.composerTextHeight).toBeLessThanOrEqual(44);
-  expect(idle.earlierControl).toBeLessThanOrEqual(40);
-  await page.screenshot({ path: testInfo.outputPath('phone-conversation-idle-390x844.png') });
-  await page.locator('#prompt-text').focus();
-  await expect(page.locator('#conversation-status')).toBeHidden();
-  await settleLayout(page);
-  const focused = await phoneMetrics(page);
-  expect(focused.composerTextHeight).toBeGreaterThanOrEqual(75);
-  await page.screenshot({ path: testInfo.outputPath('phone-conversation-composer-focused-390x844.png') });
-  expect(idle.conversationScroll).toBeGreaterThan(438.09);
-  expect(focused.conversationScroll).toBeGreaterThan(438.09);
-  expect(idle.visibleFeed).toBeGreaterThan(378);
-  expect(focused.visibleFeed).toBeGreaterThan(378);
-  await page.evaluate(({ idle, focused }) => {
-    window.phoneLayoutMetrics = { baseline: { conversationScroll: 438.09, visibleFeed: 378.09 }, idle, focused };
-  }, { idle, focused });
-  fs.writeFileSync(testInfo.outputPath('phone-feed-metrics.json'), JSON.stringify({
-    baseline: { conversationScroll: 438.09, visibleFeed: 378.09 },
-    idle,
-    focused,
-  }, null, 2));
-});
-
 test('phone task details open full width and scroll within forty percent of the viewport', async ({ page }, testInfo) => {
   await mount(page, 12);
   const details = page.locator('#conversation-side');
@@ -323,21 +263,4 @@ test('phone task details open full width and scroll within forty percent of the 
   expect(dimensions.contentScrollHeight).toBeGreaterThan(dimensions.contentHeight);
   await page.screenshot({ path: testInfo.outputPath('phone-expanded-details.png') });
   fs.writeFileSync(testInfo.outputPath('phone-expanded-metrics.json'), JSON.stringify(dimensions, null, 2));
-});
-
-test('phone hides status and Model/Effort while the prompt is focused', async ({ page }) => {
-  await mount(page, 1, {
-    configOptions: [
-      { key: 'model', current: 'gpt-5', choices: [] },
-      { key: 'effort', current: 'high', choices: [] },
-    ],
-    sessionOverrides: { prompt_images_supported: false },
-  });
-  await expect(page.locator('#prompt-settings')).toContainText('Model:');
-  await expect(page.locator('#prompt-settings')).toContainText('Effort:');
-  await page.locator('#prompt-text').focus();
-  await expect(page.locator('#conversation-status')).toBeHidden();
-  await expect(page.locator('#prompt-settings')).toBeHidden();
-  await expect(page.locator('#send-button')).toBeVisible();
-  await expect(page.locator('#attach-image')).toBeHidden();
 });

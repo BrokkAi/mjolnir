@@ -325,6 +325,18 @@ pub(crate) enum Confirmation {
         mode: Box<Mode>,
         intent: DismissalIntent,
     },
+    InstallMbx {
+        generation: u64,
+        key: serde_json::Value,
+        machine_id: String,
+        machine: Box<mj_core::config::Machine>,
+        host: String,
+        upgrading: bool,
+        profile_file: String,
+        profile_warning: Option<String>,
+        manual_path_line: Option<String>,
+        previous: Box<Mode>,
+    },
     CloseFailed {
         session_id: String,
         error: String,
@@ -560,7 +572,8 @@ impl Confirmation {
             | Self::LaunchFailed { .. }
             | Self::Dismiss { .. }
             | Self::ConvertRawCheckout { .. }
-            | Self::RecoverMove { .. } => None,
+            | Self::RecoverMove { .. }
+            | Self::InstallMbx { .. } => None,
         }
     }
 }
@@ -1593,6 +1606,7 @@ impl DashboardState {
                 | Confirmation::RepairRepositoryRemotes { previous: mode, .. }
                 | Confirmation::ConfigurationRepair { previous: mode, .. }
                 | Confirmation::LaunchFailed { previous: mode, .. }
+                | Confirmation::InstallMbx { previous: mode, .. }
                 | Confirmation::ConvertRawCheckout { previous: mode, .. } => {
                     self.restore_dismissed_mode(mode);
                 }
@@ -1669,6 +1683,29 @@ impl DashboardState {
                         return DashboardAction::None;
                     }
                     retry
+                } else {
+                    DashboardAction::None
+                }
+            }
+            (
+                Confirmation::InstallMbx {
+                    generation,
+                    key,
+                    machine_id,
+                    machine,
+                    previous,
+                    ..
+                },
+                index,
+            ) => {
+                self.restore_dismissed_mode(previous);
+                if index == 1 {
+                    DashboardAction::InstallMbx {
+                        generation,
+                        key,
+                        machine_id,
+                        machine,
+                    }
                 } else {
                     DashboardAction::None
                 }

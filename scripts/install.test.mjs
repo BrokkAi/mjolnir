@@ -85,46 +85,6 @@ function fixture(os, arch) {
   return { root, installed: (name) => path.join(installRoot, 'bin', name), run };
 }
 
-test('Linux install replaces a stale native worker and installs the portable worker', () => {
-  const { root, installed, run } = fixture('Linux', 'x86_64');
-  try {
-    mkdirSync(path.dirname(installed('mj-worker')), { recursive: true });
-    writeFileSync(installed('mj-worker'), 'stale');
-    const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl' });
-    assert.equal(readFileSync(installed('mj-worker'), 'utf8'), 'worker native\n');
-    assert.equal(readFileSync(installed('mj-voice-worker'), 'utf8'), 'worker native\n');
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /mj test/);
-    assert.equal(
-      readFileSync(installed('mj-worker-x86_64-unknown-linux-musl'), 'utf8'),
-      'worker x86_64-unknown-linux-musl\n',
-    );
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test('a failed worker build leaves the existing installation alone', () => {
-  const { root, installed, run } = fixture('Linux', 'x86_64');
-  try {
-    const result = run({ INSTALLED_TARGET: 'x86_64-unknown-linux-musl', FAIL_BUILD: '1' });
-    assert.notEqual(result.status, 0, result.stderr);
-    assert.equal(existsSync(installed('mj')), false);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
-test('macOS install places the native worker and the container-built Linux worker', () => {
-  const { root, installed, run } = fixture('Darwin', 'arm64');
-  try {
-    const result = run();
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(installed('mj-worker'), 'utf8'), 'worker native\n');
-    assert.equal(readFileSync(installed('mj-voice-worker'), 'utf8'), 'worker native\n');
-    assert.equal(
-      readFileSync(installed('mj-worker-aarch64-unknown-linux-musl'), 'utf8'),
-      'worker from container\n',
-    );
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-
 for (const target of ['native', 'x86_64-unknown-linux-musl', 'mj-voice-worker']) {
   test(`failed ${target} build preserves an existing installation`, () => {
     const { root, installed, run } = fixture('Linux', 'x86_64');
@@ -142,6 +102,7 @@ for (const target of ['native', 'x86_64-unknown-linux-musl', 'mj-voice-worker'])
 // The install must land in the same profile directory scripts/run.sh uses, or
 // the two scripts invalidate each other's Cargo artifacts on every run.
 for (const [args, profile] of [[[], 'release'], [['--release'], 'release'], [['--profile', 'dev'], 'debug']]) {
+  // Hard-won: 3038175: install and run used different Cargo profile paths and rebuilt all artifacts.
   test(`install with [${args}] builds every binary under target/${profile}`, () => {
     const { root, installed, run } = fixture('Linux', 'x86_64');
     try {

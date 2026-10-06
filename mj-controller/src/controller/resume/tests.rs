@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,6 +23,60 @@ use mj_transcript::projection::materialized_session_from_canonical;
 use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecutor};
 
 use super::*;
+
+#[test]
+fn in_place_subagent_prompt_roster_uses_latest_child_state() {
+    const CHILD: &str = "MJ_IN_PLACE_ROSTER_FRESHNESS_TEST_CHILD";
+    let test_name = crate::controller::test_support::test_name(
+        module_path!(),
+        "in_place_subagent_prompt_roster_uses_latest_child_state",
+    );
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name)
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent_id = "0123456789abcdef0123456789abcdef";
+    let mut parent = checkpoint_test_session(parent_id);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    crate::database::save_session(&parent).unwrap();
+    let child_directory = tempfile::tempdir().unwrap();
+    let mut child = parent.clone();
+    child.id = "fresh-child".into();
+    child.state = SessionState::Running;
+    child.target = Some(TargetLocator::LocalBare {
+        worker_root: child_directory.path().join(&child.id),
+    });
+    let relation = mj_core::subagent::SubagentRecord {
+        child_session_id: child.id.clone(),
+        parent_session_id: parent_id.into(),
+        task_name: "inspect current child state".into(),
+        profile_id: "claude".into(),
+        model: None,
+        effort: None,
+        working_directory: PathBuf::new(),
+        initial_prompt: "inspect current child state".into(),
+        request_key: "fresh-child-request".into(),
+        created_at: "2026-10-05T00:00:00Z".into(),
+        noticed_turn: None,
+        handback_tool: false,
+    };
+    crate::database::save_subagent_session(&child, &relation).unwrap();
+
+    let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
+    assert!(context.unwrap().contains("fresh-child; running"));
+    assert!(notice.unwrap().contains("fresh-child; running"));
+
+    child.state = SessionState::Parked;
+    crate::database::save_session(&child).unwrap();
+    let (context, notice) = super::load_in_place_subagent_prompt_data(parent_id).unwrap();
+    assert!(context.unwrap().contains("fresh-child; parked"));
+    assert!(notice.unwrap().contains("fresh-child; parked"));
+}
 
 #[tokio::test]
 async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across_reload() {
@@ -155,42 +208,10 @@ const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
 const RETIRED_WORKTREE_RESUME_TEST_CHILD: &str = "MJ_RETIRED_WORKTREE_RESUME_TEST_CHILD";
 const WORKER_PREFLIGHT_TEST_CHILD: &str = "MJ_WORKER_PREFLIGHT_TEST_CHILD";
 
-#[test]
-fn muse_resume_allows_workspace_relocation_before_provisioning() {
-    let mut config = resume_compatibility_config();
-    config
-        .targets
-        .insert("other-container".into(), config.targets["podman"].clone());
-    let controller = Controller {
-        config,
-        state: State::default(),
-    };
-    let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
-    session.harness_kind = HarnessKind::Muse;
-    assert!(
-        controller
-            .validate_muse_resume_destination(&session, HarnessKind::Muse, "podman")
-            .is_ok()
-    );
-    assert!(
-        controller
-            .validate_muse_resume_destination(&session, HarnessKind::Muse, "other-container")
-            .is_ok()
-    );
-    controller
-        .validate_muse_resume_destination(&session, HarnessKind::Muse, "ssh-bare")
-        .unwrap();
-    assert!(
-        controller
-            .validate_muse_resume_destination(&session, HarnessKind::Codex, "ssh-bare")
-            .is_ok()
-    );
-    assert_eq!(session.state, SessionState::Running);
-}
-
 /// Compaction costs minutes and paid model requests; resolving the worker
 /// binary is local and costs microseconds. A cross-harness resume that
 /// cannot produce a worker must say so before it compacts anything.
+// Hard-won: 721bea6b94f2: a missing worker binary was discovered only after minutes of paid transcript compaction.
 #[test]
 fn a_resume_preflights_the_worker_binary_before_compacting() {
     // MJ_WORKER_BINARY, MJ_DATA_DIR, and MJ_CONFIG_DIR are process-global,
@@ -790,88 +811,6 @@ fn lane_command(purpose: &str) -> CommandSpec {
     CommandSpec::new("hel", ["worker"]).purpose(purpose)
 }
 
-/// Launch progress must not claim "Start" while the target is still
-/// receiving the worker binary, the checkpoint archive and the restore.
-/// Everything before the daemon launch reports as Sync; the launch itself
-/// names its own stage, so a Sync-labelled executor cannot relabel it.
-#[test]
-fn start_begins_at_the_worker_launch_not_at_the_transfers_before_it() {
-    struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
-    }
-    impl CommandExecutor for RecordingExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    let session_id = "51515151515151515151515151515151";
-    let worker_root = format!("/var/lib/hel/workers/{session_id}");
-    let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
-    };
-    let syncing = StagedExecutor::new(&executor, ProvisionStage::Syncing);
-    let backend = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "abcdef0123456789".into(),
-        workspace_storage: Default::default(),
-    };
-
-    upload_checkpoint_spec(
-        &syncing,
-        &backend,
-        session_id,
-        Path::new("/archives/session.hel.zip"),
-        &format!("{worker_root}/restore.hel.zip"),
-    )
-    .unwrap();
-    execute_checked(
-        &syncing,
-        restore_command(
-            &backend,
-            session_id,
-            &format!("{worker_root}/restore-spec.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    // Deliberately run the launch through the Sync-labelled executor: it
-    // must still report Start.
-    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(session_id, "test launch")
-        .unwrap()
-        .unwrap();
-    crate::controller::worker_binary::start_worker(&owner, &syncing, &backend, &worker_root)
-        .unwrap();
-
-    let stages = executor
-        .commands
-        .borrow()
-        .iter()
-        .map(|command| (command.purpose.clone(), command.stage))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        stages,
-        vec![
-            (
-                "upload checkpoint specification".to_owned(),
-                Some(ProvisionStage::Syncing)
-            ),
-            (
-                "restore target checkpoint".to_owned(),
-                Some(ProvisionStage::Syncing)
-            ),
-            (
-                "start detached Mjolnir worker".to_owned(),
-                Some(ProvisionStage::Starting)
-            ),
-        ]
-    );
-}
 #[test]
 fn independent_target_lanes_run_at_the_same_time() {
     let executor = BarrierExecutor {
@@ -1008,6 +947,25 @@ fn cross_harness_lane_failure_cancels_and_joins_the_peer() {
 }
 
 #[test]
+fn local_bare_restore_reuses_verified_absolute_archive_without_upload() {
+    let archive = Path::new("/var/lib/hel/archives/session.hel.zip");
+    let remote = Path::new("/var/lib/hel/workers/session/restore.hel.zip");
+    let local = targets::TargetLocator::LocalBare {
+        worker_root: "/var/lib/hel/workers/session".into(),
+    };
+    let container = targets::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: "container".into(),
+        workspace_storage: Default::default(),
+    };
+
+    assert_eq!(restore_archive_path(&local, archive, remote), archive);
+    assert!(!should_upload_restore_archive(&local));
+    assert_eq!(restore_archive_path(&container, archive, remote), remote);
+    assert!(should_upload_restore_archive(&container));
+}
+
+#[test]
 fn a_projection_standing_at_the_archived_frontier_is_reused() {
     let digest = "a".repeat(64);
     let other = "b".repeat(64);
@@ -1032,25 +990,6 @@ fn a_projection_standing_at_the_archived_frontier_is_reused() {
             "{stored:?} must not be mistaken for the archived projection"
         );
     }
-}
-
-#[test]
-fn local_bare_restore_reuses_verified_absolute_archive_without_upload() {
-    let archive = Path::new("/var/lib/hel/archives/session.hel.zip");
-    let remote = Path::new("/var/lib/hel/workers/session/restore.hel.zip");
-    let local = targets::TargetLocator::LocalBare {
-        worker_root: "/var/lib/hel/workers/session".into(),
-    };
-    let container = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "container".into(),
-        workspace_storage: Default::default(),
-    };
-
-    assert_eq!(restore_archive_path(&local, archive, remote), archive);
-    assert!(!should_upload_restore_archive(&local));
-    assert_eq!(restore_archive_path(&container, archive, remote), remote);
-    assert!(should_upload_restore_archive(&container));
 }
 
 #[test]
@@ -1189,25 +1128,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         partial_checkout.managed_worktree
     );
     assert!(failure.to_string().contains("cleanup"));
-}
-#[test]
-fn failed_worktree_cleanup_notice_names_mjolnir_and_the_recovery_command() {
-    let notice = worktree_cleanup_notice(
-        Path::new("/workspace/project"),
-        &anyhow::anyhow!("permission denied"),
-    );
-
-    assert!(
-        notice.starts_with(
-            "Mjolnir could not remove the worktree at /workspace/project: permission denied."
-        ),
-        "{notice}"
-    );
-    assert!(
-        notice.contains("`git worktree remove --force /workspace/project`"),
-        "{notice}"
-    );
-    assert!(!notice.contains("Hel"), "{notice}");
 }
 #[test]
 fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
@@ -1994,6 +1914,7 @@ exit 0
             utility_handoff: None,
             projection_build: None,
             resume_notices: Vec::new(),
+            include_in_place_subagents: false,
             install_attached_resources: true,
             worker_root_reset: WorkerRootReset::FreshTarget,
             retire_after_ready: None,
@@ -2158,6 +2079,7 @@ exit 0
 /// prompt, so the restored worker cannot reload the archived one and opens a
 /// fresh one. The resume accepts it, records the new identity, and the session
 /// answers prompts.
+// Hard-won: 2f8ec62e13d6: retries of never-prompted sessions rejected the fresh native ID every time.
 #[cfg(unix)]
 #[test]
 fn a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_opened() {
@@ -2171,6 +2093,7 @@ fn a_never_prompted_session_resumes_into_the_fresh_native_session_its_worker_ope
 /// The identity check still protects history: a worker that opens a different
 /// native session without saying it replaced an unused one is refused, and the
 /// failed attempt leaves nothing behind in the transcript.
+// Hard-won: 2f8ec62e13d6: failed resume attempts left restart rows in the durable transcript.
 #[cfg(unix)]
 #[test]
 fn a_resume_that_opens_another_native_session_without_cause_is_refused() {
@@ -2185,6 +2108,7 @@ fn a_resume_that_opens_another_native_session_without_cause_is_refused() {
 /// prompt after the resume, through the relay's hidden context, and tells the
 /// person in one conversation line. The record forgets the child once the
 /// relay has the note.
+// Hard-won: d0e60898c487: after suspend stopped its children, the resumed model still believed they were running.
 #[cfg(unix)]
 #[test]
 fn a_resume_tells_the_agent_and_the_person_which_sub_agents_the_suspend_stopped() {

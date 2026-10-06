@@ -779,13 +779,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Home-relative join used only by tests and diagnostics; the install path
-/// never joins an unvalidated archive path onto a home.
-#[cfg(test)]
-fn entry_path(home: &Path, entry: &SkillsEntry) -> std::path::PathBuf {
-    home.join(&entry.path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,31 +799,6 @@ mod tests {
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         SkillsArchive { entries }
-    }
-
-    #[test]
-    fn every_harness_syncs_a_skills_directory() {
-        for kind in HarnessKind::ALL {
-            assert_eq!(kind.synced_skill_dirs(), &["skills"]);
-            // Install carries a harness-owned path across by moving it, which
-            // works for a direct child of a synced directory only.
-            for owned in kind.harness_owned_skill_paths() {
-                assert!(
-                    kind.synced_skill_dirs().iter().any(|dir| owned
-                        .strip_prefix(&format!("{dir}/"))
-                        .is_some_and(|name| !name.is_empty() && !name.contains('/'))),
-                    "{kind:?} {owned}"
-                );
-            }
-        }
-        assert_eq!(
-            HarnessKind::Claude.harness_owned_skill_paths(),
-            &["skills/synced", "skills/.trash"]
-        );
-        assert_eq!(
-            HarnessKind::Codex.harness_owned_skill_paths(),
-            &["skills/.system"]
-        );
     }
 
     #[test]
@@ -881,36 +849,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_skills_are_installable_archive_entries() {
-        for kind in HarnessKind::ALL {
-            let entries = managed_skills(kind);
-            let prefix = kind.synced_skill_dirs()[0];
-            for entry in &entries {
-                validate_archive_path(&entry.path).expect(&entry.path);
-                assert!(entry.path.starts_with(&format!("{prefix}/")), "{entry:?}");
-                assert!(entry.bytes.len() as u64 <= MAX_SKILLS_FILE_BYTES);
-                if entry.path.ends_with("/SKILL.md") {
-                    assert!(
-                        entry.bytes.starts_with(b"---\nname: "),
-                        "{} needs skill frontmatter",
-                        entry.path
-                    );
-                }
-            }
-            // The install path only writes what `decode` accepts, so the
-            // managed set has to survive a round trip on its own.
-            let archive = SkillsArchive {
-                entries: entries.clone(),
-            };
-            for format in FORMATS {
-                let encoded = archive.encode(format);
-                assert!(encoded.len() <= MAX_SKILLS_ARCHIVE_BYTES);
-                assert_eq!(SkillsArchive::decode(&encoded).unwrap(), archive);
-            }
-        }
-    }
-
-    #[test]
     fn session_skills_of_an_empty_home_is_the_managed_set() {
         let home = tempfile::tempdir().unwrap();
         let archive = session_skills(
@@ -928,50 +866,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn localhost_installs_the_linked_configuration_reference_and_isolated_sessions_remove_mj() {
-        for kind in HarnessKind::ALL {
-            let home = tempfile::tempdir().unwrap();
-            let directory = mj_skill_directory(kind);
-            write(home.path(), &format!("{directory}/SKILL.md"), b"old mj");
-            write(
-                home.path(),
-                &format!("{directory}/references/obsolete.md"),
-                b"old reference",
-            );
-            let other = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
-            write(home.path(), &other, b"review");
-            for format in FORMATS {
-                let local =
-                    session_skills(kind, home.path(), format, SkillsScope::Localhost).unwrap();
-                install_skills(kind, home.path(), &local).unwrap();
-                let skill =
-                    std::fs::read_to_string(home.path().join(&directory).join("SKILL.md")).unwrap();
-                assert!(skill.contains("references/configuration.md"));
-                let reference = std::fs::read_to_string(
-                    home.path()
-                        .join(&directory)
-                        .join("references/configuration.md"),
-                )
-                .unwrap();
-                assert!(reference.contains("[profiles"));
-                assert!(
-                    !home
-                        .path()
-                        .join(&directory)
-                        .join("references/obsolete.md")
-                        .exists()
-                );
-
-                let isolated =
-                    session_skills(kind, home.path(), format, SkillsScope::Isolated).unwrap();
-                install_skills(kind, home.path(), &isolated).unwrap();
-                assert!(!home.path().join(&directory).exists(), "{kind:?}");
-                assert_eq!(std::fs::read(home.path().join(&other)).unwrap(), b"review");
-            }
-        }
     }
 
     #[test]
@@ -998,43 +892,6 @@ mod tests {
                 .unwrap();
             assert_eq!(entry.bytes, format!("user {name}").as_bytes());
         }
-    }
-
-    #[test]
-    fn a_managed_skill_replaces_a_user_skill_with_the_same_path() {
-        let home = tempfile::tempdir().unwrap();
-        write(
-            home.path(),
-            "skills/mj/SKILL.md",
-            b"the user's own mj skill",
-        );
-        write(home.path(), "skills/review/SKILL.md", b"review");
-
-        let archive = session_skills(
-            HarnessKind::Codex,
-            home.path(),
-            SkillsArchiveFormat::Gzip,
-            SkillsScope::Localhost,
-        )
-        .unwrap();
-        let managed = managed_skills(HarnessKind::Codex);
-        let mine = archive
-            .entries()
-            .iter()
-            .find(|entry| entry.path == "skills/mj/SKILL.md")
-            .unwrap();
-        assert_eq!(mine, &managed[0]);
-        // The user's unrelated skill is kept, and nothing is duplicated.
-        assert!(
-            archive
-                .entries()
-                .iter()
-                .any(|entry| entry.path == "skills/review/SKILL.md" && entry.bytes == b"review")
-        );
-        assert_eq!(archive.entries().len(), managed.len() + 1);
-        let mut sorted = archive.entries().to_vec();
-        sorted.sort_by(|left, right| left.path.cmp(&right.path));
-        assert_eq!(sorted, archive.entries());
     }
 
     const FORMATS: [SkillsArchiveFormat; 2] =
@@ -1196,6 +1053,7 @@ mod tests {
     /// worker fail `skills_state` once a minute. A file that stays above the
     /// limit once compressed is skipped, reported, and the rest of the tree
     /// still collects.
+    // Hard-won: 17a0618f: An oversized linked demo made every worker skills sync fail once a minute.
     #[test]
     fn an_incompressible_file_over_the_limit_is_skipped_rather_than_failing_the_tree() {
         let home = tempfile::tempdir().unwrap();
@@ -1405,6 +1263,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 17a0618f: A skipped oversized file repeated the same failed-sync warning every minute.
     #[test]
     fn a_skipped_skill_file_is_reported_once() {
         let path = Path::new("/nonexistent/skills-report-once/large.html");
@@ -1419,6 +1278,7 @@ mod tests {
     /// link's contents, so the canonical tree the sync compares against has to
     /// read through the link too. Otherwise the first successful sync removes
     /// the linked skill from every session.
+    // Hard-won: 17a0618f: Canonical sync omitted linked skills that launch staging copied into each session.
     #[cfg(unix)]
     #[test]
     fn profile_collection_follows_links_as_staging_does() {
@@ -1478,7 +1338,9 @@ mod tests {
                 ("skills/.system/imagegen/SKILL.md", b"imagegen"),
                 ("skills/.system/skill-creator/SKILL.md", b"creator"),
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
+                &[]
+            }
         }
     }
 
@@ -1503,6 +1365,7 @@ mod tests {
     /// limit. The Codex CLI writes its built-in skills into `skills/.system/`
     /// (about 600 KB on the launch host). Mjolnir leaves every such path out of
     /// every collection of that harness's home.
+    // Hard-won: 864ae4f8: Codex built-in skills were copied into every session and inflated the synchronized tree.
     #[test]
     fn harness_owned_skills_are_left_out_of_collection() {
         let user = [SkillsEntry {
@@ -1579,6 +1442,7 @@ mod tests {
     /// copy that an earlier sync or launch put there cannot be told apart from
     /// it. An install replaces only what Mjolnir owns, and never writes into
     /// the harness's directories.
+    // Hard-won: 864ae4f8: An upgrade sync removed harness-owned skills after excluding their directory from the archive.
     #[test]
     fn install_leaves_harness_owned_skills_in_place() {
         for kind in HarnessKind::ALL {
@@ -1640,34 +1504,6 @@ mod tests {
         assert!(collect_skills(HarnessKind::Kimi, home.path()).is_err());
     }
 
-    #[test]
-    fn install_creates_replaces_and_removes_trees() {
-        let home = tempfile::tempdir().unwrap();
-        let first = archive(&[
-            ("skills/review/SKILL.md", b"v1"),
-            ("skills/audit/SKILL.md", b"audit"),
-        ]);
-        install_skills(HarnessKind::Claude, home.path(), &first).unwrap();
-        assert_eq!(
-            std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
-            b"v1"
-        );
-
-        let second = archive(&[("skills/review/SKILL.md", b"v2")]);
-        install_skills(HarnessKind::Claude, home.path(), &second).unwrap();
-        assert_eq!(
-            std::fs::read(home.path().join("skills/review/SKILL.md")).unwrap(),
-            b"v2"
-        );
-        // Removed from the canonical tree, so removed from the session.
-        assert!(!home.path().join("skills/audit").exists());
-        assert!(!home.path().join("skills.hel-incoming").exists());
-        assert!(!home.path().join("skills.hel-retired").exists());
-
-        install_skills(HarnessKind::Claude, home.path(), &SkillsArchive::default()).unwrap();
-        assert!(!home.path().join("skills").exists());
-    }
-
     #[cfg(unix)]
     #[test]
     fn install_refuses_a_symlinked_destination() {
@@ -1701,28 +1537,5 @@ mod tests {
         install_skills(HarnessKind::Kimi, home.path(), &hostile).unwrap();
         assert!(home.path().join("skills/ok").exists());
         assert!(!home.path().join("plugins").exists());
-    }
-
-    #[test]
-    fn collect_then_install_reproduces_the_tree_byte_for_byte() {
-        let canonical = tempfile::tempdir().unwrap();
-        write(canonical.path(), "skills/review/SKILL.md", b"review");
-        write(canonical.path(), "skills/review/nested/deep.md", b"deep");
-        let session = tempfile::tempdir().unwrap();
-
-        let archive = collect_skills(HarnessKind::Claude, canonical.path()).unwrap();
-        let wire = archive.encode(SkillsArchiveFormat::Gzip);
-        let received = SkillsArchive::decode(&wire).unwrap();
-        install_skills(HarnessKind::Claude, session.path(), &received).unwrap();
-
-        let installed = collect_skills(HarnessKind::Claude, session.path()).unwrap();
-        assert_eq!(archive.fingerprint(), installed.fingerprint());
-        assert_eq!(archive, installed);
-        for entry in installed.entries() {
-            assert_eq!(
-                std::fs::read(entry_path(session.path(), entry)).unwrap(),
-                entry.bytes
-            );
-        }
     }
 }

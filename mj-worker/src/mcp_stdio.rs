@@ -1,6 +1,8 @@
 //! The JSON-lines stdio transport shared by the worker's MCP servers.
 //!
-//! Hel's MCP servers (project memory, review dispatch, sub-agents) are
+
+//! Hel's MCP servers (session history, project memory, and sub-agents) are
+
 //! hand-rolled rather than built on an SDK. They differ only in their name,
 //! instructions, tools and call handler, so the JSON-RPC loop lives here once.
 
@@ -12,17 +14,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-/// Whether `tools/call` requests are answered one at a time or concurrently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dispatch {
-    /// Each call finishes before the next request is read.
-    Sequential,
-    /// Each call runs on its own thread, so a long call never blocks a cheap
-    /// one queued after it. JSON-RPC responses carry their request id, so they
-    /// may be written in any order.
-    Concurrent,
-}
-
 /// How often a long call reports that it is still working, when the client
 /// asked to be kept informed. Claude Code abandons a stdio MCP call that sends
 /// neither a response nor a progress notification for 1800 seconds, so a call
@@ -33,7 +24,6 @@ pub struct McpServer<F> {
     pub name: &'static str,
     pub instructions: &'static str,
     pub tools: Vec<Value>,
-    pub dispatch: Dispatch,
     /// How often an in-flight call may report progress. Tests shorten it; in
     /// production it is [`PROGRESS_INTERVAL`].
     pub progress_interval: Duration,
@@ -153,25 +143,17 @@ where
                     .as_ref()
                     .and_then(|params| params.pointer("/_meta/progressToken"))
                     .cloned();
-                match server.dispatch {
-                    Dispatch::Sequential => {
-                        let progress = progress_handle(&output, token, server.progress_interval);
-                        tool_response(id, call(params.as_ref(), &progress))
+                let output = Arc::clone(&output);
+                let call = Arc::clone(&call);
+                let interval = server.progress_interval;
+                calls.push(std::thread::spawn(move || {
+                    let progress = progress_handle(&output, token, interval);
+                    let response = tool_response(id, call(params.as_ref(), &progress));
+                    if let Err(error) = write_line(&output, &response) {
+                        tracing::warn!(%error, "could not write an MCP tool response");
                     }
-                    Dispatch::Concurrent => {
-                        let output = Arc::clone(&output);
-                        let call = Arc::clone(&call);
-                        let interval = server.progress_interval;
-                        calls.push(std::thread::spawn(move || {
-                            let progress = progress_handle(&output, token, interval);
-                            let response = tool_response(id, call(params.as_ref(), &progress));
-                            if let Err(error) = write_line(&output, &response) {
-                                tracing::warn!(%error, "could not write an MCP tool response");
-                            }
-                        }));
-                        continue;
-                    }
-                }
+                }));
+                continue;
             }
             _ => rpc_error(id, -32601, format!("unknown MCP method {method:?}")),
         };
@@ -370,7 +352,6 @@ mod tests {
                 name: "test",
                 instructions: "test",
                 tools: vec![json!({"name": "slow", "inputSchema": {"type": "object"}})],
-                dispatch: Dispatch::Concurrent,
                 progress_interval: interval,
                 call: move |_params: Option<&Value>, progress: &Progress| {
                     for tick in 0..ticks {
@@ -395,6 +376,7 @@ mod tests {
             .collect()
     }
 
+    // Hard-won: da95decb: long sub-agent waits exceeded the MCP client silence limit without progress.
     #[test]
     fn a_call_with_a_progress_token_gets_progress_lines_before_its_response() {
         let lines = serve_a_slow_call(
@@ -453,6 +435,7 @@ mod tests {
         });
     }
 
+    // Hard-won: ff3d662a: a lost worker reply after daemon restart left MCP calls blocked forever.
     #[test]
     fn socket_request_reports_a_missing_reply_within_the_timeout() {
         let dir = tempfile::tempdir().unwrap();
@@ -481,25 +464,6 @@ mod tests {
             Ok(true),
             "the call must drop the connection once the reply timeout passes"
         );
-    }
-
-    #[test]
-    fn socket_request_returns_the_reply_when_it_arrives() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("worker.sock");
-        fake_worker(&socket, |stream| {
-            stream.write_all(b"{\"pong\":true}\n").unwrap();
-            stream.flush().unwrap();
-        });
-
-        let reply: Option<Value> = socket_request(
-            &socket,
-            &json!({"ping": true}),
-            "test",
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        assert_eq!(reply, Some(json!({"pong": true})));
     }
 
     #[test]

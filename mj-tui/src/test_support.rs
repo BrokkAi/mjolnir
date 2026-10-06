@@ -29,15 +29,7 @@ pub(crate) fn key(code: KeyCode) -> KeyEvent {
 }
 
 /// The drawn buffer as one string per row.
-pub(crate) fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
-    (buffer.area.y..buffer.area.bottom())
-        .map(|y| {
-            (buffer.area.x..buffer.area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect()
-}
+pub(crate) use mj_chat::golden::buffer_lines;
 
 pub(crate) fn assert_dialog_spacing(lines: &[String], title: &str, action: &str) {
     let cells: Vec<Vec<char>> = lines.iter().map(|line| line.chars().collect()).collect();
@@ -229,6 +221,8 @@ pub(crate) fn mouse_at_row(kind: MouseEventKind, area: Rect, row_offset: u16) ->
 }
 
 pub(crate) fn config() -> Config {
+    // SetupDialog sizes itself from the NO_COLOR-aware summary before drawing.
+    crate::pin_no_color_override_for_test(true);
     Config {
         keys: Default::default(),
         jev: Default::default(),
@@ -660,21 +654,6 @@ pub(crate) fn thought(position: u64, text: impl Into<String>) -> Arc<TranscriptI
             streaming: false,
         },
     )
-}
-
-pub(crate) fn session_restart(position: u64) -> Arc<TranscriptItem> {
-    let mut item = transcript_item(
-        position,
-        TranscriptBody::System {
-            text: mj_core::transcript::SESSION_RESTART_TEXT.into(),
-        },
-    );
-    Arc::make_mut(&mut item).stable_id = format!(
-        "{}{}",
-        mj_core::transcript::SESSION_RESTART_ITEM_PREFIX,
-        position
-    );
-    item
 }
 
 pub(crate) fn work_interruption(position: u64) -> Arc<TranscriptItem> {

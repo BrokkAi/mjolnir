@@ -142,9 +142,8 @@ struct Opened {
 }
 
 /// Open a session through a fake muse-acp whose host grants session MCP,
-/// withholds it, or could not start. A session carries project memory; a
-/// reviewer carries its analyzer server instead.
-async fn open_muse(host: &str, reviewer: bool) -> Opened {
+/// withholds it, or could not start. A session carries project memory.
+async fn open_muse(host: &str) -> Opened {
     let root = tempfile::tempdir().unwrap();
     let script = root.path().join("muse_acp.py");
     let log = root.path().join("mcp.jsonl");
@@ -193,7 +192,7 @@ for line in sys.stdin:
         ]),
         cwd: root.path().to_path_buf(),
         additional_directories: Vec::new(),
-        project_memory: (!reviewer).then(|| ProjectMemoryLaunchConfig {
+        project_memory: Some(ProjectMemoryLaunchConfig {
             history_socket: None,
             project_key: "abc".into(),
             root: root.path().join("memory"),
@@ -201,18 +200,7 @@ for line in sys.stdin:
             repository_roots: BTreeMap::new(),
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }),
-        extra_mcp_servers: if reviewer {
-            vec![ReviewerMcpServer::new(
-                mj_core::worker_launch::ReviewMcpServer {
-                    name: "bifrost".into(),
-                    command: "bifrost".into(),
-                    args: Vec::new(),
-                },
-                Path::new("/worker"),
-            )]
-        } else {
-            Vec::new()
-        },
+        extra_mcp_servers: Vec::new(),
         resume_session: None,
         native_session_may_have_history: false,
         accepted_config: Default::default(),
@@ -265,9 +253,10 @@ for line in sys.stdin:
     }
 }
 
+// Hard-won: c5deb2a: Older Muse containers stopped working after upgrades when their adapter withheld MCP servers.
 #[tokio::test]
 async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_them() {
-    let opened = open_muse("granted", false).await;
+    let opened = open_muse("granted").await;
     opened.outcome.unwrap();
     assert!(opened.configured);
     assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
@@ -275,7 +264,7 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
 
     // A container keeps the adapter it was created with. Its session keeps
     // working without the tools, and the person is told why.
-    let opened = open_muse("withheld", false).await;
+    let opened = open_muse("withheld").await;
     opened.outcome.unwrap();
     assert!(opened.configured);
     assert_eq!(opened.received, [["mj-memory"]]);
@@ -289,24 +278,12 @@ async fn muse_sessions_receive_mcp_servers_and_say_so_when_the_host_withholds_th
     );
 }
 
-#[tokio::test]
-async fn a_muse_reviewer_without_its_analyzer_tools_does_not_start() {
-    let opened = open_muse("granted", true).await;
-    opened.outcome.unwrap();
-    assert!(opened.configured);
-    assert_eq!(opened.received, [["bifrost"]]);
-
-    let opened = open_muse("withheld", true).await;
-    let error = format!("{:#}", opened.outcome.unwrap_err());
-    assert!(error.contains("without its analyzer tools"), "{error}");
-    assert!(!opened.configured);
-}
-
+// Hard-won: c5deb2a: A Muse reviewer could run without the analyzer tools required to review safely.
 #[tokio::test]
 async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
     // A host that never started also withholds the grant; its diagnostic, not
     // the missing grant, is what the person has to act on.
-    let opened = open_muse("failed", true).await;
+    let opened = open_muse("failed").await;
     let error = format!("{:#}", opened.outcome.unwrap_err());
     assert!(error.contains("Muse Code is not logged in"), "{error}");
     assert!(!error.contains("MCP"), "{error}");

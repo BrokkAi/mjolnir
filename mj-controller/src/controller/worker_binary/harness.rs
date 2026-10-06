@@ -1,5 +1,5 @@
 use super::*;
-use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION};
+use mj_core::harness_runtime::{GROK_VERSION, KIMI_VERSION, OPENCODE_VERSION};
 
 /// The repository paths a worker opens. `session_id` and `container_workspace`
 /// identify the session whose workspace is used, which for a sub-agent child is
@@ -93,6 +93,15 @@ pub(in crate::controller) fn bridge_launch(
                 ],
             )
         }
+        mj_core::config::HarnessKind::OpenCode => (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                format!(
+                    "if command -v opencode >/dev/null 2>&1; then exec opencode acp; elif [ -x \"$HOME/.opencode/bin/opencode\" ]; then exec \"$HOME/.opencode/bin/opencode\" acp; elif command -v curl >/dev/null 2>&1; then curl -fsSL https://opencode.ai/install | bash -s -- --version {OPENCODE_VERSION} --no-modify-path >&2 && exec \"$HOME/.opencode/bin/opencode\" acp; else echo 'Mjolnir needs compatible OpenCode or curl for its official installer; add the tool to PATH' >&2; exit 127; fi"
+                ),
+            ],
+        ),
     }
 }
 
@@ -192,7 +201,7 @@ pub(in crate::controller) fn stage_profile(
     // Only the files peculiar to a harness are listed per harness. The
     // instruction file and the synced skill directories are the same facts the
     // rest of Hel reads off `HarnessKind`, so they are appended from there
-    // rather than repeated in all five arms.
+    // rather than repeated in every arm.
     let harness_files: &[&str] = match harness {
         mj_core::config::HarnessKind::Muse => {
             &["auth.json", "settings.json", "trust.json", "rules"]
@@ -216,6 +225,15 @@ pub(in crate::controller) fn stage_profile(
             "plugins",
         ],
         mj_core::config::HarnessKind::Grok => &["auth.json", "config.toml", "agent_id", "plugins"],
+        mj_core::config::HarnessKind::OpenCode => {
+            // OpenCode keeps its login in the data directory beside the
+            // configuration directory both share as a root.
+            &[
+                "opencode.json",
+                "opencode.jsonc",
+                ".data/opencode/auth.json",
+            ]
+        }
     };
     let allowlist: Vec<&str> = harness_files
         .iter()

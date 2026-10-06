@@ -2,6 +2,8 @@ const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
 
+test.use({ timezoneId: 'UTC' });
+
 const root = path.resolve(__dirname, '../../../mj-controller/src/web');
 const source = fs.readFileSync(path.join(root, 'viewer.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'viewer.css'), 'utf8');
@@ -52,38 +54,45 @@ async function mount(page, data) {
   await page.addScriptTag({ content: `const quotaPanel = document.querySelector('#quota'); function serverClockMs() { return Date.now(); } let snapshot = ${JSON.stringify({ profiles: data })};\n${renderSource}\nrenderQuota();` });
 }
 
-for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }]) {
-  test(`all six quotas plus API fit ${viewport.width}x${viewport.height}, with details on demand`, async ({ page }) => {
+test('golden_viewer_quota_overview', async ({ context }) => {
+  const { assertGolden } = await import('./golden.mjs');
+  const output = [];
+  for (const viewport of [{ width: 320, height: 568 }, { width: 390, height: 844 }]) {
+    const page = await context.newPage();
     await page.setViewportSize(viewport);
+    await page.clock.install({ time: new Date(1788642251000) });
     await mount(page, profiles());
-    const rows = page.locator('.quota-profile');
-    await expect(rows).toHaveCount(7);
-    await expect(page.locator('.quota-overview-heading span')).toHaveText(['% left', 'Week', '5H']);
-    await expect(page.locator('[data-profile-id="claude"] summary .quota-value')).toHaveText(['100%', '90% !']);
-    const metrics = await page.evaluate(() => ({
-      width: document.documentElement.scrollWidth,
-      height: document.documentElement.scrollHeight,
-      rows: [...document.querySelectorAll('.quota-overview-row')].map(node => node.getBoundingClientRect().height),
-    }));
-    expect(metrics.width).toBeLessThanOrEqual(viewport.width);
-    expect(metrics.height).toBeLessThanOrEqual(viewport.height);
-    expect(metrics.rows.every(height => height >= 44)).toBe(true);
-    await expect(page.locator('[data-profile-id="claude"] summary')).toHaveAttribute('aria-label', /Week: 100% left/);
-    await expect(page.locator('[data-profile-id="claude"] summary')).toHaveAttribute('aria-label', /projected to run out before reset/);
-    await expect(page.locator('[data-profile-id="codex2"] summary')).toHaveAttribute('aria-label', /5H: not reported/);
+    const capture = async label => {
+      output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
+      output.push((await page.locator('#quota-page').innerText()).trim());
+      const state = await page.evaluate(() => ({
+        documentWidth: document.documentElement.scrollWidth,
+        documentHeight: document.documentElement.scrollHeight,
+        rows: [...document.querySelectorAll('.quota-overview-row')].map(node => +node.getBoundingClientRect().height.toFixed(2)),
+        profiles: [...document.querySelectorAll('.quota-profile')].map(node => ({
+          id: node.dataset.profileId,
+          open: node.open,
+          label: node.querySelector('summary')?.getAttribute('aria-label'),
+          refreshPayload: node.querySelector('[data-refresh]')?.getAttribute('data-payload') || null,
+          focused: node.querySelector('summary') === document.activeElement,
+        })),
+      }));
+      output.push(`layout: ${JSON.stringify(state)}`);
+    };
+    await capture('six quotas and API at a glance');
     const row = page.locator('[data-profile-id="claude"]');
     await row.locator('summary').focus();
     await page.keyboard.press('Enter');
-    await expect(row.locator('.quota-details')).toBeVisible();
-    await expect(row).toContainText('resets 12:00 Sep 12');
-    await expect(row).toContainText('on course to run out first');
-    await expect(row.getByRole('button', { name: 'Refresh' })).toHaveAttribute('data-payload', JSON.stringify({ profile_id: 'claude' }));
-    await page.evaluate(() => { snapshot.profiles[0].quota.windows[0].percent_used = 17; renderQuota(); });
-    await expect(row).toHaveAttribute('open', '');
-    await expect(row.locator('summary')).toHaveAttribute('aria-label', /Week: 83% left/);
-    await expect(row.locator('summary')).toBeFocused();
-  });
-}
+    await capture('quota details opened on demand');
+    await page.evaluate(() => {
+      snapshot.profiles[0].quota.windows[0].percent_used = 17;
+      renderQuota();
+    });
+    await capture('refreshed quota keeps its details and focus');
+    await page.close();
+  }
+  assertGolden('viewer_quota_overview', output.join('\n'));
+});
 
 test('quota keeps unknown, stale and failed readings explicit and unusual labels contained', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 });
@@ -114,7 +123,6 @@ test('failed quota refresh is visible and leaves the control available for retry
   expect(result).toEqual({ sent: { action: 'refresh-quota', profile_id: 'claude' }, disabled: false });
   await expect(page.locator('.quota-error').first()).toHaveText('Refresh unavailable');
 });
-
 
 test('banked reset countdowns tick without snapshots or replacing focused controls', async ({ page }) => {
   await page.clock.install({ time: new Date(1_000_000_000) });

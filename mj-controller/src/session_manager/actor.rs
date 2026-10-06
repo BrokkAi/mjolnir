@@ -1429,9 +1429,6 @@ pub(super) async fn drive_reviewer(
             client.advance_review_baseline(role, trees).await?;
             ReviewerOutcome::BaselineAdvanced
         }
-        ReviewerAction::TakeLaneDispatches => ReviewerOutcome::LaneDispatches {
-            requests: client.take_lane_dispatches().await?,
-        },
     })
 }
 
@@ -1498,7 +1495,17 @@ pub(super) async fn sync_actor_connection(
         None
     };
     if connection.is_none() {
-        let fresh = StandaloneSession::connect(target).await?;
+        let mut fresh = StandaloneSession::connect(target).await?;
+        if let Err(error) =
+            reopen_subagent_admission_after_move(target, &mut fresh, observation.as_ref()).await
+        {
+            tracing::warn!(
+                session_id = target.session_id,
+                error = %error,
+                "could not repair sub-agent admission on relay reconnect; the next connection will retry"
+            );
+            return Err(error.context("repair sub-agent admission on relay reconnect"));
+        }
         let snapshot = fresh.snapshot();
         observe_worker_readiness(target, &snapshot, observation).await?;
         *connection = Some(fresh);
@@ -1516,6 +1523,53 @@ pub(super) async fn sync_actor_connection(
         }
     }
     Ok(None)
+}
+
+async fn reopen_subagent_admission_after_move(
+    target: &RelaySessionTarget,
+    connection: &mut StandaloneSession,
+    readiness_owner: Option<&crate::worker_lifecycle::WorkerPermit>,
+) -> Result<()> {
+    let owner = if let Some(owner) = readiness_owner {
+        Some(owner.clone())
+    } else {
+        crate::worker_lifecycle::WorkerPermit::try_acquire(
+            &target.session_id,
+            "repair sub-agent admission",
+        )?
+    };
+    let Some(owner) = owner else {
+        // A lifecycle operation already owns this worker. Its durable phase
+        // decides when it is safe to open admission again.
+        return Ok(());
+    };
+
+    let id = target.session_id.clone();
+    let query_owner = owner.clone();
+    let (parent_role_enabled, move_active) = tokio::task::spawn_blocking(move || {
+        query_owner.scope_blocking(|| -> Result<_> {
+            let Some(session) = crate::database::load_session_record(&id)? else {
+                return Ok((false, false));
+            };
+            let parent_role_enabled = crate::controller::move_session::parent_tools_enabled(
+                &session.subagents.clone().unwrap_or_default(),
+                session.harness_kind,
+            );
+            let move_active = crate::database::has_active_in_place_move(&id)?;
+            Ok((parent_role_enabled, move_active))
+        })
+    })
+    .await
+    .context("inspect sub-agent admission ownership")??;
+    if !parent_role_enabled || move_active {
+        return Ok(());
+    }
+    if !(mj_core::relay::RelayRequest::SetSubagentAdmission { open: true })
+        .supported_at(connection.protocol_version())
+    {
+        return Ok(());
+    }
+    connection.set_subagent_admission(true).await
 }
 
 async fn observe_worker_readiness(

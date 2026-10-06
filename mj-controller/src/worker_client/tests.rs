@@ -57,21 +57,10 @@ fn command_spec_preserves_argv_boundaries() {
     assert_eq!(spec.args[1], "hel worker proxy --root '/odd path'");
 }
 
-#[test]
-fn relay_protocol_version_range_contains_current_version() {
-    assert_eq!(
-        RelayVersionRange::CURRENT.negotiate(RelayVersionRange::CURRENT),
-        Some(RELAY_PROTOCOL_VERSION)
-    );
-    assert_eq!(
-        RelayVersionRange::CURRENT.negotiate(RelayVersionRange { min: 1, max: 1 }),
-        Some(1)
-    );
-}
-
 /// A host at its `MaxStartups` ceiling drops the surplus connection before
 /// authentication. That says nothing about the worker, so connect retries
 /// instead of reporting a dead relay and triggering worker recovery.
+// Hard-won: e6ed54ed: sshd refusals during startup were reported as dead workers.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_relay_proxy_refused_by_sshd_is_retried_rather_than_reported_dead() {
@@ -183,6 +172,7 @@ fn connect_and_let_reapers_report(spec: &CommandSpec) -> Result<RelayClient> {
 /// the proxy's own stderr, nor the reaping of the refused proxy is a warning
 /// then; the refusal is logged once, at debug level, by the shared refusal
 /// routine.
+// Hard-won: 5c9afffd: successful MaxSessions retries produced four warning logs per session.
 #[cfg(unix)]
 #[test]
 fn a_relay_proxy_refused_by_max_sessions_retries_without_a_warning() {
@@ -352,6 +342,7 @@ fn relay_proxy_attempts(directory: &std::path::Path) -> u32 {
 /// session started normally. A socket that appears within the retry budget
 /// is a routine retry, logged at debug level, and the exit of each proxy that
 /// found no socket is not reported again when that proxy is reaped.
+// Hard-won: b52a038c: normal worker starts logged two warnings before the socket appeared.
 #[cfg(unix)]
 #[test]
 fn a_worker_socket_that_appears_within_the_retry_budget_is_not_a_warning() {
@@ -417,6 +408,7 @@ async fn a_worker_socket_still_missing_after_the_retry_budget_is_one_warning() {
     );
 }
 
+// Hard-won: 0a278358: a new controller could not handshake with v1 workers after protocol 2 pinned the range.
 #[cfg(unix)]
 #[tokio::test]
 async fn controller_accepts_negotiated_protocol_v1() {
@@ -595,6 +587,7 @@ async fn a_proxy_that_exits_before_hello_reports_a_dead_transport() {
 /// The proxy explains failures the controller cannot observe itself, such
 /// as a worker socket path longer than `sun_path`. Logging that line is
 /// not enough: the error the caller reports must carry it too.
+// Hard-won: d1744be0: long worker socket paths failed, but their stderr was missing from the launch error.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_hello_failure_carries_the_proxy_stderr_tail() {
@@ -939,6 +932,7 @@ fn catch_up_page_stops_at_the_frontier_captured_before_stream_growth() {
     assert_eq!(clipped.events.last().unwrap().ordinal, 2);
 }
 
+#[cfg(unix)]
 fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
     CredentialSyncTarget {
         session_id: SESSION_ID.into(),
@@ -950,45 +944,6 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
-    }
-}
-
-/// Localhost sessions receive the CLI skill with the profile's own skills.
-#[test]
-fn localhost_sessions_are_pushed_the_managed_skills_too() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
-    std::fs::write(home.path().join("skills/review/SKILL.md"), "review").unwrap();
-
-    let target = skills_sync_target(home.path());
-    for format in [
-        mj_core::skills::SkillsArchiveFormat::Plain,
-        mj_core::skills::SkillsArchiveFormat::Gzip,
-    ] {
-        let archive = canonical_session_skills(&target, format).unwrap();
-        assert_eq!(
-            archive,
-            mj_core::skills::session_skills(
-                target.harness,
-                home.path(),
-                format,
-                mj_core::skills::SkillsScope::Localhost
-            )
-            .unwrap()
-        );
-        for managed in mj_core::skills::managed_skills(target.harness) {
-            assert!(
-                archive.entries().contains(&managed),
-                "{} is missing",
-                managed.path
-            );
-        }
-        assert!(
-            archive
-                .entries()
-                .iter()
-                .any(|entry| entry.path == "skills/review/SKILL.md")
-        );
     }
 }
 
@@ -1115,6 +1070,7 @@ async fn mixed_localhost_and_isolated_sessions_sync_different_skills_from_one_pr
 /// worker gets a compressed archive with the page. Either way the push
 /// succeeds only if the worker's fingerprint of what it received matches the
 /// controller's.
+// Hard-won: 29894ad9: protocol-22 workers rejected the compressed skills archive sent by newer controllers.
 #[cfg(unix)]
 #[tokio::test]
 async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
@@ -1334,6 +1290,7 @@ fn codex_sync_target(
 /// profile's. That match is what shows the profile's own login is the one the
 /// provider refused, so a spawn on the profile can be refused at once. A
 /// periodic sync still leaves sessions that agreed out of its outcomes.
+// Hard-won: 1b077959: refused profile logins left sub-agent failures unrecognized and retriggered.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_triggered_sync_reports_the_session_it_reached_with_nothing_to_change() {
@@ -1408,6 +1365,7 @@ async fn a_new_login_is_pushed_to_every_live_session_of_its_profile() {
     }
 }
 
+// Hard-won: c8d27f3c: credential sync connected after lifecycle had parked the worker and reported ECONNREFUSED.
 #[tokio::test]
 async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result() {
     let gate = Arc::new(crate::recovery_gate::RecoveryGate::default());

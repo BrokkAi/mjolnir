@@ -23,6 +23,10 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             intent: DismissalIntent::CancelImport,
             ..
         } => &["Keep importing", "Cancel import"],
+        Confirmation::InstallMbx {
+            upgrading: true, ..
+        } => &["Cancel", "Upgrade mbx"],
+        Confirmation::InstallMbx { .. } => &["Cancel", "Install mbx"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
         Confirmation::DestroyStopped {
             delete_branch_available: true,
@@ -135,6 +139,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::InterruptWork { .. }
             | Confirmation::InterruptAll { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
+            | Confirmation::InstallMbx { .. }
             | Confirmation::ConvertRawCheckout { .. }
     ) {
         0
@@ -1318,6 +1323,39 @@ pub(crate) fn confirmation_body(
                 Line::raw("Keep importing, or cancel the operation?"),
             ],
         ),
+        Confirmation::InstallMbx {
+            host,
+            upgrading,
+            profile_file,
+            profile_warning,
+            manual_path_line,
+            ..
+        } => {
+            let mut lines = vec![
+                Line::raw(format!(
+                    "This installs the pinned mbx release on {host} and runs `mbx setup --yes`."
+                )),
+                Line::raw(""),
+                Line::raw(format!("It edits `{profile_file}` to add mbx to PATH.")),
+            ];
+            if let Some(warning) = profile_warning {
+                lines.push(Line::raw(""));
+                lines.push(Line::raw(warning.clone()));
+            } else {
+                lines.push(Line::raw("New login shells will pick up the PATH change."));
+            }
+            if let Some(path_line) = manual_path_line {
+                lines.push(Line::raw(path_line.clone()));
+            }
+            (
+                if *upgrading {
+                    " Upgrade mbx? "
+                } else {
+                    " Install mbx? "
+                },
+                lines,
+            )
+        }
         Confirmation::ConvertRawCheckout { preview, .. } => {
             let mut lines = vec![Line::raw(preview.summary_line()), Line::raw("")];
             for warning in preview.warning_lines() {
@@ -1568,6 +1606,7 @@ pub(crate) fn render_confirmation(
         | Confirmation::LaunchFailed { .. }
         | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
+        Confirmation::InstallMbx { .. } => 12,
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::DiscardSinceCheckpoint { .. } => 12,

@@ -1,0 +1,15 @@
+=== raw local project accepted (1 preflight review) ===
+{
+  "project_directory": "<project>",
+  "managed_worktree": {
+    "available": true,
+    "default_create": true
+  },
+  "remote_repairs": [],
+  "dirty_repositories": [],
+  "remote_repositories": [],
+  "local_changes_excluded": false
+}
+=== isolated project rejected (1 preflight review) ===
+result: rejected
+reason: Project "hel": the directory <local repository> does not exist.

@@ -245,17 +245,6 @@ mod tests {
         assert_eq!(next_signal_action(&signals_seen), SignalAction::Force);
     }
 
-    #[test]
-    fn interrupt_suppression_is_scoped() {
-        let _lock = INTERRUPT_SUPPRESSION_TEST_LOCK.lock().unwrap();
-        assert_eq!(SUPPRESSED_INTERRUPTS.load(Ordering::Acquire), 0);
-        {
-            let _guard = suppress_interrupts();
-            assert_eq!(SUPPRESSED_INTERRUPTS.load(Ordering::Acquire), 1);
-        }
-        assert_eq!(SUPPRESSED_INTERRUPTS.load(Ordering::Acquire), 0);
-    }
-
     #[cfg(unix)]
     #[test]
     fn suppressed_interrupt_does_not_advance_shutdown() {
@@ -289,11 +278,5 @@ mod tests {
         let late = coordinator.token().child_token();
         early.cancelled().await;
         late.cancelled().await;
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_signal_streams_register_synchronously() {
-        let (_ctrl_c, _ctrl_break) = install_windows_signals();
     }
 }

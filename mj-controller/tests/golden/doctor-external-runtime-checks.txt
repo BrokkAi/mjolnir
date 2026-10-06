@@ -1,0 +1,9 @@
+ready AWS EC2 target production: The AWS CLI is installed, profile default has valid credentials, and launch template lt-0123456789abcdef0 exists in us-east-2.
+ready Remote Docker for target remote-docker: Remote Docker 27.5.1 is available via dev@docker.example.test; image ghcr.io/example/dev:1.2.3 is present. Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.
+warning Host limits for target remote-podman: The login user on dev@docker.example.test holds 174 of its 200 kernel keyring quota, and `kernel.keys.maxkeys` is 1000. sshd MaxStartups is 10:30:100. Every container takes a session keyring, so `podman run` fails with `crun: create keyring` once the quota is gone.
+  remediation: Raise `kernel.keys.maxkeys` and `kernel.keys.maxbytes` with sysctl on dev@docker.example.test, and close finished sessions promptly.
+warning Host limits for target missing-ssh: Could not read the kernel keyring quota or sshd MaxStartups from dev@docker.example.test: ssh executable is unavailable
+  remediation: Read them by hand on dev@docker.example.test: `cat /proc/key-users /proc/sys/kernel/keys/maxkeys` and `grep -ri maxstartups /etc/ssh/sshd_config /etc/ssh/sshd_config.d`.
+ready Sub-agent policy: Claude and Codex sessions may opt in, up to 3 sub-agents at once per session. A session's sub-agents may use its own profile and: disabled-reviewer.
+warning Sub-agent profile disabled-reviewer: Profile "disabled-reviewer" is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use.
+  remediation: Re-enable profile "disabled-reviewer", or remove it from [subagents.eligible_profiles].

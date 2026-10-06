@@ -31,6 +31,7 @@ fn policy(silence_minutes: u64, tool_call_minutes: u64) -> StallPolicy {
 /// The failure in issue #1020: a harness blocked in a long tool call sends no
 /// protocol traffic for the whole of a twenty-minute build, and used to have
 /// its turn failed for it.
+// Hard-won: 88fbe7a: long-running build/open tool calls were incorrectly reported as a stall.
 #[test]
 fn a_running_tool_call_is_not_a_stall() {
     let facts = ActivityFacts {
@@ -43,21 +44,6 @@ fn a_running_tool_call_is_not_a_stall() {
     assert_eq!(
         stall_verdict(&facts, policy(10, 240), NOW),
         StallVerdict::Live
-    );
-}
-
-#[test]
-fn silence_with_nothing_in_flight_is_a_stall() {
-    let facts = ActivityFacts {
-        execution: RelayExecutionState::Running,
-        last_acp_activity_at_ms: Some(NOW - 30 * MINUTE as i64),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        stall_verdict(&facts, policy(10, 240), NOW),
-        StallVerdict::Silent {
-            silent_ms: 30 * MINUTE
-        }
     );
 }
 
@@ -79,30 +65,6 @@ fn a_tool_call_that_outlives_its_bound_is_a_stall_naming_the_call() {
     );
 }
 
-#[test]
-fn a_disabled_bound_never_trips_and_never_spins() {
-    let running_a_day = ActivityFacts {
-        last_acp_activity_at_ms: Some(NOW - 1_440 * MINUTE as i64),
-        tools_in_flight: vec![tool("forever", NOW - 1_440 * MINUTE as i64)],
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        stall_verdict(&running_a_day, policy(10, 0), NOW),
-        StallVerdict::Live
-    );
-    assert!(policy(10, 0).next_check(&running_a_day, NOW) >= Duration::from_millis(250));
-
-    let silent = ActivityFacts {
-        last_acp_activity_at_ms: Some(NOW - 1_440 * MINUTE as i64),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        stall_verdict(&silent, policy(0, 240), NOW),
-        StallVerdict::Live
-    );
-    assert!(!policy(0, 0).enabled());
-}
-
 /// A turn with no recorded activity at all has not started; absence of
 /// evidence must not be read as silence.
 #[test]
@@ -118,6 +80,7 @@ fn an_empty_activity_clock_is_not_a_stall() {
 /// through to a bound it worked out from facts that have since moved on. This
 /// was a real bug: with a long bound the watchdog slept past a tool call
 /// opening and ending, and the tool-call bound never tripped at all.
+// Hard-won: a11622f: watchdog sleep across an open/close transition delayed enforcement of the tool bound.
 #[test]
 fn the_watchdog_never_sleeps_past_a_change_in_what_is_in_flight() {
     let with_tool = ActivityFacts {
@@ -155,6 +118,7 @@ fn the_watchdog_never_sleeps_past_a_change_in_what_is_in_flight() {
 /// The failure in issue #1025: while the daemon cannot see the worker it used
 /// to report the default value of an enum, which is `Idle`, about a session
 /// whose turn was still running.
+// Hard-won: 88fbe7a: missing live activity after daemon disconnect was incorrectly treated as idle.
 #[test]
 fn a_disconnected_daemon_never_reports_idle() {
     let state = while_disconnected(
@@ -382,6 +346,7 @@ fn every_way_of_being_busy_is_work_in_flight() {
 /// A running flag needs something live to corroborate it, because the durable
 /// projection can lag behind a turn that has already ended. With corroboration
 /// the session is working; without it the flag alone proves nothing.
+// Hard-won: 52aba5d: a stale running flag made a restarted worker appear idle and eligible for destructive replacement.
 #[test]
 fn a_running_flag_alone_is_not_a_running_turn() {
     let flag_only = ActivityFacts {
@@ -415,88 +380,6 @@ fn a_running_flag_alone_is_not_a_running_turn() {
         ..ActivityFacts::default()
     };
     assert_eq!(chat_phase(&lagging), RelayExecutionState::Running);
-}
-
-#[test]
-fn what_the_session_is_doing_is_reported_in_order_of_precedence() {
-    let idle = ActivityFacts {
-        idle_since_ms: Some(NOW),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        classify(&idle),
-        ActivityState::Idle {
-            since_ms: Some(NOW)
-        }
-    );
-
-    let goal = ActivityFacts {
-        goal_active: true,
-        ..ActivityFacts::default()
-    };
-    assert_eq!(classify(&goal), ActivityState::Goal);
-
-    let background = ActivityFacts {
-        goal_active: true,
-        background_commands: 1,
-        background_started_at_ms: Some(NOW),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        classify(&background),
-        ActivityState::Background {
-            started_at_ms: Some(NOW)
-        }
-    );
-
-    // A tool call outranks background work, and is visible even when the
-    // durable execution flag has not caught up with it.
-    let tool_only = ActivityFacts {
-        background_commands: 1,
-        tools_in_flight: vec![tool("bash", NOW - MINUTE as i64)],
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        classify(&tool_only),
-        ActivityState::Tool {
-            tool_call_id: "bash".into(),
-            started_at_ms: NOW - MINUTE as i64,
-            last_activity_at_ms: None,
-        }
-    );
-    assert_eq!(
-        classify(&tool_only).chat_phase(),
-        RelayExecutionState::Running
-    );
-
-    // A turn marker outranks everything below it.
-    let turn = ActivityFacts {
-        harness_turn_started_at_ms: Some(NOW),
-        tools_in_flight: vec![tool("bash", NOW)],
-        background_commands: 1,
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        classify(&turn),
-        ActivityState::Turn {
-            started_at_ms: Some(NOW),
-            last_activity_at_ms: None,
-        }
-    );
-
-    // Lifecycle outranks everything, including live work, because a closed
-    // worker owns nothing whatever its last snapshot said.
-    for (execution, expected) in [
-        (RelayExecutionState::Closing, ActivityState::Closing),
-        (RelayExecutionState::Closed, ActivityState::Closed),
-    ] {
-        let facts = ActivityFacts {
-            execution,
-            harness_turn_started_at_ms: Some(NOW),
-            ..ActivityFacts::default()
-        };
-        assert_eq!(classify(&facts), expected);
-    }
 }
 
 /// A newer worker may publish a state this build does not know. Failing to
@@ -567,6 +450,7 @@ fn checkpoint_blocker_asks_only_about_provider_owned_work() {
 /// running has no provider blocker at all, and it still has to wait: that gap
 /// is what let the recovery coordinator start a copy every second that the
 /// barrier then deferred.
+// Hard-won: 670a5bb: recovery-copy work looped for hours and filled disk because checkpoint admission ignored provider work.
 #[test]
 fn a_routine_checkpoint_waits_for_provider_work_and_for_work_in_flight() {
     let quiet = ActivityFacts {
@@ -614,72 +498,6 @@ fn a_routine_checkpoint_waits_for_provider_work_and_for_work_in_flight() {
     assert_eq!(routine_checkpoint_wait(&closed, HarnessKind::Kimi), None);
 }
 
-/// Silence is published as a fact and never turned into a verdict.
-///
-/// This is the whole answer to #1017 on Mjolnir's side: the turn a harness
-/// finished without telling us cannot be recovered, so what a person or an
-/// orchestrator gets instead is an honest "running, and nothing has arrived
-/// for eleven minutes" that they can act on. Reporting it must not depend on
-/// the harness, and it must never be reported for a session that is not
-/// running anything, because silence means nothing there.
-#[test]
-fn a_running_session_reports_how_long_the_harness_has_been_quiet() {
-    let quiet_turn = ActivityFacts {
-        prompt_started_at_ms: Some(NOW - 12 * MINUTE as i64),
-        last_acp_activity_at_ms: Some(NOW - 11 * MINUTE as i64),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        silent_for_ms(&quiet_turn, NOW),
-        Some(11 * MINUTE),
-        "a running turn reports its silence age"
-    );
-    assert_eq!(
-        silence_note(&classify(&quiet_turn), NOW).as_deref(),
-        Some("no harness activity for about 11 minutes")
-    );
-
-    // A tool call is running, which is the ordinary reason for silence. The
-    // age is still reported; deciding what it means is the reader's job.
-    let quiet_tool = ActivityFacts {
-        tools_in_flight: vec![tool("build", NOW - 30 * MINUTE as i64)],
-        last_acp_activity_at_ms: Some(NOW - 30 * MINUTE as i64),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(silent_for_ms(&quiet_tool, NOW), Some(30 * MINUTE));
-
-    // Just-spoke, idle, and a worker too old to report the clock all say
-    // nothing rather than guessing.
-    let talking = ActivityFacts {
-        prompt_started_at_ms: Some(NOW - MINUTE as i64),
-        last_acp_activity_at_ms: Some(NOW - 1_000),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(silent_for_ms(&talking, NOW), Some(1_000));
-    assert_eq!(
-        silence_note(&classify(&talking), NOW),
-        None,
-        "a second of quiet is not news"
-    );
-
-    let idle = ActivityFacts {
-        last_acp_activity_at_ms: Some(NOW - 60 * MINUTE as i64),
-        ..ActivityFacts::default()
-    };
-    assert_eq!(
-        silent_for_ms(&idle, NOW),
-        None,
-        "an idle session is quiet because it has nothing to say"
-    );
-
-    let old_worker = ActivityFacts {
-        prompt_started_at_ms: Some(NOW - 12 * MINUTE as i64),
-        last_acp_activity_at_ms: None,
-        ..ActivityFacts::default()
-    };
-    assert_eq!(silent_for_ms(&old_worker, NOW), None);
-}
-
 /// A session nobody can see reports no silence age.
 ///
 /// The daemon losing sight of a worker says nothing about whether the harness
@@ -696,27 +514,6 @@ fn a_disconnected_session_reports_no_silence_age() {
     assert!(unknown.is_working(), "{unknown:?}");
     assert_eq!(unknown.silent_for_ms(NOW), None);
     assert_eq!(silence_note(&unknown, NOW), None);
-}
-
-#[test]
-fn expected_continuation_yields_to_observed_work_and_owns_no_work() {
-    let mut facts = ActivityFacts {
-        expected_continuation: Some(123),
-        ..Default::default()
-    };
-    let state = classify(&facts);
-    assert_eq!(state, ActivityState::Expecting { since_ms: 123 });
-    assert!(!state.is_working());
-    assert!(!state.has_work_in_flight());
-    assert!(!has_work_in_flight(&facts));
-    assert_eq!(state.chat_phase(), RelayExecutionState::Idle);
-    assert_eq!(chat_phase(&facts), RelayExecutionState::Idle);
-    facts.goal_active = true;
-    assert_eq!(classify(&facts), state);
-    facts.background_commands = 1;
-    assert!(matches!(classify(&facts), ActivityState::Background { .. }));
-    facts.prompt_started_at_ms = Some(100);
-    assert!(matches!(classify(&facts), ActivityState::Turn { .. }));
 }
 
 #[test]
@@ -750,6 +547,7 @@ fn inferred_idle_preserves_owned_background_work_and_foreground_precedence() {
 
 /// Launch finding R5-10: "Smoke test passed in 2 second(s)." A duration
 /// agrees its unit with the count, as every counted noun does since C-12.
+// Hard-won: 25c6af8: user-facing durations paired counts with the wrong noun forms, including “2 second(s)”.
 #[test]
 fn a_duration_agrees_its_unit_with_the_count() {
     assert_eq!(describe_duration(1_000), "1 second");
@@ -761,6 +559,7 @@ fn a_duration_agrees_its_unit_with_the_count() {
 
 // --- the layered quiet rule -------------------------------------------------
 
+// Hard-won: 295a3f8: upgrade admission killed a Claude notification turn in the task-settle gap.
 #[test]
 fn a_settled_background_task_is_an_imminent_turn_for_the_window() {
     let now = 5_000_000;

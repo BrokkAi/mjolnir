@@ -156,32 +156,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_observed_credit_windows_and_ignores_auxiliary_limits() {
-        let five_hour = parse_limit(Limit {
-            kind: "CREDIT_LIMIT".into(),
-            number: Some(5),
-            usage: Some(12_000),
-            current_value: Some(300),
-            remaining: Some(11_700),
-            percentage: Some(3.0),
-            next_reset_time: Some(1_789_370_152_403),
-        })
-        .unwrap();
-        assert_eq!(five_hour.label, "5H");
-        assert_eq!(five_hour.remaining_percent, 98);
-        assert_eq!(five_hour.resets_at, Some(1_789_370_152));
-        assert!(
-            parse_limit(Limit {
-                kind: "MCP_LIMIT".into(),
-                number: None,
-                usage: Some(10),
-                current_value: Some(1),
-                remaining: Some(9),
-                percentage: None,
-                next_reset_time: None,
+    fn golden_zai_usage_windows_follow_the_provider_quota_payload() {
+        // The complete rows are captured from Z.ai's monitor endpoint
+        // (`/api/monitor/usage/quota/limit`):
+        // https://github.com/steipete/CodexBar/issues/2724
+        // The last rows retain its shape while omitting optional and unusable
+        // provider fields.
+        let payload = serde_json::json!({
+            "code": 200,
+            "msg": "Operation successful",
+            "data": {
+                "limits": [
+                    {
+                        "type": "CREDIT_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "usage": 2000,
+                        "currentValue": 71,
+                        "remaining": 1929,
+                        "percentage": 3,
+                        "nextResetTime": 1786073946574_i64
+                    },
+                    {
+                        "type": "CREDIT_LIMIT",
+                        "unit": 6,
+                        "number": 1,
+                        "usage": 10000,
+                        "currentValue": 71,
+                        "remaining": 9929,
+                        "percentage": 1,
+                        "nextResetTime": 1786660486998_i64
+                    },
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "percentage": 79.5,
+                        "nextResetTime": 1786073946574_i64
+                    },
+                    {
+                        "type": "CREDIT_LIMIT",
+                        "number": 1,
+                        "currentValue": 0,
+                        "remaining": 0
+                    },
+                    {
+                        "type": "TIME_LIMIT",
+                        "number": 5,
+                        "usage": 100,
+                        "currentValue": 10,
+                        "remaining": 90
+                    }
+                ],
+                "level": "lite"
+            },
+            "success": true
+        });
+        let limits: Vec<Limit> =
+            serde_json::from_value(payload["data"]["limits"].clone()).expect("provider limit rows");
+        let windows = limits
+            .into_iter()
+            .filter_map(parse_limit)
+            .collect::<Vec<_>>();
+        let rendered = windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{} remaining={} used={} limit={} resets_at={}",
+                    window.label,
+                    window.remaining_percent,
+                    window
+                        .used
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                    window
+                        .limit
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                    window
+                        .resets_at
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+                )
             })
-            .is_none()
-        );
+            .collect::<Vec<_>>()
+            .join("\n");
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "zai-usage-windows", &rendered);
     }
 
     #[tokio::test]
@@ -192,12 +247,5 @@ mod tests {
         let windows = query("api.z.ai", &key).await.unwrap();
         assert!(!windows.is_empty());
         assert!(windows.iter().all(|window| window.remaining_percent <= 100));
-    }
-
-    #[test]
-    fn only_the_coding_plan_hosts_serve_quota() {
-        assert!(serves_quota("api.z.ai"));
-        assert!(serves_quota("open.bigmodel.cn"));
-        assert!(!serves_quota("api.openai.com"));
     }
 }

@@ -46,7 +46,6 @@ fn scoped_log_capture_sees_every_callsite() {
 #[derive(Clone, Copy)]
 enum WhileClassifying {
     Wait,
-    NewPrompt,
     Stop,
     KeepCurrent,
     /// A checkpoint barrier becomes ready while the classifier is asked.
@@ -241,13 +240,6 @@ async fn completed_turn_response(
         assert!(log.contains("cancelled"), "{log}");
         return;
     }
-    if matches!(action, WhileClassifying::NewPrompt) {
-        submit(&mut relay.lock().unwrap(), "prompt-2");
-        wakes_tx.send(()).await.unwrap();
-        assert!(
-            matches!(commands_rx.recv().await.unwrap(), CommandRequest::Prompt { request_id, .. } if request_id == "prompt-2")
-        );
-    }
     let barrier = |relay: &mut DurableRelay, id: &str, command: RelayCommand| {
         let response = relay.handle(RelayRequestEnvelope {
             request_id: format!("request-{id}"),
@@ -392,9 +384,6 @@ async fn completed_turn_response(
             ActivityState::Background { .. }
         ));
         assert_eq!(state.inferred_idle_since_ms, None);
-    } else {
-        // Give the completed HTTP task a chance to reach the generation guard.
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
     assert!(!matches!(
         relay.lock().unwrap().operational_state().activity_state(),
@@ -428,31 +417,15 @@ async fn replied_verdict_publishes_without_delaying_completion_and_clears_on_out
 
 /// I2-3: the classifier's answer landed after a close's checkpoint cut and
 /// made the worker refuse the Close. The answer now waits for the barrier.
+// Hard-won: 634af0a: a classifier journal write moved the checkpoint cut and made suspend fail.
 #[tokio::test]
 async fn a_classifier_answer_waits_for_a_ready_checkpoint_barrier() {
     completed_turn_with_background(WhileClassifying::Checkpoint, "finished", 0).await;
 }
 
 #[tokio::test]
-async fn replied_verdict_cannot_change_a_newer_prompt() {
-    completed_turn_verdict(WhileClassifying::NewPrompt).await;
-}
-
-#[tokio::test]
 async fn shutdown_cancels_pending_replied_verdict() {
     completed_turn_verdict(WhileClassifying::Stop).await;
-}
-
-#[tokio::test]
-async fn replied_verdict_classifies_harness_background_tasks_and_logs_the_decision() {
-    for choice in ["finished", "user", "background_work"] {
-        completed_turn_with_background(WhileClassifying::Wait, choice, 4).await;
-    }
-}
-
-#[tokio::test]
-async fn replied_idle_verdict_cannot_override_a_new_prompt() {
-    completed_turn_with_background(WhileClassifying::NewPrompt, "finished", 4).await;
 }
 
 #[tokio::test]
@@ -511,6 +484,7 @@ fn ask_once_without_a_classifier() {
 
 /// The CI flake in order: this test's dispatcher is the only one registered,
 /// then a thread with no subscriber reaches the Jev callsite first.
+// Hard-won: ccd520d: parallel callsite initialization made CI log captures miss Jev events.
 #[test]
 fn scoped_log_capture_keeps_a_callsite_first_reached_without_a_subscriber() {
     scoped_log_capture_sees_every_callsite();

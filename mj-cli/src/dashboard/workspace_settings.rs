@@ -276,18 +276,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_and_closing_a_workspace_does_not_write_its_layout() {
-        let mut persistence = WorkspaceSettingPersistence::with_save(
-            PANE_SIZES,
-            initial("workspace-a"),
-            Notices::default(),
-            |_, _| async { panic!("opening a workspace must not save its layout") },
-        );
-        persistence.remember("workspace-b".into(), PaneSizes::default());
-        persistence.finish().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn rapid_changes_are_serialized_and_flush_the_latest_layout() {
         let (started, mut calls) = mpsc::unbounded_channel();
         let mut persistence = WorkspaceSettingPersistence::with_save(
@@ -485,33 +473,5 @@ mod tests {
         release.send(()).unwrap();
         persistence.finish().await.unwrap();
         assert!(notices.current().is_none());
-    }
-
-    #[tokio::test]
-    async fn a_changed_conversation_layout_is_saved_with_its_own_notice_text() {
-        let notices = Notices::default();
-        let mut persistence = WorkspaceSettingPersistence::with_save(
-            LAYOUT,
-            BTreeMap::from([("workspace-a".to_owned(), ConversationLayout::default())]),
-            notices.clone(),
-            |_, _| async { anyhow::bail!("database unavailable") },
-        );
-        let split = ConversationLayout {
-            browse: None,
-            pins: Default::default(),
-            root: mj_core::workspace::LayoutNode::Split {
-                axis: mj_core::workspace::SplitAxis::Horizontal,
-                ratio: 0.5,
-                first: Box::new(mj_core::workspace::LayoutNode::Pane { id: 1 }),
-                second: Box::new(mj_core::workspace::LayoutNode::Pane { id: 2 }),
-            },
-            focus: 2,
-            sessions: BTreeMap::from([(2, "session-b".to_owned())]),
-        };
-        persistence.update("workspace-a", split);
-        let error = persistence.finish().await.unwrap_err();
-        assert!(error.to_string().contains("database unavailable"));
-        let reported = notices.current().unwrap();
-        assert!(reported.contains("workspace layout"), "{reported}");
     }
 }

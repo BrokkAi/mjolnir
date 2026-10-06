@@ -882,8 +882,7 @@ pub(super) fn render_reviewer(
 }
 
 /// The same pane under another title, with an optional one-row strip above the
-/// transcript. Turn review uses the strip to show which reviewing agents are
-/// running and where each has got to.
+/// transcript. Turn review uses the strip to show the reviewer's state.
 pub(super) fn render_reviewer_titled(
     frame: &mut ratatui::Frame,
     area: Rect,

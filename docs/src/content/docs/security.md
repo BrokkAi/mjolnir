@@ -61,12 +61,13 @@ controls:
 | Kimi Code | `auto` |
 | Grok Build | always approve with its sandbox disabled |
 | Muse Code | the `:unrestricted` permission profile in its staged settings, `allowAll` approvals, and `--disable-sandbox` |
+| OpenCode | `"permission": "allow"` in the staged `opencode.json` |
 
 Kimi's mode is named `auto`, but in this context it approves every call. It is
 not a low-risk guardian policy.
 
-Codex, Claude Code, and Grok Build can preserve guardian-style approvals on a
-bare runtime. Kimi Code cannot, and neither can Muse Code: its permission
+Codex, Claude Code, Grok Build, and OpenCode can preserve guardian-style
+approvals on a bare runtime. Kimi Code cannot, and neither can Muse Code: its permission
 profile is a host-lifetime setting that the wire cannot select,
 so every Muse session runs unconstrained. Mjolnir warns when a harness without
 guardian support is paired with a raw target, but a warning is not a
@@ -109,6 +110,7 @@ home from a harness-specific allowlist:
 | Kimi Code | Authentication, config, device ID, instructions, MCP config, skills, agents, and plugins |
 | Grok Build | Authentication, config, agent ID, instructions, skills, and plugins |
 | Muse Code | Authentication, settings, trust configuration, instructions, skills, and rules |
+| OpenCode | Authentication, configuration, instructions, and skills |
 
 Symbolic links inside an allowlisted profile entry are followed: the session
 receives the contents of the file or directory a link points to, even when the

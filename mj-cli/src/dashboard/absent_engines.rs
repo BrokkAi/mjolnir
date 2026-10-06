@@ -89,6 +89,7 @@ mod tests {
     /// R8-6: a target whose engine is not installed is checked once, logged
     /// once, and answered from the record until its configuration or the
     /// engine changes.
+    // Hard-won: c3d2ae5a: an absent Docker engine caused a warning every minute instead of one cached status.
     #[test]
     fn an_absent_engine_is_not_checked_again_until_its_target_or_the_engine_changes() {
         let empty_path = tempfile::tempdir().unwrap();

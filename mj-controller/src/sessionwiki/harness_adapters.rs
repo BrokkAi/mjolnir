@@ -46,6 +46,7 @@ pub(super) const fn tool_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Kimi => "kimi-code",
         HarnessKind::Grok => "grok-build",
         HarnessKind::Muse => "muse",
+        HarnessKind::OpenCode => "opencode",
     }
 }
 
@@ -63,6 +64,9 @@ fn adapted_tool_name(kind: HarnessKind) -> Option<&'static str> {
     match kind {
         HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => Some(tool_name(kind)),
         HarnessKind::Codex | HarnessKind::Claude => None,
+        // SessionWiki has no OpenCode adapter, and its sessions are SQLite
+        // rows rather than transcripts this adapter could index.
+        HarnessKind::OpenCode => None,
     }
 }
 

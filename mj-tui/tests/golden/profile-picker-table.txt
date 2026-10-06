@@ -1,0 +1,87 @@
+=== new_session_profile_step_aligns_its_columns (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                               ✦  M J O L N I R                               │
+│Create new work or open a session.    ││                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                  ╭ × New session · 1/4 profile ──────────────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │    PROFILE   HARNESS      WEEKLY      5H                                      │                   │
+│                  │    claude-1  Claude Code  refreshing                                          │                   │
+│                  │    codex-1   Codex        refreshing                                          │                   │
+│                  │    codex-2   Codex        refreshing                                          │  ─────────────────╯
+│                  │ ⚠  kimi-1    Kimi Code    refreshing                                          │  ─────────────────╮
+│                  │                                                                               │                   │
+│                  │ ⚠  No guardian approval mode; do not run on a raw, unsandboxed target.        │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Next                                                             │  ────────── ▁   ▪ ╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                     ─────────────────╯
+│                                                                                                     ────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+│                                      ││  kimi-1    Kimi Code    refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== new_session_profile_step_shows_weekly_and_five_hour_percentages (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                  Select a session to open its conversation.                  │
+│  │ No messages                                                                                                       │
+│  │                                                                                                                   │
+│                  ╭ × New session · 1/4 profile ──────────────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │   PROFILE   HARNESS      WEEKLY      5H                                       │                   │
+│                  │   claude-1  Claude Code  63%         40%                                      │                   │
+│                  │   codex-1   Codex        refreshing                                           │                   │
+│                  │   codex-2   Codex        refreshing                                           │  ─────────────────╯
+│                  │                                                                               │  ─────────────────╮
+│                  │   Cancel     Next                                                             │                   │
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                     ─────────────────╯
+│                                                                                                     ────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly          Resets  5H              Resets       │
+│                                      ││  claude-1  Claude Code  ▕██████▎   ▏63% now     ▕████      ▏40% now          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== resume_profile_step_aligns_its_columns_and_explains_the_marker (120x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
+╭ Sessions ──────                                                                                                      │
+│ Create   Open                                                                                                        │
+│hel ────────────  ╭ × Resume · 1/3 profile (cross-harness supported) ─────────────────────────────╮                   │
+│› ■ ACP pretty n  │                                                                               │                   │
+│  Stopped  podma  │    PROFILE   HARNESS      WEEKLY      5H                                      │                   │
+│  │ No messages   │    claude-1  Claude Code  refreshing      (lossy: text-only transcript)       │                   │
+│  │               │    codex-1   Codex        refreshing                                          │  ─────────────────╯
+│                  │    codex-2   Codex        refreshing                                          │  ─────────────────╮
+│                  │ ⚠  kimi-1    Kimi Code    refreshing      (lossy: text-only transcript)       │                   │
+│                  │                                                                               │                   │
+│                  │ Same agent: the conversation continues natively.                              │  ─────────────────╯
+│                  │ ⚠  No guardian approval mode; do not run on a raw, unsandboxed target.        │  ────────── ▁   ▪ ╮
+│                  │                                                                               │                   │
+│                  │   Cancel     Next                                                             │  ─────────────────╯
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯  ────── ▁   ▪   □ ╮
+│                                                                                                                      ▐
+│                                                                                                                      ▐
+│                                      ││  codex-1   Codex        refreshing…                                          ▐
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys

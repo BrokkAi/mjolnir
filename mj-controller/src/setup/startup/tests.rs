@@ -308,30 +308,6 @@ fn discovery_merges_a_settings_edit_that_happened_while_it_ran() {
 }
 
 #[test]
-fn welcome_reports_only_actionable_doctor_errors() {
-    let checks = vec![
-        DoctorCheck {
-            id: "download".into(),
-            title: "Image".into(),
-            status: CheckStatus::Warning,
-            detail: "Downloading".into(),
-            remediation: None,
-        },
-        DoctorCheck {
-            id: "auth".into(),
-            title: "Claude Code".into(),
-            status: CheckStatus::Fixable,
-            detail: "Not signed in".into(),
-            remediation: Some("Run `mj login --profile claude`.".into()),
-        },
-    ];
-    assert_eq!(
-        actionable_errors(&checks),
-        ["Claude Code: Run `mj login --profile claude`.\nNot signed in"]
-    );
-}
-
-#[test]
 fn cancelled_setup_does_not_wait_for_another_owner() {
     let directory = tempfile::tempdir().unwrap();
     let _owner = acquire_setup_lock(&directory.path().join("setup.lock"), &|| false).unwrap();

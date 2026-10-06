@@ -57,7 +57,6 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         Box::pin(crate::review_selection::resolve(
             self.0.clone(),
             None,
-            false,
             cancelled,
             None,
         ))

@@ -254,7 +254,13 @@ pub fn render_scrollbar(frame: &mut Frame, geometry: ScrollbarGeometry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::{ChoiceList, Form};
     use crossterm::event::KeyModifiers;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+    use std::fmt::Write as _;
 
     fn track() -> Rect {
         Rect::new(7, 11, 1, 20)
@@ -278,61 +284,144 @@ mod tests {
         assert_eq!(clamp(1, &[], 5), 0);
     }
 
-    #[test]
-    fn selection_stays_centred_while_moving_down_a_long_list() {
-        let (len, viewport) = (40, 9);
-        let heights = vec![1; len];
-        for selected in 4..=(len - 5) {
-            let offset = centered_offset(selected, &heights, viewport);
-            assert_eq!(
-                selected - offset,
-                4,
-                "selected {selected} sits on the centre row"
-            );
-            assert_eq!(offset, centered_unit_offset(selected, len, viewport));
+    fn centered_view(heights: &[usize], selected: usize, viewport: u16) -> (usize, String) {
+        let offset = centered_offset(selected, heights, usize::from(viewport));
+        let mut lines = Vec::new();
+        for (index, height) in heights.iter().enumerate().skip(offset) {
+            for row in 0..*height {
+                if lines.len() == usize::from(viewport) {
+                    break;
+                }
+                let marker = if index == selected && row == 0 {
+                    ">"
+                } else {
+                    " "
+                };
+                lines.push(Line::raw(format!("{marker}{index:02} {}", "row".repeat(2))));
+            }
         }
+        let mut terminal = Terminal::new(TestBackend::new(12, viewport)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+            .expect("render scrolling list");
+        (
+            offset,
+            crate::golden::buffer_lines(terminal.backend().buffer()).join("\n"),
+        )
+    }
+
+    fn append_centered_state(
+        output: &mut String,
+        label: &str,
+        heights: &[usize],
+        selected: usize,
+        viewport: u16,
+    ) {
+        let (offset, surface) = centered_view(heights, selected, viewport);
+        writeln!(output, "=== {label} (12x{viewport}) ===").expect("write heading");
+        writeln!(output, "offset: {offset}").expect("write offset");
+        output.push_str(&surface);
+        output.push('\n');
     }
 
     #[test]
-    fn centring_pins_the_list_at_both_ends() {
-        let (len, viewport) = (40, 9);
-        let heights = vec![1; len];
-        // Near the top the list starts at its first item and the selection moves up.
-        for selected in 0..4 {
-            assert_eq!(centered_offset(selected, &heights, viewport), 0);
-        }
-        // Near the bottom the list ends at its last item.
-        for selected in (len - 4)..len {
-            assert_eq!(
-                centered_offset(selected, &heights, viewport),
-                len - viewport
+    fn golden_centered_list_viewport() {
+        let mut output = String::new();
+        let heights = [1; 40];
+        for selected in 0..40 {
+            append_centered_state(
+                &mut output,
+                &format!("unit rows selected {selected}"),
+                &heights,
+                selected,
+                9,
             );
+            writeln!(
+                output,
+                "unit offset: {}",
+                centered_unit_offset(selected, 40, 9)
+            )
+            .expect("write unit offset");
         }
-    }
-
-    #[test]
-    fn a_list_that_fits_never_scrolls_when_centring() {
+        let fitting = [1; 6];
         for selected in 0..6 {
-            assert_eq!(centered_offset(selected, &[1; 6], 6), 0);
-            assert_eq!(centered_offset(selected, &[1; 6], 20), 0);
-            assert_eq!(centered_unit_offset(selected, 6, 6), 0);
+            append_centered_state(
+                &mut output,
+                &format!("fit viewport 6 selected {selected}"),
+                &fitting,
+                selected,
+                6,
+            );
+            append_centered_state(
+                &mut output,
+                &format!("fit viewport 20 selected {selected}"),
+                &fitting,
+                selected,
+                20,
+            );
+            let list = [
+                Line::raw("Alpha"),
+                Line::raw("Beta"),
+                Line::raw("Gamma"),
+                Line::raw("Delta"),
+                Line::raw("Epsilon"),
+                Line::raw("Zeta"),
+            ];
+            let mut terminal = Terminal::new(TestBackend::new(12, 6)).expect("terminal");
+            let mut form = Form::<u8>::new();
+            form.declare(
+                1,
+                crate::components::ControlKind::ChoiceList { len: 6, selected },
+            );
+            form.end_frame(1);
+            terminal
+                .draw(|frame| {
+                    form.begin_frame();
+                    ChoiceList::render(frame, frame.area(), &list, selected, &mut form, 1);
+                    form.end_frame(1);
+                })
+                .expect("render choice list");
+            let buffer = terminal.backend().buffer();
+            let selected_style = (0..buffer.area.width)
+                .map(|x| {
+                    let cell = &buffer[(x, selected as u16)];
+                    format!(
+                        "{}:{:?}/{:?}/{:?}",
+                        cell.symbol(),
+                        cell.fg,
+                        cell.bg,
+                        cell.modifier
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            writeln!(
+                output,
+                "unit offsets at viewport 6/20: {}/{}; unit offset viewport 6: {}; actual ChoiceList selected {selected}:\n{}\nselected row style: {selected_style}",
+                centered_offset(selected, &fitting, 6),
+                centered_offset(selected, &fitting, 20),
+                centered_unit_offset(selected, 6, 6),
+                crate::golden::buffer_lines(buffer).join("\n")
+            )
+            .expect("write fit list rendering");
         }
-        // Rows of mixed height that fit together also stay put.
-        assert_eq!(centered_offset(2, &[2, 3, 2], 7), 0);
-    }
-
-    #[test]
-    fn centring_mixed_row_heights_keeps_the_selected_row_visible() {
-        let heights = [2, 3, 4, 2, 3, 2, 4, 3];
-        let viewport = 9;
-        for selected in 0..heights.len() {
-            let offset = centered_offset(selected, &heights, viewport);
-            let shown = heights[offset..=selected].iter().sum::<usize>();
-            assert!(
-                shown <= viewport,
-                "selected {selected} fits below offset {offset}"
+        let mixed_fit = [2, 3, 2];
+        append_centered_state(&mut output, "mixed rows fit", &mixed_fit, 2, 7);
+        let mixed = [2, 3, 4, 2, 3, 2, 4, 3];
+        for selected in 0..mixed.len() {
+            append_centered_state(
+                &mut output,
+                &format!("mixed heights selected {selected}"),
+                &mixed,
+                selected,
+                9,
             );
         }
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "centered-list-viewport",
+            &output,
+        );
     }
 
     #[test]
@@ -341,23 +430,33 @@ mod tests {
         assert_eq!(scrollbar_geometry(Rect::new(0, 0, 1, 0), 100, 0, 10), None);
     }
 
-    #[test]
-    fn full_viewport_uses_the_whole_track() {
-        let geometry = scrollbar_geometry(track(), 10, 0, 10).expect("track geometry");
-        assert_eq!(geometry.max_scroll, 0);
-        assert_eq!(geometry.thumb, geometry.track);
+    fn rendered_geometry(label: &str, content: usize, position: usize, viewport: usize) -> String {
+        let track = Rect::new(1, 0, 1, 20);
+        let geometry = scrollbar_geometry(track, content, position, viewport).expect("geometry");
+        let mut terminal = Terminal::new(TestBackend::new(3, 20)).expect("terminal");
+        terminal
+            .draw(|frame| render_scrollbar(frame, geometry))
+            .expect("render scrollbar");
+        format!(
+            "=== {label} (3x20) ===\ngeometry: max={} thumb={:?}\n{}\n",
+            geometry.max_scroll,
+            geometry.thumb,
+            crate::golden::buffer_lines(terminal.backend().buffer()).join("\n")
+        )
     }
 
     #[test]
-    fn proportional_thumb_reaches_both_endpoints() {
-        let start = scrollbar_geometry(track(), 100, 0, 25).expect("track geometry");
-        let end = scrollbar_geometry(track(), 100, 75, 25).expect("track geometry");
-
-        assert_eq!(start.max_scroll, 75);
-        assert_eq!(start.thumb.y, start.track.y);
-        assert_eq!(start.thumb.height, 5);
-        assert_eq!(end.thumb.bottom(), end.track.bottom());
-        assert_eq!(end.thumb.height, start.thumb.height);
+    fn golden_scrollbar_geometry() {
+        let mut output = String::new();
+        output.push_str(&rendered_geometry("full viewport", 10, 0, 10));
+        output.push_str(&rendered_geometry(
+            "proportional thumb at start",
+            100,
+            0,
+            25,
+        ));
+        output.push_str(&rendered_geometry("proportional thumb at end", 100, 75, 25));
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "scrollbar-geometry", &output);
     }
 
     #[test]

@@ -496,6 +496,7 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
 
 /// A routine checkpoint is Mjolnir's housekeeping, not user work, so it keeps
 /// a pending retry assessment and, once assessed, the armed retry (F24).
+// Hard-won: 1a0ed612: routine checkpoints cleared capacity assessments and armed retries.
 #[test]
 fn a_routine_checkpoint_keeps_the_pending_assessment_and_the_armed_retry() {
     let root = tempfile::tempdir().unwrap();
@@ -528,6 +529,7 @@ fn a_routine_checkpoint_keeps_the_pending_assessment_and_the_armed_retry() {
 /// Older journals hold a `RetryAssessmentStarted` record, the durable form of
 /// a turn that ended on a capacity refusal. A routine checkpoint must not
 /// drop it (F24).
+// Hard-won: 1a0ed612: routine checkpoints cleared capacity assessments and armed retries.
 #[test]
 fn a_routine_checkpoint_keeps_a_journaled_retry_assessment() {
     let root = tempfile::tempdir().unwrap();

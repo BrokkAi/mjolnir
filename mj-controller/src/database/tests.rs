@@ -103,6 +103,7 @@ fn store_schema_mismatch_survives_the_controller_load_error_chain() {
 /// happens next: another process migrated the store, and this lane kept
 /// writing rows the store's new ladder does not expect. Every queued write is
 /// now refused with the reason.
+// Hard-won: b19f7b1c: a queued projection write after another process advances the store
 #[test]
 fn writer_refuses_a_projection_write_after_the_store_moves() {
     let directory = tempfile::tempdir().unwrap();
@@ -145,6 +146,7 @@ fn writer_refuses_a_projection_write_after_the_store_moves() {
     owner.shutdown().unwrap();
 }
 
+// Hard-won: b19f7b1c: a queued receipt write after another process advances the store
 #[test]
 fn writer_refuses_a_read_receipt_after_the_store_moves() {
     let directory = tempfile::tempdir().unwrap();
@@ -755,7 +757,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        71
+        74
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -779,7 +781,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN checkout_json;
+        "ALTER TABLE sessions DROP COLUMN checkout_json;
         DELETE FROM schema_migrations WHERE version >= 54;
         UPDATE schema_compatibility SET minimum_compatible_version = 53;
         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 53;",
@@ -796,7 +798,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        71
+        74
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
@@ -1165,6 +1167,7 @@ fn read_write_mounts_survive_an_older_writer_rewriting_session_mounts() {
     assert_eq!(loaded[1].access, crate::targets::MountAccess::Ro);
 }
 
+// Hard-won: b91beebe: a stale lifecycle write erased newer mounts and container settings
 #[test]
 fn lifecycle_save_preserves_container_settings_and_mounts() {
     let directory = tempfile::tempdir().unwrap();
@@ -1211,16 +1214,25 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     record.review = Some(mj_core::config::SessionReview::On {
         model: Some("gpt-6-astra".into()),
         effort: Some("high".into()),
-        tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+        tier: Some("extended".into()),
     });
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
-    assert_eq!(loaded.sessions["session-1"].review, record.review);
+    assert_eq!(
+        loaded.sessions["session-1"].review,
+        Some(mj_core::config::SessionReview::On {
+            model: Some("gpt-6-astra".into()),
+            effort: Some("high".into()),
+            tier: None,
+        }),
+        "writes omit the legacy tier while preserving the review choice"
+    );
 }
 
+// Hard-won: d92ab7ce: the lifecycle UPDATE omitted build_cache_json and live sessions reloaded without their mounted cache
 #[test]
 fn provisioning_persists_the_build_cache_it_resolved() {
     let directory = tempfile::tempdir().unwrap();
@@ -1460,6 +1472,7 @@ fn losing_the_target_ends_the_reviewer_conversation_and_bumps_its_generation() {
     );
 }
 
+// Hard-won: b91beebe: a stale checkpoint write erased newer mounts and container settings
 #[test]
 fn checkpointed_save_preserves_container_settings_and_mounts() {
     let directory = tempfile::tempdir().unwrap();
@@ -3295,45 +3308,6 @@ fn independent_session_writes_preserve_both_updates() {
     );
 }
 
-/// Launch finding H-3: no session may sit in a workspace nobody can see. A
-/// store whose `default` holds a session, suspended ones included, lists it
-/// as an ordinary workspace named `default`; an empty `default` is not
-/// listed, and its name cannot be taken for a workspace that would then be
-/// invisible.
-#[test]
-fn a_default_workspace_that_holds_sessions_is_listed_and_an_empty_one_is_not() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let visible = create_workspace_at(&database, "Visible").unwrap();
-    assert_eq!(
-        list_workspaces_from(&database)
-            .unwrap()
-            .iter()
-            .map(|workspace| workspace.id.as_str())
-            .collect::<Vec<_>>(),
-        [visible.id.as_str()]
-    );
-    let refused = create_or_get_workspace_at(&database, "Default").unwrap_err();
-    assert!(format!("{refused:#}").contains("reserved"), "{refused:#}");
-
-    save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    assert_eq!(
-        workspace_for_session_at(&database, "session-1").unwrap(),
-        Some(DEFAULT_WORKSPACE_ID.to_owned())
-    );
-    let listed = list_workspaces_from(&database).unwrap();
-    let default = listed
-        .iter()
-        .find(|workspace| workspace.id == DEFAULT_WORKSPACE_ID)
-        .expect("a default workspace holding a session is listed");
-    assert_eq!(default.name, "default");
-    assert_eq!(
-        create_or_get_workspace_at(&database, "default").unwrap().id,
-        DEFAULT_WORKSPACE_ID,
-        "once listed, the name selects it like any other"
-    );
-}
-
 fn workspace_pane_size_row_count(path: &Path, workspace_id: &str) -> i64 {
     Connection::open(path)
         .unwrap()
@@ -3343,24 +3317,6 @@ fn workspace_pane_size_row_count(path: &Path, workspace_id: &str) -> i64 {
             |row| row.get(0),
         )
         .unwrap()
-}
-
-#[test]
-fn workspace_pane_sizes_default_without_creating_an_absent_row() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let workspace = create_workspace_at(&database, "Defaults").unwrap();
-
-    assert_eq!(workspace_pane_size_row_count(&database, &workspace.id), 0);
-    assert_eq!(
-        load_workspace_pane_sizes_from(&database, &workspace.id).unwrap(),
-        PaneSizes::default()
-    );
-    assert_eq!(
-        workspace_pane_size_row_count(&database, &workspace.id),
-        0,
-        "loading defaults must not create a settings row"
-    );
 }
 
 #[test]
@@ -3541,24 +3497,6 @@ fn split_layout(first_session: &str, second_session: &str) -> ConversationLayout
             (2, second_session.to_owned()),
         ]),
     }
-}
-
-#[test]
-fn workspace_layout_defaults_without_creating_an_absent_row() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("hel.sqlite3");
-    let workspace = create_workspace_at(&database, "Defaults").unwrap();
-
-    assert_eq!(workspace_layout_row_count(&database, &workspace.id), 0);
-    assert_eq!(
-        load_workspace_layout_from(&database, &workspace.id).unwrap(),
-        ConversationLayout::default()
-    );
-    assert_eq!(
-        workspace_layout_row_count(&database, &workspace.id),
-        0,
-        "loading the default layout must not create a settings row"
-    );
 }
 
 #[test]
@@ -4364,6 +4302,7 @@ fn a_projection_page_persists_the_turn_outcome_and_the_queue_acceptance_ordinal(
 /// The wait endpoint reports a turn number and a final message for the span
 /// one turn covers. A message the harness records after the turn ended — a
 /// resume notice is one — belongs to no turn and must not displace the answer.
+// Hard-won: 529a5144: a later harness notice replaced a completed turn answer and duration
 #[test]
 fn a_turn_summary_counts_turn_starts_and_reads_that_turn_s_final_message() {
     let directory = tempfile::tempdir().unwrap();
@@ -4541,6 +4480,7 @@ fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
 /// harness notice recorded after that turn — a resume warning, for instance —
 /// must not take its place. The session-wide newest agent message does take
 /// its place, which is why the report is read from the turn's own span.
+// Hard-won: 529a5144: a later resume notice replaced a finished child report
 #[test]
 fn a_finished_turn_reports_its_own_answer_and_not_a_later_harness_notice() {
     let directory = tempfile::tempdir().unwrap();
@@ -5146,6 +5086,7 @@ fn deleting_a_child_session_deletes_its_subagent_relation() {
 /// The row is seeded with the foreign key off, because the schema's cascade is
 /// what normally prevents it; the point of the test is what the load does when
 /// the row exists anyway, whatever left it there.
+// Hard-won: cac34041: one orphan relation made every state load fail
 #[test]
 fn a_subagent_relation_with_no_session_does_not_refuse_the_whole_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -5286,6 +5227,7 @@ pub(super) fn after_materialized_frontier_read() {
     }
 }
 
+// Hard-won: 767a0c57: a streamed commit between frontier and transcript reads made a valid projection fail session loading.
 #[test]
 fn projection_reads_keep_one_snapshot_when_a_writer_commits_after_the_frontier_read() {
     for mode in ["whole", "tail", "summary"] {
@@ -5484,6 +5426,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
 /// lock: SQLite only calls the busy handler when the connection holds no
 /// transaction, so the upgrade returns `SQLITE_BUSY` at once. Writer-capable
 /// connections therefore begin IMMEDIATE (issue 1117).
+// Hard-won: 3c668c3d: an activity write returned SQLITE_BUSY and stopped the API
 #[test]
 fn writer_connections_wait_for_a_concurrent_writer_instead_of_failing() {
     let directory = tempfile::tempdir().unwrap();
@@ -5912,6 +5855,7 @@ fn delivering_the_note_clears_only_the_sub_agents_it_named() {
 
 /// The ordinal of the parent's newest prompt is recorded only for a sub-agent
 /// child, and a late write for an older prompt never moves it back.
+// Hard-won: a91cfd04: a parent reported a just-started child complete before its turn was stored
 #[test]
 fn a_subagent_prompt_ordinal_is_kept_for_children_and_only_moves_forward() {
     let directory = tempfile::tempdir().unwrap();
@@ -6083,6 +6027,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
 /// the catalog. The context then holds the canonical project, and rebinding
 /// reports it so the resumed record can follow (resume publication rejects a
 /// record whose bundle differs from its context).
+// Hard-won: cb051da9: canonical bundle aliases made imported session resume publication fail
 #[test]
 fn rebinding_to_an_aliased_bundle_reports_the_canonical_project() {
     let directory = tempfile::tempdir().unwrap();

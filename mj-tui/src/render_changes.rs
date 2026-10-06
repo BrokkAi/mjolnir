@@ -297,7 +297,7 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &self.mode else {
             return Vec::new();
         };
-        let now = chrono::Local::now();
+        let now = crate::resume::display_now();
         let offset = dialog
             .form
             .borrow()

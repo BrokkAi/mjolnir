@@ -1,0 +1,796 @@
+=== collapsed field opens (20x10) ===
+
+one ▾           Cont
+
+
+
+
+
+
+
+
+action: Some(Activate(1))
+
+=== popup opened (20x10) ===
+
+one ▾           Cont
+╭ choices ╮
+│one      │
+│two      │
+│three    │
+╰─────────╯
+
+
+
+
+=== keyboard preview leaves committed value (20x10) ===
+
+one ▾           Cont
+╭ choices ╮
+│one      │
+│two      │
+│three    │
+╰─────────╯
+
+
+
+routed preview: None
+committed selection: 0
+preview selection: 1
+
+=== tab commits highlighted option (20x10) ===
+
+two ▾           Cont
+
+
+
+
+
+
+
+
+routed action: Some(ComboBoxCommit(1, 1))
+committed selection: 1
+
+=== unrelated button action passes through (30x10) ===
+
+two ▾            Continue
+
+
+
+
+
+
+
+
+routed action: Some(Activate(2))
+
+=== collapsed glyph at minimum width (6x1) ===
+long v
+
+=== mouse click commits popup row (20x10) ===
+
+one ▾
+╭ choices ╮
+│one      │
+│two      │
+│three    │
+╰─────────╯
+
+
+
+action: Some(ComboBoxCommit(1, 1))
+
+=== popup scroll selects an option (20x10) ===
+
+model ▾
+╭ choices ╮
+│one      │
+│two      │
+│three    │
+╰─────────╯
+
+
+
+action: Some(Select(1, 1))
+
+=== escape dismisses expanded popup (20x10) ===
+
+model ▾
+
+
+
+
+
+
+
+
+action: Some(ComboBoxDismiss(1))
+
+=== outside click dismisses expanded popup (20x10) ===
+
+one ▾
+
+
+
+
+
+
+
+
+action: Some(ComboBoxDismiss(1))
+
+=== selection centered or list pinned (0) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00 ▐│
+│model-01 ▐│
+│model-02 ││
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (1) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00 ▐│
+│model-01 ▐│
+│model-02 ││
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (2) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00 ▐│
+│model-01 ▐│
+│model-02 ││
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (3) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00 ▐│
+│model-01 ▐│
+│model-02 ││
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (4) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00 ▐│
+│model-01 ▐│
+│model-02 ││
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (5) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-01 ▐│
+│model-02 ▐│
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+│model-08 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (6) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-02 ▐│
+│model-03 ▐│
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+│model-08 ││
+│model-09 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (7) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-03 ▐│
+│model-04 ▐│
+│model-05 ││
+│model-06 ││
+│model-07 ││
+│model-08 ││
+│model-09 ││
+│model-10 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (8) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-04 ││
+│model-05 ▐│
+│model-06 ▐│
+│model-07 ││
+│model-08 ││
+│model-09 ││
+│model-10 ││
+│model-11 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (9) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-05 ││
+│model-06 ▐│
+│model-07 ▐│
+│model-08 ││
+│model-09 ││
+│model-10 ││
+│model-11 ││
+│model-12 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (10) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-06 ││
+│model-07 ▐│
+│model-08 ▐│
+│model-09 ││
+│model-10 ││
+│model-11 ││
+│model-12 ││
+│model-13 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (11) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-07 ││
+│model-08 ▐│
+│model-09 ▐│
+│model-10 ││
+│model-11 ││
+│model-12 ││
+│model-13 ││
+│model-14 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (12) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-08 ││
+│model-09 ││
+│model-10 ▐│
+│model-11 ▐│
+│model-12 ││
+│model-13 ││
+│model-14 ││
+│model-15 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (13) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-09 ││
+│model-10 ││
+│model-11 ▐│
+│model-12 ▐│
+│model-13 ││
+│model-14 ││
+│model-15 ││
+│model-16 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (14) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-10 ││
+│model-11 ││
+│model-12 ▐│
+│model-13 ▐│
+│model-14 ││
+│model-15 ││
+│model-16 ││
+│model-17 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (15) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-11 ││
+│model-12 ││
+│model-13 ││
+│model-14 ▐│
+│model-15 ▐│
+│model-16 ││
+│model-17 ││
+│model-18 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (16) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-12 ││
+│model-13 ││
+│model-14 ││
+│model-15 ▐│
+│model-16 ▐│
+│model-17 ││
+│model-18 ││
+│model-19 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (17) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-13 ││
+│model-14 ││
+│model-15 ││
+│model-16 ▐│
+│model-17 ▐│
+│model-18 ││
+│model-19 ││
+│model-20 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (18) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-14 ││
+│model-15 ││
+│model-16 ││
+│model-17 ▐│
+│model-18 ▐│
+│model-19 ││
+│model-20 ││
+│model-21 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (19) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-15 ││
+│model-16 ││
+│model-17 ││
+│model-18 ││
+│model-19 ▐│
+│model-20 ▐│
+│model-21 ││
+│model-22 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (20) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-16 ││
+│model-17 ││
+│model-18 ││
+│model-19 ││
+│model-20 ▐│
+│model-21 ▐│
+│model-22 ││
+│model-23 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (21) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-17 ││
+│model-18 ││
+│model-19 ││
+│model-20 ││
+│model-21 ▐│
+│model-22 ▐│
+│model-23 ││
+│model-24 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (22) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-18 ││
+│model-19 ││
+│model-20 ││
+│model-21 ││
+│model-22 ▐│
+│model-23 ▐│
+│model-24 ││
+│model-25 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (23) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-19 ││
+│model-20 ││
+│model-21 ││
+│model-22 ││
+│model-23 ││
+│model-24 ▐│
+│model-25 ▐│
+│model-26 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (24) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-20 ││
+│model-21 ││
+│model-22 ││
+│model-23 ││
+│model-24 ││
+│model-25 ▐│
+│model-26 ▐│
+│model-27 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (25) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-21 ││
+│model-22 ││
+│model-23 ││
+│model-24 ││
+│model-25 ││
+│model-26 ▐│
+│model-27 ▐│
+│model-28 ││
+╰──────────╯
+
+
+
+=== selection centered or list pinned (26) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-22 ││
+│model-23 ││
+│model-24 ││
+│model-25 ││
+│model-26 ││
+│model-27 ││
+│model-28 ▐│
+│model-29 ▐│
+╰──────────╯
+
+
+
+=== selection centered or list pinned (27) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-22 ││
+│model-23 ││
+│model-24 ││
+│model-25 ││
+│model-26 ││
+│model-27 ││
+│model-28 ▐│
+│model-29 ▐│
+╰──────────╯
+
+
+
+=== selection centered or list pinned (28) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-22 ││
+│model-23 ││
+│model-24 ││
+│model-25 ││
+│model-26 ││
+│model-27 ││
+│model-28 ▐│
+│model-29 ▐│
+╰──────────╯
+
+
+
+=== selection centered or list pinned (29) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-22 ││
+│model-23 ││
+│model-24 ││
+│model-25 ││
+│model-26 ││
+│model-27 ││
+│model-28 ▐│
+│model-29 ▐│
+╰──────────╯
+
+
+
+=== fitting list selection (0) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+│model-05  │
+╰──────────╯
+
+
+
+
+
+=== fitting list selection (1) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+│model-05  │
+╰──────────╯
+
+
+
+
+
+=== fitting list selection (2) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+│model-05  │
+╰──────────╯
+
+
+
+
+
+=== fitting list selection (3) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+│model-05  │
+╰──────────╯
+
+
+
+
+
+=== fitting list selection (4) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+│model-05  │
+╰──────────╯
+
+
+
+
+
+=== fitting list selection (5) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+│model-05  │
+╰──────────╯
+
+
+
+
+
+=== ASCII scrollbar thumb (0) (30x14) ===
+
+model v
++ choices -+
+|model-00 #|
+|model-01 #|
+|model-02 #|
+|model-03 ||
+|model-04 ||
+|model-05 ||
+|model-06 ||
+|model-07 ||
++----------+
+
+
+
+=== ASCII scrollbar thumb (19) (30x14) ===
+
+model v
++ choices -+
+|model-12 ||
+|model-13 ||
+|model-14 ||
+|model-15 ||
+|model-16 ||
+|model-17 #|
+|model-18 #|
+|model-19 #|
++----------+
+
+
+
+=== no scrollbar without overflow (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00  │
+│model-01  │
+│model-02  │
+│model-03  │
+│model-04  │
+╰──────────╯
+
+
+
+
+
+
+=== Unicode scrollbar thumb (0) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-00 ▐│
+│model-01 ▐│
+│model-02 ▐│
+│model-03 ││
+│model-04 ││
+│model-05 ││
+│model-06 ││
+│model-07 ││
+╰──────────╯
+
+
+selected option: model-00
+
+=== Unicode scrollbar thumb (10) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-06 ││
+│model-07 ││
+│model-08 ▐│
+│model-09 ▐│
+│model-10 ▐│
+│model-11 ││
+│model-12 ││
+│model-13 ││
+╰──────────╯
+
+
+selected option: model-10
+
+=== Unicode scrollbar thumb (19) (30x14) ===
+
+model ▾
+╭ choices ─╮
+│model-12 ││
+│model-13 ││
+│model-14 ││
+│model-15 ││
+│model-16 ││
+│model-17 ▐│
+│model-18 ▐│
+│model-19 ▐│
+╰──────────╯
+
+
+selected option: model-19

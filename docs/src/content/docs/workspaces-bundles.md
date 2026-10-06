@@ -287,23 +287,20 @@ because their display names happen to match.
 
 ### What the agent sees
 
-The Mjolnir project-memory service provides three tools:
+Each session gets a private project-memory directory in its staged harness
+profile. Claude Code uses its native project-memory integration. Codex, Kimi,
+and Grok receive the directory as a readable and writable workspace root and
+use their own file tools to edit it. Muse can access it directly because its
+sandbox is disabled. The startup context gives non-Claude agents its path and
+supplies the first 200 lines or 25 KiB of `MEMORY.md`, so keep that index short
+and link to focused documents there. The `mj-memory` MCP server provides only
+session-history and code-provenance tools.
 
-| Tool | Purpose |
-| --- | --- |
-| `list` | List documents below an optional virtual path prefix, 50 entries at a time. |
-| `read` | Read one document and its version token. |
-| `write` | Create or replace a whole UTF-8 document using compare-and-swap. |
-
-Virtual paths start at `/`; target and controller filesystem paths never cross
-the tool boundary. `/MEMORY.md` is the concise index automatically supplied as
-hidden startup context. New sessions receive at most its first 200 lines or
-25 KiB, so keep it short and link to focused documents elsewhere in memory.
-
-Delivery is harness-specific. Claude Code uses its native project-memory
-integration; Kimi managed targets receive the service through their staged MCP
-configuration; Codex, Grok, Muse, and local Kimi receive it through ACP. See
-[Harness limitations](/profiles/#harness-limitations).
+For each non-Claude memory file, keep one fact in a Markdown document with
+frontmatter for `name`, `description`, and `metadata.type`. Add a one-line
+pointer to each file in `MEMORY.md`. Update an existing note instead of
+duplicating it, and delete notes that are wrong. Claude Code keeps its native
+memory conventions. See [Harness limitations](/profiles/#harness-limitations).
 
 For a multi-root bundle, bundle-wide material lives at the virtual root and
 repository-specific material may live below `/roots/<repository-id>/`.
@@ -312,21 +309,15 @@ workspace root.
 
 ### Writes, limits, and synchronization
 
-`write` replaces a complete document. To create one, the agent passes
-`if_version = "new"`; to update one, it must pass the version returned by
-`read`. If the document changed meanwhile, the write returns the current
-version and content instead of overwriting it.
+Project-memory files are synchronized at checkpoints and have these limits:
 
-Project memory has these limits:
-
-- 100 KiB per document;
+- 100 KiB per file;
 - 1 MiB per synchronized snapshot;
-- 1024 bytes per virtual path; and
-- 50 entries per listing page.
+- 1024 bytes per path.
 
-Empty documents, unsafe path components, hidden/reserved path segments, and
-symbolic-link traversal are rejected. The service has no explicit delete tool,
-but deleting a document from a session replica syncs at the next checkpoint.
+Empty files, unsafe path components, hidden or reserved path segments, and
+symbolic-link traversal are not synchronized. Delete a file from the session
+replica to remove it from project memory at the next checkpoint.
 
 Every session works on a private replica. At checkpoints, Mjolnir combines it
 with the canonical controller copy using a line-by-line three-way merge.

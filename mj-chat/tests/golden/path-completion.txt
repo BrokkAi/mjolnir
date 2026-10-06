@@ -1,0 +1,101 @@
+single completion request: Some("~/pr"); reply applied: true
+=== single match inserts without popup (40x14) ===
+value: "~/projects/"; cursor: 11; control: PathField { len: 0, selected: 0, expanded: false }; pending: None; truncated: false
+
+~/projects/
+
+
+
+
+
+
+
+
+
+
+
+
+common-prefix request: Some("~/p"); reply applied: true
+=== common prefix and two candidates (40x14) ===
+value: "~/pro"; cursor: 5; control: PathField { len: 2, selected: 0, expanded: true }; pending: None; truncated: false
+
+~/pro
+╭ matches ─────────────╮
+│~/projects/           │
+│~/provision/          │
+╰──────────────────────╯
+
+
+
+
+
+
+
+
+=== truncated candidates before edit (40x14) ===
+value: "~/p"; cursor: 3; control: PathField { len: 2, selected: 0, expanded: true }; pending: None; truncated: true
+
+~/p
+╭ first 50 matches · keep typing ╮
+│~/projects/                     │
+│~/provision/                    │
+╰────────────────────────────────╯
+
+
+
+
+
+
+
+
+edit outcome: Changed
+=== popup dismissed after edit (40x14) ===
+value: "~/pr"; cursor: 4; control: PathField { len: 0, selected: 0, expanded: false }; pending: None; truncated: false
+
+~/pr
+
+
+
+
+
+
+
+
+
+
+
+
+=== selected candidate is clamped (40x14) ===
+value: "~/p"; cursor: 3; control: PathField { len: 2, selected: 1, expanded: true }; pending: None; truncated: false
+
+~/p
+╭ matches ─────────────╮
+│~/projects/           │
+│~/provision/          │
+╰──────────────────────╯
+
+
+
+
+
+
+
+
+accepted: true; accepting closed popup: false
+=== accepted candidate (40x14) ===
+value: "~/provision/"; cursor: 12; control: PathField { len: 0, selected: 0, expanded: false }; pending: None; truncated: false
+
+~/provision/
+
+
+
+
+
+
+
+
+
+
+
+
+=== end of rendered states ===

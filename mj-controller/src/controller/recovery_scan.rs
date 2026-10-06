@@ -276,7 +276,13 @@ impl Controller {
         let mut relay = StandaloneSession::connect_command(spec, session_id)
             .await
             .context("orphan relay did not complete the v1 handshake")?;
-        let native_session_id = wait_for_native_session(&mut relay, executor).await?;
+        let harness = self
+            .state
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown adopted session {session_id}"))?
+            .harness_kind;
+        let native_session_id = wait_for_native_session(&mut relay, executor, harness).await?;
         self.mark_worker_connected(session_id, Some(native_session_id))?;
         if let Some(title) = relay
             .snapshot()
@@ -1278,6 +1284,7 @@ mod tests {
 
     const FAILED_ADOPTION_CHILD: &str = "MJ_TEST_FAILED_ADOPTION_CHILD";
 
+    // Hard-won: 91163d55: failed orphan adoption became non-retryable instead of preserving ownership
     #[tokio::test]
     async fn a_failed_adoption_records_the_failure_and_stays_retryable() {
         // MJ_DATA_DIR is process-global, so the database-backed half runs in
@@ -1611,6 +1618,7 @@ mod tests {
         false
     }
 
+    // Hard-won: 75136459: recovery missed a container after its errored session stopped naming it
     #[test]
     fn a_container_an_errored_session_no_longer_names_is_an_orphan() {
         if !isolated_scan("a_container_an_errored_session_no_longer_names_is_an_orphan") {
@@ -1697,6 +1705,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 18de1bb4: default orphan scan exposed resources belonging to other or unstamped instances
     #[test]
     fn default_scan_scope_hides_other_and_unknown_instances() {
         let mut scan = RecoveryScan {
@@ -1719,6 +1728,7 @@ mod tests {
         assert_eq!(scan.hidden_other_instances, 2);
     }
 
+    // Hard-won: 18de1bb4: destructive recovery acted on another or unstamped instance without opt-in
     #[test]
     fn acting_on_another_or_unknown_instance_requires_the_explicit_flag() {
         require_instance_access(&candidate("mine", Some("qa")), "qa", false).unwrap();
@@ -1740,6 +1750,7 @@ mod tests {
         require_instance_access(&candidate("legacy", None), "qa", true).unwrap();
     }
 
+    // Hard-won: 4f38727b: orphan destruction left the Podman workspace volume behind
     #[test]
     fn a_podman_orphan_destroy_plan_removes_its_workspace_volume() {
         // `destroy_orphan_worker` rescans, so this drives the two steps it runs

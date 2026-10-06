@@ -55,6 +55,7 @@ fn accept_within(listener: &UnixListener, wait: Duration) -> UnixStream {
     }
 }
 
+// Hard-won: 5dc31b4: a dead worker left its proxy waiting for the 900-second relay timeout.
 #[test]
 fn a_proxy_exits_when_its_worker_dies_while_its_client_holds_stdin_open() {
     let root = tempfile::tempdir().expect("create a proxy test root");

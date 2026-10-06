@@ -254,6 +254,96 @@ pub(super) async fn poll_daemon_runtime(
     }
 }
 
+#[cfg(test)]
+mod expired_tail_cursor_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_session_tail_cursor_clears_the_replica_cursor_before_retry() {
+        const CHILD: &str = "MJ_TEST_EXPIRED_SESSION_TAIL_CURSOR";
+        const TEST: &str = "expired_session_tail_cursor_clears_the_replica_cursor_before_retry";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().expect("isolated data root");
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(module_path!(), TEST),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "expired-tail-cursor")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+
+        use mj_client::daemon::{
+            DaemonAction, DaemonMetadata, DaemonReply, RequestEnvelope, ResponseEnvelope,
+        };
+        use mj_client::runtime_feed::{RuntimeCursor, RuntimeReplica, SessionTailReply};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind fake daemon protocol endpoint");
+        let address = listener.local_addr().unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: mj_client::daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address,
+            token: "tail-cursor-test-token".into(),
+            started_at: "2026-10-05T00:00:00Z".into(),
+            build_version: "test".into(),
+        };
+        let metadata_path = mj_client::daemon::metadata_path();
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).expect("create isolated data dir");
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_vec(&metadata).expect("serialize daemon metadata"),
+        )
+        .expect("publish fake daemon metadata");
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept tail request");
+            let request: RequestEnvelope = mj_client::daemon::read_frame(&mut stream)
+                .await
+                .expect("read tail request");
+            let DaemonAction::SessionTail { session_id, cursor } = request.action else {
+                panic!("expected SessionTail request");
+            };
+            let response = ResponseEnvelope {
+                protocol_version: request.protocol_version,
+                request_id: request.request_id,
+                result: Ok(DaemonReply::SessionTail(Box::new(
+                    SessionTailReply::ResetRequired,
+                ))),
+            };
+            mj_client::daemon::write_frame(&mut stream, &response)
+                .await
+                .expect("write expired cursor response");
+            (session_id, cursor)
+        });
+
+        let cursor = RuntimeCursor {
+            incarnation: "previous-daemon".into(),
+            sequence: 42,
+        };
+        let replica = Arc::new(tokio::sync::Mutex::new(RuntimeReplica {
+            cursor: Some(cursor.clone()),
+            ..RuntimeReplica::default()
+        }));
+        let error = load_session_tail(Arc::clone(&replica), "session-7".into())
+            .await
+            .expect_err("an expired cursor requires a fresh runtime snapshot");
+        assert_eq!(
+            error.to_string(),
+            "the daemon no longer holds this runtime cursor"
+        );
+        assert!(replica.lock().await.cursor.is_none());
+        assert_eq!(
+            server.await.expect("fake daemon task"),
+            ("session-7".to_owned(), cursor)
+        );
+    }
+}
+
 /// A submit the daemon answered with an error was refused, not lost, unless
 /// the daemon itself says delivery is unconfirmed. Only a failed exchange with
 /// the daemon leaves delivery unknown (I1-12).
@@ -384,39 +474,8 @@ mod tests {
     use crate::pollers::{Feed, RuntimeStateUpdate};
     use mj_client::daemon::{DaemonRefusal, RuntimeNotice};
 
-    /// Opening a session's preview needs no query: the tail the feed follows
-    /// is already in memory, and serving it reaches neither the daemon nor
-    /// the store.
-    #[tokio::test]
-    async fn a_held_tail_is_served_without_the_daemon_or_the_store() {
-        let mut materialized = mj_core::state::MaterializedSession::empty("s");
-        materialized.applied_event_ordinal = 3;
-        let tail = mj_client::runtime_feed::SessionTail::of(
-            &materialized,
-            &mj_core::state::ProjectionWindow::default(),
-            16,
-        );
-        let mut replica = mj_client::runtime_feed::RuntimeReplica {
-            cursor: Some(mj_client::runtime_feed::RuntimeCursor {
-                incarnation: "daemon".into(),
-                sequence: 7,
-            }),
-            ..Default::default()
-        };
-        replica.projection.transcripts.insert("s".into(), tail);
-        let replica = std::sync::Arc::new(tokio::sync::Mutex::new(replica));
-        // A test binary refuses the default instance's daemon and store, so
-        // reaching either would fail this call.
-        let (served, window) = super::load_session_tail(replica, "s".into())
-            .await
-            .expect("a held tail is served")
-            .expect("the session has a tail");
-        assert_eq!(served, materialized);
-        assert_eq!(window, mj_core::state::ProjectionWindow::default());
-    }
-
-    /// The daemon republishes its whole snapshot, at a new revision, whenever
-    /// any session moves. A surface must not wake for the parts it already has.
+    /// A republished revision with equal content must not wake the surface,
+    /// while changed content must still wake it.
     #[test]
     fn a_republished_snapshot_wakes_the_surface_only_for_what_changed() {
         let (state_tx, state_rx) = tokio::sync::watch::channel(RuntimeStateUpdate::default());
@@ -471,6 +530,7 @@ mod tests {
 
     /// I1-12: the daemon's refusal of `/clear` reached the chat as
     /// "Delivery unconfirmed" and stayed pinned as an unconfirmed row.
+    // Hard-won: 8bf21ad0: a final daemon relay refusal was incorrectly rendered as delivery unconfirmed and left the row stuck.
     #[test]
     fn a_daemon_refusal_is_a_rejection_and_a_lost_exchange_is_unconfirmed() {
         let refused = remote_submit_failure(&anyhow::Error::new(DaemonRefusal(

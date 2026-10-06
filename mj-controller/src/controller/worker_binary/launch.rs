@@ -1,5 +1,41 @@
 use super::*;
 
+fn disable_mbx_cache_shims(
+    session_id: &str,
+    backend: &targets::TargetLocator,
+    worker_root: &str,
+    executor: &impl CommandExecutor,
+    reason: &str,
+) {
+    let cleanup = remove_generated_mbx_shims(executor, backend, worker_root);
+    if let Err(error) = &cleanup {
+        tracing::warn!(
+            session_id,
+            "could not remove marked shared-mbx launchers: {error:#}"
+        );
+    }
+    let cleanup_note = cleanup
+        .err()
+        .map(|error| format!(" Mjolnir could not remove its marked launchers: {error:#}."))
+        .unwrap_or_default();
+    tracing::warn!(
+        session_id,
+        "shared mbx is unavailable in this container: {reason}"
+    );
+    executor.notify_notice(&format!(
+        "The Rust build cache is unavailable in this container: {reason}.{cleanup_note} The session will start without it."
+    ));
+}
+
+fn build_cache_config_roots(launch: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    [&launch.target_environment, &launch.environment]
+        .into_iter()
+        .filter_map(|environment| environment.get("XDG_CONFIG_HOME").map(PathBuf::from))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 impl Controller {
     /// Where this session's worker lives. This is decided from the session
     /// record and configuration alone, so a caller can name the worker root
@@ -129,7 +165,11 @@ impl Controller {
             &profile_stage,
         )?;
         if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
-            configure_kimi_project_memory_mcp(&profile_stage, worker_root, &project_memory)?;
+            configure_kimi_history_mcp(
+                &profile_stage,
+                worker_root,
+                project_memory.history_socket.as_deref(),
+            )?;
         }
         let worker_binary = worker_binary_for(backend, executor)?;
 
@@ -151,10 +191,8 @@ impl Controller {
         prepare_installed_managed_harness(executor, backend, worker_root, &launch)
     }
 
-    /// Put the pinned mbx binary and its `cargo` shim in the session's `bin`
-    /// directory, which the worker prepends to `PATH` for the harness, its
-    /// terminals, and `bash -lc` shells. mbx invoked as `cargo` removes that
-    /// directory from `PATH` and runs the image's real Cargo underneath.
+    /// Refresh and verify the shared-cache copy, then install marked launchers
+    /// in the session's `bin` directory on the worker PATH.
     pub(in crate::controller) fn install_build_cache_shim(
         &self,
         session: &mj_core::state::SessionRecord,
@@ -162,24 +200,59 @@ impl Controller {
         launch: &WorkerLaunchConfig,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
+        let Some(cache) = session.build_cache.as_ref() else {
+            return Ok(());
+        };
         let worker_root = targets::worker_root(backend, &session.id)?;
-        // The download is the one build-cache failure worth telling the user
-        // about: it is fixable, and it is the only step that reaches the
-        // network.
-        let binary =
-            crate::controller::mbx::binary_for(backend, executor).inspect_err(|error| {
-                executor.notify_notice(&format!(
-                    "The Rust build cache could not be prepared: {error:#}."
-                ));
-            })?;
-        let (configuration, config_roots) =
-            self.build_cache_configuration(session, backend, launch, executor)?;
-        install_mbx_files(
+        let config_roots = build_cache_config_roots(launch);
+        let configuration = crate::controller::mbx::shared_configuration_file(&cache.directory);
+        if link_legacy_mbx_configuration(
             executor,
             backend,
-            &session.id,
             &worker_root,
-            &binary,
+            &configuration,
+            &config_roots,
+        )? {
+            return Ok(());
+        }
+        let binary = match crate::controller::mbx::sync_mbx_binary_for_container(
+            backend,
+            &cache.directory,
+            executor,
+        ) {
+            Ok(crate::controller::mbx::CachedMbxSync::Ready(binary)) => binary,
+            Ok(crate::controller::mbx::CachedMbxSync::Unavailable(reason)) => {
+                disable_mbx_cache_shims(&session.id, backend, &worker_root, executor, &reason);
+                return Ok(());
+            }
+            Err(error) => {
+                disable_mbx_cache_shims(
+                    &session.id,
+                    backend,
+                    &worker_root,
+                    executor,
+                    &format!("{error:#}"),
+                );
+                return Ok(());
+            }
+        };
+        if let Err(error) = verify_mbx_binary(executor, backend, &binary.path, &binary.version) {
+            disable_mbx_cache_shims(
+                &session.id,
+                backend,
+                &worker_root,
+                executor,
+                &format!("{error:#}"),
+            );
+            return Ok(());
+        }
+        let (configuration, config_roots) =
+            self.build_cache_configuration(session, backend, launch, executor)?;
+        install_mbx_shims(
+            executor,
+            backend,
+            &worker_root,
+            &binary.path,
             &configuration,
             &config_roots,
         )
@@ -192,9 +265,7 @@ impl Controller {
         launch: &WorkerLaunchConfig,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        let (configuration, config_roots) =
-            self.build_cache_configuration(session, backend, launch, executor)?;
-        link_mbx_configuration(executor, backend, &configuration, &config_roots)
+        self.install_build_cache_shim(session, backend, launch, executor)
     }
 
     fn build_cache_configuration(
@@ -213,11 +284,8 @@ impl Controller {
                 .context("session has no build cache")?,
             executor,
         )?;
-        let config_roots = [&launch.target_environment, &launch.environment]
-            .into_iter()
-            .filter_map(|environment| environment.get("XDG_CONFIG_HOME").map(PathBuf::from))
-            .collect::<std::collections::BTreeSet<_>>();
-        Ok((configuration, config_roots.into_iter().collect()))
+        let config_roots = build_cache_config_roots(launch);
+        Ok((configuration, config_roots))
     }
 
     /// Probe the installed binary and the worker's recorded state after a
@@ -370,7 +438,6 @@ impl Controller {
         // parent's work as the child's.
         launch.review_capture =
             mj_core::review::settings::can_review(&self.config) && subagent.is_none();
-        launch.bifrost_binary = mj_review::bifrost::configured_bifrost_binary();
         if let Some(subagent) = &subagent {
             let parent = self
                 .state
@@ -758,7 +825,6 @@ pub(super) fn worker_launch_config(
             handback_tool: false,
             initial_model: None,
             review_capture: false,
-            bifrost_binary: None,
             harness: profile.kind,
             harness_home: PathBuf::from(&target_profile_home),
             // The staged home mirrors the profile home, so the marker's path

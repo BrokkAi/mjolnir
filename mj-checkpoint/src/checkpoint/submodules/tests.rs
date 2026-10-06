@@ -186,6 +186,7 @@ fn init_repository(path: &Path) {
 /// no `.gitmodules` entry, could not be checkpointed at all, because
 /// `git submodule foreach` fails on a gitlink it has no URL for. The session's
 /// project directory was a subdirectory of that checkout.
+// Hard-won: 4d80f0eb: checkpointing a checkout with an unregistered gitlink failed with Git's missing-URL error.
 #[test]
 fn a_real_checkout_refuses_a_dirty_submodule_but_not_an_unregistered_gitlink() {
     let temp = tempfile::tempdir().unwrap();

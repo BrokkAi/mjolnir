@@ -5,8 +5,8 @@ description: Understand Mjolnir's purpose, boundaries, supported coding harnesse
 
 Mjolnir (`mj`) is a session manager for coding agents that provisions their
 execution environments and lets you continue work across harnesses, accounts,
-and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, and Muse
-Code through the Agent Client Protocol (ACP), with a terminal dashboard,
+and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, Muse
+Code, and OpenCode through the Agent Client Protocol (ACP), with a terminal dashboard,
 personal web viewer, and desktop app.
 
 Choose a harness account independently from the target where it runs. Mjolnir
@@ -96,6 +96,7 @@ These are the integrations shipped with Mjolnir 2.x today:
 | Kimi Code | `kimi` | Yes | Yes | Yes | No |
 | Grok Build | `grok` | Yes | Yes | Yes | Yes |
 | Muse Code | `muse` | Yes | Yes | Yes | No |
+| OpenCode | `opencode` | Yes | No | Yes | Yes |
 
 “Native state” means Mjolnir can resume the harness's own session when the
 same harness is selected again. A cross-harness resume instead restores the

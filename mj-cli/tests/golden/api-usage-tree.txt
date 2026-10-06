@@ -1,0 +1,13 @@
+=== parent session usage tree (CLI text) ===
+usage tree session-parent: 2 sessions
+totals from the 3 of 5 turns that reported a whole turn; 1 started turns without a completion report
+model gpt-5.4; effort high:
+  input_tokens  1800  (2 turns)
+  output_tokens  500  (2 turns)
+model unknown; effort unknown:
+  cache_read_tokens  600  (1 turns)
+not in totals: 1 last-request, 0 unknown-scope, 1 missing reports
+session session-parent: task root; parent none; retained session
+  provider session cost: 0.0123 USD
+session session-reviewer: task Review the migration plan; parent session-parent; accounting retained after cleanup
+  provider session cost: 0.0045 USD

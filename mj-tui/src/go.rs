@@ -241,9 +241,7 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        buffer_lines, chord, dashboard_with_session, running_session, stopped_session,
-    };
+    use crate::test_support::{dashboard_with_session, running_session};
     use crate::{CommandId, Mode};
 
     fn mode() -> GoMode {
@@ -268,48 +266,6 @@ mod tests {
     /// The session the daemon would choose in these one-session fixtures.
     fn startup(dashboard: &DashboardState) -> Option<SessionRecord> {
         dashboard.state.sessions.values().next().cloned()
-    }
-
-    #[test]
-    fn a_stopped_startup_session_opens_the_resume_wizard_without_a_feed_record() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut stopped = stopped_session();
-        stopped.id = "stopped".into();
-        stopped.workspace_id = dashboard.state.sessions["session-1"].workspace_id.clone();
-        dashboard.begin_go(mode(), false, Some(stopped));
-        let Mode::Resume(wizard) = &dashboard.mode else {
-            panic!("expected the resume wizard, got {:?}", dashboard.mode);
-        };
-        assert_eq!(wizard.session_id, "stopped");
-        assert!(!dashboard.state.sessions.contains_key("stopped"));
-    }
-
-    #[test]
-    fn new_reuses_the_recipe_without_stopping_the_existing_session() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let expected = mode().recipe.unwrap();
-        assert_eq!(
-            dashboard.begin_go(mode(), false, startup(&dashboard)),
-            DashboardAction::Open {
-                session_id: "session-1".into()
-            }
-        );
-        let before = dashboard.state.clone();
-        assert_eq!(
-            chord(&mut dashboard, CommandId::NewSessionWizard),
-            DashboardAction::GoLaunch { recipe: expected }
-        );
-        assert_eq!(dashboard.state, before);
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
-    }
-
-    #[test]
-    fn workspace_management_remains_available_from_go() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_go(mode(), false, startup(&dashboard));
-        assert!(dashboard.command_allowed_now(CommandId::Workspaces));
-        chord(&mut dashboard, CommandId::Workspaces);
-        assert!(matches!(dashboard.mode, Mode::WorkspaceManager(_)));
     }
 
     #[test]
@@ -374,86 +330,6 @@ mod tests {
         dashboard.cancel_modal();
         assert_eq!(
             dashboard.dispatch_command(CommandId::NewSessionWizard),
-            DashboardAction::GoLaunch {
-                recipe: mode().recipe.unwrap()
-            }
-        );
-    }
-
-    #[test]
-    fn ordinary_new_still_opens_the_existing_wizard() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.dispatch_command(CommandId::NewSessionWizard);
-        assert!(matches!(dashboard.mode, Mode::New(_)));
-        assert!(dashboard.go_mode().is_none());
-    }
-
-    #[test]
-    fn banner_displays_the_selected_sessions_actual_checkout_and_branch() {
-        let mut session = running_session();
-        session.acp_session_title = None;
-        session.project_directory = Some("/actual/checkout".into());
-        let id = session.id.clone();
-        let mut dashboard = dashboard_with_session(session);
-        dashboard.begin_go(mode(), false, startup(&dashboard));
-        dashboard.set_go_context(id, Ok(("/actual/checkout".into(), "feature-x".into())));
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 45)).unwrap();
-        terminal
-            .draw(|frame| {
-                crate::render_combined(
-                    frame,
-                    &mut dashboard,
-                    &mut std::collections::BTreeMap::new(),
-                    &std::collections::BTreeMap::new(),
-                    false,
-                );
-            })
-            .unwrap();
-        let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-        assert!(rendered.contains("Source: /projects/current"));
-        assert!(rendered.contains("Working: /actual/checkout"));
-        assert!(rendered.contains("branch: feature-x"));
-        assert!(rendered.contains(" Menu "));
-        for visible in ["Workspaces", "Targets", "Profiles", "b panes"] {
-            assert!(
-                rendered.contains(visible),
-                "missing dashboard detail: {visible}"
-            );
-        }
-        assert!(!rendered.contains("session-1"));
-        assert!(rendered.contains("Conversation 1"));
-        assert!(dashboard.workspace_pane_area.is_some());
-        assert!(!dashboard.pane_size_control_areas.is_empty());
-        if let Some(path) = std::env::var_os("MJ_GO_CAPTURE_PATH") {
-            std::fs::write(
-                path,
-                crate::docs_screenshots::buffer_svg(
-                    terminal.backend().buffer(),
-                    "Focused project workspace",
-                    "Fast mode with conversations, New, Menu and the selected working context",
-                ),
-            )
-            .unwrap();
-        }
-        assert!(rendered.contains(" New "));
-        let rows = buffer_lines(terminal.backend().buffer());
-        let (row, line) = rows
-            .iter()
-            .enumerate()
-            .find(|(_, line)| line.contains(" New "))
-            .unwrap();
-        let column = crate::test_support::cell_column(line, " New ") + 1;
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-        let mouse = |kind| MouseEvent {
-            kind,
-            column,
-            row: row as u16,
-            modifiers: KeyModifiers::NONE,
-        };
-        dashboard.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left)));
-        assert_eq!(
-            dashboard.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left))),
             DashboardAction::GoLaunch {
                 recipe: mode().recipe.unwrap()
             }

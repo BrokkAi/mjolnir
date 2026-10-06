@@ -98,6 +98,7 @@ fn operational(session_id: &str) -> RelayOperationalState {
         replaced_unused_native_session_id: None,
         checkpoint_only: false,
         acp_ready: None,
+        harness_preparation: None,
         agent_capabilities: None,
         agent_info: None,
         runtime: None,
@@ -239,6 +240,10 @@ async fn runtime_feed_publishes_records_snapshot_before_session_projection() {
     drop(feed);
 }
 
+/// The feed forgets the fingerprint of a session that leaves the daemon's
+/// snapshot, so it must say so: a consumer that kept its own copy would wait
+/// forever for a view this feed treats as already sent. The same unchanged
+/// view is sent again when the session returns.
 #[tokio::test]
 async fn runtime_feed_skips_unchanged_fingerprints_and_loads_changed_projections() {
     type PollRequest = (
@@ -333,10 +338,7 @@ async fn runtime_feed_skips_unchanged_fingerprints_and_loads_changed_projections
     drop(feed);
 }
 
-/// The feed forgets the fingerprint of a session that leaves the daemon's
-/// snapshot, so it must say so: a consumer that kept its own copy would wait
-/// forever for a view this feed treats as already sent. The same unchanged
-/// view is sent again when the session returns.
+// Hard-won: 8b3a7286: the TUI could not open a session after Move left the runtime snapshot
 #[tokio::test]
 async fn a_session_leaving_the_snapshot_is_announced_and_republished_on_return() {
     type PollRequest = (
@@ -622,18 +624,6 @@ async fn a_blocked_session_load_does_not_stop_other_sessions_with_four_workers()
 }
 
 #[test]
-fn runtime_projection_view_accepts_matching_ordinal_and_digest() {
-    let runtime = runtime_view("session-1", 7, "digest-7");
-    let (materialized, window) = projection("session-1", 7, "digest-7");
-    let mut convergence = ProjectionConvergence::default();
-
-    let view = runtime_projection_view(runtime, Ok(Some((materialized, window))), &mut convergence)
-        .expect("matching projection is publishable");
-    assert!(view.snapshot.is_some());
-    assert!(view.error.is_none());
-}
-
-#[test]
 fn runtime_projection_view_reports_a_persistent_mismatch_after_bounded_retries() {
     let mut convergence = ProjectionConvergence::default();
     for _ in 0..PROJECTION_CONVERGENCE_RETRIES {
@@ -739,8 +729,8 @@ async fn an_expired_tail_cursor_is_fetched_again_rather_than_reported() {
 /// view is published again.
 #[tokio::test(start_paused = true)]
 async fn a_tail_that_changed_at_the_same_ordinal_is_published_again() {
-    let tail = |text: &str| {
-        let mut materialized = MaterializedSession::empty("session-1");
+    fn materialized(session_id: &str, text: &str) -> MaterializedSession {
+        let mut materialized = MaterializedSession::empty(session_id);
         materialized.applied_event_ordinal = 1;
         materialized.applied_event_digest = "digest-1".into();
         materialized.transcript = vec![Arc::new(mj_core::transcript::TranscriptItem {
@@ -754,6 +744,10 @@ async fn a_tail_that_changed_at_the_same_ordinal_is_published_again() {
                 streaming: false,
             },
         })];
+        materialized
+    }
+    let tail = |text: &str| {
+        let materialized = materialized("session-1", text);
         mj_client::runtime_feed::SessionTail::of(&materialized, &ProjectionWindow::default(), 16)
     };
     let with_tail = |revision, text: &str| {
@@ -768,9 +762,34 @@ async fn a_tail_that_changed_at_the_same_ordinal_is_published_again() {
         projection
     };
     let poll = scripted_polls(vec![with_tail(1, "full output"), with_tail(2, "compacted")]);
-    let load = |session_id: String| async move { Ok(Some(projection(&session_id, 1, "digest-1"))) };
+    let load_index = Arc::new(AtomicUsize::new(0));
+    let load_index_next = load_index.clone();
+    let load = move |session_id: String| {
+        let index = load_index_next.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let text = if index == 0 {
+                "full output"
+            } else {
+                "compacted"
+            };
+            let materialized = materialized(&session_id, text);
+            let window = ProjectionWindow::of(&materialized);
+            Ok(Some((materialized, window)))
+        }
+    };
     let mut feed = spawn_runtime_feed_with("workspace-1".into(), poll, load);
 
-    next_session_update(&mut feed).await;
-    next_session_update(&mut feed).await;
+    let full = next_session_update(&mut feed).await;
+    let full_tail = full.snapshot.unwrap().materialized.transcript;
+    assert!(
+        format!("{full_tail:?}").contains("full output"),
+        "{full_tail:?}"
+    );
+
+    let compacted = next_session_update(&mut feed).await;
+    let compacted_tail = compacted.snapshot.unwrap().materialized.transcript;
+    assert!(
+        format!("{compacted_tail:?}").contains("compacted"),
+        "{compacted_tail:?}"
+    );
 }

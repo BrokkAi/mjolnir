@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex (including custom model providers), Claude Code, Kimi Code, Grok Build, and Muse Code accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, and OpenCode accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -29,8 +29,9 @@ All models is unavailable for new selections.
 | Kimi Code | `kimi` | `KIMI_CODE_HOME` | `~/.kimi-code` | `credentials/kimi-code.json` | no |
 | Grok Build | `grok` | `GROK_HOME` | `~/.grok` | `auth.json` | yes |
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
+| OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | `.data/opencode/auth.json` | yes |
 
-There are five harness kinds. A Codex profile can also authenticate with an API
+There are six harness kinds. A Codex profile can also authenticate with an API
 key against a model provider other than OpenAI; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
 
@@ -304,6 +305,14 @@ configuration copy and stores native history under that copy's `.data/muse/`
 tree, including on a bare runtime on this machine. Do not override `XDG_CONFIG_HOME` or
 `XDG_DATA_HOME` in the profile environment.
 
+For OpenCode, configure `kind = "opencode"` and a home ending in `opencode`,
+for example `home = "/home/me/.config/opencode"` or
+`/home/me/accounts/work/opencode`. Discovery uses `$XDG_CONFIG_HOME/opencode`
+when set. Mjolnir gives each session a private configuration copy and stores
+its login and session database under that copy's `.data/opencode/` tree,
+including on a bare runtime on this machine. Do not override
+`XDG_CONFIG_HOME` or `XDG_DATA_HOME` in the profile environment.
+
 Run:
 
 ```console
@@ -321,6 +330,7 @@ environment before starting the harness's interactive login:
 | Kimi Code | `kimi login` |
 | Grok Build | `grok login` |
 | Muse Code | `muse login` |
+| OpenCode | `opencode auth login` |
 
 The login command is always resolved from the controller's `PATH`. A profile
 selects credentials and environment, not another harness executable.
@@ -376,6 +386,7 @@ from the profile home:
 | Kimi Code | `credentials/`, `config.toml`, `device_id`, `AGENTS.md`, `SYSTEM.md`, `mcp.json`, `skills/`, `agents/`, `plugins/` |
 | Grok Build | `auth.json`, `config.toml`, `AGENTS.md`, `agent_id`, `skills/`, `plugins/` |
 | Muse Code | `auth.json`, `settings.json`, `trust.json`, `AGENTS.md`, `skills/`, `rules/` |
+| OpenCode | `opencode.json`, `opencode.jsonc`, `.data/opencode/auth.json`, `AGENTS.md`, `skills/` |
 
 Staging follows symbolic links: a linked file or directory is copied with the
 contents of its target, even when the target is outside the harness home. A link
@@ -396,9 +407,11 @@ Mjolnir then adds its own files to the staged home:
   sub-agent hands back its report or a parent starts or waits for one;
 - for a Codex profile with a custom provider, the generated `models.json` and
   the `config.toml` line that points at it;
-- for Kimi Code on a target other than this machine, the `mj-memory` MCP server
-  in `mcp.json`;
+- for Kimi Code on a target other than this machine, the `mj-memory` history
+  MCP server in `mcp.json`;
 - for Muse, the permission profile in its settings;
+- for OpenCode under an unconstrained policy, the `"permission": "allow"`
+  setting in `opencode.json`;
 - in a container or on an EC2 instance, a note in the instruction file
   (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
 
@@ -418,11 +431,12 @@ moved, which stages it like any other. Until then its credentials and skills are
 not synchronized.
 
 Those sessions also left their project-memory replicas under `projects/hel-*` in
-the profile home. When the daemon starts, it removes each replica whose session
-has ended. It keeps a replica while its session is in this instance's store or
-a running process names the session, so it does not remove one that another
-Mjolnir instance still uses. A Claude Code project directory also holds the
-session's native transcripts; those stay.
+the profile home. Mjolnir does not remove them: several Mjolnir instances can
+share a profile home, and one instance cannot tell another's stopped session
+from an ended one. The project memory itself is kept in Mjolnir's data
+directory, so you can delete a leftover `projects/hel-*` directory by hand once
+its session is closed. In a Claude Code project directory, keep the session's
+native transcripts.
 
 Credential bytes travel only in direct controller-to-worker messages. They are
 excluded from the durable event journal and recovery archives. Fingerprints and
@@ -536,7 +550,7 @@ receive the owning daemon's configuration and data paths so their commands
 address the same Mjolnir instance.
 
 Container, SSH, and EC2 sessions do not receive this host CLI skill. Their
-delegation and project-memory MCP tools carry their own instructions. Launch
+delegation and session-history MCP tools carry their own instructions. Launch
 staging and ongoing skills reconciliation both enforce this distinction,
 including removing an older copy from an isolated session. The `skills/mj/`
 directory is reserved: localhost sessions receive the managed copy and isolated
@@ -548,16 +562,16 @@ Session recall and file provenance are provided by the `mj-memory` MCP server:
 `trace_file`, `session_files`, and `blame_file`. They query the controller's
 session index on local, container, and SSH targets without installing `sw` or
 copying the index to the target. Claude receives these history tools and keeps
-native project notes; the other harnesses also receive the document tools
-`list`, `read`, and `write`. Applicable tools are registered again when a
-session resumes.
+native project notes. Other harnesses read and write their session's project
+memory replica with their own file tools. Applicable history tools are
+registered again when a session resumes.
 
 History reads are bounded and include continuation information. The index can
 lag active sessions, and older transcripts may lack timestamps or file evidence.
 `blame_file` runs Git in the target checkout and reports heuristic attribution;
 uncommitted lines remain unattributed. Queries require a connected controller
-and time out after 60 seconds. Local project document tools remain usable while
-a history query waits. History tools never resume or restore old sessions.
+and time out after 60 seconds. Local project-memory files remain usable while a
+history query waits. History tools never resume or restore old sessions.
 User-supplied `recall` and `provenance` skills are preserved.
 
 The destination tree is replaced atomically. Removing the controller-side
@@ -583,6 +597,10 @@ Muse requires curl and tar; Mjolnir downloads the pinned native Muse binary and
 x86-64 and ARM64, are supported. The adapter's Apache-2.0 LICENSE and NOTICE
 are retained with the installation; the native Muse binary retains its own
 upstream terms.
+OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode archive
+from its GitHub releases and verifies its SHA-256 checksum. Linux and macOS, on
+x86-64 and ARM64, are supported. The pinned installation disables OpenCode's
+self-update so a running session never replaces its own binary.
 Mjolnir reports a missing prerequisite and leaves the existing worker alone;
 it does not invoke sudo or a system package manager.
 
@@ -610,6 +628,7 @@ while the pane has focus. **Refresh** runs the same refresh as
 | Kimi Code | Usage windows returned by the configured Kimi service. |
 | Grok Build | The harness's ACP billing extension. |
 | Muse Code | Native subscription usage windows and reset times, when reported. |
+| OpenCode | No published quota endpoint; the profile shows an unavailable reading. |
 
 A Codex profile on a provider that publishes no quota endpoint shows `API`
 instead of a window, because it is usage-priced. An unavailable reading is
@@ -641,19 +660,26 @@ other sessions or credentials. External Muse sessions normally come from
 `~/.local/share/muse/sessions` (`XDG_DATA_HOME/muse/sessions` when set); mj
 restores them into the destination profile’s isolated data directory.
 
-Muse receives Mjolnir's project-memory and review tools through muse-acp 0.8.0
-or newer with Muse Code 1.3.0 or newer, which managed targets and the agent-dev
-image install. A session whose Muse runtime does not accept them, such as one
-in a container created from an older image, continues without them and says
-so; suspend and resume it once the image has updated. A Muse reviewer needs its
-tools, so it does not start without them. Because Muse always runs
-unconstrained, it reviews only sessions that already run unconstrained, such as
-sessions on container targets and Muse sessions. Muse Spark can also supply utility
-inference for cross-harness handoffs; see
+Muse reads and writes its session's project-memory files directly because its
+sandbox is disabled. It receives Mjolnir's session-history and review MCP tools
+through muse-acp 0.8.0 or newer with Muse Code 1.3.0 or newer, which managed
+targets and the agent-dev image install. A session whose Muse runtime does not
+accept MCP servers, such as one in a container created from an older image,
+continues without those tools and says so; suspend and resume it once the image
+has updated. A Muse reviewer needs its review MCP tools, so it does not start
+without them. Because Muse always runs unconstrained, it reviews only sessions
+that already run unconstrained, such as sessions on container targets and Muse
+sessions. Muse Spark can also supply utility inference for cross-harness
+handoffs; see
 [Durability and recovery](/durability/).
 
 - Kimi Code has no guardian approval mode. Prefer an isolated
   [container target](/containers/) or EC2 rather than raw execution.
+- OpenCode talks to third-party providers through its own gateway, so it
+  publishes no quota endpoint and its profile shows quota as unavailable. It
+  reads permission rules from `opencode.json`. Its sessions live in a SQLite
+  database, so native import and SessionWiki search do not list them, and it
+  never serves Mjolnir's delegation or utility inference.
 - A custom bridge must speak the ACP version and features Mjolnir expects.
 - A profile home is account-scoped. Do not point two profiles at the same home
   and expect them to represent different accounts.

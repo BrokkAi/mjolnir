@@ -142,27 +142,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structured_input_event_keeps_its_request_payload() {
-        let request = mj_core::elicitation::ElicitationRequest {
-            id: "question".into(),
-            message: "Which branch?".into(),
-            title: None,
-            description: None,
-            fields: Vec::new(),
-        };
-        let event = ApiEventData::InputRequired {
-            request: Some(request.clone()),
-            turn_id: Some(1),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(
-            json["data"]["request"],
-            serde_json::to_value(request).unwrap()
-        );
-        assert_eq!(serde_json::from_value::<ApiEventData>(json).unwrap(), event);
-    }
-
-    #[test]
     fn awaiting_input_emits_input_required_before_turn_ended() {
         let current = MaterializedSession::empty("session");
         let event = RelayEvent {

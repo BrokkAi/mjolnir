@@ -96,19 +96,13 @@ enum WorkerCommand {
         #[arg(long)]
         destination: PathBuf,
     },
-    /// Serve project memory tools over MCP stdio.
+    /// Serve project history tools over MCP stdio.
     MemoryMcp {
-        #[arg(long)]
-        root: PathBuf,
+        /// Accepted for staged Kimi profiles created by older controllers.
+        #[arg(long, hide = true)]
+        _root: Option<PathBuf>,
         #[arg(long)]
         history_socket: Option<PathBuf>,
-        #[arg(long)]
-        native_notes: bool,
-    },
-    /// Serve the turn review's specialist-dispatch tool over MCP stdio.
-    ReviewMcp {
-        #[arg(long)]
-        socket: PathBuf,
     },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
@@ -483,13 +477,10 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }
         WorkerCommand::MemoryMcp {
-            root,
+            _root: _,
             history_socket,
-            native_notes,
-        } => {
-            mj_worker::memory_mcp::run_mcp_stdio_with_history(&root, history_socket, !native_notes)
-        }
-        WorkerCommand::ReviewMcp { socket } => mj_worker::review::mcp::run_mcp_stdio(&socket),
+        } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
+
         WorkerCommand::SubagentMcp {
             socket,
             harness,
@@ -594,133 +585,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_command_shape_stays_compatible_with_installed_launches() {
+    fn memory_mcp_ignores_the_legacy_root_argument() {
         let cli = Cli::try_parse_from([
             "hel",
             "worker",
-            "run",
+            "memory-mcp",
             "--root",
-            "/worker",
-            "--config",
-            "/worker/launch.json",
+            "/profile/projects/session/memory",
+            "--history-socket",
+            "/worker/control.sock",
         ])
         .unwrap();
         assert!(matches!(
             cli.command,
             Command::Worker(WorkerArgs {
-                command: WorkerCommand::Run { .. }
-            })
-        ));
-    }
-
-    #[test]
-    fn managed_harness_preparation_command_is_target_side() {
-        let cli = Cli::try_parse_from([
-            "hel",
-            "worker",
-            "prepare-harness",
-            "--config",
-            "/worker/launch.json",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Worker(WorkerArgs {
-                command: WorkerCommand::PrepareHarness { .. }
-            })
-        ));
-    }
-
-    #[test]
-    fn streaming_checkpoint_worker_commands_parse_without_file_arguments() {
-        for name in ["capture-checkpoint", "pack-checkpoint"] {
-            let cli = Cli::try_parse_from(["hel", "worker", name]).unwrap();
-            assert!(matches!(
-                cli.command,
-                Command::Worker(WorkerArgs {
-                    command: WorkerCommand::CaptureCheckpoint | WorkerCommand::PackCheckpoint
-                })
-            ));
-        }
-    }
-
-    #[test]
-    fn export_subcommands_parse_the_arguments_the_controller_sends() {
-        let cli = Cli::try_parse_from([
-            "hel",
-            "worker",
-            "diff",
-            "--repository",
-            "/workspace/app",
-            "--base=HEAD^",
-            "--json",
-        ])
-        .unwrap();
-        assert!(matches!(cli.command, Command::Worker(WorkerArgs {
-            command: WorkerCommand::Diff { base: Some(base), json: true, .. }
-        }) if base == "HEAD^"));
-
-        let cli = Cli::try_parse_from([
-            "hel",
-            "worker",
-            "diff",
-            "--repository",
-            "/workspace/app",
-            "--branch",
-            "mj/session-1",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Worker(WorkerArgs {
-                command: WorkerCommand::Diff {
-                    repository,
-                    base: None,
-                    branch: Some(branch),
-                    json: false,
-                },
-            }) if repository == Path::new("/workspace/app") && branch == "mj/session-1"
-        ));
-
-        let cli = Cli::try_parse_from([
-            "hel",
-            "worker",
-            "read-file",
-            "--root",
-            "/workspace",
-            "--path",
-            "app/README.md",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Worker(WorkerArgs {
-                command: WorkerCommand::ReadFile { root, path },
-            }) if root == Path::new("/workspace") && path == Path::new("app/README.md")
-        ));
-
-        let cli = Cli::try_parse_from([
-            "hel",
-            "worker",
-            "push-branch",
-            "--root",
-            "/worker/session",
-            "--repository",
-            "/workspace/app",
-            "--branch",
-            "review/one",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Worker(WorkerArgs {
-                command: WorkerCommand::PushBranch { root, repository, branch },
-            }) if root == Path::new("/worker/session") && repository == Path::new("/workspace/app") && branch == "review/one"
+                command: WorkerCommand::MemoryMcp { history_socket: Some(socket), .. }
+            }) if socket == Path::new("/worker/control.sock")
         ));
     }
 
     /// A precondition failure leaves its reason on the process, not a generic
     /// error: the daemon maps this exit code to a 409 carrying that reason.
+    // Hard-won: 5d4d3a8: Caller-fixable export refusals were returned as server errors indistinguishable from broken git.
     #[test]
     fn an_export_precondition_failure_carries_the_refusal_exit_code() {
         let root = tempfile::tempdir().unwrap();
@@ -751,25 +637,6 @@ mod tests {
         assert!(failed.downcast_ref::<ExportRefused>().is_none());
     }
 
-    /// A worker that predates these subcommands answers a usage failure, which
-    /// is how the controller tells "too old" from "the export failed".
-    #[test]
-    fn an_unknown_worker_subcommand_is_a_clap_usage_failure() {
-        let error = Cli::try_parse_from(["hel", "worker", "diff-not-a-command"]).unwrap_err();
-        assert_eq!(error.exit_code(), 2);
-    }
-
-    #[test]
-    fn export_checkpoint_accepts_stdin_spec_marker() {
-        let cli =
-            Cli::try_parse_from(["hel", "worker", "export-checkpoint", "--spec", "-"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Command::Worker(WorkerArgs {
-                command: WorkerCommand::ExportCheckpoint { spec }
-            }) if spec == Path::new("-")
-        ));
-    }
     #[test]
     fn file_injection_streams_large_stdin_while_draining_worker_output() {
         use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};

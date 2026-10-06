@@ -77,7 +77,7 @@ The only accepted top-level keys are:
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
-| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, or `mono` (no colors). A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
@@ -336,7 +336,6 @@ precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
 ```toml
 [review]
 enabled = true
-tier = "quick"
 profile = "reviewer"
 # model = "provider-model-id"
 # effort = "high"
@@ -345,15 +344,14 @@ profile = "reviewer"
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `false` | Examines each eligible completed turn after queued work drains; an unchanged delta resolves without a review prompt. |
-| `tier` | string enum | no | `"quick"` | `quick` or `extended`. |
+| `tier` | string | no | unset | Deprecated compatibility field. Existing `quick` or `extended` values are accepted but ignored. |
 | `profile` | string | no | Auto (unset) | Auto selects an eligible profile by provider and quota. A named enabled review-capable profile is honored, including the primary profile. |
-| `model` | string | no | unset (harness default) | Main-reviewer override for a named profile. Auto uses fixed model-family defaults; specialist lanes use provider-specific overrides. |
-| `effort` | string | no | unset (harness default) | Main-reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
+| `model` | string | no | unset (harness default) | Reviewer model override for a named profile. Auto uses fixed model-family defaults. |
+| `effort` | string | no | unset (harness default) | Reviewer effort override for a named profile. Auto does not accept manual overrides. Required effort is checked against the selected model. |
 
-These settings also select the plan second-opinion reviewer. Auto prefers another provider, falling back to another profile or the primary profile when needed. The
-quick tier runs one general reviewer and validates reported findings. Extended
-review may add intent analysis, a supervisor, and specialist lanes. See
-[Independent turn review](/turn-review/).
+These settings also select the plan second-opinion reviewer. Auto prefers
+another provider, falling back to another profile or the primary profile when
+needed. Turn review uses one reviewer. See [Independent turn review](/turn-review/).
 
 `mj new --review-model <model>` and `--review-effort <effort>` review every turn
 of one new session with that model or effort, even when `enabled` is false. In
@@ -361,6 +359,11 @@ Auto, Mjolnir picks the first enabled profile that offers the model.
 `mj new --no-review` turns off automatic review for one session, even when
 `enabled` is true; `/review` still works. Sessions created without these flags
 follow `[review]`.
+
+The deprecated `mj new --review-tier quick|extended` option still accepts
+either value and enables automatic review for that session, but the value is
+ignored. `mj import <harness>` accepts the same compatibility option. Existing
+`tier` values in session settings are also ignored.
 
 In the terminal, these review fields are edited inside **Settings** so one Save or
 Cancel applies to the entire configuration draft. Settings can discover the
@@ -774,8 +777,15 @@ instance. See [AWS EC2](/aws/).
 
 ### Build cache `[machines.<id>.build_cache]`
 
-Every container runtime on a machine shares one mbx build cache, so the
-settings belong to the machine. Caching is enabled by default where supported.
+Every container runtime on a machine can share one mbx build cache, so the
+settings belong to the machine. Caching is enabled by default only when the
+Linux host has mbx 1.22.0 or newer and its filesystem supports reflinks. A
+missing or older mbx leaves sessions uncached; install or upgrade it from
+**Settings › Setup › Machines**.
+The host executable is atomically refreshed at `<cache>/.mjolnir/bin/mbx` inside
+the read-write shared cache mount. Mjolnir checks that copy in the container
+before adding its marked Cargo and `mbx` launchers; periodic reconciliation
+refreshes it after host upgrades without interrupting running processes.
 In Settings, open **Machines → [machine] → Build cache (mbx)**, or search for
 **mbx**, **cache**, or **build cache**. The machine row shows its configured
 state and total budget; opening it resolves the host's actual defaults and
@@ -784,9 +794,9 @@ for cache prerequisites.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | unset (decided by the machine's filesystem) | `false` runs sessions on this machine without the cache. |
-| `directory` | path string | no | unset (the machine's native mbx cache, else `~/.cache/mbx`) | Must be absolute. It is a path on that machine, not on the controller. |
-| `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. Caps the whole cache: build outputs, target directories, and incremental state together. |
+| `enabled` | boolean | no | unset (decided by host mbx compatibility and the machine's filesystem) | `false` runs sessions on this machine without the cache. |
+| `directory` | path string | no | the host's native mbx cache directory | Must be absolute. It is a path on that machine, not on the controller. New sessions use the directory reported by native mbx; a missing or too-old mbx does not get a fallback cache. |
+| `max_size` | string | no | the host's native mbx configuration | An mbx size such as `100GiB`. Configure limits on the machine with mbx. |
 
 The optional `scheduler` table controls mbx's shared compiler scheduler:
 
@@ -803,8 +813,9 @@ memory = "24GiB"
 
 mbx shares this pool across independent builds on the machine. Compiler work
 uses permits according to its estimated memory demand, so a compile can use
-more than one permit. Blank scheduler fields are omitted from mbx's managed
-configuration, leaving mbx's own defaults in effect.
+more than one permit. Configure scheduler values in the host's mbx
+configuration; Mjolnir does not install a private mbx or create a fallback
+cache configuration.
 
 A section with every field unset is the same as no section at all.
 
@@ -1001,7 +1012,6 @@ tailscale_detect = true
 
 [review]
 enabled = false
-tier = "quick"
 profile = "claude-review"
 
 [profiles.codex-work]
@@ -1048,7 +1058,6 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
 | `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
-| `MJ_BIFROST_BIN` | Path or command name of the Bifrost that turn review runs. Set it on the daemon; the daemon passes it to each new session's worker (a profile's `[environment]` table does not reach the review). The path must exist on the target. Unset, the review runs `bifrost` from the target's `PATH`. `mj doctor` checks its version. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_MAX_CONCURRENT` | Cap on concurrent SSH connections per host; see the SSH target guide. |
 | `MJ_SSH_SESSIONS_PER_CONNECTION` | Sessions per shared OpenSSH connection; defaults to `8`. See the [SSH guide](/ssh/#sharing-connections-per-host). |
@@ -1100,6 +1109,10 @@ Session replicas sync with canonical project memory at checkpoints using a
 line-by-line three-way merge, including deletions. If sessions change the same
 lines, an available utility model merges them; otherwise the session being
 merged wins. Mjolnir does not create a conflicts folder.
+
+Claude Code uses native project memory. Other harnesses read and write their
+session replica directly with their own file tools; startup context gives them
+its path and describes the `MEMORY.md` index convention.
 
 Do not hand-edit the database or daemon files. Use the TUI, viewer, and commands
 in the [CLI reference](/cli-reference/). See [Durability and recovery](/durability/)

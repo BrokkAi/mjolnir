@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
 
-test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block' });
+test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block', timezoneId: 'UTC' });
 
 function session(id, overrides = {}) {
   return {
@@ -166,61 +166,125 @@ function wikiRow(id, sessionId, overrides = {}) {
   };
 }
 
-test('resume opens with compact current-workspace rows and lists what the index returned', async ({ page }) => {
-  const sessions = [
-    session('newest', { title: 'Newest profile work', project_label: 'alpha-project', last_activity_at_ms: 3_000 }),
-    session('older', { title: 'A very long session title that must stay inside the phone viewport without horizontal scrolling', project_label: 'older-project', last_activity_at_ms: 2_000 }),
-    session('tie-b', { title: 'Tie B', project_label: 'shared-project', last_activity_at_ms: 1_000 }),
-    session('tie-a', { title: 'Tie A', project_label: 'shared-project', last_activity_at_ms: 1_000 }),
-    session('other-workspace', { title: 'Other workspace', workspace_id: 'other', last_activity_at_ms: 9_000 }),
-  ];
-  const state = await mount(page, {
-    sessions,
+async function captureResumeState(output, page, label, state, extra = null) {
+  const viewport = page.viewportSize();
+  output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
+  output.push((await page.locator('#resume-page').isVisible())
+    ? (await page.locator('#resume-page').innerText()).trim()
+    : (await page.locator('#app').innerText()).trim());
+  const controls = await page.locator('#resume-page input, #resume-page select, #resume-page button').evaluateAll(nodes => nodes.map(node => ({
+    id: node.id || null,
+    text: node.innerText?.trim() || node.getAttribute('aria-label') || null,
+    value: 'value' in node ? node.value : null,
+    disabled: 'disabled' in node ? node.disabled : null,
+  })));
+  output.push(`controls: ${JSON.stringify(controls)}`);
+  if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions)}`);
+  if (state.wikiQueries.length) output.push(`request: GET /api/v1/wiki/search ${JSON.stringify(state.wikiQueries)}`);
+  if (state.wikiRestores.length) output.push(`action: POST /api/v1/wiki/archive/restore ${JSON.stringify(state.wikiRestores)}`);
+  if (extra !== null) output.push(`state: ${JSON.stringify(extra)}`);
+}
+
+test('golden_viewer_resume', async ({ context }) => {
+  const { assertGolden } = await import('./golden.mjs');
+  const output = [];
+
+  const listPage = await context.newPage();
+  const listState = await mount(listPage, {
+    sessions: [
+      session('newest', { title: 'Newest profile work', project_label: 'alpha-project', last_activity_at_ms: 3_000 }),
+      session('older', { title: 'A very long session title that must stay inside the phone viewport without horizontal scrolling', project_label: 'older-project', last_activity_at_ms: 2_000 }),
+      session('tie-b', { title: 'Tie B', project_label: 'shared-project', last_activity_at_ms: 1_000 }),
+      session('tie-a', { title: 'Tie A', project_label: 'shared-project', last_activity_at_ms: 1_000 }),
+      session('other-workspace', { title: 'Other workspace', workspace_id: 'other', last_activity_at_ms: 9_000 }),
+    ],
     profiles: Array.from({ length: 18 }, (_, index) => ({ id: `profile-${index}`, harness_kind: 'codex' })),
     wiki: {
-      // The index ranks the older session first; the list must follow it
-      // rather than fall back to newest first.
-      rows: [
-        wikiRow('w-older', 'older', { snippet: 'a pomegranate sentinel' }),
-        wikiRow('w-newest', 'newest', { title: 'pomegranate' }),
-      ],
+      rows: [wikiRow('w-older', 'older', { snippet: 'a pomegranate sentinel' }), wikiRow('w-newest', 'newest', { title: 'pomegranate' })],
       restoredId: 'restored',
     },
   });
-  await expect(page.locator('#resume-list-view')).toBeVisible();
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(4);
-  await expect(page.locator('#resume-detail-view')).toBeHidden();
-  await expect(page.locator('#resumable')).toContainText('Newest profile work');
-  await page.screenshot({ path: '/tmp/hel2-resume-populated.png', fullPage: true });
-  const boxes = await page.locator('#resumable [data-session-id]').evaluateAll(nodes => nodes.map(node => {
-    const row = node.getBoundingClientRect();
-    const title = node.querySelector('.resume-session-title').getBoundingClientRect();
-    return { bottom: row.bottom, rowWidth: row.width, titleWidth: title.width };
-  }));
-  expect(boxes.every(box => box.bottom <= 844)).toBe(true);
-  expect(boxes.every(box => box.titleWidth > box.rowWidth * 0.85)).toBe(true);
-  await expect(page.locator('#resumable select, #resumable input')).toHaveCount(0);
-  const ids = await page.locator('#resumable [data-session-id]').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
-  expect(ids).toEqual(['newest', 'older', 'tie-a', 'tie-b']);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  expect(await page.evaluate(() => document.body.scrollWidth <= window.innerWidth)).toBe(true);
+  await captureResumeState(output, listPage, 'current-workspace sessions in index order', listState, {
+    sessionIds: await listPage.locator('#resumable [data-session-id]').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId)),
+    width: await listPage.evaluate(() => ({ document: document.documentElement.scrollWidth, viewport: innerWidth })),
+  });
+  await listPage.locator('#resume-search').fill('pomegranate');
+  await expect(listPage.locator('#resumable [data-session-id]')).toHaveCount(2);
+  await captureResumeState(output, listPage, 'search uses index hits and their snippets', listState, {
+    sessionIds: await listPage.locator('#resumable [data-session-id]').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId)),
+  });
+  await listPage.locator('#resume-search').fill('does-not-exist');
+  await expect.poll(() => listState.wikiQueries.at(-1)).toBe('does-not-exist');
+  await expect(listPage.locator('#resumable [data-session-id]')).toHaveCount(0);
+  await captureResumeState(output, listPage, 'empty resume search', listState);
+  await listPage.close();
 
-  // A query lists the index's hits, in the index's order, and the snippet it
-  // matched on. A session whose own title carries the word is not a hit.
-  await page.locator('#resume-search').fill('pomegranate');
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(2);
-  expect(await page.locator('#resumable [data-session-id]')
-    .evaluateAll(nodes => nodes.map(node => node.dataset.sessionId)))
-    .toEqual(['older', 'newest']);
-  await expect(page.locator('#resumable [data-session-id="older"]')).toContainText('a pomegranate sentinel');
+  const selectedPage = await context.newPage();
+  const selectedState = await mount(selectedPage, { sessions: [session('mutating', { title: 'Mutating session' })] });
+  await openSession(selectedPage, 'mutating');
+  await captureResumeState(output, selectedPage, 'selected resumable session', selectedState);
+  selectedState.snapshot.sessions[0].has_error = true;
+  selectedState.snapshot.sessions[0].queued_prompts = [{ id: 'prompt-1', text: 'queued later' }];
+  await refresh(selectedPage, selectedState);
+  await captureResumeState(output, selectedPage, 'selected card after error and queued prompt arrive', selectedState);
+  await selectedPage.close();
 
-  await page.locator('#resume-search').fill('does-not-exist');
-  await expect(page.locator('#resumable')).toContainText(/no (matching sessions|sessions match)/i);
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(0);
+  const archivedListPage = await context.newPage();
+  const archivedListState = await mount(archivedListPage, {
+    wiki: {
+      rows: [
+        { id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work', started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello', archived: true, native_id: null, snippet: null, hel_session_id: null },
+        { id: 'live-one', tool: 'mjolnir', project: '/tmp/project', title: 'Suspended test', started: '2026-09-17T01:00:00Z', msgs: 5, preview: 'still here', archived: false, native_id: null, snippet: 'a pomegranate sentinel', hel_session_id: 'suspended' },
+      ],
+      brief: '# Previous session\n\nThe single word is hello.',
+      restoredId: 'restored',
+    },
+  });
+  await expect.poll(() => archivedListState.wikiQueries.at(-1)).toBe('');
+  await archivedListPage.locator('#resume-search').pressSequentially('pomegranate', { delay: 20 });
+  await expect.poll(() => archivedListState.wikiQueries.at(-1)).toBe('pomegranate');
+  await captureResumeState(output, archivedListPage, 'archived index entry and live search hit', archivedListState, {
+    archivedIds: await archivedListPage.locator('#resume-archived [data-wiki-id]').evaluateAll(nodes => nodes.map(node => node.dataset.wikiId)),
+    liveIds: await archivedListPage.locator('#resumable [data-session-id]').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId)),
+  });
+  await archivedListPage.close();
 
-  await page.locator('#resume-search').fill('');
-  await expect(page.locator('#resumable [data-session-id]')).toHaveCount(4);
-  await expect.poll(() => state.snapshots).toBeGreaterThan(0);
+  const restorePage = await context.newPage();
+  const restoreState = await mount(restorePage, {
+    wiki: {
+      rows: [{ id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work', started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello', archived: true, native_id: null, snippet: null, hel_session_id: null }],
+      brief: '# Previous session\n\nThe single word is hello.',
+      restoredId: 'restored',
+    },
+  });
+  await expect.poll(() => restoreState.wikiQueries.at(-1)).toBe('');
+  await restorePage.locator('#resume-archived [data-wiki-id="archived-one"]').click();
+  await expect(restorePage.locator('#resume-detail')).toContainText('The single word is hello.');
+  await captureResumeState(output, restorePage, 'archived brief before restore', restoreState);
+  await choose(picker(restorePage.locator('#resume-detail'), 'wiki-profile'), 'beta');
+  await choose(picker(restorePage.locator('#resume-detail'), 'wiki-target'), 'remote');
+  await restorePage.locator('#resume-detail').getByRole('button', { name: 'Restore', exact: true }).click();
+  await expect.poll(() => restoreState.wikiRestores.length).toBe(1);
+  await expect(restorePage).toHaveURL(/restored/);
+  await expect(restorePage.locator('#conversation-title')).toHaveText('restored');
+  await captureResumeState(output, restorePage, 'restored archive opens as a new conversation', restoreState);
+  await restorePage.close();
+
+  const barePage = await context.newPage();
+  const preflightRequests = [];
+  barePage.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/preflight/resume') preflightRequests.push(request.postDataJSON());
+  });
+  const bareState = await mount(barePage);
+  await expect.poll(() => bareState.wikiQueries.at(-1)).toBe('');
+  await openSession(barePage, 'suspended');
+  await barePage.locator('[data-role="resume-target"] select').selectOption('local');
+  await captureResumeState(output, barePage, 'bare destination leaves Resume ready without conversion questions', bareState, {
+    preflightRequests,
+  });
+  await barePage.close();
+
+  assertGolden('viewer_resume', output.join('\n'));
 });
 
 test('selecting a row asks for settings only after selection and Back restores search and focus', async ({ page }) => {
@@ -290,18 +354,6 @@ test('missing previous configuration requires a new choice before Resume', async
   await choose(profile, 'beta');
   await choose(picker(detail, 'resume-target'), 'remote');
   await expect(resume).toBeEnabled();
-});
-
-test('a selected card reflects new errors and queued prompts from later snapshots', async ({ page }) => {
-  const state = await mount(page, { sessions: [session('mutating', { title: 'Mutating session' })] });
-  await openSession(page, 'mutating');
-  const detail = page.locator('#resume-detail');
-  await expect(detail.locator('[data-role="resume-queue"]')).toHaveCount(0);
-  state.snapshot.sessions[0].has_error = true;
-  state.snapshot.sessions[0].queued_prompts = [{ id: 'prompt-1', text: 'queued later' }];
-  await refresh(page, state);
-  await expect(detail).toContainText(/previous operation reported an error/i);
-  await expect(detail.locator('[data-role="resume-queue"]').first()).toBeVisible();
 });
 
 test('removing the selected profile clears the draft instead of silently replacing it', async ({ page }) => {
@@ -445,7 +497,6 @@ test('a queue-pinned move recovery exposes retry Move and does not offer unsafe 
   await expect(page.locator('#move-page')).toBeVisible();
 });
 
-
 test('a removed choice can be explicitly replaced when only one alternative remains', async ({ page }) => {
   const state = await mount(page);
   await openSession(page, 'suspended');
@@ -538,66 +589,6 @@ test('a late success does not redirect a new visit to the same card', async ({ p
   release();
   await expect(page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true })).toBeEnabled();
   await expect(page).toHaveURL(/\/resume\/suspended$/);
-});
-
-test('the Archived section lists what the index kept and marks a hit on a live row', async ({ page }) => {
-  const state = await mount(page, {
-    wiki: {
-      rows: [
-        {
-          id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work',
-          started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello',
-          archived: true, native_id: null, snippet: null, hel_session_id: null,
-        },
-        {
-          id: 'live-one', tool: 'mjolnir', project: '/tmp/project', title: 'Suspended test',
-          started: '2026-09-17T01:00:00Z', msgs: 5, preview: 'still here',
-          archived: false, native_id: null, snippet: 'a pomegranate sentinel', hel_session_id: 'suspended',
-        },
-      ],
-      brief: '# Previous session\n\nThe single word is hello.',
-      restoredId: 'restored',
-    },
-  });
-  await expect(page.locator('#resume-archived')).toBeVisible();
-  await expect(page.locator('#resume-archived [data-wiki-id]')).toHaveCount(1);
-  await expect(page.locator('#resume-archived')).toContainText('Archived pomegranate work');
-  await expect(page.locator('#resume-archived')).toContainText('3 messages');
-  await expect(page.locator('#resumable [data-session-id="suspended"]')).toContainText('a pomegranate sentinel');
-  await expect(page.locator('#resume-wiki-note')).toBeHidden();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-
-  // A burst of typing is debounced into a request that carries the final text.
-  // A stall longer than the debounce splits a burst, so this waits for the
-  // request the complete word produced instead of counting requests.
-  const before = state.wikiQueries.length;
-  await page.locator('#resume-search').pressSequentially('pomegranate', { delay: 20 });
-  await expect.poll(() => state.wikiQueries.at(-1)).toBe('pomegranate');
-  expect(state.wikiQueries.length).toBeGreaterThan(before);
-});
-
-test('an archived row shows its brief and restores into a new session', async ({ page }) => {
-  const state = await mount(page, {
-    wiki: {
-      rows: [{
-        id: 'archived-one', tool: 'mjolnir', project: '/tmp/project', title: 'Archived pomegranate work',
-        started: '2026-09-17T00:23:00Z', msgs: 3, preview: 'the single word is hello',
-        archived: true, native_id: null, snippet: null, hel_session_id: null,
-      }],
-      brief: '# Previous session\n\nThe single word is hello.',
-      restoredId: 'restored',
-    },
-  });
-  await page.locator('#resume-archived [data-wiki-id="archived-one"]').click();
-  await expect(page).toHaveURL(/\/resume\/archive\/archived-one$/);
-  await expect(page.locator('#resume-detail .wiki-brief')).toContainText('The single word is hello.');
-  await choose(picker(page.locator('#resume-detail'), 'wiki-profile'), 'beta');
-  await choose(picker(page.locator('#resume-detail'), 'wiki-target'), 'remote');
-  await page.locator('#resume-detail').getByRole('button', { name: 'Restore', exact: true }).click();
-  await expect.poll(() => state.wikiRestores.length).toBe(1);
-  expect(state.wikiRestores[0].id).toBe('archived-one');
-  expect(state.wikiRestores[0].body).toEqual({ workspace_id: 'test', profile_id: 'beta', target_id: 'remote' });
-  await expect(page).toHaveURL(/#conversation\/restored$/);
 });
 
 test('a daemon without the wiki routes still lists sessions and closes the search box', async ({ page }) => {

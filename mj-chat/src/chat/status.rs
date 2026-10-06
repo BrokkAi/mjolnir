@@ -441,6 +441,14 @@ impl ChatState {
         }
     }
 
+    /// Redraws the transcript when Settings changes how tool calls show.
+    pub fn set_tool_display(&mut self, tools: super::ToolDisplay) {
+        if self.tool_display != tools {
+            self.tool_display = tools;
+            self.invalidate_render_cache();
+        }
+    }
+
     /// Activity animates only while the session has work to report.
     pub fn needs_animation(&self) -> bool {
         let primary_working = match self.phase {

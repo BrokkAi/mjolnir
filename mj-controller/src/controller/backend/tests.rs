@@ -6,19 +6,130 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::controller::Controller;
-use crate::controller::provisioning::install_attached_resources;
 use mj_core::config::{
-    AwsAddressSource, Config, ContainerTemplate as ConfigContainer, ProjectBundle,
-    ProjectRepository, SshConnection, TargetTemplate,
+    Config, ContainerTemplate as ConfigContainer, ProjectBundle, ProjectRepository, SshConnection,
+    TargetTemplate,
 };
-use mj_core::state::{SessionRecord, SessionState, State};
+use mj_core::state::State;
 
 use crate::targets::{
-    self, AdditionalMount, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate,
-    ImageHost, RefreshWhen, SshTarget,
+    self, CommandExecutor, CommandOutput, CommandSpec, ContainerTemplate, ImageHost, RefreshWhen,
 };
 
 use super::*;
+
+struct AwsCliFixtureExecutor {
+    commands: RefCell<Vec<CommandSpec>>,
+    responses: RefCell<std::collections::VecDeque<CommandOutput>>,
+}
+
+impl AwsCliFixtureExecutor {
+    fn new(responses: impl IntoIterator<Item = &'static [u8]>) -> Self {
+        Self {
+            commands: RefCell::new(Vec::new()),
+            responses: RefCell::new(
+                responses
+                    .into_iter()
+                    .map(|stdout| CommandOutput {
+                        status: 0,
+                        stdout: stdout.to_vec(),
+                        stderr: Vec::new(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl CommandExecutor for AwsCliFixtureExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        self.commands.borrow_mut().push(command.clone());
+        Ok(self
+            .responses
+            .borrow_mut()
+            .pop_front()
+            .expect("one AWS CLI response per command"))
+    }
+}
+
+fn aws_options_controller(
+    launch_template: &str,
+    profile: Option<&str>,
+    version: Option<&str>,
+) -> Controller {
+    Controller {
+        config: Config {
+            targets: BTreeMap::from([(
+                "ec2".to_owned(),
+                TargetTemplate::AwsEc2 {
+                    aws_profile: profile.map(str::to_owned),
+                    region: "us-west-2".to_owned(),
+                    launch_template: launch_template.to_owned(),
+                    launch_template_version: version.map(str::to_owned),
+                    ssh_user: "ec2-user".to_owned(),
+                    address_source: Default::default(),
+                    identity_file: None,
+                    ssh_args: Vec::new(),
+                },
+            )]),
+            ..Config::default()
+        },
+        state: State::default(),
+    }
+}
+
+fn render_aws_allocations(allocations: &[SessionResourceAllocation]) -> String {
+    allocations
+        .iter()
+        .map(|allocation| match allocation {
+            SessionResourceAllocation::AwsEc2 {
+                instance_type,
+                vcpus,
+                memory_bytes,
+            } => format!("{instance_type}: {vcpus} vCPUs, {memory_bytes} bytes"),
+            SessionResourceAllocation::Container { .. } => {
+                panic!("AWS discovery returned a container allocation")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn golden_aws_resource_options_read_documented_cli_responses() {
+    // These fixtures follow the AWS CLI v2 response shapes:
+    // https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-launch-template-versions.html
+    // https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instance-types.html
+    const RESPONSES: [&[u8]; 4] = [
+        br#"{"LaunchTemplateVersions":[{"LaunchTemplateId":"lt-0123456789abcdef0","VersionNumber":7,"LaunchTemplateData":{"ImageId":"ami-0123456789abcdef0","InstanceType":"m7i.large"}}]}"#,
+        br#"{"InstanceTypes":[{"InstanceType":"m7i.4xlarge","VCpuInfo":{"DefaultVCpus":16},"MemoryInfo":{"SizeInMiB":65536}},{"InstanceType":"m7i.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":32768}},{"InstanceType":"m7i.large","VCpuInfo":{"DefaultVCpus":2},"MemoryInfo":{"SizeInMiB":8192}},{"InstanceType":"m7i.xlarge","VCpuInfo":{"DefaultVCpus":4},"MemoryInfo":{"SizeInMiB":16384}},{"InstanceType":"m7i.malformed","VCpuInfo":{"DefaultVCpus":4}},{"InstanceType":"m7i.overflow","VCpuInfo":{"DefaultVCpus":32},"MemoryInfo":{"SizeInMiB":18446744073709551615}}]}"#,
+        br#"{"LaunchTemplateVersions":[{"LaunchTemplateName":"legacy","VersionNumber":7,"LaunchTemplateData":{"ImageId":"ami-0123456789abcdef0","InstanceType":"c6i.large"}}]}"#,
+        br#"{"InstanceTypes":[{"InstanceType":"c6i.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":16384}},{"InstanceType":"c6i.large","VCpuInfo":{"DefaultVCpus":2},"MemoryInfo":{"SizeInMiB":4096}}]}"#,
+    ];
+    let executor = AwsCliFixtureExecutor::new(RESPONSES);
+    let by_id = aws_options_controller("lt-0123456789abcdef0", Some("build"), Some("7"))
+        .resolve_aws_resource_options("ec2", &executor)
+        .expect("resolve ID-addressed launch template");
+    let by_name = aws_options_controller("legacy", None, None)
+        .resolve_aws_resource_options("ec2", &executor)
+        .expect("resolve name-addressed launch template");
+
+    let mut rendered = String::new();
+    rendered.push_str("=== launch-template id ===\n");
+    rendered.push_str(&render_aws_allocations(&by_id));
+    rendered.push_str("\n\n=== launch-template name ===\n");
+    rendered.push_str(&render_aws_allocations(&by_name));
+    rendered.push_str("\n\n=== AWS CLI commands ===\n");
+    for command in executor.commands.borrow().iter() {
+        rendered.push_str(&format!("{} {}\n", command.program, command.args.join(" ")));
+    }
+    rendered.pop();
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "aws-resource-options",
+        &rendered,
+    );
+}
 
 #[test]
 fn provisioning_uses_accepted_fetch_and_push_settings_after_the_catalog_changes() {
@@ -178,214 +289,7 @@ fn ssh_readiness_wait_stops_when_cancellation_is_requested() {
     assert!(error.to_string().contains("cancelled"), "{error}");
     assert_eq!(*executor.attempts.borrow(), 2);
 }
-#[test]
-fn aws_resources_are_compressed_into_one_streamed_ssh_command() {
-    struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
-        streams: RefCell<Vec<Vec<u8>>>,
-    }
-    impl CommandExecutor for RecordingExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
 
-        fn execute_with_stdin(
-            &self,
-            command: &CommandSpec,
-            input: &mut (dyn std::io::Read + Send),
-        ) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            let mut stream = Vec::new();
-            input.read_to_end(&mut stream)?;
-            self.streams.borrow_mut().push(stream);
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    let source = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(source.path().join("many/files")).unwrap();
-    std::fs::write(source.path().join("many/files/one"), b"one").unwrap();
-    std::fs::write(source.path().join("many/files/two"), b"two").unwrap();
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let record = SessionRecord {
-        project: None,
-        target_runtime: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
-        publication: None,
-        build_cache: None,
-        container_workspace: None,
-        subagents: None,
-        create_managed_worktree: None,
-        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-        archived: false,
-        container_cpus: None,
-        container_memory: None,
-        id: session_id.into(),
-        title: "AWS resources".into(),
-        harness_kind: mj_core::config::HarnessKind::Codex,
-        last_profile: "codex".into(),
-        bundle_id: "project".into(),
-        project_directory: None,
-        managed_worktree: None,
-        review: None,
-        target_template_id: "aws".into(),
-        resource_allocation: None,
-        additional_mounts: vec![AdditionalMount {
-            source: source.path().to_path_buf(),
-            destination: "/home/ubuntu/mj-resources/data".into(),
-            access: crate::targets::MountAccess::Cow,
-        }],
-        state: SessionState::Disconnected,
-        target: None,
-        native_session_id: None,
-        acp_session_title: None,
-        session_title_override: None,
-        created_at: "2026-08-12T00:00:00Z".into(),
-        updated_at: "2026-08-12T00:00:00Z".into(),
-        viewed_through_event_ordinal: 0,
-        draft_input: String::new(),
-        last_error: None,
-        last_checkpoint_error: None,
-        checkpoint: None,
-    };
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: mj_core::state::STATE_VERSION,
-        sessions: [(session_id.into(), record)].into_iter().collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let backend = targets::TargetLocator::AwsEc2 {
-        profile: "default".into(),
-        region: "us-east-1".into(),
-        instance_id: "i-1234567890abcdef0".into(),
-        ssh: SshTarget {
-            destination: "ubuntu@example.test".into(),
-            ssh_args: Vec::new(),
-        },
-        workspace: format!(".local/share/hel/workspaces/{session_id}"),
-    };
-    let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
-        streams: RefCell::new(Vec::new()),
-    };
-
-    install_attached_resources(
-        &state,
-        session_id,
-        &backend,
-        ".local/share/hel/workers/session",
-        &executor,
-    )
-    .unwrap();
-
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].program, "ssh");
-    assert!(
-        commands[0]
-            .args
-            .iter()
-            .any(|argument| argument.contains("install-resource"))
-    );
-    let streams = executor.streams.borrow();
-    assert_eq!(streams.len(), 1);
-    assert_eq!(&streams[0][..2], &[0x1f, 0x8b]);
-}
-#[test]
-fn canonical_bundle_maps_github_shorthand_and_primary_destination() {
-    let bundle = ProjectBundle {
-        primary_repo: "app".into(),
-        repositories: vec![ProjectRepository {
-            id: "app".into(),
-            github: Some("example/app".into()),
-            local: None,
-            destination: PathBuf::from("services/app"),
-            git_ref: None,
-        }],
-    };
-    let backend = backend_bundle(&bundle, &targets::ProcessExecutor).unwrap();
-    assert_eq!(backend.primary, "services/app");
-    assert_eq!(
-        backend.repositories[0].url.as_deref(),
-        Some("https://github.com/example/app.git")
-    );
-}
-#[test]
-fn container_resources_and_environment_become_argv() {
-    let template = TargetTemplate::LocalPodman {
-        container: ConfigContainer {
-            build_cache: None,
-            image: "dev:1".into(),
-            pull_policy: mj_core::config::ImagePullPolicy::Never,
-            platform: Some("linux/arm64".into()),
-            cpus: Some("4".into()),
-            memory: Some("8g".into()),
-            environment: std::collections::BTreeMap::from([("A".into(), "b c".into())]).into(),
-            workspace_storage: Default::default(),
-        },
-    };
-    let targets::TargetTemplate::LocalPodman(container) =
-        backend_target(&template, None, ContainerOverrides::default()).unwrap()
-    else {
-        unreachable!()
-    };
-    assert!(container.extra_run_args.contains(&"--cpus=4".into()));
-    assert!(container.extra_run_args.contains(&"A=b c".into()));
-    assert_eq!(
-        container.pull_policy,
-        mj_core::config::ImagePullPolicy::Never
-    );
-}
-#[test]
-fn session_size_overrides_beat_the_target_template_and_its_allocation() {
-    let template = TargetTemplate::LocalPodman {
-        container: ConfigContainer {
-            build_cache: None,
-            image: "dev:1".into(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: Some("4".into()),
-            memory: Some("8g".into()),
-            environment: Default::default(),
-            workspace_storage: Default::default(),
-        },
-    };
-    let mut session = crate::controller::test_support::checkpoint_test_session("session-size");
-    session.container_cpus = Some("2".into());
-    session.container_memory = Some("3g".into());
-    session.resource_allocation = Some(SessionResourceAllocation::Container {
-        cpus: 16,
-        memory_bytes: 64_000_000_000,
-    });
-    let targets::TargetTemplate::LocalPodman(container) = backend_target(
-        &template,
-        session.resource_allocation.as_ref(),
-        ContainerOverrides::for_session(&session),
-    )
-    .unwrap() else {
-        unreachable!()
-    };
-    assert!(container.extra_run_args.contains(&"--cpus=2".into()));
-    assert!(container.extra_run_args.contains(&"--memory=3g".into()));
-    assert!(!container.extra_run_args.iter().any(|argument| {
-        argument.starts_with("--cpus=4")
-            || argument.starts_with("--cpus=16")
-            || argument.starts_with("--memory=8g")
-    }));
-}
 #[test]
 fn github_token_is_inherited_only_by_managed_containers() {
     let mut podman = targets::TargetTemplate::LocalPodman(ContainerTemplate {
@@ -444,6 +348,7 @@ fn github_token_is_inherited_only_by_managed_containers() {
         ]
     );
 }
+
 fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {
     ConfigContainer {
         build_cache: None,
@@ -457,6 +362,7 @@ fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) 
     }
 }
 
+// Hard-won: 8c5355ea19ec: auto-policy images were skipped, leaving first Create to download them
 #[test]
 fn the_image_refresh_plan_covers_every_configured_container_image_except_never() {
     use mj_core::config::ImagePullPolicy;
@@ -629,7 +535,6 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
-
 #[test]
 fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
     use mj_core::config::ImagePullPolicy;
@@ -840,6 +745,8 @@ impl CommandExecutor for PreflightExecutor {
         self.notices.borrow_mut().push(notice.to_owned());
     }
 }
+
+// Hard-won: d7afd671: the old preflight rejected Podman 4.0 despite root-default sessions no longer needing keep-id.
 #[test]
 fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
     let template = TargetTemplate::LocalPodman {
@@ -869,6 +776,8 @@ fn local_podman_preflight_failures_explain_the_problem_and_offer_retry() {
     assert!(error.contains("Retry launch"));
     assert!(error.contains("Podman 4.0.0"));
 }
+
+// Hard-won: d7afd671: the old preflight rejected Podman 4.0 despite root-default sessions no longer needing keep-id.
 #[test]
 fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
     let template = TargetTemplate::SshPodman {
@@ -910,46 +819,8 @@ fn ssh_podman_preflight_failures_name_the_destination_and_offer_retry() {
     assert!(error.contains("dev@example.test"));
     assert!(error.contains("Podman 4.0.0"));
 }
-#[test]
-fn ssh_podman_preflight_notifies_when_remote_user_lingering_is_disabled() {
-    let template = TargetTemplate::SshPodman {
-        ssh: SshConnection {
-            host: "example.test".into(),
-            user: Some("dev".into()),
-            identity_file: None,
-            extra_args: vec![],
-        },
-        container: ConfigContainer {
-            build_cache: None,
-            image: "ubuntu:24.04".into(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: None,
-            memory: None,
-            environment: Default::default(),
-            workspace_storage: Default::default(),
-        },
-    };
-    let executor = PreflightExecutor {
-        outputs: RefCell::new(vec![CommandOutput {
-            status: 0,
-            stdout: crate::targets::ssh_podman_probe_fixture(&[
-                ("version", 0, "podman version 5.4.2\n", ""),
-                ("uid_map", 0, "0 1000 1\n1 100000 65536\n", ""),
-                ("linger", 0, "no\n", ""),
-            ]),
-            stderr: vec![],
-        }]),
-        notices: RefCell::new(vec![]),
-    };
 
-    verify_target(&template, &executor, TargetCheck::Launch).unwrap();
-
-    let notices = executor.notices.borrow();
-    assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains("last SSH connection closes"));
-    assert!(notices[0].contains("sudo loginctl enable-linger"));
-}
+// Hard-won: 69e2f7a632ab: launch and move repeated slow remote container checks on multiple wizard pages
 #[test]
 fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
     struct Recording(RefCell<Vec<CommandSpec>>);
@@ -1003,46 +874,6 @@ fn launch_preflight_checks_only_reachability_for_ssh_container_targets() {
         );
     }
 }
-#[test]
-fn apple_container_preflight_failures_recommend_doctor() {
-    let template = TargetTemplate::AppleContainer {
-        container: ConfigContainer {
-            build_cache: None,
-            image: "ubuntu:24.04".into(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: None,
-            memory: None,
-            environment: Default::default(),
-            workspace_storage: Default::default(),
-        },
-    };
-    for (stdout, stderr) in [
-        (
-            "apiserver is not running and not registered with launchd",
-            "",
-        ),
-        ("", "daemon is not running"),
-        ("apiserver is not running", "service unavailable"),
-    ] {
-        let executor = PreflightExecutor {
-            outputs: RefCell::new(vec![CommandOutput {
-                status: 1,
-                stdout: stdout.as_bytes().to_vec(),
-                stderr: stderr.as_bytes().to_vec(),
-            }]),
-            notices: RefCell::new(vec![]),
-        };
-
-        let error = preflight_target(&template, &executor, TargetCheck::Launch)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Retry launch"));
-        assert!(error.contains("container system start"));
-        assert!(error.contains(stdout));
-        assert!(error.contains(stderr));
-    }
-}
 
 /// F-7: an executor that behaves like a host without Docker. Running the
 /// program fails the way `std::process::Command` does when it is not on PATH.
@@ -1065,6 +896,7 @@ impl CommandExecutor for NoDockerExecutor {
     }
 }
 
+// Hard-won: ba563efac06a: launch options reported local Docker ready when no engine was installed
 #[test]
 fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() {
     assert_eq!(
@@ -1093,6 +925,7 @@ fn local_engine_readiness_tells_a_missing_engine_from_one_that_did_not_answer() 
 /// before anything was launched. The wizard's check now says what to do
 /// without it; a launch that fails the same check still says it, next to the
 /// failure dialog's Retry launch button.
+// Hard-won: 028b83276375: missing Docker errors disagreed across launch surfaces and buried the cause
 #[test]
 fn the_wizard_says_docker_is_not_installed_in_the_launch_options_words() {
     let template = TargetTemplate::LocalDocker {

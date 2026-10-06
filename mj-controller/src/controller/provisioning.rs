@@ -45,8 +45,8 @@ const INHERITED_GIT_SETTINGS: &[&str] = &[
 /// same time.
 ///
 /// Starting a child means starting a harness, and a harness start inside a
-/// container is expensive: the reviewer sidecar already caps its own
-/// specialist lanes at three for the same reason. Measured on a local Podman
+/// container is expensive, especially while its reviewer is active. Measured
+/// on a local Podman
 /// target, ten children started one after another each reached their harness
 /// in about seven seconds, while four started at once left two or three of
 /// them past the 300-second harness-startup wait. Admitting two at a time
@@ -909,8 +909,13 @@ impl Controller {
                     connect_started_worker(reconnect, session_id, executor, backend, worker_root)
                         .await?
                 };
-                let native_session_id =
-                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+                let native_session_id = wait_for_native_session_in_stage(
+                    &mut relay,
+                    executor,
+                    readiness_stage,
+                    profile.kind,
+                )
+                .await?;
                 let owner = crate::worker_lifecycle::require(session_id)?;
                 crate::database::finish_worker_restart(session_id, owner.operation_id())?;
                 Ok(Some(native_session_id))
@@ -1505,8 +1510,8 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
     pub(crate) fn new(inner: &'a E, stage: ProvisionStage) -> Self {
         Self {
             inner,
-            stage,
-            _guard: ProvisionStageGuard::new(inner, stage),
+            stage: stage.clone(),
+            _guard: ProvisionStageGuard::new(inner, stage.clone()),
         }
     }
 
@@ -1514,7 +1519,7 @@ impl<'a, E: CommandExecutor> StagedExecutor<'a, E> {
         if command.stage.is_some() {
             return command.clone();
         }
-        command.clone().stage(self.stage)
+        command.clone().stage(self.stage.clone())
     }
 }
 

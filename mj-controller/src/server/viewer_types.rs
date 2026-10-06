@@ -398,7 +398,6 @@ impl ViewerSnapshot {
             bundles,
             review_config: ViewerReviewConfig {
                 enabled: config.review.enabled,
-                tier: config.review.tier.label().to_owned(),
                 profile: config.review.profile.clone(),
             },
             capacity: Vec::new(),
@@ -752,7 +751,6 @@ pub enum ViewerCommandSource {
 #[serde(deny_unknown_fields)]
 pub struct ViewerReviewConfig {
     pub enabled: bool,
-    pub tier: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 }
@@ -761,8 +759,6 @@ pub struct ViewerReviewConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerTurnReview {
-    /// `quick` or `extended`.
-    pub tier: String,
     /// What the review is doing, in one line.
     pub status: String,
     /// One row per reviewing agent: its label and where it has got to.
@@ -800,7 +796,6 @@ impl ViewerTurnReview {
     #[must_use]
     pub fn from_runtime(review: &crate::review_host::RuntimeReviewView) -> Self {
         Self {
-            tier: review.tier.label().to_owned(),
             status: review.status.clone(),
             roles: review
                 .roles

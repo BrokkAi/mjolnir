@@ -77,6 +77,7 @@ const key = (args) => {
 };
 
 for (const extra of [[], ['--release'], ['--profile', 'dev']]) {
+  // Hard-won: 3038175: different profiles invalidated each other’s Cargo artifacts on every run.
   test(`install.sh and run.sh issue identical Cargo builds for [${extra}]`, () => {
     const f = fixture();
     try {
@@ -99,6 +100,7 @@ for (const extra of [[], ['--release'], ['--profile', 'dev']]) {
   });
 }
 
+// Hard-won: 3038175: run.sh rewrote Cargo.lock and discarded the committed dependency selection.
 test('every build is reproducible from the committed lock file', () => {
   const f = fixture();
   try {

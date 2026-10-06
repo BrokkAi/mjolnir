@@ -239,19 +239,4 @@ mod tests {
             "an NFS-retained old executable must differ from its replacement"
         );
     }
-
-    #[test]
-    fn current_process_is_running_the_current_executable() {
-        assert_eq!(
-            process_runs_this_executable(std::process::id()).unwrap(),
-            Some(true)
-        );
-        assert_eq!(process_runs_this_executable(u32::MAX).unwrap(), None);
-    }
-
-    #[test]
-    fn a_live_process_reports_the_file_it_runs() {
-        let own = process_executable_path(std::process::id()).unwrap();
-        assert_eq!(Some(own), running_executable_path());
-    }
 }

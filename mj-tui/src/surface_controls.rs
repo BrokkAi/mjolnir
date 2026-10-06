@@ -300,8 +300,9 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
             && !dashboard.modal_open();
         let style = if enabled && (focused || form.is_armed(control)) {
             theme::focus_control()
-        } else if enabled && id == CommandId::NewSessionWizard && !theme::is_mono() {
-            // Monochrome reserves bold reverse video for actual keyboard focus.
+        } else if enabled && id == CommandId::NewSessionWizard && !theme::reverse_video() {
+            // Without painted surfaces, bold reverse video is reserved for
+            // actual keyboard focus.
             theme::active_control()
         } else if enabled {
             theme::actionable().patch(theme::raised())
@@ -571,7 +572,7 @@ mod tests {
     use crate::test_support::{
         buffer_lines, chord, dashboard_with_session, key, mouse_at, point, running_session,
     };
-    use crate::{Focus, Mode, PaneSize, SessionStateFilter, SupportPane};
+    use crate::{Focus, Mode, PaneSize, SupportPane};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use mj_chat::theme;
     use ratatui::{Terminal, backend::TestBackend};
@@ -584,250 +585,68 @@ mod tests {
         buffer_lines(terminal.backend().buffer())
     }
 
+    fn draw_buffer(dashboard: &mut DashboardState, size: (u16, u16)) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn append_state(
+        output: &mut String,
+        label: &str,
+        dashboard: &mut DashboardState,
+        size: (u16, u16),
+    ) -> Vec<String> {
+        use std::fmt::Write as _;
+
+        let lines = draw(dashboard, size);
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} ({}x{}) ===", size.0, size.1).expect("write state header");
+        output.push_str(&lines.join("\n"));
+        output.push('\n');
+        lines
+    }
+
+    fn append_button_styles(output: &mut String, dashboard: &mut DashboardState, size: (u16, u16)) {
+        use std::fmt::Write as _;
+
+        let buffer = draw_buffer(dashboard, size);
+        let lines = buffer_lines(&buffer);
+        for label in ["Create", "Open"] {
+            let at = point(&lines, label);
+            let cell = &buffer[at];
+            writeln!(
+                output,
+                "button {label}: fg={:?} bg={:?} modifiers={:?}",
+                cell.fg, cell.bg, cell.modifier
+            )
+            .expect("write button style");
+        }
+    }
+
+    fn append_action_focus(output: &mut String, dashboard: &DashboardState) {
+        use std::fmt::Write as _;
+
+        writeln!(
+            output,
+            "action focus: {:?}; Create enabled: {}; Open enabled: {}",
+            dashboard.session_action_focus,
+            crate::surface_controls::session_action_enabled(dashboard, CommandId::NewSessionWizard),
+            crate::surface_controls::session_action_enabled(dashboard, CommandId::ResumeDialog)
+        )
+        .expect("write action focus");
+    }
+
     fn click(dashboard: &mut DashboardState, point: (u16, u16)) -> DashboardAction {
         assert_eq!(
             dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), point)),
             DashboardAction::None
         );
         dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), point))
-    }
-
-    #[test]
-    fn sidebar_creation_and_open_are_clickable_at_every_size() {
-        for size in [(80, 20), (100, 24), (120, 30), (140, 40), (200, 60)] {
-            let mut dashboard = dashboard_with_session(running_session());
-            dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
-            dashboard.set_pane_size(SupportPane::Quota, PaneSize::Minimized);
-            dashboard.focus_prompt();
-            dashboard.set_notice("Background work finished");
-            let lines = draw(&mut dashboard, size);
-            let create = point(&lines, "Create");
-            assert_eq!(click(&mut dashboard, create), DashboardAction::None);
-            assert!(matches!(dashboard.mode, Mode::New(_)), "{size:?}");
-            dashboard.cancel_modal();
-            let lines = draw(&mut dashboard, size);
-            let open = point(&lines, "Open");
-            assert_eq!(
-                click(&mut dashboard, open),
-                DashboardAction::OpenResumeDialog
-            );
-        }
-    }
-
-    #[test]
-    fn session_action_buttons_render_inside_the_sessions_pane_and_follow_arrow_focus() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal
-            .draw(|frame| crate::render::render(frame, &mut dashboard))
-            .unwrap();
-
-        let pane = dashboard.pane_areas.expect("sessions pane")[0];
-        let create = point(&buffer_lines(terminal.backend().buffer()), "Create");
-        assert_eq!(create.1, pane.y + 1, "actions occupy the pane's first row");
-        assert_eq!(dashboard.session_action_focus, None);
-
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Up)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::NewSessionWizard)
-        );
-        terminal
-            .draw(|frame| crate::render::render(frame, &mut dashboard))
-            .unwrap();
-        let create = point(&buffer_lines(terminal.backend().buffer()), "Create");
-        assert_eq!(
-            terminal.backend().buffer()[(create.0, create.1)].bg,
-            theme::focus_control()
-                .bg
-                .expect("focused button background"),
-            "the keyboard-focused action uses the focused button style"
-        );
-
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Right)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::ResumeDialog)
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::OpenResumeDialog
-        );
-    }
-
-    #[test]
-    fn monochrome_session_action_emphasis_follows_keyboard_focus() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut config = dashboard.config.clone();
-        config.theme = mj_core::config::UiTheme::Mono;
-        dashboard.set_config(config);
-        dashboard.focus_sessions();
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        let mut action_emphasis = |dashboard: &mut DashboardState| {
-            terminal
-                .draw(|frame| crate::render::render(frame, dashboard))
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let lines = buffer_lines(buffer);
-            ["Create", "Open"].map(|label| {
-                let position = point(&lines, label);
-                buffer[position]
-                    .modifier
-                    .contains(ratatui::style::Modifier::BOLD)
-            })
-        };
-
-        assert_eq!(action_emphasis(&mut dashboard), [false, false]);
-        dashboard.handle_key(key(KeyCode::Up));
-        assert_eq!(action_emphasis(&mut dashboard), [true, false]);
-        dashboard.handle_key(key(KeyCode::Right));
-        assert_eq!(action_emphasis(&mut dashboard), [false, true]);
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::OpenResumeDialog,
-            "Enter must activate the only emphasized action"
-        );
-    }
-
-    #[test]
-    fn session_action_navigation_returns_to_the_first_session_and_enter_opens_it() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut second = running_session();
-        second.id = "another-session".into();
-        dashboard.state.sessions.insert(second.id.clone(), second);
-        dashboard.focus_sessions();
-        dashboard.set_selection_for(Focus::Sessions, 0);
-        draw(&mut dashboard, (120, 40));
-
-        assert!(
-            dashboard
-                .handle_event_result(Event::Key(key(KeyCode::Down)))
-                .consumed
-        );
-        assert_eq!(dashboard.selected_visible_index(), Some(1));
-        assert!(
-            dashboard
-                .handle_event_result(Event::Key(key(KeyCode::Up)))
-                .consumed
-        );
-        assert_eq!(dashboard.selected_visible_index(), Some(0));
-        assert!(
-            dashboard
-                .handle_event_result(Event::Key(key(KeyCode::Up)))
-                .consumed
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::NewSessionWizard)
-        );
-        assert!(
-            dashboard
-                .handle_event_result(Event::Key(key(KeyCode::Right)))
-                .consumed
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::ResumeDialog)
-        );
-        assert!(
-            dashboard
-                .handle_event_result(Event::Key(key(KeyCode::Left)))
-                .consumed
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::NewSessionWizard),
-            "Left returns from Resume to Create"
-        );
-        assert!(
-            dashboard
-                .handle_event_result(Event::Key(key(KeyCode::Down)))
-                .consumed
-        );
-        assert_eq!(dashboard.session_action_focus, None);
-        assert_eq!(dashboard.selected_visible_index(), Some(0));
-        assert!(matches!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::Open { .. }
-        ));
-
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        draw(&mut dashboard, (120, 40));
-        dashboard.handle_key(key(KeyCode::Up));
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None
-        );
-        assert!(matches!(dashboard.mode, Mode::New(_)));
-    }
-
-    #[test]
-    fn empty_sessions_can_select_and_activate_the_action_row() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.state.sessions.clear();
-        dashboard.session_details.clear();
-        dashboard.focus_sessions();
-        draw(&mut dashboard, (120, 40));
-
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::NewSessionWizard)
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Right)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::ResumeDialog)
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::OpenResumeDialog
-        );
-    }
-
-    #[test]
-    fn disabled_create_is_skipped_by_action_navigation_and_mouse_stays_working() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.config.profiles.clear();
-        dashboard.focus_sessions();
-        let lines = draw(&mut dashboard, (120, 40));
-        let create = point(&lines, "Create");
-        let open = point(&lines, "Open");
-        assert_eq!(create.1, open.1);
-
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Up)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::ResumeDialog)
-        );
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Left)),
-            DashboardAction::None
-        );
-        assert_eq!(
-            dashboard.session_action_focus,
-            Some(CommandId::ResumeDialog)
-        );
-
-        dashboard.cancel_modal();
-        let lines = draw(&mut dashboard, (120, 40));
-        assert_eq!(
-            click(&mut dashboard, point(&lines, "Open")),
-            DashboardAction::OpenResumeDialog
-        );
     }
 
     #[test]
@@ -896,62 +715,6 @@ mod tests {
     /// that ends the Sessions filter label drops the whole filter, the search
     /// text and the state together, as `Esc` on the pane does. A click on the
     /// label's own text leaves the filter in force.
-    #[test]
-    fn the_filter_clear_chip_drops_the_filter_and_the_label_does_not() {
-        use mj_core::config::SymbolSet;
-
-        for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')]
-        {
-            let mut dashboard = dashboard_with_session(running_session());
-            let mut config = dashboard.config.clone();
-            config.advanced.symbols = Some(symbols);
-            dashboard.set_config(config);
-            dashboard.focus_sessions();
-            // A search and a state filter together: `/ses`, Enter, then `b`.
-            dashboard.handle_key(key(KeyCode::Char('/')));
-            for character in "ses".chars() {
-                dashboard.handle_key(key(KeyCode::Char(character)));
-            }
-            dashboard.handle_key(key(KeyCode::Enter));
-            dashboard.handle_key(key(KeyCode::Char('b')));
-            let filter = dashboard.sessions_filter.clone();
-            assert_eq!(
-                filter
-                    .as_ref()
-                    .map(|filter| (filter.query.value(), filter.state)),
-                Some(("ses", Some(SessionStateFilter::Blocked)))
-            );
-
-            let label = format!("/ses {dot} blocked");
-            let lines = draw(&mut dashboard, (120, 40));
-            let (x, y) = point(&lines, &format!("{label} {close} "));
-            let pane = dashboard.pane_areas.expect("pane areas")[0];
-            assert_eq!(y, pane.y, "{symbols:?}: the label is on the title");
-
-            // The label's first and last cells are not the chip.
-            let last = x + label.chars().count() as u16 - 1;
-            for cell in [x, last] {
-                assert_eq!(click(&mut dashboard, (cell, y)), DashboardAction::None);
-                assert_eq!(dashboard.sessions_filter, filter, "{symbols:?}: {cell}");
-                draw(&mut dashboard, (120, 40));
-            }
-
-            let chip = last + 2;
-            assert_eq!(
-                lines[usize::from(y)].chars().nth(usize::from(chip)),
-                Some(close)
-            );
-            assert_eq!(click(&mut dashboard, (chip, y)), DashboardAction::None);
-            assert_eq!(dashboard.sessions_filter, None, "{symbols:?}");
-            let lines = draw(&mut dashboard, (120, 40));
-            assert!(
-                !lines[usize::from(y)].contains(&format!(" {close} ")),
-                "{symbols:?}: the chip leaves with the filter: {:?}",
-                lines[usize::from(y)]
-            );
-        }
-    }
-
     /// The Sessions action row as drawn inside the Sessions pane, without the
     /// panes beside it.
     fn actions_row(dashboard: &DashboardState, lines: &[String]) -> String {
@@ -963,84 +726,6 @@ mod tests {
             .collect()
     }
 
-    /// User request 2026-09-29: a `Filter: ____` input sits on the buttons'
-    /// row, to their right, in the standard pane at the widths people use.
-    #[test]
-    fn the_filter_input_sits_right_of_the_buttons_at_140_and_80_columns() {
-        for width in [140, 80] {
-            let mut dashboard = dashboard_with_session(running_session());
-            let lines = draw(&mut dashboard, (width, 40));
-            let row = actions_row(&dashboard, &lines);
-            let open = row.find("Open").expect("Open button");
-            let filter = row.find("Filter: ____").expect("filter input");
-            assert!(open < filter, "{width}: {row:?}");
-            // Nothing is active, so there is no clear button.
-            assert!(!row.contains('×'), "{width}: {row:?}");
-            assert_eq!(dashboard.sessions_filter, None);
-        }
-    }
-
-    #[test]
-    fn the_filter_input_is_hidden_in_the_compact_list_but_the_filter_still_applies() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
-        dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        for character in "zzz".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let lines = draw(&mut dashboard, (140, 40));
-        let row = actions_row(&dashboard, &lines);
-        assert!(!row.contains("Filter:"), "{row:?}");
-        assert!(lines.join("\n").contains("Outside filter"), "{lines:#?}");
-        assert!(dashboard.sessions_filter.is_some());
-    }
-
-    /// Typing in the input edits the `/` search text and `Esc` clears it and
-    /// leaves. The input has no `x` of its own: the clear chip is on the
-    /// Sessions title.
-    #[test]
-    fn typing_in_the_filter_input_filters_and_esc_clears() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let lines = draw(&mut dashboard, (140, 40));
-        let (x, y) = point(&lines, "Filter:");
-        assert_eq!(click(&mut dashboard, (x + 2, y)), DashboardAction::None);
-        assert!(
-            dashboard
-                .sessions_filter
-                .as_ref()
-                .is_some_and(|f| f.editing)
-        );
-        assert_eq!(dashboard.focus(), Focus::Sessions);
-        for character in "nomatch".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        assert_eq!(
-            dashboard.sessions_filter.as_ref().map(|f| f.query.value()),
-            Some("nomatch")
-        );
-        let lines = draw(&mut dashboard, (140, 40));
-        let row = actions_row(&dashboard, &lines);
-        assert!(row.contains("Filter: nomatch"), "{row:?}");
-        assert!(!row.contains('×') && !row.contains(" x "), "{row:?}");
-        // The same text is the `/` search: the list is filtered by it.
-        assert!(
-            dashboard
-                .ordered_sessions()
-                .iter()
-                .all(|session| Some(session.id.as_str()) == dashboard.selected_session_id())
-        );
-
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert_eq!(dashboard.sessions_filter, None);
-        let lines = draw(&mut dashboard, (140, 40));
-        assert!(actions_row(&dashboard, &lines).contains("Filter: ____"));
-    }
-
-    fn mods(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
     fn filter_state(dashboard: &DashboardState) -> (String, usize) {
         let filter = dashboard.sessions_filter.as_ref().expect("filter");
         (filter.query.value().to_owned(), filter.query.cursor())
@@ -1048,56 +733,6 @@ mod tests {
 
     /// User request 2026-09-29: the filter input takes the readline keys the
     /// composer does.
-    #[test]
-    fn the_filter_input_takes_readline_keys() {
-        use KeyModifiers as M;
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        for character in "alpha beta gamma".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let steps: &[(KeyEvent, &str, usize)] = &[
-            (key(KeyCode::Left), "alpha beta gamma", 15),
-            (key(KeyCode::Right), "alpha beta gamma", 16),
-            (key(KeyCode::Home), "alpha beta gamma", 0),
-            (key(KeyCode::End), "alpha beta gamma", 16),
-            (mods(KeyCode::Char('a'), M::CONTROL), "alpha beta gamma", 0),
-            (mods(KeyCode::Char('e'), M::CONTROL), "alpha beta gamma", 16),
-            (mods(KeyCode::Char('b'), M::CONTROL), "alpha beta gamma", 15),
-            (mods(KeyCode::Char('f'), M::CONTROL), "alpha beta gamma", 16),
-            (mods(KeyCode::Char('b'), M::ALT), "alpha beta gamma", 11),
-            (mods(KeyCode::Char('b'), M::ALT), "alpha beta gamma", 6),
-            (mods(KeyCode::Char('f'), M::ALT), "alpha beta gamma", 10),
-            (key(KeyCode::Delete), "alpha betagamma", 10),
-            (key(KeyCode::Backspace), "alpha betgamma", 9),
-            (mods(KeyCode::Char('h'), M::CONTROL), "alpha begamma", 8),
-            (mods(KeyCode::Char('w'), M::CONTROL), "alpha gamma", 6),
-            (mods(KeyCode::Char('k'), M::CONTROL), "alpha ", 6),
-            (mods(KeyCode::Char('a'), M::CONTROL), "alpha ", 0),
-            (key(KeyCode::Char('x')), "xalpha ", 1),
-            (mods(KeyCode::Char('u'), M::CONTROL), "alpha ", 0),
-        ];
-        for (event, text, cursor) in steps {
-            assert!(
-                dashboard
-                    .handle_sessions_filter_key(*event, false)
-                    .is_some()
-            );
-            assert_eq!(
-                filter_state(&dashboard),
-                ((*text).to_owned(), *cursor),
-                "{event:?}"
-            );
-        }
-        // Up and Down are not text: the pane still gets them.
-        assert!(
-            dashboard
-                .handle_sessions_filter_key(key(KeyCode::Up), false)
-                .is_none()
-        );
-    }
-
     fn filter_cells(dashboard: &mut DashboardState) -> (String, Vec<usize>) {
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal
@@ -1110,7 +745,7 @@ mod tests {
         let reversed = (x..x + FILTER_LABEL.len() as u16 + FILTER_FIELD_MAX)
             .filter(|&column| {
                 let cell = &buffer[(column, y)];
-                if theme::is_mono() {
+                if theme::reverse_video() {
                     cell.modifier.contains(ratatui::style::Modifier::REVERSED)
                 } else {
                     Some(cell.bg) == caret.bg
@@ -1161,65 +796,6 @@ mod tests {
         assert!(row.contains("Filter: abcdefghij"), "{row:?}");
         assert!(!row.contains("789"), "{row:?}");
         assert_eq!(reversed, vec![label]);
-    }
-
-    #[test]
-    fn slash_focuses_the_filter_input_and_enter_or_esc_leave_it() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        dashboard.handle_key(key(KeyCode::Char('q')));
-        assert!(
-            dashboard
-                .sessions_filter
-                .as_ref()
-                .is_some_and(|f| f.editing)
-        );
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert!(
-            dashboard
-                .sessions_filter
-                .as_ref()
-                .is_some_and(|f| !f.editing && f.query.value() == "q")
-        );
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert_eq!(dashboard.sessions_filter, None);
-    }
-
-    #[test]
-    fn the_filter_input_row_is_pure_ascii_with_ascii_symbols() {
-        use mj_core::config::SymbolSet;
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut config = dashboard.config.clone();
-        config.advanced.symbols = Some(SymbolSet::Ascii);
-        dashboard.set_config(config);
-        dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        dashboard.handle_key(key(KeyCode::Char('q')));
-        let lines = draw(&mut dashboard, (140, 40));
-        let row = actions_row(&dashboard, &lines);
-        assert!(row.contains("Filter: q"), "{row:?}");
-        assert!(!row.contains(" x "), "{row:?}");
-        assert!(row.is_ascii(), "{row:?}");
-    }
-
-    #[test]
-    fn the_filter_matches_a_sessions_branch_name() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut other = running_session();
-        other.id = "branchy-session".into();
-        other.launch_branch = Some("feature/octopus".into());
-        dashboard.state.sessions.insert(other.id.clone(), other);
-        dashboard.focus_sessions();
-        dashboard.handle_key(key(KeyCode::Char('/')));
-        for character in "OCTOPUS".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        // The branch matches, so nothing is held back.
-        assert_eq!(dashboard.sessions_hidden_count(), 0);
-        dashboard.handle_key(key(KeyCode::Char('x')));
-        assert_eq!(dashboard.sessions_hidden_count(), 1);
     }
 
     fn titled(id: &str, title: &str) -> mj_core::state::SessionRecord {
@@ -1308,5 +884,584 @@ mod tests {
         dashboard.clear_sessions_filter();
         assert_eq!(dashboard.next_sessions_text_search(), None);
         assert_eq!(ids(&dashboard), baseline);
+    }
+
+    #[test]
+    fn golden_sessions_pane_actions() {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        for size in [(80, 20), (100, 24), (120, 30), (140, 40), (200, 60)] {
+            let mut dashboard = dashboard_with_session(running_session());
+            dashboard.set_pane_size(SupportPane::Targets, PaneSize::Minimized);
+            dashboard.set_pane_size(SupportPane::Quota, PaneSize::Minimized);
+            dashboard.focus_prompt();
+            dashboard.set_notice("Background work finished");
+            let lines = append_state(
+                &mut output,
+                "Create and Open remain clickable",
+                &mut dashboard,
+                size,
+            );
+            let action = click(&mut dashboard, point(&lines, "Create"));
+            append_state(
+                &mut output,
+                "Create opens the session wizard",
+                &mut dashboard,
+                size,
+            );
+            writeln!(
+                output,
+                "action: {action:?}; mode: New={}",
+                matches!(dashboard.mode, Mode::New(_))
+            )
+            .expect("write create action");
+            dashboard.cancel_modal();
+            let lines = draw(&mut dashboard, size);
+            let action = click(&mut dashboard, point(&lines, "Open"));
+            append_state(
+                &mut output,
+                "Open launches the session picker",
+                &mut dashboard,
+                size,
+            );
+            writeln!(output, "action: {action:?}").expect("write open action");
+        }
+
+        let size = (120, 40);
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        append_state(
+            &mut output,
+            "action row in the Sessions pane",
+            &mut dashboard,
+            size,
+        );
+        append_action_focus(&mut output, &dashboard);
+        append_button_styles(&mut output, &mut dashboard, size);
+        dashboard.handle_key(key(KeyCode::Up));
+        append_state(
+            &mut output,
+            "keyboard focus on Create",
+            &mut dashboard,
+            size,
+        );
+        append_action_focus(&mut output, &dashboard);
+        append_button_styles(&mut output, &mut dashboard, size);
+        dashboard.handle_key(key(KeyCode::Right));
+        append_state(
+            &mut output,
+            "keyboard focus moves to Open",
+            &mut dashboard,
+            size,
+        );
+        append_action_focus(&mut output, &dashboard);
+        append_button_styles(&mut output, &mut dashboard, size);
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "Enter activates the focused Open button",
+            &mut dashboard,
+            size,
+        );
+        writeln!(output, "action: {action:?}").expect("write focused action");
+
+        let mut monochrome = dashboard_with_session(running_session());
+        let mut config = monochrome.config.clone();
+        config.theme = mj_core::config::UiTheme::Mono;
+        monochrome.set_config(config);
+        monochrome.focus_sessions();
+        append_state(
+            &mut output,
+            "monochrome action emphasis at rest",
+            &mut monochrome,
+            size,
+        );
+        append_button_styles(&mut output, &mut monochrome, size);
+        monochrome.handle_key(key(KeyCode::Up));
+        append_state(
+            &mut output,
+            "monochrome emphasis on Create",
+            &mut monochrome,
+            size,
+        );
+        append_button_styles(&mut output, &mut monochrome, size);
+        monochrome.handle_key(key(KeyCode::Right));
+        append_state(
+            &mut output,
+            "monochrome emphasis on Open",
+            &mut monochrome,
+            size,
+        );
+        append_button_styles(&mut output, &mut monochrome, size);
+        let action = monochrome.handle_key(key(KeyCode::Enter));
+        writeln!(output, "monochrome Enter action: {action:?}").expect("write monochrome action");
+
+        let mut navigation = dashboard_with_session(running_session());
+        let mut second = running_session();
+        second.id = "another-session".into();
+        navigation.state.sessions.insert(second.id.clone(), second);
+        navigation.focus_sessions();
+        navigation.set_selection_for(Focus::Sessions, 0);
+        append_state(
+            &mut output,
+            "navigation starts at first session",
+            &mut navigation,
+            size,
+        );
+        for (label, event) in [
+            ("Down selects second session", KeyCode::Down),
+            ("Up returns to first session", KeyCode::Up),
+            ("Up reaches Create", KeyCode::Up),
+            ("Right reaches Open", KeyCode::Right),
+            ("Left returns to Create", KeyCode::Left),
+            ("Down returns to first session", KeyCode::Down),
+        ] {
+            navigation.handle_key(key(event));
+            append_state(&mut output, label, &mut navigation, size);
+            append_action_focus(&mut output, &navigation);
+        }
+        let action = navigation.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "Enter opens the first session",
+            &mut navigation,
+            size,
+        );
+        writeln!(output, "action: {action:?}").expect("write session action");
+
+        let mut no_sessions = dashboard_with_session(running_session());
+        no_sessions.state.sessions.clear();
+        no_sessions.session_details.clear();
+        no_sessions.focus_sessions();
+        append_state(
+            &mut output,
+            "empty list selects Create",
+            &mut no_sessions,
+            size,
+        );
+        append_action_focus(&mut output, &no_sessions);
+        no_sessions.handle_key(key(KeyCode::Right));
+        append_state(
+            &mut output,
+            "empty list can select Open",
+            &mut no_sessions,
+            size,
+        );
+        let action = no_sessions.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "empty list opens the picker",
+            &mut no_sessions,
+            size,
+        );
+        writeln!(output, "action: {action:?}").expect("write empty-list action");
+
+        let mut disabled = dashboard_with_session(running_session());
+        disabled.config.profiles.clear();
+        disabled.focus_sessions();
+        let lines = append_state(
+            &mut output,
+            "Create disabled without profiles",
+            &mut disabled,
+            size,
+        );
+        append_button_styles(&mut output, &mut disabled, size);
+        disabled.handle_key(key(KeyCode::Up));
+        append_state(
+            &mut output,
+            "keyboard skips disabled Create",
+            &mut disabled,
+            size,
+        );
+        append_action_focus(&mut output, &disabled);
+        disabled.handle_key(key(KeyCode::Left));
+        append_state(
+            &mut output,
+            "Left stays on enabled Open",
+            &mut disabled,
+            size,
+        );
+        append_action_focus(&mut output, &disabled);
+        let action = click(&mut disabled, point(&lines, "Open"));
+        append_state(
+            &mut output,
+            "mouse still activates Open",
+            &mut disabled,
+            size,
+        );
+        writeln!(output, "action: {action:?}").expect("write disabled action");
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "sessions-pane-actions",
+            &output,
+        );
+    }
+
+    #[test]
+    fn golden_sessions_filter() {
+        use KeyModifiers as M;
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        for (symbols, close, dot, name) in [
+            (mj_core::config::SymbolSet::Unicode, '×', '·', "Unicode"),
+            (mj_core::config::SymbolSet::Ascii, 'x', '-', "ASCII"),
+        ] {
+            let mut dashboard = dashboard_with_session(running_session());
+            let mut config = dashboard.config.clone();
+            config.advanced.symbols = Some(symbols);
+            dashboard.set_config(config);
+            dashboard.focus_sessions();
+            dashboard.handle_key(key(KeyCode::Char('/')));
+            for character in "ses".chars() {
+                dashboard.handle_key(key(KeyCode::Char(character)));
+            }
+            dashboard.handle_key(key(KeyCode::Enter));
+            dashboard.handle_key(key(KeyCode::Char('b')));
+            let filter = dashboard.sessions_filter.clone();
+            let label = format!("/ses {dot} blocked");
+            let lines = append_state(
+                &mut output,
+                &format!("{name} state filter and title clear chip"),
+                &mut dashboard,
+                (120, 40),
+            );
+            let (x, y) = point(&lines, &format!("{label} {close} "));
+            let last = x + label.chars().count() as u16 - 1;
+            for (which, cell) in [("first label cell", x), ("last label cell", last)] {
+                let action = click(&mut dashboard, (cell, y));
+                assert_eq!(dashboard.sessions_filter, filter, "{name}: {which}");
+                append_state(
+                    &mut output,
+                    &format!("{name} click on {which} leaves filter active"),
+                    &mut dashboard,
+                    (120, 40),
+                );
+                writeln!(
+                    output,
+                    "click=({cell},{y}); action={action:?}; filter retained=true"
+                )
+                .expect("write label hit result");
+            }
+            let chip = last + 2;
+            let action = click(&mut dashboard, (chip, y));
+            assert!(
+                dashboard.sessions_filter.is_none(),
+                "{name}: chip clears filter"
+            );
+            append_state(
+                &mut output,
+                &format!("{name} clear chip drops search and state filters"),
+                &mut dashboard,
+                (120, 40),
+            );
+            writeln!(
+                output,
+                "chip=({chip},{y}) glyph={close:?}; action={action:?}; filter active=false"
+            )
+            .expect("write chip hit result");
+        }
+
+        for width in [140, 80] {
+            let mut dashboard = dashboard_with_session(running_session());
+            let lines = append_state(
+                &mut output,
+                &format!("inactive filter input follows buttons at {width} columns"),
+                &mut dashboard,
+                (width, 40),
+            );
+            let row = actions_row(&dashboard, &lines);
+            writeln!(output, "Sessions action row: {row:?}; filter active: false")
+                .expect("write input row");
+        }
+
+        let mut compact = dashboard_with_session(running_session());
+        compact.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+        compact.focus_sessions();
+        compact.handle_key(key(KeyCode::Char('/')));
+        for character in "zzz".chars() {
+            compact.handle_key(key(KeyCode::Char(character)));
+        }
+        let lines = append_state(
+            &mut output,
+            "minimized pane applies the filter while hiding the input",
+            &mut compact,
+            (140, 40),
+        );
+        writeln!(
+            output,
+            "action row: {:?}; hidden sessions: {}",
+            actions_row(&compact, &lines),
+            compact.sessions_hidden_count()
+        )
+        .expect("write compact filter result");
+
+        let mut typing = dashboard_with_session(running_session());
+        let lines = draw(&mut typing, (140, 40));
+        let (x, y) = point(&lines, "Filter:");
+        let action = click(&mut typing, (x + 2, y));
+        writeln!(
+            output,
+            "click Filter input: {action:?}; editing: {}",
+            typing
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|filter| filter.editing)
+        )
+        .expect("write focus action");
+        for character in "nomatch".chars() {
+            typing.handle_key(key(KeyCode::Char(character)));
+        }
+        let lines = append_state(
+            &mut output,
+            "typed filter narrows the Sessions list",
+            &mut typing,
+            (140, 40),
+        );
+        writeln!(
+            output,
+            "query/cursor: {:?}; hidden sessions: {}; row: {:?}",
+            filter_state(&typing),
+            typing.sessions_hidden_count(),
+            actions_row(&typing, &lines)
+        )
+        .expect("write typed filter");
+        typing.handle_key(key(KeyCode::Esc));
+        assert!(typing.sessions_filter.is_none());
+        append_state(
+            &mut output,
+            "Esc clears the filter input",
+            &mut typing,
+            (140, 40),
+        );
+        writeln!(output, "filter active: false").expect("write clear state");
+
+        let mut readline = dashboard_with_session(running_session());
+        readline.focus_sessions();
+        readline.handle_key(key(KeyCode::Char('/')));
+        for character in "alpha beta gamma".chars() {
+            readline.handle_key(key(KeyCode::Char(character)));
+        }
+        let steps: &[(&str, KeyEvent, &str, usize)] = &[
+            ("Left", key(KeyCode::Left), "alpha beta gamma", 15),
+            ("Right", key(KeyCode::Right), "alpha beta gamma", 16),
+            ("Home", key(KeyCode::Home), "alpha beta gamma", 0),
+            ("End", key(KeyCode::End), "alpha beta gamma", 16),
+            (
+                "Ctrl-A",
+                KeyEvent::new(KeyCode::Char('a'), M::CONTROL),
+                "alpha beta gamma",
+                0,
+            ),
+            (
+                "Ctrl-E",
+                KeyEvent::new(KeyCode::Char('e'), M::CONTROL),
+                "alpha beta gamma",
+                16,
+            ),
+            (
+                "Ctrl-B",
+                KeyEvent::new(KeyCode::Char('b'), M::CONTROL),
+                "alpha beta gamma",
+                15,
+            ),
+            (
+                "Ctrl-F",
+                KeyEvent::new(KeyCode::Char('f'), M::CONTROL),
+                "alpha beta gamma",
+                16,
+            ),
+            (
+                "Alt-B",
+                KeyEvent::new(KeyCode::Char('b'), M::ALT),
+                "alpha beta gamma",
+                11,
+            ),
+            (
+                "Alt-B again",
+                KeyEvent::new(KeyCode::Char('b'), M::ALT),
+                "alpha beta gamma",
+                6,
+            ),
+            (
+                "Alt-F",
+                KeyEvent::new(KeyCode::Char('f'), M::ALT),
+                "alpha beta gamma",
+                10,
+            ),
+            ("Delete", key(KeyCode::Delete), "alpha betagamma", 10),
+            ("Backspace", key(KeyCode::Backspace), "alpha betgamma", 9),
+            (
+                "Ctrl-H",
+                KeyEvent::new(KeyCode::Char('h'), M::CONTROL),
+                "alpha begamma",
+                8,
+            ),
+            (
+                "Ctrl-W",
+                KeyEvent::new(KeyCode::Char('w'), M::CONTROL),
+                "alpha gamma",
+                6,
+            ),
+            (
+                "Ctrl-K",
+                KeyEvent::new(KeyCode::Char('k'), M::CONTROL),
+                "alpha ",
+                6,
+            ),
+            (
+                "Ctrl-A before insert",
+                KeyEvent::new(KeyCode::Char('a'), M::CONTROL),
+                "alpha ",
+                0,
+            ),
+            ("insert x", key(KeyCode::Char('x')), "xalpha ", 1),
+            (
+                "Ctrl-U",
+                KeyEvent::new(KeyCode::Char('u'), M::CONTROL),
+                "alpha ",
+                0,
+            ),
+        ];
+        for (label, event, expected_text, expected_cursor) in steps {
+            readline.handle_key(*event);
+            let actual = filter_state(&readline);
+            assert_eq!(actual, ((*expected_text).to_owned(), *expected_cursor));
+            append_state(
+                &mut output,
+                &format!("readline {label}"),
+                &mut readline,
+                (140, 40),
+            );
+            writeln!(output, "input/cursor: {:?}@{}", actual.0, actual.1)
+                .expect("write readline result");
+        }
+        readline.handle_key(key(KeyCode::Up));
+        append_state(
+            &mut output,
+            "Up leaves text editing for the Sessions pane",
+            &mut readline,
+            (140, 40),
+        );
+        writeln!(
+            output,
+            "query/cursor after Up: {:?}",
+            filter_state(&readline)
+        )
+        .expect("write Up result");
+
+        let mut slash = dashboard_with_session(running_session());
+        slash.focus_sessions();
+        slash.handle_key(key(KeyCode::Char('/')));
+        slash.handle_key(key(KeyCode::Char('q')));
+        append_state(
+            &mut output,
+            "slash opens filter input",
+            &mut slash,
+            (140, 40),
+        );
+        writeln!(
+            output,
+            "editing after slash: {}",
+            slash
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|filter| filter.editing)
+        )
+        .expect("write slash focus");
+        slash.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "Enter keeps text and leaves editing",
+            &mut slash,
+            (140, 40),
+        );
+        writeln!(
+            output,
+            "query after Enter: {:?}; editing: {}",
+            filter_state(&slash),
+            slash
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|filter| filter.editing)
+        )
+        .expect("write Enter result");
+        slash.handle_key(key(KeyCode::Char('/')));
+        append_state(
+            &mut output,
+            "slash returns focus to the filter input",
+            &mut slash,
+            (140, 40),
+        );
+        writeln!(
+            output,
+            "editing after slash: {}",
+            slash
+                .sessions_filter
+                .as_ref()
+                .is_some_and(|filter| filter.editing)
+        )
+        .expect("write refocus state");
+        slash.handle_key(key(KeyCode::Esc));
+        append_state(
+            &mut output,
+            "Esc after slash removes filter",
+            &mut slash,
+            (140, 40),
+        );
+        writeln!(output, "filter active: {}", slash.sessions_filter.is_some())
+            .expect("write slash Esc result");
+
+        let mut ascii = dashboard_with_session(running_session());
+        let mut config = ascii.config.clone();
+        config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
+        ascii.set_config(config);
+        ascii.focus_sessions();
+        ascii.handle_key(key(KeyCode::Char('/')));
+        ascii.handle_key(key(KeyCode::Char('q')));
+        let lines = append_state(
+            &mut output,
+            "ASCII symbols keep the filter row ASCII",
+            &mut ascii,
+            (140, 40),
+        );
+        let row = actions_row(&ascii, &lines);
+        assert!(row.is_ascii());
+        writeln!(output, "filter row: {row:?}; ASCII: true").expect("write ASCII row");
+
+        let mut branch = dashboard_with_session(running_session());
+        let mut branch_session = running_session();
+        branch_session.id = "branchy-session".into();
+        branch_session.launch_branch = Some("feature/octopus".into());
+        branch
+            .state
+            .sessions
+            .insert(branch_session.id.clone(), branch_session);
+        branch.focus_sessions();
+        branch.handle_key(key(KeyCode::Char('/')));
+        for character in "OCTOPUS".chars() {
+            branch.handle_key(key(KeyCode::Char(character)));
+        }
+        assert_eq!(branch.sessions_hidden_count(), 0);
+        append_state(
+            &mut output,
+            "branch name matches without regard to case",
+            &mut branch,
+            (140, 40),
+        );
+        writeln!(output, "hidden sessions: 0").expect("write branch match");
+        branch.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(branch.sessions_hidden_count(), 1);
+        append_state(
+            &mut output,
+            "additional text hides the branch match",
+            &mut branch,
+            (140, 40),
+        );
+        writeln!(output, "hidden sessions: 1").expect("write branch mismatch");
+
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "sessions-filter", &output);
     }
 }

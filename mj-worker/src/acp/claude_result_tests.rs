@@ -293,6 +293,7 @@ fn steer_interruption() -> Value {
     })
 }
 
+// Hard-won: 65a7390: Claude prompts stayed running because the result from their answer cycle did not end them.
 #[tokio::test]
 async fn a_claude_prompt_ends_at_its_result_while_the_adapter_holds_the_reply() {
     let mut probe = ClaudeProbe::new().await;
@@ -543,6 +544,7 @@ async fn steer_applied(probe: &mut ClaudeProbe) {
     }
 }
 
+// Hard-won: 65a7390: A steered Claude cycle could finish without settling the prompt when no interruption flag arrived.
 #[tokio::test]
 async fn the_steered_cycle_ends_the_prompt_whether_or_not_an_interruption_is_reported() {
     for interrupted in [true, false] {
@@ -601,6 +603,7 @@ async fn a_steer_still_waiting_for_its_acknowledgement_is_settled_before_the_pro
 /// Stop while Claude Code works on its own reaches the adapter as
 /// `session/cancel`. The relay ends that turn at the interrupted cycle's
 /// result, which the runtime forwards like any other.
+// Hard-won: 4c379ac: Escape did nothing while Claude continued its own background work.
 #[tokio::test]
 async fn stop_while_claude_works_on_its_own_sends_session_cancel() {
     let mut probe = ClaudeProbe::new().await;
@@ -694,6 +697,7 @@ async fn a_local_command_ends_at_the_reply_after_its_text() {
 /// because no model cycle ran, yet that text marked the session used, and
 /// the worker that replaced it refused to start a fresh session. Only a
 /// cycle's result, or a prompt, is evidence that Claude Code wrote one.
+// Hard-won: f70600d: An adapter notice marked a never-prompted Claude session used and caused resume crash loops.
 #[tokio::test]
 async fn adapter_text_outside_any_cycle_does_not_mark_the_session_used() {
     let mut probe = ClaudeProbe::new().await;

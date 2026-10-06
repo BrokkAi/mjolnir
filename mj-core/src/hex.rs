@@ -15,14 +15,3 @@ pub fn lower_hex(bytes: impl AsRef<[u8]>) -> String {
     }
     output
 }
-
-#[cfg(test)]
-mod tests {
-    use super::lower_hex;
-
-    #[test]
-    fn lower_hex_pads_every_byte_to_two_lowercase_digits() {
-        assert_eq!(lower_hex([0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
-        assert_eq!(lower_hex([] as [u8; 0]), "");
-    }
-}

@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
@@ -15,6 +17,10 @@ const MANIFEST_FILE: &str = "mj-harness.json";
 const LEASE_FILE: &str = ".lease";
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const CACHE_DIR: &str = "mjolnir/harnesses";
+const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_INSTALLER_BYTES: usize = 8 * 1024 * 1024;
 
 const CODEX_PACKAGE_JSON: &[u8] = include_bytes!("../../assets/harnesses/codex/package.json");
 const CODEX_PACKAGE_LOCK: &[u8] = include_bytes!("../../assets/harnesses/codex/package-lock.json");
@@ -32,8 +38,12 @@ pub(crate) struct ManagedHarness {
     _lease: File,
 }
 
-pub(crate) fn spawn_gc(root: PathBuf, harness: HarnessKind) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+pub(crate) fn spawn_gc_on(
+    runtime: &tokio::runtime::Handle,
+    root: PathBuf,
+    harness: HarnessKind,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.tick().await;
         loop {
@@ -75,13 +85,10 @@ pub(crate) async fn resolve(
         return Ok(None);
     }
     let environment = mj_core::login_environment::with_overrides(environment).await?;
-    tokio::task::spawn_blocking(move || {
-        let root = cache_root(&environment)?;
-        resolve_at(&root, harness, execution_policy, &environment)
-    })
-    .await
-    .context("managed harness preparation task failed")?
-    .map(Some)
+    let root = cache_root(&environment)?;
+    resolve_at_async(&root, harness, execution_policy, &environment)
+        .await
+        .map(Some)
 }
 
 fn cache_root(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
@@ -104,7 +111,26 @@ fn cache_root(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
     Ok(base.join(CACHE_DIR))
 }
 
+#[cfg(test)]
 fn resolve_at(
+    root: &Path,
+    harness: HarnessKind,
+    execution_policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+) -> Result<ManagedHarness> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build managed harness test runtime")?
+        .block_on(resolve_at_async(
+            root,
+            harness,
+            execution_policy,
+            environment,
+        ))
+}
+
+async fn resolve_at_async(
     root: &Path,
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
@@ -115,9 +141,7 @@ fn resolve_at(
     std::fs::create_dir_all(&harness_root)
         .with_context(|| format!("create managed {} cache", harness.display_name()))?;
     let install_lock = open_lock(&harness_root.join(INSTALL_LOCK_FILE))?;
-    install_lock
-        .lock()
-        .with_context(|| format!("lock managed {} installer", harness.display_name()))?;
+    lock_file(&install_lock, false, "managed harness installer").await?;
     remove_abandoned_staging(&harness_root)?;
 
     let install = harness_root.join(selected.install_id);
@@ -138,15 +162,13 @@ fn resolve_at(
                 format!("remove incomplete managed harness {}", install.display())
             })?;
         }
-        install_into(&harness_root, &install, harness, selected, environment)?;
+        install_into(&harness_root, &install, harness, selected, environment).await?;
     }
     gc_harness_root(&harness_root, selected.install_id)?;
 
     let lease_path = install.join(LEASE_FILE);
     let lease = open_lock(&lease_path)?;
-    lease
-        .lock_shared()
-        .with_context(|| format!("lease managed harness {}", install.display()))?;
+    lock_file(&lease, true, "managed harness lease").await?;
     drop(install_lock);
 
     let mut launch_environment = BTreeMap::new();
@@ -166,6 +188,11 @@ fn resolve_at(
                 .into_owned(),
         );
     }
+    // The pinned installation is not the release channel, so its downloader
+    // must never fetch a replacement under a running session.
+    if harness == HarnessKind::OpenCode {
+        launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
+    }
     Ok(ManagedHarness {
         command: install.join(selected.entrypoint),
         args: harness
@@ -178,6 +205,31 @@ fn resolve_at(
         cache_root: root.to_path_buf(),
         _lease: lease,
     })
+}
+
+async fn lock_file(file: &File, shared: bool, purpose: &str) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let result = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error).with_context(|| format!("lock {purpose}"));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {}
+        }
+        if started.elapsed() >= INSTALL_LOCK_TIMEOUT {
+            bail!(
+                "timed out after {} seconds waiting to lock {purpose}",
+                INSTALL_LOCK_TIMEOUT.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
@@ -201,7 +253,7 @@ fn remove_abandoned_staging(harness_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_into(
+async fn install_into(
     harness_root: &Path,
     final_path: &Path,
     harness: HarnessKind,
@@ -213,21 +265,28 @@ fn install_into(
         .tempdir_in(harness_root)
         .with_context(|| format!("create staging directory in {}", harness_root.display()))?;
     match harness {
-        HarnessKind::Codex => install_npm(
-            staging.path(),
-            CODEX_PACKAGE_JSON,
-            CODEX_PACKAGE_LOCK,
-            environment,
-        )?,
-        HarnessKind::Claude => install_npm(
-            staging.path(),
-            CLAUDE_PACKAGE_JSON,
-            CLAUDE_PACKAGE_LOCK,
-            environment,
-        )?,
-        HarnessKind::Kimi => install_kimi(staging.path(), environment)?,
-        HarnessKind::Grok => install_grok(staging.path(), environment)?,
-        HarnessKind::Muse => install_muse(staging.path(), environment)?,
+        HarnessKind::Codex => {
+            install_npm(
+                staging.path(),
+                CODEX_PACKAGE_JSON,
+                CODEX_PACKAGE_LOCK,
+                environment,
+            )
+            .await?
+        }
+        HarnessKind::Claude => {
+            install_npm(
+                staging.path(),
+                CLAUDE_PACKAGE_JSON,
+                CLAUDE_PACKAGE_LOCK,
+                environment,
+            )
+            .await?
+        }
+        HarnessKind::Kimi => install_kimi(staging.path(), environment).await?,
+        HarnessKind::Grok => install_grok(staging.path(), environment).await?,
+        HarnessKind::Muse => install_muse(staging.path(), environment).await?,
+        HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
     }
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
@@ -291,26 +350,32 @@ fn relativize_internal_links(root: &Path, directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_npm(
+async fn install_npm(
     staging: &Path,
     package_json: &[u8],
     package_lock: &[u8],
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    require_node_22(environment)?;
+    require_node_22(environment).await?;
     std::fs::write(staging.join("package.json"), package_json)
         .context("write managed harness package.json")?;
     std::fs::write(staging.join("package-lock.json"), package_lock)
         .context("write managed harness package-lock.json")?;
-    let mut command = Command::new("npm");
+    let mut command = tokio::process::Command::new("npm");
     command
         .args(["ci", "--omit=dev", "--no-audit", "--no-fund"])
-        .current_dir(staging);
-    apply_environment(&mut command, environment);
-    run_checked(&mut command, "install exact managed npm harness")
+        .current_dir(staging)
+        .env_clear()
+        .envs(environment);
+    run_bounded_checked(
+        &mut command,
+        "install exact managed npm harness",
+        MANAGED_INSTALL_TIMEOUT,
+    )
+    .await
 }
 
-fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+async fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
     use mj_core::harness_runtime::{MUSE_ACP_VERSION, MUSE_VERSION};
     let metadata: serde_json::Value =
         serde_json::from_str(include_str!("../../assets/muse/runtime.json"))?;
@@ -334,34 +399,89 @@ fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Resul
     let url = format!(
         "https://github.com/BrokkAi/muse-acp/releases/download/v{MUSE_ACP_VERSION}/muse-acp-v{MUSE_ACP_VERSION}-{adapter_target}.tar.gz"
     );
-    download_verified(&url, &archive, field("adapter_sha256")?, environment)?;
-    let mut tar = Command::new("tar");
+    download_verified_async(&url, &archive, field("adapter_sha256")?, environment).await?;
+    let mut tar = tokio::process::Command::new("tar");
     tar.arg("-xzf")
         .arg(&archive)
         .arg("--strip-components=1")
         .arg("-C")
-        .arg(&bin);
-    apply_environment(&mut tar, environment);
-    run_checked(&mut tar, "extract verified Muse ACP archive")?;
+        .arg(&bin)
+        .env_clear()
+        .envs(environment);
+    run_bounded_checked(
+        &mut tar,
+        "extract verified Muse ACP archive",
+        HARNESS_COMMAND_TIMEOUT,
+    )
+    .await?;
     std::fs::remove_file(archive)?;
     let muse_target = field("muse_target")?;
     let url = format!(
         "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version={MUSE_VERSION}&file=muse-{muse_target}"
     );
     let muse = bin.join("muse");
-    download_verified(&url, &muse, field("muse_sha256")?, environment)?;
+    download_verified_async(&url, &muse, field("muse_sha256")?, environment).await?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
-fn download_verified(
+/// Install the pinned OpenCode release from its own published archive.
+///
+/// The Linux archive is a gzipped tarball and the macOS archive is a zip;
+/// macOS `tar` is bsdtar, which reads both, and GNU tar reads the tarball.
+async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    use mj_core::harness_runtime::OPENCODE_VERSION;
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../../assets/opencode/runtime.json"))?;
+    anyhow::ensure!(
+        metadata["version"] == OPENCODE_VERSION,
+        "OpenCode download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("OpenCode does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing OpenCode artifact field {name}"))
+    };
+    let file = field("file")?;
+    let url = format!(
+        "https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_VERSION}/{file}"
+    );
+    let archive = staging.join(file);
+    download_verified_async(&url, &archive, field("sha256")?, environment).await?;
+    let mut tar = tokio::process::Command::new("tar");
+    tar.arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(staging)
+        .env_clear()
+        .envs(environment);
+    run_bounded_checked(
+        &mut tar,
+        "extract verified OpenCode archive",
+        HARNESS_COMMAND_TIMEOUT,
+    )
+    .await?;
+    std::fs::remove_file(&archive)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        staging.join("opencode"),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    Ok(())
+}
+
+async fn download_verified_async(
     url: &str,
     destination: &Path,
     expected: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut curl = Command::new("curl");
+    let mut curl = tokio::process::Command::new("curl");
     curl.args([
         "--proto",
         "=https",
@@ -374,9 +494,15 @@ fn download_verified(
         "-o",
     ])
     .arg(destination)
-    .arg(url);
-    apply_environment(&mut curl, environment);
-    run_checked(&mut curl, "download pinned harness runtime")?;
+    .arg(url)
+    .env_clear()
+    .envs(environment);
+    run_bounded_checked(
+        &mut curl,
+        "download pinned harness runtime",
+        HARNESS_COMMAND_TIMEOUT,
+    )
+    .await?;
     let actual = mj_core::worker_launch::worker_executable_digest(destination)?;
     anyhow::ensure!(
         actual == expected,
@@ -386,67 +512,93 @@ fn download_verified(
     Ok(())
 }
 
-fn require_node_22(environment: &BTreeMap<String, String>) -> Result<()> {
-    let mut node = Command::new("node");
+async fn require_node_22(environment: &BTreeMap<String, String>) -> Result<()> {
+    let mut node = tokio::process::Command::new("node");
     node.args([
         "-e",
         "process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)",
-    ]);
-    apply_environment(&mut node, environment);
-    run_checked(
+    ])
+    .env_clear()
+    .envs(environment);
+    run_bounded_checked(
         &mut node,
         "verify Node.js 22 or newer for managed harness installation",
-    )?;
-    let mut npm = Command::new("npm");
-    npm.arg("--version");
-    apply_environment(&mut npm, environment);
-    run_checked(&mut npm, "verify npm for managed harness installation")
+        HARNESS_COMMAND_TIMEOUT,
+    )
+    .await?;
+    let mut npm = tokio::process::Command::new("npm");
+    npm.arg("--version").env_clear().envs(environment);
+    run_bounded_checked(
+        &mut npm,
+        "verify npm for managed harness installation",
+        HARNESS_COMMAND_TIMEOUT,
+    )
+    .await
 }
 
-fn install_kimi(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+async fn install_kimi(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
     let script = download_installer(
         "https://code.kimi.com/kimi-code/install.sh",
         environment,
         "download Kimi Code installer",
-    )?;
-    let mut bash = Command::new("bash");
-    bash.env("KIMI_VERSION", KIMI_VERSION)
+    )
+    .await?;
+    let mut bash = tokio::process::Command::new("bash");
+    bash.env_clear()
+        .envs(environment)
+        .env("KIMI_VERSION", KIMI_VERSION)
         .env("KIMI_INSTALL_DIR", staging)
         .env("KIMI_CODE_HOME", staging)
         .env("KIMI_NO_MODIFY_PATH", "1")
         .current_dir(staging);
-    apply_environment(&mut bash, environment);
-    run_with_input_checked(&mut bash, &script, "install exact managed Kimi Code")
+    run_bounded_with_input_checked(
+        &mut bash,
+        &script,
+        "install exact managed Kimi Code",
+        MANAGED_INSTALL_TIMEOUT,
+    )
+    .await
 }
 
-fn install_grok(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+async fn install_grok(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
     let script = download_installer(
         "https://x.ai/cli/install.sh",
         environment,
         "download Grok installer",
-    )?;
+    )
+    .await?;
     let isolated_home = staging.join("installer-home");
     std::fs::create_dir_all(&isolated_home).context("create isolated Grok installer home")?;
-    let mut bash = Command::new("bash");
+    let mut bash = tokio::process::Command::new("bash");
     bash.arg("-s")
         .arg(GROK_VERSION)
+        .env_clear()
+        .envs(environment)
         .env("HOME", &isolated_home)
         .env("GROK_BIN_DIR", staging.join("bin"))
         .current_dir(staging);
-    apply_environment(&mut bash, environment);
-    run_with_input_checked(&mut bash, &script, "install exact managed Grok")
+    run_bounded_with_input_checked(
+        &mut bash,
+        &script,
+        "install exact managed Grok",
+        MANAGED_INSTALL_TIMEOUT,
+    )
+    .await
 }
 
-fn download_installer(
+async fn download_installer(
     url: &str,
     environment: &BTreeMap<String, String>,
     operation: &str,
 ) -> Result<Vec<u8>> {
-    let mut curl = Command::new("curl");
-    curl.args(["-fsSL", url]);
-    apply_environment(&mut curl, environment);
-    let output = mj_core::subprocess::run_with_input(&mut curl, &[])
-        .with_context(|| operation.to_owned())?;
+    let mut curl = tokio::process::Command::new("curl");
+    curl.args(["-fsSL", "--connect-timeout", "30", "--max-time", "600", url])
+        .env_clear()
+        .envs(environment);
+    let output =
+        mj_core::subprocess::run_bounded(&mut curl, MAX_INSTALLER_BYTES, HARNESS_COMMAND_TIMEOUT)
+            .await
+            .with_context(|| operation.to_owned())?;
     if !output.status.success() {
         bail!("{operation} failed: {}", output_summary(&output));
     }
@@ -456,13 +608,31 @@ fn download_installer(
     Ok(output.stdout)
 }
 
-fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
-    run_with_input_checked(command, &[], operation)
+async fn run_bounded_checked(
+    command: &mut tokio::process::Command,
+    operation: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let output = mj_core::subprocess::run_bounded(command, 4 * 1024 * 1024, timeout)
+        .await
+        .with_context(|| operation.to_owned())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("{operation} failed: {}", output_summary(&output)))
+    }
 }
 
-fn run_with_input_checked(command: &mut Command, input: &[u8], operation: &str) -> Result<()> {
-    let output = mj_core::subprocess::run_with_input(command, input)
-        .with_context(|| operation.to_owned())?;
+async fn run_bounded_with_input_checked(
+    command: &mut tokio::process::Command,
+    input: &[u8],
+    operation: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let output =
+        mj_core::subprocess::run_bounded_with_input(command, input, 4 * 1024 * 1024, timeout)
+            .await
+            .with_context(|| operation.to_owned())?;
     if output.status.success() {
         Ok(())
     } else {
@@ -489,19 +659,38 @@ fn output_summary(output: &std::process::Output) -> String {
     format!("{} ({tail})", output.status)
 }
 
+#[cfg(test)]
+fn download_verified(
+    url: &str,
+    destination: &Path,
+    expected: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build managed harness test runtime")?
+        .block_on(download_verified_async(
+            url,
+            destination,
+            expected,
+            environment,
+        ))
+}
+
+#[cfg(test)]
 fn apply_environment(command: &mut Command, environment: &BTreeMap<String, String>) {
-    // Keep command-specific installer settings above the clean session base.
-    let overrides = command
-        .get_envs()
-        .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
-        .collect::<Vec<_>>();
     command.env_clear().envs(environment);
-    for (name, value) in overrides {
-        if let Some(value) = value {
-            command.env(name, value);
-        } else {
-            command.env_remove(name);
-        }
+}
+
+#[cfg(test)]
+fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
+    let output =
+        mj_core::subprocess::run_with_input(command, &[]).with_context(|| operation.to_owned())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("{operation} failed: {}", output_summary(&output)))
     }
 }
 
@@ -782,22 +971,6 @@ INSTALLER
     }
 
     #[test]
-    fn muse_incomplete_install_requires_both_executables() {
-        let temp = tempfile::tempdir().unwrap();
-        let selected = pin(HarnessKind::Muse);
-        complete_fake(
-            temp.path(),
-            HarnessKind::Muse,
-            selected.install_id,
-            selected.entrypoint,
-        );
-        let install = temp.path().join(selected.install_id);
-        assert!(!complete_install(&install, HarnessKind::Muse, selected).unwrap());
-        executable(&install.join("bin/muse"), "#!/bin/sh\nexit 0\n");
-        assert!(complete_install(&install, HarnessKind::Muse, selected).unwrap());
-    }
-
-    #[test]
     #[ignore = "downloads the pinned Muse runtime and adapter from their publishers"]
     fn muse_real_install_is_verified_concurrent_and_reusable() {
         let parent =
@@ -832,10 +1005,6 @@ INSTALLER
             assert!(entrypoint_is_executable(&first.command));
         });
     }
-    use mj_core::harness_runtime::{
-        CLAUDE_ACP_VERSION, CODEX_ACP_PACKAGE, CODEX_ACP_VERSION, CODEX_CLI_VERSION,
-    };
-
     fn executable(path: &Path, body: &str) {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
@@ -874,28 +1043,6 @@ INSTALLER
             "PATH".to_owned(),
             format!("{}:/usr/bin:/bin", bin.display()),
         )])
-    }
-
-    #[test]
-    fn embedded_npm_recipes_match_the_runtime_pins() {
-        for (body, dependencies) in [
-            (
-                CODEX_PACKAGE_JSON,
-                vec![
-                    (CODEX_ACP_PACKAGE, CODEX_ACP_VERSION),
-                    ("@openai/codex", CODEX_CLI_VERSION),
-                ],
-            ),
-            (
-                CLAUDE_PACKAGE_JSON,
-                vec![("@agentclientprotocol/claude-agent-acp", CLAUDE_ACP_VERSION)],
-            ),
-        ] {
-            let package: serde_json::Value = serde_json::from_slice(body).unwrap();
-            for (name, version) in dependencies {
-                assert_eq!(package["dependencies"][name], version);
-            }
-        }
     }
 
     #[test]

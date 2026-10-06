@@ -11,13 +11,15 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
-            json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null})
+            json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null,
+                   "tool_output":"grouped",
+                   "tool_output_lines":mj_core::config::DEFAULT_TOOL_OUTPUT_LINES})
         }
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
         }
         "review" => {
-            json!({"enabled":false,"tier":"quick","profile":null,"model":null,"effort":null})
+            json!({"enabled":false,"profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
         "jev" => json!({"enabled":true}),
@@ -162,6 +164,7 @@ pub(super) fn whole_number(path: &[String]) -> Option<WholeNumber> {
     let (min, max, message, defaulted) = match parts.as_slice() {
         ["notify", "delay_seconds"] => (0, u64::MAX, "Enter a whole number of seconds.", true),
         ["subagents", "max_concurrent"] => (1, 64, "Enter a whole number from 1 to 64.", true),
+        ["advanced", "tool_output_lines"] => (0, 50, "Enter a whole number from 0 to 50.", true),
         ["sessionwiki", "archive_after_days"] => (
             1,
             u64::from(u32::MAX),
@@ -221,6 +224,8 @@ pub(super) fn label(key: &str) -> String {
         "detailed_activity_clocks" => "Detailed activity clocks",
         "session_order" => "Session order",
         "symbols" => "Symbols",
+        "tool_output" => "Tool calls",
+        "tool_output_lines" => "Tool output lines",
         "notify" => "Notifications",
         "mode" => "Notify through",
         "bell" => "Ring the terminal bell",
@@ -256,7 +261,6 @@ pub(super) fn label(key: &str) -> String {
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
         "tls_key" => "TLS private key file",
-        "tier" => "Review depth",
         "model" => "Review model",
         "effort" => "Review effort",
         "image" => "Container image",
@@ -327,6 +331,9 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::SubagentConfig::default().max_concurrent
         ),
+        ["advanced", "tool_output_lines"] => {
+            format!("{} (default)", mj_core::config::DEFAULT_TOOL_OUTPUT_LINES)
+        }
         // Unset symbols follow the terminal: ASCII on the Linux console or
         // without a UTF-8 locale, Unicode otherwise.
         ["advanced", "symbols"] => "Follows the terminal".to_owned(),
@@ -388,7 +395,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             "{} · sidebar {}",
             theme_report(
                 &choice_label(&["theme".to_owned()], &draft["theme"], draft),
-                mj_chat::theme::no_color_requested()
+                crate::no_color_requested()
             ),
             choice_label(
                 &["sessions_side".to_owned()],
@@ -407,9 +414,14 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             } else {
                 ""
             };
+            let tools = if section["tool_output"] == Value::String("inline".to_owned()) {
+                " · inline tools"
+            } else {
+                ""
+            };
             match on {
-                0 => format!("All off{order}"),
-                count => format!("{count} on{order}"),
+                0 => format!("All off{order}{tools}"),
+                count => format!("{count} on{order}{tools}"),
             }
         }
         "notify" => match section["mode"].as_str() {
@@ -432,16 +444,9 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             if section["enabled"] != Value::Bool(true) {
                 "Off".to_owned()
             } else {
-                // An unset depth is the default one, and an unset profile is
-                // Auto, which picks a reviewer when each review starts.
-                let tier = match &section["tier"] {
-                    Value::Null => Value::String("quick".to_owned()),
-                    tier => tier.clone(),
-                };
-                let tier = choice_label(&["tier".to_owned()], &tier, draft);
                 match section["profile"].as_str() {
-                    Some(profile) => format!("{tier} · {profile}"),
-                    None => format!("{tier} · Auto · picks by quota"),
+                    Some(profile) => profile.to_owned(),
+                    None => "Auto · picks by quota".to_owned(),
                 }
             }
         }
@@ -558,11 +563,11 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
         "yolo" => "Allow all actions",
         "left" => "Left",
         "right" => "Right",
+        "grouped" => "Grouped",
+        "inline" => "Inline with output",
         "podman-volume" => "Managed volume",
         "container-layer" => "Inside the container",
         "host-helper" => "Custom storage helper",
-        "quick" => "Quick",
-        "extended" => "Extended",
         "public-dns" => "Public DNS name",
         "public-ip" => "Public IP address",
         "private-dns" => "Private DNS name",
@@ -581,9 +586,9 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
+        "tool_output" => &["grouped", "inline"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
-        "tier" => &["quick", "extended"],
         "permissions" => &["guardian", "yolo"],
         "pull_policy" => &["auto", "always", "newer", "missing", "never"],
         "address_source" => &["public-dns", "public-ip", "private-dns", "private-ip"],
@@ -591,7 +596,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
             &["podman-volume", "host-helper", "container-layer"]
         }
         "kind" if path.first().is_some_and(|key| key == "profiles") => {
-            &["codex", "claude", "kimi", "grok", "muse"]
+            &["codex", "claude", "kimi", "grok", "muse", "opencode"]
         }
         "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
         "kind" => &["bare", "podman", "docker", "apple-container"],
@@ -696,7 +701,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
         }
         "theme" => {
-            "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
+            "Dashboard and conversation colors. Terminal Dark and Light use the terminal's own colors. Applies after saving."
         }
         "profiles" => {
             "Add a profile for each agent you want to run, or use Detect profiles to find installed agents."
@@ -714,7 +719,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "phone" => {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
-        "advanced" => "Optional diagnostics and display details for the activity surface.",
+        "advanced" => {
+            "Display options: activity clocks, session order, symbols, and how tool calls show."
+        }
         "notify" => {
             "How to be told when a session you are not looking at asks a question, fails, or finishes."
         }
@@ -734,6 +741,12 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "symbols" => {
             "Draw marks and borders in Unicode or ASCII. Unset: ASCII on the Linux console or without UTF-8."
+        }
+        "tool_output" => {
+            "Grouped folds finished calls into one row of names. Inline shows each call with its command and output, like Codex."
+        }
+        "tool_output_lines" => {
+            "Output rows under each inline tool call: the first and last lines, with a count of the rest. 0 hides output."
         }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."
@@ -763,10 +776,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share Rust build caches on Linux hosts; on by default. On macOS, install and configure native mbx separately."
+            "Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup › Machines."
         }
         "directory" => {
-            "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."
+            "The cache directory reported by the machine's native mbx installation. Configure its location on that machine."
         }
         "max_total_size" => {
             "Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial automatic budget."

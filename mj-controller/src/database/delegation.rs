@@ -52,6 +52,25 @@ pub(crate) fn load_delegation(
     .transpose()
 }
 
+/// Whether a parent has an accepted child mutation that the daemon has not
+/// completed yet. The worker queue alone is insufficient: delivery removes a
+/// request before its durable effect is acknowledged.
+pub(crate) fn has_pending_mutating_delegations(parent: &str) -> Result<bool> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT prepared_json FROM delegation_effects
+         WHERE parent_session_id=?1 AND result_json IS NULL",
+    )?;
+    let rows = statement.query_map([parent], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let prepared: PreparedDelegation = serde_json::from_str(&row?)?;
+        if prepared.request.action.mutates_child_state() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn prepare_delegation(
     parent: String,
     prepared: PreparedDelegation,
@@ -139,6 +158,7 @@ mod tests {
         };
         prepare_delegation("parent".into(), prepared.clone()).unwrap();
         delegation_delivering("parent".into(), "request".into()).unwrap();
+        assert!(has_pending_mutating_delegations("parent").unwrap());
         drop(writer);
         let _writer = install_isolated_test_writer();
         let mut replacement = prepared;
@@ -152,6 +172,7 @@ mod tests {
             message: "original result".into(),
         };
         record_delegation_result("parent".into(), result).unwrap();
+        assert!(!has_pending_mutating_delegations("parent").unwrap());
         let (restored, result) = load_delegation("parent", "request").unwrap().unwrap();
         assert_eq!(restored.turn_target.as_deref(), Some("original-turn"));
         assert_eq!(result.unwrap().message, "original result");

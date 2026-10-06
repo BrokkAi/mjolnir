@@ -1,0 +1,15 @@
+=== launch-template id ===
+m7i.large: 2 vCPUs, 8589934592 bytes
+m7i.xlarge: 4 vCPUs, 17179869184 bytes
+m7i.2xlarge: 8 vCPUs, 34359738368 bytes
+m7i.4xlarge: 16 vCPUs, 68719476736 bytes
+
+=== launch-template name ===
+c6i.large: 2 vCPUs, 4294967296 bytes
+c6i.2xlarge: 8 vCPUs, 17179869184 bytes
+
+=== AWS CLI commands ===
+aws --profile build --region us-west-2 ec2 describe-launch-template-versions --launch-template-id lt-0123456789abcdef0 --versions 7 --output json
+aws --profile build --region us-west-2 ec2 describe-instance-types --filters Name=instance-type,Values=m7i.* --output json
+aws --profile default --region us-west-2 ec2 describe-launch-template-versions --launch-template-name legacy --versions $Default --output json
+aws --profile default --region us-west-2 ec2 describe-instance-types --filters Name=instance-type,Values=c6i.* --output json

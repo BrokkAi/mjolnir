@@ -3,13 +3,10 @@ use crate::chat::test_support::{
     advertise, alt, ctrl, drawn_transcript, fast_mode_option, grok_chat, key, mode_config_option,
     queued, select_config_option, snapshot,
 };
-use crate::selection::SurfaceId;
 use base64::Engine;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use mj_client::review::RuntimeReviewView;
-use mj_core::relay::ActivePrompt;
 use mj_core::review::driver::TurnReviewPhase;
-use mj_core::review::lanes::ReviewTier;
 
 #[test]
 fn activity_animation_stops_when_foreground_and_background_work_settle() {
@@ -38,57 +35,6 @@ fn activity_animation_stops_when_foreground_and_background_work_settle() {
     assert!(!chat.needs_animation());
 }
 
-/// A standby composer edits exactly like the attached one — the readline
-/// chords, paste with normalized line endings — and Enter on a plain prompt
-/// queues it: the input clears, the text becomes a preview, and the host gets
-/// a `Prompt` action. A command keeps the draft and explains, and command
-/// completion stays closed.
-#[test]
-fn a_standby_composer_edits_like_the_real_one_and_queues_its_prompt() {
-    let config: Config = serde_json::from_str(r#"{"version": 0}"#).expect("default config");
-    let mut chat = ChatState::standby(
-        "session-1",
-        &config,
-        SessionHeaderIdentity::default(),
-        Notices::default(),
-    );
-    chat.set_draft("alpha beta".into());
-    assert_eq!(chat.input_cursor, "alpha beta".len());
-
-    // The readline set the type-ahead pane never answered.
-    chat.handle_key(ctrl('a'));
-    chat.handle_key(ctrl('k'));
-    assert_eq!(chat.input, "");
-    chat.handle_key(ctrl('y'));
-    assert_eq!(chat.input, "alpha beta");
-
-    chat.paste("…\r\nsecond");
-    assert_eq!(chat.input, "alpha beta…\nsecond");
-
-    // A command cannot be answered while the session is offline, so it is
-    // consumed with an explanation and the draft stays put.
-    chat.set_input("/help".into());
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert!(chat.notice().is_some());
-    assert_eq!(chat.draft(), "/help");
-    assert!(chat.queued_prompt_texts().is_empty());
-
-    chat.set_input("alpha beta…\nsecond".into());
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("alpha beta…\nsecond".into()),
-        "Enter must hand a plain prompt to the host"
-    );
-    assert_eq!(chat.draft(), "");
-    assert_eq!(chat.queued_prompt_texts(), vec!["alpha beta…\nsecond"]);
-    assert!(chat.remove_queued_prompt_text("alpha beta…\nsecond"));
-    assert!(chat.queued_prompt_texts().is_empty());
-
-    chat.set_input("/mod".into());
-    chat.update_autocomplete();
-    assert!(chat.autocomplete.is_none());
-}
-
 #[test]
 fn idle_background_work_and_working_review_keep_animation_independent() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -108,13 +54,26 @@ fn idle_background_work_and_working_review_keep_animation_independent() {
     chat.set_turn_review(Some(RuntimeReviewView {
         session_id: "session-1".into(),
         questions: Vec::new(),
-        tier: ReviewTier::Quick,
         phase: TurnReviewPhase::CapturingDelta,
         roles: Vec::new(),
         status: "capturing the turn".into(),
         verdict: None,
     }));
     assert!(chat.needs_animation());
+}
+
+#[test]
+fn review_status_omits_the_deprecated_tier() {
+    let review = mj_core::config::ReviewConfig {
+        enabled: true,
+        tier: Some("extended".into()),
+        profile: Some("reviewer".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        review_status_line(&review, true),
+        "Reviewing every completed turn with [review] profile \"reviewer\". A review is open now."
+    );
 }
 
 /// Mirrors what `ActiveChat::open` does for a session with no warm view:
@@ -151,98 +110,6 @@ fn background_task(id: &str, command: &str, can_stop: bool) -> mj_core::relay::B
         command: command.into(),
         can_stop,
     }
-}
-
-#[test]
-fn image_paste_submits_markers_as_images_at_the_cursor() {
-    let image = test_image();
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_prompt_images_supported(true);
-    chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
-    assert_eq!(chat.input, "[image 1]");
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("[image 1]".into())
-    );
-    assert_eq!(chat.take_submitting_images()[0].image, image);
-    assert!(chat.input_images.is_empty());
-
-    chat.set_input("compare  and this".into());
-    chat.input_cursor = "compare ".len();
-    chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
-    chat.handle_key(key(KeyCode::End));
-    chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
-    let payload = chat.draft_payload();
-    assert_eq!(payload.text, "compare [image 2] and this[image 3]");
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt(payload.text.clone())
-    );
-    assert_eq!(chat.take_submitting_images(), payload.images);
-    assert!(matches!(
-        payload.content_blocks().as_slice(),
-        [
-            ContentBlock::Text(_),
-            ContentBlock::Image(_),
-            ContentBlock::Text(_),
-            ContentBlock::Image(_)
-        ]
-    ));
-}
-
-#[test]
-fn image_markers_move_and_delete_as_one_item() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_prompt_images_supported(true);
-    chat.set_input("keep ".into());
-    chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-    let end = chat.input_cursor;
-    chat.handle_key(key(KeyCode::Left));
-    assert_eq!(chat.input_cursor, 5);
-    chat.handle_key(key(KeyCode::Right));
-    assert_eq!(chat.input_cursor, end);
-    chat.handle_key(key(KeyCode::Backspace));
-    assert_eq!(chat.input, "keep ");
-    assert!(chat.input_images.is_empty());
-    chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-    chat.handle_key(key(KeyCode::Left));
-    chat.handle_key(key(KeyCode::Delete));
-    assert_eq!(chat.input, "keep ");
-    assert!(chat.input_images.is_empty());
-}
-
-#[test]
-fn kill_and_yank_preserve_images_and_renumber_copies() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_prompt_images_supported(true);
-    chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-    chat.handle_key(ctrl('u'));
-    assert!(chat.input.is_empty());
-    assert!(chat.input_images.is_empty());
-    chat.handle_key(ctrl('y'));
-    chat.handle_key(ctrl('y'));
-    assert_eq!(chat.input, "[image 1][image 2]");
-    assert_eq!(chat.input_images.len(), 2);
-    assert_eq!(chat.input_images[0].image, chat.input_images[1].image);
-}
-
-#[test]
-fn composer_renders_numbered_images_and_advertises_control_v() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_prompt_images_supported(true);
-    chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-    chat.feedback.clear();
-    let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
-    assert!(screen.contains("[image 1]"));
-    let paste = if cfg!(target_os = "macos") {
-        "Cmd-V paste"
-    } else {
-        "Ctrl-V paste"
-    };
-    assert!(screen.contains(paste));
-    chat.handle_key(key(KeyCode::Backspace));
-    let screen = test_support::drawn_transcript(&mut chat, 160, 30).join("\n");
-    assert!(!screen.contains("[image 1]"));
 }
 
 #[test]
@@ -324,41 +191,6 @@ fn failed_image_submission_preserves_newer_images_and_survives_reopening() {
 }
 
 #[test]
-fn local_commands_cannot_silently_discard_an_attached_image() {
-    for input in ["!pwd ", "/help ", "/model ", "/plan inspect "] {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_prompt_images_supported(true);
-        chat.set_input(input.into());
-        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-        let before = chat.draft_payload();
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert_eq!(chat.draft_payload(), before);
-    }
-}
-
-#[test]
-fn attach_command_accumulates_after_existing_image_markers() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_prompt_images_supported(true);
-    chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
-    chat.handle_paste("/attach /tmp/second.png");
-
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Attach {
-            path: "/tmp/second.png".into(),
-            command: "/attach /tmp/second.png".into(),
-        }
-    );
-    assert_eq!(chat.input, "[image 1]");
-    assert_eq!(chat.input_images.len(), 1);
-
-    assert!(chat.reserve_attachment(0));
-    assert_eq!(chat.input, "[image 1][image 2]");
-    assert_eq!(chat.input_images.len(), 2);
-}
-
-#[test]
 fn pending_attachment_is_failed_when_a_saved_draft_is_restored() {
     let payload = PromptPayload::with_image("inspect ", ClipboardImage::pending());
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -393,23 +225,6 @@ fn a_literal_draft_envelope_prefix_round_trips_as_text() {
 }
 
 #[test]
-fn dictation_toggle_is_inert_until_voice_is_available() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    assert_eq!(chat.dictation_toggle_action(), ChatAction::None);
-
-    chat.set_voice_available(true);
-    assert_eq!(chat.dictation_toggle_action(), ChatAction::ToggleVoice);
-
-    // The key that used to start dictation is the host's now, so the composer
-    // reads Alt-V as nothing at all.
-    assert_eq!(
-        chat.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)),
-        ChatAction::None
-    );
-    assert!(chat.input.is_empty());
-}
-
-#[test]
 fn active_voice_remains_stoppable_after_availability_is_lost() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.voice_active = true;
@@ -425,126 +240,6 @@ fn active_voice_remains_stoppable_after_availability_is_lost() {
         }),
         ChatAction::ToggleVoice
     );
-}
-
-#[test]
-fn disabled_voice_button_click_is_inert() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
-
-    assert_eq!(
-        chat.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 11,
-            row: 8,
-            modifiers: KeyModifiers::NONE,
-        }),
-        ChatAction::None
-    );
-}
-
-#[test]
-fn enabled_voice_button_click_toggles_voice() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_voice_available(true);
-    chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
-
-    assert_eq!(
-        chat.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 11,
-            row: 8,
-            modifiers: KeyModifiers::NONE,
-        }),
-        ChatAction::ToggleVoice
-    );
-}
-
-#[test]
-fn enter_does_not_submit_while_voice_is_active() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.voice_active = true;
-    chat.set_input("dictated draft".into());
-
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(chat.input, "dictated draft");
-}
-
-#[test]
-fn microphone_button_hitbox_occupies_prompt_upper_left() {
-    let prompt = Rect::new(4, 2, 30, 5);
-    let button = voice_button_area(prompt).expect("button fits");
-    assert_eq!(button.y, prompt.y);
-    assert_eq!(button.x, prompt.x + 1);
-    assert_eq!(button.width, 3);
-    assert!(voice_button_area(Rect::new(0, 0, 4, 3)).is_none());
-    assert!(voice_button_area(Rect::new(0, 0, 5, 3)).is_some());
-}
-
-#[test]
-fn regular_prompt_draws_microphone_at_its_upper_left() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_voice_available(true);
-    chat.mark_prompt_submitted("continue");
-
-    let rows = drawn_transcript(&mut chat, 80, 24);
-    assert!(
-        rows.iter().any(|row| row.contains("🎙︎")),
-        "microphone button missing from prompt border: {rows:?}"
-    );
-    let button = chat.voice_button_area.expect("button hitbox");
-    let border = &rows[usize::from(button.y)];
-    let mic_offset = border.find("🎙︎").expect("microphone on top border");
-    assert_eq!(
-        rendering::display_width(&border[..mic_offset]),
-        usize::from(button.x + 1)
-    );
-    assert_eq!(button.x, 1);
-    assert_eq!(
-        button.y,
-        chat.frame_surfaces()
-            .surface(SurfaceId::PromptInput)
-            .unwrap()
-            .rect
-            .y
-            .saturating_sub(1)
-    );
-    let press = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: button.x + 1,
-        row: button.y,
-        modifiers: KeyModifiers::NONE,
-    };
-    assert_eq!(chat.handle_mouse(press), ChatAction::None);
-    assert_eq!(
-        chat.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            ..press
-        }),
-        ChatAction::ToggleVoice
-    );
-}
-
-#[test]
-fn capacity_wait_displays_a_countdown_and_escape_cancels_it() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.header_target = "localhost".into();
-    chat.header_profile = "codex".into();
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        capacity_retry: Some(mj_core::relay::CapacityRetry {
-            attempt: 1,
-            retry_at_ms: 120000,
-            command_id: "capacity-retry-42".into(),
-            submitted: false,
-        }),
-        ..Default::default()
-    });
-    assert!(chat.clock_text(60).contains("retrying in 1m00s"));
-    assert!(matches!(
-        chat.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        ChatAction::Cancel
-    ));
 }
 
 #[test]
@@ -578,139 +273,6 @@ fn clock_sampling_tracks_displayed_units_and_keeps_the_drawn_baseline() {
 }
 
 #[test]
-fn background_tasks_use_the_prompt_border_and_open_a_task_dialog() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("keep this draft".into());
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        background_commands: vec![mj_core::relay::BackgroundCommand {
-            id: "test:dialog".into(),
-            started_at_ms: mj_core::clock::epoch_millis() - 61_000,
-            command: "cargo test --workspace".into(),
-            can_stop: true,
-        }],
-        ..mj_client::usage_format::SessionActivity::default()
-    });
-
-    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Tasks (1)"), "{screen}");
-    assert!(!screen.contains("oldest"), "{screen}");
-    assert!(!screen.contains("Background:"), "{screen}");
-
-    let task_area = chat.task_control_area.expect("task control hitbox");
-    chat.mark_prompt_submitted("continue");
-    chat.steering_supported = Some(true);
-    chat.targeted_turn_control_supported = true;
-    chat.queued_prompts.push_back(queued("next", "follow up"));
-    let rows = drawn_transcript(&mut chat, 100, 24);
-    let shifted_task_area = chat.task_control_area.expect("shifted task control hitbox");
-    assert!(shifted_task_area.x > task_area.x);
-    let border = &rows[usize::from(shifted_task_area.y)];
-    assert!(border.contains("1 queued · Esc steers next"), "{border}");
-    let task_offset = border.find("Tasks (1)").expect("task label");
-    assert_eq!(
-        rendering::display_width(&border[..task_offset]),
-        usize::from(shifted_task_area.x + 1)
-    );
-    for width in [32, 48, 56, 80] {
-        let rows = drawn_transcript(&mut chat, width, 24);
-        let border = &rows[usize::from(shifted_task_area.y)];
-        assert!(border.contains("1 queued · Esc steers next"), "{border}");
-        if width == 32 {
-            assert!(chat.task_control_area.is_none());
-            assert!(!border.contains("Tasks"), "{border}");
-        } else {
-            assert!(chat.task_control_area.is_some());
-            assert!(border.contains("Tasks (1)"), "{border}");
-        }
-    }
-    drawn_transcript(&mut chat, 100, 24);
-    let task_area = shifted_task_area;
-    let cursor_before = chat.input_cursor;
-    let click = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: task_area.x,
-        row: task_area.y,
-        modifiers: KeyModifiers::NONE,
-    };
-    assert!(chat.component_handles_mouse(click));
-    assert_eq!(chat.handle_mouse(click), ChatAction::None);
-    assert!(chat.task_dialog_open());
-    assert_eq!(chat.input_cursor, cursor_before);
-    drawn_transcript(&mut chat, 100, 24);
-    let dialog_inner = chat.task_dialog_area.expect("task dialog geometry");
-    let dismiss = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: dialog_inner.x.saturating_add(1),
-        row: dialog_inner.y.saturating_sub(1),
-        modifiers: KeyModifiers::NONE,
-    };
-    assert!(chat.component_handles_mouse(dismiss));
-    assert_eq!(chat.handle_mouse(dismiss), ChatAction::None);
-    assert_eq!(
-        chat.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            ..dismiss
-        }),
-        ChatAction::None
-    );
-    assert!(!chat.task_dialog_open());
-
-    assert_eq!(chat.handle_key(key(KeyCode::Down)), ChatAction::None);
-    assert!(chat.task_control_focused());
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert!(chat.task_dialog_open());
-    assert_eq!(chat.input, "keep this draft");
-
-    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Background tasks"), "{screen}");
-    assert!(screen.contains("cargo test --workspace"), "{screen}");
-    assert!(screen.contains("Esc close"), "{screen}");
-
-    assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
-    assert!(!chat.task_dialog_open());
-    assert_eq!(chat.input, "keep this draft");
-
-    // The dialog remains drawable on a cramped terminal, and wrapping a
-    // long command contributes rows to scrolling rather than disappearing
-    // after one entry.
-    chat.open_task_dialog();
-    chat.session_activity.background_commands[0].command =
-        "cargo test --all-targets --all-features --workspace".into();
-    for height in [1, 4, 8] {
-        let screen = drawn_transcript(&mut chat, 24, height).join("\n");
-        if height >= 4 {
-            assert!(screen.contains("×"), "height={height}: {screen}");
-            assert!(
-                screen.contains("Background task"),
-                "height={height}: {screen}"
-            );
-        }
-    }
-    for _ in 0..20 {
-        chat.handle_key(key(KeyCode::Down));
-    }
-    assert!(chat.task_dialog_scroll > 0);
-    let tail = drawn_transcript(&mut chat, 24, 8).join("\n");
-    assert!(tail.contains("ace"), "{tail}");
-
-    chat.session_activity.background_commands[0].command = format!(
-        "cargo test {}FINAL_ARGUMENT",
-        "--feature example ".repeat(40)
-    );
-    drawn_transcript(&mut chat, 80, 12);
-    for _ in 0..100 {
-        chat.handle_key(key(KeyCode::Down));
-    }
-    let tail = drawn_transcript(&mut chat, 80, 12).join("\n");
-    assert!(tail.contains("FINAL_ARGUMENT"), "{tail}");
-
-    chat.set_session_activity(mj_client::usage_format::SessionActivity::default());
-    let empty = drawn_transcript(&mut chat, 80, 12).join("\n");
-    assert!(empty.contains("No background tasks remain."), "{empty}");
-}
-
-#[test]
 fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
@@ -734,35 +296,6 @@ fn a_session_created_with_subagents_shows_a_dimmed_entry_before_the_first_child(
     let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
     assert!(screen.contains("Subagents · 0/1"), "{screen}");
     assert!(chat.subagent_control_area.is_some());
-}
-
-#[test]
-fn subagents_use_the_prompt_border_and_activate_by_keyboard_or_mouse() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("keep this draft".into());
-    chat.set_subagent_count(2);
-
-    let screen = drawn_transcript(&mut chat, 100, 24).join("\n");
-    assert!(screen.contains("Subagents · 0/2"), "{screen}");
-    let area = chat
-        .subagent_control_area
-        .expect("sub-agent control hitbox");
-    let click = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: area.x,
-        row: area.y,
-        modifiers: KeyModifiers::NONE,
-    };
-    assert!(chat.component_handles_mouse(click));
-    assert_eq!(chat.handle_mouse(click), ChatAction::OpenSubagents);
-
-    assert_eq!(chat.handle_key(key(KeyCode::Down)), ChatAction::None);
-    assert!(chat.subagent_control_focused());
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::OpenSubagents
-    );
-    assert_eq!(chat.input, "keep this draft");
 }
 
 #[test]
@@ -795,66 +328,6 @@ fn stoppable_background_task_keyboard_activation_is_deduplicated() {
 
     // The disabled pending control cannot submit a second request.
     assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-}
-
-#[test]
-fn read_only_background_rows_have_no_stop_control() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        background_commands: vec![background_task("codex:1", "codex exec", false)],
-        ..mj_client::usage_format::SessionActivity::default()
-    });
-    chat.open_task_dialog();
-    let screen = drawn_transcript(&mut chat, 80, 16).join("\n");
-    assert!(screen.contains("codex exec"), "{screen}");
-    assert!(!screen.contains("[Stop]"), "{screen}");
-    assert_eq!(chat.handle_key(key(KeyCode::Tab)), ChatAction::None);
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-}
-
-#[test]
-fn stoppable_background_task_mouse_activation_and_scroll_keep_dialog_state() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_session_activity(mj_client::usage_format::SessionActivity {
-        pursuing_goal: Default::default(),
-        background_commands: (0..8)
-            .map(|index| background_task(&format!("task-{index}"), &format!("work-{index}"), true))
-            .collect(),
-        ..mj_client::usage_format::SessionActivity::default()
-    });
-    chat.open_task_dialog();
-    drawn_transcript(&mut chat, 40, 8);
-    let inner = chat.task_dialog_area.expect("dialog geometry");
-    chat.handle_mouse(MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: inner.x,
-        row: inner.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    assert!(chat.task_dialog_scroll > 0);
-    chat.handle_key(key(KeyCode::PageUp));
-    assert_eq!(chat.task_dialog_scroll, 0);
-
-    // The first row's button is right-aligned in the dialog inner area.
-    let x = inner.right().saturating_sub(2);
-    let y = inner.y;
-    let press = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: x,
-        row: y,
-        modifiers: KeyModifiers::NONE,
-    };
-    assert_eq!(chat.handle_mouse(press), ChatAction::None);
-    assert_eq!(
-        chat.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            ..press
-        }),
-        ChatAction::StopBackgroundTask {
-            id: "task-0".into()
-        }
-    );
 }
 
 #[test]
@@ -923,6 +396,7 @@ fn disappeared_background_task_clears_pending_stop_and_failure_reenables_it() {
     );
 }
 
+// Hard-won: 30de9e86: Typed composer text was lost when leaving and reopening a conversation.
 #[test]
 fn a_saved_draft_reopens_in_the_composer_with_the_cursor_at_its_end() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -931,82 +405,6 @@ fn a_saved_draft_reopens_in_the_composer_with_the_cursor_at_its_end() {
 
     assert_eq!(chat.input, "half typed thought");
     assert_eq!(chat.input_cursor, "half typed thought".len());
-}
-
-#[test]
-fn an_empty_saved_draft_leaves_the_composer_untouched() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("typed since opening".into());
-
-    chat.restore_draft(String::new());
-
-    assert_eq!(chat.input, "typed since opening");
-}
-
-#[test]
-fn a_fresh_chat_opens_with_the_session_s_saved_draft_in_the_composer() {
-    let chat = freshly_opened_chat("half typed thought");
-
-    assert_eq!(chat.input, "half typed thought");
-    assert_eq!(chat.input_cursor, "half typed thought".len());
-}
-
-#[test]
-fn a_fresh_chat_for_a_session_with_no_saved_draft_opens_empty() {
-    assert_eq!(freshly_opened_chat("").input, "");
-}
-
-#[test]
-fn enter_submits_to_the_worker_while_idle_or_running() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.handle_key(key(KeyCode::Char('h')));
-    chat.handle_key(key(KeyCode::Char('i')));
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("hi".into())
-    );
-
-    let mut running = snapshot();
-    running.phase = WorkerPhase::Running;
-    running.active_prompt = Some(ActivePrompt {
-        request_id: "p".into(),
-        text: "busy".into(),
-        attachments: vec![],
-    });
-    let mut chat = ChatState::new(&running, &[]);
-    chat.handle_key(key(KeyCode::Char('x')));
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("x".into())
-    );
-    assert!(chat.queued_prompts.is_empty());
-    assert!(chat.entries.is_empty());
-}
-
-#[test]
-fn bang_prefix_submits_a_bash_command_without_starting_a_prompt() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("!printf '%s' hello | tr a-z A-Z".into());
-
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::RunShell("printf '%s' hello | tr a-z A-Z".into())
-    );
-    assert!(chat.input.is_empty());
-    assert_eq!(
-        chat.prompt_history.last().map(String::as_str),
-        Some("!printf '%s' hello | tr a-z A-Z")
-    );
-}
-
-#[test]
-fn empty_bang_command_stays_in_the_composer_and_shows_usage() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("!   ".into());
-
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(chat.input, "!   ");
-    assert_eq!(chat.notice().as_deref(), Some("usage: !<bash command>"));
 }
 
 #[test]
@@ -1092,48 +490,6 @@ fn notices_set_replace_if_and_clear() {
 }
 
 #[test]
-fn notices_keep_a_history_and_count_failures_that_stack() {
-    let notices = Notices::default();
-    notices.set("Profile quotas refreshed");
-    notices.set_failure("Resume failed: archive missing");
-    // A second failure before the first was readable: the bar counts them,
-    // the log keeps each plain.
-    notices.set_failure("Move failed: target unreachable");
-    assert_eq!(
-        notices.current().as_deref(),
-        Some("2 failures · latest: Move failed: target unreachable")
-    );
-    let history = notices.history();
-    assert_eq!(
-        history
-            .iter()
-            .map(|record| (record.text.as_str(), record.failure))
-            .collect::<Vec<_>>(),
-        [
-            ("Move failed: target unreachable", true),
-            ("Resume failed: archive missing", true),
-            ("Profile quotas refreshed", false),
-        ]
-    );
-    // Clearing resets the count; the next failure stands alone.
-    notices.clear();
-    notices.set_failure("Stop failed");
-    assert_eq!(notices.current().as_deref(), Some("Stop failed"));
-    // The same text twice is one history entry.
-    notices.clear();
-    notices.set("Same");
-    notices.set("Same");
-    assert_eq!(
-        notices
-            .history()
-            .iter()
-            .filter(|record| record.text == "Same")
-            .count(),
-        1
-    );
-}
-
-#[test]
 fn a_fresh_failure_notice_survives_routine_background_notices() {
     let notices = Notices::default();
     notices.set_failure("Resume failed: archived transcript is invalid");
@@ -1175,6 +531,7 @@ fn cloned_notices_share_one_slot() {
 
 /// Dismissal is what an incidental key press asks for, and a notice that
 /// nobody has had time to read must survive it.
+// Hard-won: 7c56a0f4: Incidental keypresses erased notices before the user could see a frame.
 #[test]
 fn a_notice_is_dismissed_only_once_it_has_been_showing_long_enough() {
     let notices = Notices::default();
@@ -1330,6 +687,7 @@ fn reviewer_form_reconciliation_drops_stale_forms_and_resurfaces_primary() {
 /// session the next time it is opened, so leaving the view is a different
 /// act from answering the agent. The moved-key notices are handled on the
 /// same terms: they pass the open form without consuming it.
+// Hard-won: 3fbdd2ae: An open elicitation trapped users because detach keys were consumed.
 #[test]
 fn control_g_and_control_q_pass_a_chat_whose_elicitation_is_still_open() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1406,88 +764,13 @@ fn cancellation_waits_for_turn_completion_before_queue_can_drain() {
     assert_eq!(chat.queued_prompts.front().unwrap().text, "next");
 }
 
-#[test]
-fn alt_up_recovers_the_latest_queued_prompt_for_editing() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.queued_prompts.push_back(queued("queued-1", "first"));
-    chat.queued_prompts.push_back(queued("queued-2", "second"));
-
-    assert_eq!(
-        chat.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-        ChatAction::RemoveQueuedPrompt {
-            id: "queued-2".into(),
-            text: "second".into(),
-            kind: QueuedCommandKind::Prompt,
-        }
-    );
-
-    assert_eq!(chat.input, "second");
-    assert_eq!(chat.queued_prompts.len(), 1);
-    assert_eq!(chat.queued_prompts[0].text, "first");
-}
-
-#[test]
-fn up_and_control_p_peel_queued_prompts_back_into_the_editor() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    for (id, text) in [
-        ("queued-1", "first"),
-        ("queued-2", "second"),
-        ("queued-3", "third"),
-    ] {
-        chat.queued_prompts.push_back(queued(id, text));
-    }
-
-    chat.handle_key(key(KeyCode::Up));
-    assert_eq!(chat.input, "third");
-    assert_eq!(chat.queued_prompts.len(), 2);
-
-    chat.clear_input();
-    chat.handle_key(ctrl('p'));
-    assert_eq!(chat.input, "second");
-    assert_eq!(chat.queued_prompts.len(), 1);
-
-    chat.clear_input();
-    chat.handle_key(key(KeyCode::Up));
-    assert_eq!(chat.input, "first");
-    assert!(chat.queued_prompts.is_empty());
-
-    chat.clear_input();
-    chat.handle_key(key(KeyCode::Up));
-    assert!(chat.input.is_empty());
-}
-
-#[test]
-fn model_and_effort_slash_commands_change_live_session_config() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_config_options(&[
-        select_config_option("model", "gpt-5.6", &["gpt-5.6", "gpt-5.6-luna"]),
-        select_config_option("effort", "high", &["high", "xhigh"]),
-    ]);
-    chat.input = "/model gpt-5.6-luna".into();
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::SetConfig {
-            key: "model".into(),
-            value: "gpt-5.6-luna".into(),
-        }
-    );
-
-    chat.input = "/effort xhigh".into();
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::SetConfig {
-            key: "effort".into(),
-            value: "xhigh".into(),
-        }
-    );
-}
-
 /// A harness that advertises no selector cannot apply the change at all, so
 /// the refusal belongs in the footer now rather than in a transcript line that
 /// arrives seconds after "Configuration update accepted". The words are the
 /// runtime's own, and the article follows the key's name. The composer clears
 /// the same as it would for a command that was actually sent, so the next
 /// command typed does not append to the refused one.
+// Hard-won: 27140151: An unsupported selector was reported accepted before its late refusal arrived.
 #[test]
 fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1513,125 +796,6 @@ fn a_selector_the_harness_does_not_expose_is_refused_before_anything_is_sent() {
         Some("ACP bridge does not expose an effort selector")
     );
     assert_eq!(chat.input, "");
-}
-
-#[test]
-fn fast_toggles_the_advertised_codex_configuration_without_arguments() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_config_options(&[fast_mode_option("off")]);
-    chat.input = "/fast".into();
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::SetConfig {
-            key: "fast-mode".into(),
-            value: "on".into(),
-        }
-    );
-
-    chat.set_config_options(&[fast_mode_option("on")]);
-    chat.input = "/fast".into();
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::SetConfig {
-            key: "fast-mode".into(),
-            value: "off".into(),
-        }
-    );
-
-    chat.input = "/fast on".into();
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(chat.notice().as_deref(), Some("usage: /fast"));
-}
-
-#[test]
-fn fast_stays_local_when_the_active_model_does_not_support_it() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.input = "/fast".into();
-
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert!(chat.input.is_empty());
-    assert_eq!(
-        chat.notice().as_deref(),
-        Some("/fast: Fast mode is unavailable for the active Codex model")
-    );
-}
-
-#[test]
-fn config_commands_are_queued_while_the_agent_is_busy() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.phase = WorkerPhase::Running;
-
-    chat.input = "/model".into();
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(
-        chat.feedback.current().as_deref(),
-        Some("The agent does not advertise model values; usage: /model <value>")
-    );
-
-    chat.set_config_options(&[select_config_option("model", "opus", &["opus", "sonnet"])]);
-    chat.input = "/model sonnet".into();
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::SetConfig {
-            key: "model".into(),
-            value: "sonnet".into(),
-        }
-    );
-    assert!(chat.input.is_empty());
-
-    chat.phase = WorkerPhase::Closing;
-    chat.input = "/model sonnet".into();
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(
-        chat.feedback.current().as_deref(),
-        Some("/model: The worker is closing; this configuration change was not sent")
-    );
-}
-
-#[test]
-fn a_queued_config_change_peels_back_into_the_composer() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut session = MaterializedSession::empty("1234567890");
-    // The projection only rebuilds when its frontier moved.
-    session.applied_event_ordinal = 5;
-    session.queued_prompts.push(MaterializedQueuedPrompt {
-        accepted_ordinal: None,
-        command_id: "queued-config".into(),
-        kind: QueuedCommandKind::SetConfig {
-            key: "model".into(),
-            value: "sonnet".into(),
-        },
-        content: vec![serde_json::json!({"type": "text", "text": "/model sonnet"})],
-        queued_at_ms: 10,
-    });
-    chat.apply_materialized(&session, &[], &[]);
-    assert_eq!(chat.queued_prompts.len(), 1);
-    assert_eq!(chat.queued_prompts[0].queue_label(), "queued config");
-
-    assert_eq!(
-        chat.handle_key(ctrl('p')),
-        ChatAction::RemoveQueuedPrompt {
-            id: "queued-config".into(),
-            text: "/model sonnet".into(),
-            kind: QueuedCommandKind::SetConfig {
-                key: "model".into(),
-                value: "sonnet".into(),
-            },
-        }
-    );
-    assert_eq!(chat.input, "/model sonnet");
-    assert!(chat.queued_prompts.is_empty());
-
-    // Resubmitting the peeled-back text parses as the same change.
-    chat.phase = WorkerPhase::Running;
-    chat.set_config_options(&[select_config_option("model", "opus", &["opus", "sonnet"])]);
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::SetConfig {
-            key: "model".into(),
-            value: "sonnet".into(),
-        }
-    );
 }
 
 #[test]
@@ -1739,100 +903,6 @@ fn failed_queue_removal_restores_the_peeled_entry() {
 }
 
 #[test]
-fn plan_toggles_the_session_mode_for_a_harness_without_a_plan_command() {
-    let mut chat = grok_chat();
-    chat.set_input("/plan".into());
-
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/plan".into(),
-            control: PlanControl::SetSessionMode {
-                mode_id: "plan".into()
-            },
-            requested_active: true,
-            prompt: None,
-        }
-    );
-    assert!(chat.input.is_empty());
-    assert!(chat.plan_command_pending);
-
-    chat.plan_command_pending = false;
-    chat.set_input("/plan".into());
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/plan".into(),
-            control: PlanControl::SetSessionMode {
-                mode_id: "default".into()
-            },
-            requested_active: false,
-            prompt: None,
-        }
-    );
-    assert!(chat.plan_command_pending);
-}
-
-#[test]
-fn plan_accepts_explicit_on_and_off_arguments() {
-    let mut chat = grok_chat();
-    chat.set_input("/plan off".into());
-    assert_eq!(chat.submit_input(), ChatAction::None);
-
-    chat.set_input("/plan ON".into());
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/plan ON".into(),
-            control: PlanControl::SetSessionMode {
-                mode_id: "plan".into()
-            },
-            requested_active: true,
-            prompt: None,
-        }
-    );
-
-    chat.plan_command_pending = false;
-    chat.set_input("/plan sideways".into());
-    assert_eq!(chat.submit_input(), ChatAction::Prompt("sideways".into()));
-}
-
-#[test]
-fn plan_uses_an_advertised_mode_config_option() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_config_options(&[mode_config_option("default", &["default", "plan"])]);
-    chat.set_input("/plan".into());
-
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/plan".into(),
-            control: PlanControl::SetConfig {
-                key: "mode".into(),
-                value: "plan".into()
-            },
-            requested_active: true,
-            prompt: None,
-        }
-    );
-}
-
-#[test]
-fn grok_uses_its_trusted_set_mode_fallback_even_with_an_unrelated_mode_config() {
-    let mut chat = grok_chat();
-    chat.set_config_options(&[mode_config_option("default", &["default", "act"])]);
-    chat.set_input("/plan".into());
-
-    assert!(matches!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            control: PlanControl::SetSessionMode { .. },
-            ..
-        }
-    ));
-}
-
-#[test]
 fn an_unchanged_mode_catalogue_does_not_undo_an_optimistic_toggle() {
     let options = [mode_config_option("default", &["default", "plan"])];
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -1846,202 +916,6 @@ fn an_unchanged_mode_catalogue_does_not_undo_an_optimistic_toggle() {
     chat.set_config_options(&options);
 
     assert!(chat.plan_mode_active());
-}
-
-#[test]
-fn muse_plan_forwards_the_advertised_skill_without_changing_approvals() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_harness_kind(HarnessKind::Muse);
-    advertise(&mut chat, 1, &["plan"]);
-    chat.set_input("/plan the migration".into());
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::Prompt("/plan the migration".into())
-    );
-    assert!(!chat.plan_command_pending);
-}
-
-#[test]
-fn an_agent_plan_command_does_not_override_hels_unified_command() {
-    let mut chat = grok_chat();
-    advertise(&mut chat, 1, &["plan"]);
-    chat.set_input("/plan the migration".into());
-
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/plan the migration".into(),
-            control: PlanControl::SetSessionMode {
-                mode_id: "plan".into()
-            },
-            requested_active: true,
-            prompt: Some("the migration".into()),
-        }
-    );
-}
-
-#[test]
-fn plan_is_kept_local_without_a_compatible_mode_surface() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_input("/plan".into());
-
-    assert_eq!(chat.submit_input(), ChatAction::None);
-    assert!(chat.input.is_empty());
-    assert!(chat.feedback.current().unwrap().contains("does not expose"));
-}
-
-#[test]
-fn codex_plan_uses_collaboration_mode_not_the_permission_mode() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_harness_kind(HarnessKind::Codex);
-    chat.set_config_options(&[
-        select_config_option("mode", "read-only", &["read-only", "full-access"]),
-        select_config_option("collaboration_mode", "default", &["default", "plan"]),
-    ]);
-    chat.set_input("/plan inspect the migration".into());
-
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/plan inspect the migration".into(),
-            control: PlanControl::SetConfig {
-                key: "collaboration_mode".into(),
-                value: "plan".into(),
-            },
-            requested_active: true,
-            prompt: Some("inspect the migration".into()),
-        }
-    );
-    assert_eq!(
-        chat.prompt_history.last().map(String::as_str),
-        Some("/plan inspect the migration")
-    );
-}
-
-#[test]
-fn claude_and_kimi_prefer_the_exact_mode_config() {
-    for harness in [HarnessKind::Claude, HarnessKind::Kimi] {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_harness_kind(harness);
-        chat.set_config_options(&[select_config_option(
-            "mode",
-            "default",
-            &["default", "plan"],
-        )]);
-        chat.set_input("/plan".into());
-        assert!(matches!(
-            chat.submit_input(),
-            ChatAction::PlanCommand {
-                control: PlanControl::SetConfig { ref key, .. },
-                ..
-            } if key == "mode"
-        ));
-    }
-}
-
-#[test]
-fn grok_uses_set_mode_without_advertising_modes() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_harness_kind(HarnessKind::Grok);
-    chat.set_input("/plan".into());
-    assert!(matches!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            control: PlanControl::SetSessionMode { ref mode_id },
-            ..
-        } if mode_id == "plan"
-    ));
-}
-
-#[test]
-fn a_harness_without_plan_mode_rejects_plan_and_implement_locally() {
-    let mut chat = grok_chat();
-    chat.set_harness_kind(HarnessKind::Muse);
-    for command in ["/plan design it", "/implement"] {
-        chat.set_input(command.into());
-        assert_eq!(chat.submit_input(), ChatAction::None);
-        assert!(chat.input.is_empty());
-        assert!(
-            chat.feedback
-                .current()
-                .unwrap()
-                .contains("does not expose compatible plan/default modes")
-        );
-    }
-}
-
-#[test]
-fn implement_exits_plan_mode_before_submitting_the_instruction() {
-    let mut chat = grok_chat();
-    chat.finish_plan_mode_change(true);
-    chat.set_input("/implement start with the parser".into());
-    assert_eq!(
-        chat.submit_input(),
-        ChatAction::PlanCommand {
-            original: "/implement start with the parser".into(),
-            control: PlanControl::SetSessionMode {
-                mode_id: "default".into()
-            },
-            requested_active: false,
-            prompt: Some("start with the parser".into()),
-        }
-    );
-}
-
-#[test]
-fn plan_review_choices_have_distinct_followup_directions() {
-    let mut chat = grok_chat();
-    chat.finish_plan_mode_change(true);
-    let standard = ElicitationRequest {
-        id: "plan-review-1".into(),
-        message: "review".into(),
-        title: None,
-        description: None,
-        fields: Vec::new(),
-    };
-    let response = |action: &str, feedback: Option<&str>| {
-        let mut content = BTreeMap::new();
-        content.insert("action".into(), ElicitationValue::String(action.into()));
-        if let Some(feedback) = feedback {
-            content.insert("feedback".into(), ElicitationValue::String(feedback.into()));
-        }
-        ElicitationResponse::Accept { content }
-    };
-
-    assert_eq!(
-        chat.plan_review_followup(&standard, &response("implement", None)),
-        Some(PlanReviewFollowup {
-            desired_active: false,
-            control: None,
-            prompt: None,
-        })
-    );
-    assert_eq!(
-        chat.plan_review_followup(&standard, &response("revise", Some("add tests"))),
-        Some(PlanReviewFollowup {
-            desired_active: true,
-            control: None,
-            prompt: Some("add tests".into()),
-        })
-    );
-    assert!(matches!(
-        chat.plan_review_followup(&standard, &response("exit", None)),
-        Some(PlanReviewFollowup {
-            desired_active: false,
-            control: Some(PlanControl::SetSessionMode { .. }),
-            prompt: None,
-        })
-    ));
-}
-
-#[test]
-fn plan_waits_for_an_idle_agent() {
-    let mut chat = grok_chat();
-    chat.phase = WorkerPhase::Running;
-    chat.set_input("/plan".into());
-
-    assert_eq!(chat.submit_input(), ChatAction::None);
-    assert!(chat.feedback.current().unwrap().contains("only available"));
 }
 
 #[test]
@@ -2061,16 +935,19 @@ fn a_current_mode_update_corrects_the_locally_tracked_plan_mode() {
     assert!(!chat.plan_mode_active());
 }
 
+// Hard-won: 6a66a7d0: Refused slash commands remained in the draft and contaminated the next command.
 #[test]
-fn config_slash_command_without_value_shows_usage() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.input = "/model".into();
-
-    assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-    assert_eq!(
-        chat.notice().as_deref(),
-        Some("The agent does not advertise model values; usage: /model <value>")
-    );
+fn review_tier_slash_args_are_not_config_gestures() {
+    for tier in ["quick", "extended"] {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input(format!("/review {tier}"));
+        assert_eq!(
+            chat.handle_key(key(crossterm::event::KeyCode::Enter)),
+            ChatAction::None
+        );
+        assert_eq!(chat.notice().as_deref(), Some("usage: /review [status]"));
+        assert!(chat.input.is_empty());
+    }
 }
 
 #[test]
@@ -2082,6 +959,7 @@ fn a_refused_slash_command_clears_the_draft_so_the_next_command_stands_alone() {
     assert!(chat.notice().unwrap().contains("/model"));
 }
 
+// Hard-won: 6a66a7d0: Unknown slash commands were sent to the agent as ordinary prompts.
 #[test]
 fn an_unknown_slash_command_is_not_sent_to_the_agent() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2123,48 +1001,7 @@ fn editor_preserves_uppercase_text_while_shortcuts_remain_case_insensitive() {
     assert_eq!(chat.input, "HI");
 }
 
-#[test]
-fn empty_terminal_paste_requests_clipboard_and_accepts_an_image() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_prompt_images_supported(true);
-    chat.set_input("describe ".into());
-    assert_eq!(
-        chat.handle_terminal_paste(""),
-        ChatAction::PasteFromClipboard
-    );
-    assert_eq!(chat.input, "describe ");
-
-    let image = test_image();
-    chat.handle_clipboard_content(ClipboardContent::Image(image.clone()));
-    assert_eq!(chat.input, "describe [image 1]");
-    assert_eq!(
-        chat.handle_key(key(KeyCode::Enter)),
-        ChatAction::Prompt("describe [image 1]".into())
-    );
-    assert_eq!(chat.take_submitting_images()[0].image, image);
-}
-
-#[test]
-fn terminal_text_paste_does_not_request_the_clipboard() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    for text in ["hello", " \t\n", "world"] {
-        assert_eq!(chat.handle_terminal_paste(text), ChatAction::None);
-    }
-    assert_eq!(chat.input, "hello \t\nworld");
-    chat.handle_clipboard_content(ClipboardContent::Text(String::new()));
-    assert_eq!(chat.input, "hello \t\nworld");
-}
-
-#[test]
-fn empty_terminal_paste_respects_the_config_picker() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_config_options(&[select_config_option("model", "small", &["small", "large"])]);
-    assert!(chat.open_config_picker("model"));
-    assert_eq!(chat.handle_terminal_paste(""), ChatAction::None);
-    assert!(chat.input.is_empty());
-    assert!(chat.config_picker_active());
-}
-
+// Hard-won: ac740841: Synchronous clipboard access could stall the chat event loop.
 #[test]
 fn ctrl_v_returns_paste_request_action() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2182,61 +1019,6 @@ fn ctrl_v_returns_paste_request_action() {
         ChatAction::PasteFromClipboard
     );
     assert!(chat.input.is_empty());
-}
-
-#[test]
-fn toggle_render_mode_flips_between_rich_and_raw() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    chat.toggle_render_mode();
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Raw);
-    chat.toggle_render_mode();
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-
-    // The keys that used to run these toggles belong to the host's registry
-    // now, so the composer answers none of them.
-    for key in [alt('t'), ctrl('t'), alt('v')] {
-        chat.handle_key(key);
-    }
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-    assert!(chat.input.is_empty());
-}
-
-#[test]
-fn replay_projects_user_and_agent_text() {
-    let runtime = RuntimeEvent::SessionUpdate {
-        update: serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": "done"}
-        }),
-    };
-    let events = vec![
-        SequencedEvent {
-            seq: 1,
-            recorded_at_ms: None,
-            request_id: Some("p".into()),
-            event: WorkerEvent::PromptAccepted {
-                request_id: "p".into(),
-                text: "work".into(),
-                attachments: vec![],
-            },
-        },
-        SequencedEvent {
-            seq: 2,
-            recorded_at_ms: None,
-            request_id: None,
-            event: WorkerEvent::Adapter {
-                kind: "session_update".into(),
-                payload: serde_json::to_value(runtime).unwrap(),
-            },
-        },
-    ];
-    let mut initial = snapshot();
-    initial.latest_seq = 2;
-    let chat = ChatState::new(&initial, &events);
-    assert_eq!(chat.entries.len(), 2);
-    assert_eq!(chat.entries[0].role, ChatRole::User);
-    assert_eq!(chat.entries[1].text, "done");
 }
 
 #[test]
@@ -2291,6 +1073,7 @@ fn hydrated_tail_continues_the_last_streamed_message() {
     assert_eq!(materialized.unread_agent_messages_after(1), 1);
 }
 
+// Hard-won: f378854d: Every streamed token created a separate transcript entry.
 #[test]
 fn streamed_message_chunks_coalesce_into_one_entry() {
     let mut initial = snapshot();
@@ -2316,28 +1099,6 @@ fn streamed_message_chunks_coalesce_into_one_entry() {
     assert_eq!(chat.entries[0].role, ChatRole::Agent);
     assert_eq!(chat.entries[0].text, "gpt-5.6-terra");
     assert_eq!(chat.entries[1].role, ChatRole::Thought);
-}
-
-#[test]
-fn tool_calls_render_title_and_updates_stay_quiet() {
-    let mut initial = snapshot();
-    initial.latest_seq = 0;
-    let mut chat = ChatState::new(&initial, &[]);
-    chat.apply_session_update(
-        1,
-        &serde_json::json!({"sessionUpdate": "tool_call",
-            "toolCallId": "grep-config",
-            "title": "grep config", "status": "pending"}),
-    );
-    chat.apply_session_update(
-        2,
-        &serde_json::json!({"sessionUpdate": "tool_call_update",
-            "toolCallId": "grep-config", "status": "completed",
-            "content": [{"type": "content", "content": {"type": "text", "text": "noise"}}]}),
-    );
-    assert_eq!(chat.entries.len(), 1);
-    assert_eq!(chat.entries[0].role, ChatRole::Tool);
-    assert_eq!(chat.entries[0].text, "grep config");
 }
 
 #[test]
@@ -2398,27 +1159,6 @@ fn message_ids_keep_adjacent_agent_messages_separate() {
     assert_eq!(chat.entries.len(), 2);
     assert_eq!(chat.entries[0].text, "first");
     assert_eq!(chat.entries[1].text, "second");
-}
-
-#[test]
-fn plan_updates_replace_the_current_turn_plan() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    for (seq, status) in [(1, "pending"), (2, "completed")] {
-        chat.apply_session_update(
-            seq,
-            &serde_json::json!({
-                "sessionUpdate": "plan",
-                "entries": [{
-                    "content": "inspect renderer",
-                    "priority": "high",
-                    "status": status
-                }]
-            }),
-        );
-    }
-    assert_eq!(chat.entries.len(), 1);
-    assert_eq!(chat.entries[0].role, ChatRole::Plan);
-    assert_eq!(chat.entries[0].plan[0].status, PlanStatus::Completed);
 }
 
 #[test]
@@ -2497,46 +1237,6 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
     );
 }
 
-/// A prompt the harness ended without answering keeps its text where
-/// Ctrl-Alt-R can put it back, and says so in the transcript (#970).
-#[test]
-fn an_unanswered_prompt_is_marked_and_stays_restorable() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut session = MaterializedSession::empty("1234567890");
-    session.applied_event_ordinal = 9;
-    session.transcript.push(
-        TranscriptItem {
-            stable_id: "user:1".into(),
-            position: 4,
-            latest_content_event_ordinal: None,
-            created_at_ms: 10,
-            last_changed_at_ms: 10,
-            body: TranscriptBody::User {
-                content: vec![serde_json::json!({"type": "text", "text": "rename the module"})],
-            },
-        }
-        .into(),
-    );
-    session.last_turn_outcome = Some(unanswered_outcome(
-        mj_core::acp::PROMPT_UNANSWERED_STOP_REASON,
-    ));
-    chat.apply_materialized(&session, &[], &[]);
-    // The same projection arriving again must not stack a second record.
-    chat.apply_materialized(&session, &[], &[]);
-    assert_eq!(chat.unsent_prompts.len(), 1);
-    assert_eq!(chat.unsent_prompts[0].kind, UnsentKind::Unanswered);
-    assert_eq!(
-        chat.unsent_prompts[0].kind.headline(),
-        "Prompt was not answered"
-    );
-
-    chat.restore_latest_unsent_prompt();
-    assert_eq!(
-        chat.draft_payload(),
-        PromptPayload::text("rename the module")
-    );
-}
-
 fn unanswered_session(
     command_id: &str,
     position: u64,
@@ -2568,6 +1268,7 @@ fn unanswered_session(
 /// The notice helps once: later unanswered prompts in the same run add no
 /// row, an answered prompt starts a new run, and a reattach (which re-reads
 /// the last outcome and restores the saved draft) does not bring it back.
+// Hard-won: c1169958: Reattach re-recorded an unanswered prompt after the person dismissed it.
 #[test]
 fn unanswered_prompts_are_reported_once_until_one_is_answered() {
     let unanswered = mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
@@ -2600,17 +1301,6 @@ fn unanswered_prompts_are_reported_once_until_one_is_answered() {
     later.apply_materialized(&unanswered_session("p5", 12, "fifth", unanswered), &[], &[]);
     assert_eq!(later.unsent_prompts.len(), 1);
     assert_eq!(later.unsent_prompts[0].payload.text, "fifth");
-}
-
-/// A turn that ended normally leaves nothing to restore.
-#[test]
-fn a_finished_turn_is_not_offered_for_restore() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut session = MaterializedSession::empty("1234567890");
-    session.applied_event_ordinal = 9;
-    session.last_turn_outcome = Some(unanswered_outcome("EndTurn"));
-    chat.apply_materialized(&session, &[], &[]);
-    assert!(chat.unsent_prompts.is_empty());
 }
 
 fn unanswered_outcome(stop_reason: &str) -> mj_core::state::MaterializedTurnOutcome {
@@ -2705,20 +1395,7 @@ fn saved_image_drafts_require_current_capability_without_losing_content() {
     assert_eq!(reopened.take_submitting_images(), payload.images);
 }
 
-#[test]
-fn attaching_a_text_file_says_attach_takes_images_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("notes.txt");
-    std::fs::write(&path, "plain text").unwrap();
-    let error = super::attachments::install_path("attach-text", &path).unwrap_err();
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("/attach adds image files only"),
-        "{message}"
-    );
-    assert!(!message.contains("marker"), "{message}");
-}
-
+// Hard-won: 6a66a7d0: A refused slash command remained in the draft and contaminated later input.
 #[test]
 fn attach_requires_capability_and_clears_the_command_on_refusal() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2730,4 +1407,1707 @@ fn attach_requires_capability_and_clears_the_command_on_refusal() {
     assert!(!notice.contains("marker"));
     assert!(!chat.reserve_attachment(1));
     assert!(chat.input_images.is_empty());
+}
+
+mod golden_cases {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::fmt::Write as _;
+
+    const WIDTH: u16 = 100;
+    const HEIGHT: u16 = 24;
+
+    fn rendered(chat: &mut ChatState, width: u16, height: u16) -> String {
+        // The task dialog prints elapsed time. A future start keeps that
+        // user-facing clock at 0s in every checked-in render.
+        for command in &mut chat.session_activity.background_commands {
+            command.started_at_ms = i64::MAX;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| crate::chat::active::render_full_frame(frame, chat, false))
+            .expect("draw chat surface");
+        crate::golden::buffer_lines(terminal.backend().buffer()).join("\n")
+    }
+
+    fn state<F>(
+        output: &mut String,
+        label: &str,
+        chat: &mut ChatState,
+        width: u16,
+        height: u16,
+        action: Option<ChatAction>,
+        details: F,
+    ) where
+        F: FnOnce(&ChatState) -> Vec<String>,
+    {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state label");
+        output.push_str(&rendered(chat, width, height));
+        output.push('\n');
+        if let Some(action) = action {
+            writeln!(output, "action: {action:?}").expect("write action");
+        }
+        for detail in details(chat) {
+            writeln!(output, "{detail}").expect("write detail");
+        }
+    }
+
+    fn details(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn save(name: &str, output: &str) {
+        mj_core::golden::assert_platform_golden(env!("CARGO_MANIFEST_DIR"), name, output);
+    }
+
+    #[test]
+    fn golden_chat_image_prompt_composer() {
+        let mut output = String::new();
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
+        chat.set_input("compare  and this".into());
+        chat.input_cursor = "compare ".len();
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        state(
+            &mut output,
+            "paste image at cursor",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[
+                    &format!("draft: {}", chat.input),
+                    &format!("image count: {}", chat.input_images.len()),
+                ])
+            },
+        );
+        chat.handle_key(key(KeyCode::End));
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        let payload = chat.draft_payload();
+        let action = chat.handle_key(key(KeyCode::Enter));
+        let submitted = chat.take_submitting_images();
+        let submitted_matches = submitted == payload.images;
+        let marker_blocks_match = matches!(
+            payload.content_blocks().as_slice(),
+            [
+                ContentBlock::Text(_),
+                ContentBlock::Image(_),
+                ContentBlock::Text(_),
+                ContentBlock::Image(_)
+            ]
+        );
+        state(
+            &mut output,
+            "submit image markers at their cursor positions",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| {
+                details(&[
+                    &format!("submitted image count: {}", submitted.len()),
+                    &format!("submitted images match draft payload: {submitted_matches}"),
+                    &format!("marker content-block layout preserved: {marker_blocks_match}"),
+                    &format!("payload: {}", payload.text),
+                ])
+            },
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
+        chat.set_input("keep ".into());
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        state(
+            &mut output,
+            "image marker insertion",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("cursor: {}", chat.input_cursor)]),
+        );
+        let end = chat.input_cursor;
+        chat.handle_key(key(KeyCode::Left));
+        state(
+            &mut output,
+            "left skips the whole marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("cursor: {}", chat.input_cursor)]),
+        );
+        chat.handle_key(key(KeyCode::Right));
+        state(
+            &mut output,
+            "right skips the whole marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[
+                    &format!(
+                        "cursor at original marker end: {}",
+                        chat.input_cursor == end
+                    ),
+                    &format!("cursor: {}", chat.input_cursor),
+                ])
+            },
+        );
+        chat.handle_key(key(KeyCode::Backspace));
+        state(
+            &mut output,
+            "backspace removes the whole marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[
+                    &format!("cursor after deletion: {}", chat.input_cursor),
+                    &format!("remaining images: {}", chat.input_images.len()),
+                ])
+            },
+        );
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.handle_key(key(KeyCode::Left));
+        chat.handle_key(key(KeyCode::Delete));
+        state(
+            &mut output,
+            "delete removes the whole marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("remaining images: {}", chat.input_images.len())]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.handle_key(ctrl('u'));
+        state(
+            &mut output,
+            "kill removes image with its marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("images after kill: {}", chat.input_images.len())]),
+        );
+        chat.handle_key(ctrl('y'));
+        chat.handle_key(ctrl('y'));
+        state(
+            &mut output,
+            "yank copies and renumbers images",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[
+                    &format!("image count: {}", chat.input_images.len()),
+                    &format!(
+                        "copies share image data: {}",
+                        chat.input_images[0].image == chat.input_images[1].image
+                    ),
+                ])
+            },
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        state(
+            &mut output,
+            "numbered marker and paste hint",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |_| details(&["clipboard action: PasteFromClipboard"]),
+        );
+        chat.handle_key(key(KeyCode::Backspace));
+        state(
+            &mut output,
+            "marker removed from composer",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[&format!(
+                    "marker remains: {}",
+                    chat.input.contains("[image")
+                )])
+            },
+        );
+
+        for command in ["!pwd ", "/help ", "/model ", "/plan inspect "] {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_prompt_images_supported(true);
+            chat.set_input(command.into());
+            chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+            let before = chat.draft_payload();
+            let action = chat.handle_key(key(KeyCode::Enter));
+            state(
+                &mut output,
+                &format!("image retained by {command:?}"),
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                Some(action),
+                |chat| {
+                    details(&[
+                        &format!("draft unchanged: {}", chat.draft_payload() == before),
+                        &format!("image count: {}", chat.input_images.len()),
+                    ])
+                },
+            );
+        }
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
+        let action = chat.handle_terminal_paste("");
+        state(
+            &mut output,
+            "empty terminal paste requests clipboard",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        let action = chat.handle_key(key(KeyCode::Enter));
+        let submitted = chat.take_submitting_images();
+        state(
+            &mut output,
+            "clipboard image becomes a prompt attachment",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| details(&[&format!("submitted image count: {}", submitted.len())]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut actions = Vec::new();
+        for text in ["hello", " \t\n", "world"] {
+            actions.push(chat.handle_terminal_paste(text));
+        }
+        chat.handle_clipboard_content(ClipboardContent::Text(String::new()));
+        state(
+            &mut output,
+            "text paste bypasses clipboard image lookup",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(ChatAction::None),
+            |chat| {
+                details(&[
+                    &format!("text-paste actions: {actions:?}"),
+                    &format!("text remains: {:?}", chat.input),
+                ])
+            },
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[select_config_option("model", "small", &["small", "large"])]);
+        chat.open_config_picker("model");
+        let action = chat.handle_terminal_paste("");
+        state(
+            &mut output,
+            "empty paste stays in the active config picker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| details(&[&format!("picker active: {}", chat.config_picker_active())]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_prompt_images_supported(true);
+        chat.handle_clipboard_content(ClipboardContent::Image(test_image()));
+        chat.handle_paste("/attach /workspace/second.png");
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "attach command retains existing marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[
+                    &format!("markers before reservation: {}", chat.input_images.len()),
+                    &format!("draft after command: {:?}", chat.input),
+                ])
+            },
+        );
+        chat.reserve_attachment(0);
+        state(
+            &mut output,
+            "reserved attachment appends a numbered marker",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("markers: {}", chat.input_images.len())]),
+        );
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "plain text").expect("write text file");
+        let error = super::attachments::install_path("attach-text", &path).unwrap_err();
+        let message = format!("{error:#}");
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.handle_paste("/attach notes.txt");
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "text file attachment feedback",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| {
+                details(&[
+                    &format!(
+                        "installer feedback includes image-only explanation: {}",
+                        message.contains("/attach adds image files only")
+                    ),
+                    &format!("installer mentions marker: {}", message.contains("marker")),
+                ])
+            },
+        );
+
+        save("chat-image-prompt-composer", &output);
+    }
+
+    #[test]
+    fn golden_chat_composer_draft_lifecycle() {
+        let mut output = String::new();
+
+        let mut saved = freshly_opened_chat("saved before opening");
+        state(
+            &mut output,
+            "fresh chat restores saved draft",
+            &mut saved,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("draft: {:?}", chat.draft())]),
+        );
+        let mut empty = freshly_opened_chat("");
+        state(
+            &mut output,
+            "fresh chat without saved draft",
+            &mut empty,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("draft empty: {}", chat.draft().is_empty())]),
+        );
+
+        let config: Config = serde_json::from_str(r#"{"version": 0}"#).expect("default config");
+        let mut chat = ChatState::standby(
+            "session-1",
+            &config,
+            SessionHeaderIdentity::default(),
+            Notices::default(),
+        );
+        chat.set_draft("alpha beta".into());
+        chat.handle_key(ctrl('a'));
+        chat.handle_key(ctrl('k'));
+        chat.handle_key(ctrl('y'));
+        chat.paste("…\r\nsecond");
+        state(
+            &mut output,
+            "standby composer readline and normalized paste",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[
+                    &format!("draft: {:?}", chat.draft()),
+                    &format!("cursor: {}", chat.input_cursor),
+                ])
+            },
+        );
+        chat.set_input("/help".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "standby command remains an editable draft",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[
+                    &format!("draft: {:?}", chat.draft()),
+                    &format!("queued prompts: {}", chat.queued_prompt_texts().len()),
+                ])
+            },
+        );
+        chat.set_input("alpha beta…\nsecond".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "standby prompt is queued for the host",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[
+                    &format!("draft empty: {}", chat.draft().is_empty()),
+                    &format!("queued prompts: {:?}", chat.queued_prompt_texts()),
+                ])
+            },
+        );
+        chat.remove_queued_prompt_text("alpha beta…\nsecond");
+        chat.set_input("/mod".into());
+        chat.update_autocomplete();
+        state(
+            &mut output,
+            "standby composer does not offer slash autocomplete",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[&format!(
+                    "autocomplete active: {}",
+                    chat.autocomplete.is_some()
+                )])
+            },
+        );
+
+        save("chat-composer-draft-lifecycle", &output);
+    }
+
+    #[test]
+    fn golden_chat_voice_prompt_control() {
+        let mut output = String::new();
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let unavailable = chat.dictation_toggle_action();
+        let key_action = chat.handle_key(alt('v'));
+        state(
+            &mut output,
+            "voice unavailable",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(unavailable),
+            |chat| {
+                details(&[
+                    &format!("Alt-V action: {key_action:?}"),
+                    &format!("draft empty: {}", chat.input.is_empty()),
+                ])
+            },
+        );
+        chat.set_voice_available(true);
+        let action = chat.dictation_toggle_action();
+        let key_action = chat.handle_key(alt('v'));
+        state(
+            &mut output,
+            "voice available, host owns Alt-V",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| details(&[&format!("Alt-V action: {key_action:?}")]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_voice_available(true);
+        state(
+            &mut output,
+            "enabled microphone and rendered hitbox",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("button area: {:?}", chat.voice_button_area)]),
+        );
+        let area = chat.voice_button_area.expect("rendered voice button");
+        let down = chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        let up = chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        state(
+            &mut output,
+            "mouse activates microphone on release",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(up),
+            |_| details(&[&format!("press action: {down:?}")]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.voice_button_area = Some(Rect::new(10, 8, 4, 1));
+        let disabled = chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+        state(
+            &mut output,
+            "disabled microphone click is inert",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(disabled),
+            |chat| details(&[&format!("button area: {:?}", chat.voice_button_area)]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.voice_active = true;
+        chat.set_input("dictated draft".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Enter preserves a draft during active voice capture",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| details(&[&format!("draft: {:?}", chat.input)]),
+        );
+
+        for (width, prompt) in [
+            (4, Rect::new(0, 0, 4, 3)),
+            (5, Rect::new(0, 0, 5, 3)),
+            (30, Rect::new(4, 2, 30, 5)),
+        ] {
+            let button = voice_button_area(prompt);
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_voice_available(true);
+            state(
+                &mut output,
+                &format!("prompt width {width} microphone geometry"),
+                &mut chat,
+                width,
+                8,
+                None,
+                |_| details(&[&format!("button area: {button:?}")]),
+            );
+        }
+
+        save("chat-voice-prompt-control", &output);
+    }
+
+    #[test]
+    fn golden_chat_background_task_dialog() {
+        let mut output = String::new();
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("keep this draft".into());
+        chat.set_session_activity(mj_client::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
+            background_commands: vec![background_task("task-main", "cargo test --workspace", true)],
+            ..mj_client::usage_format::SessionActivity::default()
+        });
+        let initial = rendered(&mut chat, 100, 24);
+        let initial_task_x = chat.task_control_area.expect("initial task control").x;
+        state(
+            &mut output,
+            "task count in prompt border",
+            &mut chat,
+            100,
+            24,
+            None,
+            |chat| {
+                details(&[
+                    &format!("task label visible: {}", initial.contains("Tasks (1)")),
+                    &format!("draft: {:?}", chat.input),
+                    &format!("initial task control x: {initial_task_x}"),
+                ])
+            },
+        );
+        chat.mark_prompt_submitted("continue");
+        chat.steering_supported = Some(true);
+        chat.targeted_turn_control_supported = true;
+        chat.queued_prompts.push_back(queued("next", "follow up"));
+        for width in [32, 48, 56, 80] {
+            state(
+                &mut output,
+                &format!("queued task border width {width}"),
+                &mut chat,
+                width,
+                24,
+                None,
+                |chat| {
+                    details(&[
+                        &format!("task control area: {:?}", chat.task_control_area),
+                        &format!("queued text: {}", chat.queued_prompt_texts().len()),
+                    ])
+                },
+            );
+        }
+        state(
+            &mut output,
+            "queued task border width 100",
+            &mut chat,
+            100,
+            24,
+            None,
+            |chat| {
+                let area = chat.task_control_area.expect("task control after layout");
+                details(&[
+                    &format!("task control area: {area:?}"),
+                    &format!("task control shifted right: {}", area.x > initial_task_x),
+                ])
+            },
+        );
+
+        let task_area = chat.task_control_area.expect("task control hitbox");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: task_area.x,
+            row: task_area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mouse_claimed = chat.component_handles_mouse(click);
+        let action = chat.handle_mouse(click);
+        state(
+            &mut output,
+            "mouse opens task dialog",
+            &mut chat,
+            100,
+            24,
+            Some(action),
+            |chat| {
+                details(&[
+                    &format!("dialog open: {}", chat.task_dialog_open()),
+                    &format!("draft cursor: {}", chat.input_cursor),
+                    &format!("chat surface claims click: {mouse_claimed}"),
+                ])
+            },
+        );
+        let dialog_inner = chat.task_dialog_area.expect("task dialog geometry");
+        let dismiss = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: dialog_inner.x.saturating_add(1),
+            row: dialog_inner.y.saturating_sub(1),
+            modifiers: KeyModifiers::NONE,
+        };
+        let outside_claimed = chat.component_handles_mouse(dismiss);
+        let down = chat.handle_mouse(dismiss);
+        let up = chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..dismiss
+        });
+        state(
+            &mut output,
+            "outside mouse click dismisses task dialog",
+            &mut chat,
+            100,
+            24,
+            Some(up),
+            |chat| {
+                details(&[
+                    &format!("press action: {down:?}"),
+                    &format!("dialog open: {}", chat.task_dialog_open()),
+                    &format!("chat surface claims outside click: {outside_claimed}"),
+                ])
+            },
+        );
+        let down = chat.handle_key(key(KeyCode::Down));
+        let open = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "keyboard opens dialog without replacing draft",
+            &mut chat,
+            100,
+            24,
+            Some(open),
+            |chat| {
+                details(&[
+                    &format!("focus action: {down:?}"),
+                    &format!("draft: {:?}", chat.input),
+                ])
+            },
+        );
+        let close = chat.handle_key(key(KeyCode::Esc));
+        state(
+            &mut output,
+            "Escape closes task dialog",
+            &mut chat,
+            100,
+            24,
+            Some(close),
+            |chat| details(&[&format!("draft: {:?}", chat.input)]),
+        );
+
+        chat.open_task_dialog();
+        chat.session_activity.background_commands[0].command =
+            "cargo test --all-targets --all-features --workspace".into();
+        for height in [1, 4, 8] {
+            state(
+                &mut output,
+                &format!("narrow task dialog height {height}"),
+                &mut chat,
+                24,
+                height,
+                None,
+                |chat| details(&[&format!("scroll: {}", chat.task_dialog_scroll)]),
+            );
+        }
+        for _ in 0..20 {
+            chat.handle_key(key(KeyCode::Down));
+        }
+        state(
+            &mut output,
+            "wrapped task command scroll tail",
+            &mut chat,
+            24,
+            8,
+            None,
+            |chat| details(&[&format!("scroll: {}", chat.task_dialog_scroll)]),
+        );
+        chat.session_activity.background_commands[0].command = format!(
+            "cargo test {}FINAL_ARGUMENT",
+            "--feature example ".repeat(40)
+        );
+        rendered(&mut chat, 80, 12);
+        for _ in 0..100 {
+            chat.handle_key(key(KeyCode::Down));
+        }
+        state(
+            &mut output,
+            "long command retains its final argument after scrolling",
+            &mut chat,
+            80,
+            12,
+            None,
+            |chat| details(&[&format!("scroll: {}", chat.task_dialog_scroll)]),
+        );
+        chat.set_session_activity(mj_client::usage_format::SessionActivity::default());
+        state(
+            &mut output,
+            "empty task dialog",
+            &mut chat,
+            80,
+            12,
+            None,
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(mj_client::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
+            background_commands: vec![background_task("read-only", "codex exec", false)],
+            ..mj_client::usage_format::SessionActivity::default()
+        });
+        chat.open_task_dialog();
+        let tab = chat.handle_key(key(KeyCode::Tab));
+        let enter = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "read-only row has no Stop control",
+            &mut chat,
+            80,
+            16,
+            Some(enter),
+            |chat| {
+                details(&[
+                    &format!("Tab action: {tab:?}"),
+                    &format!("dialog remains open: {}", chat.task_dialog_open()),
+                ])
+            },
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_session_activity(mj_client::usage_format::SessionActivity {
+            pursuing_goal: Default::default(),
+            background_commands: (0..8)
+                .map(|index| {
+                    background_task(&format!("task-{index}"), &format!("work-{index}"), true)
+                })
+                .collect(),
+            ..mj_client::usage_format::SessionActivity::default()
+        });
+        chat.open_task_dialog();
+        rendered(&mut chat, 40, 8);
+        let inner = chat.task_dialog_area.expect("dialog geometry");
+        chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: inner.x,
+            row: inner.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        state(
+            &mut output,
+            "mouse scrolls task rows",
+            &mut chat,
+            40,
+            8,
+            None,
+            |chat| details(&[&format!("scroll: {}", chat.task_dialog_scroll)]),
+        );
+        chat.handle_key(key(KeyCode::PageUp));
+        state(
+            &mut output,
+            "PageUp returns to first task rows",
+            &mut chat,
+            40,
+            8,
+            None,
+            |chat| details(&[&format!("scroll: {}", chat.task_dialog_scroll)]),
+        );
+        let x = inner.right().saturating_sub(2);
+        let y = inner.y;
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let down = chat.handle_mouse(press);
+        let stop = chat.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..press
+        });
+        state(
+            &mut output,
+            "mouse stops first visible task",
+            &mut chat,
+            40,
+            8,
+            Some(stop),
+            |_| details(&[&format!("press action: {down:?}")]),
+        );
+
+        save("chat-background-task-dialog", &output);
+    }
+
+    #[test]
+    fn golden_chat_subagents_prompt_control() {
+        let mut output = String::new();
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        state(
+            &mut output,
+            "subagent control absent by default",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
+        );
+        chat.set_subagents_enabled(true);
+        state(
+            &mut output,
+            "dimmed zero count",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
+        );
+        crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+            state(
+                &mut output,
+                "dimmed zero count in ASCII",
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                None,
+                |_| details(&["symbol mode: ASCII"]),
+            );
+        });
+        chat.set_subagent_count(1);
+        state(
+            &mut output,
+            "first child enables prompt control",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[&format!(
+                    "control available: {}",
+                    chat.subagent_control_area.is_some()
+                )])
+            },
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("keep this draft".into());
+        chat.set_subagent_count(2);
+        state(
+            &mut output,
+            "active subagent count and preserved draft",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("control: {:?}", chat.subagent_control_area)]),
+        );
+        let area = chat.subagent_control_area.expect("subagent hitbox");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mouse_claimed = chat.component_handles_mouse(click);
+        let mouse_action = chat.handle_mouse(click);
+        state(
+            &mut output,
+            "mouse opens subagent panel",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(mouse_action),
+            |_| details(&[&format!("chat surface claims click: {mouse_claimed}")]),
+        );
+        let down = chat.handle_key(key(KeyCode::Down));
+        let enter = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "keyboard opens subagent panel",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(enter),
+            |chat| {
+                details(&[
+                    &format!("focus action: {down:?}"),
+                    &format!("draft: {:?}", chat.input),
+                ])
+            },
+        );
+
+        save("chat-subagents-prompt-control", &output);
+    }
+
+    #[test]
+    fn golden_chat_queued_prompt_editing() {
+        let mut output = String::new();
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.queued_prompts.push_back(queued("queued-1", "first"));
+        chat.queued_prompts.push_back(queued("queued-2", "second"));
+        let action = chat.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        state(
+            &mut output,
+            "Alt-Up peels newest queued prompt",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[
+                    &format!("draft: {:?}", chat.input),
+                    &format!("remaining queue: {:?}", chat.queued_prompt_texts()),
+                ])
+            },
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        for (id, text) in [
+            ("queued-1", "first"),
+            ("queued-2", "second"),
+            ("queued-3", "third"),
+        ] {
+            chat.queued_prompts.push_back(queued(id, text));
+        }
+        for (label, key_event) in [
+            ("Up peels newest", key(KeyCode::Up)),
+            ("Ctrl-P peels next", ctrl('p')),
+            ("Up peels oldest", key(KeyCode::Up)),
+            ("Up with empty queue", key(KeyCode::Up)),
+        ] {
+            let action = chat.handle_key(key_event);
+            state(
+                &mut output,
+                label,
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                Some(action),
+                |chat| {
+                    details(&[
+                        &format!("draft: {:?}", chat.input),
+                        &format!("remaining queue: {:?}", chat.queued_prompt_texts()),
+                    ])
+                },
+            );
+            chat.clear_input();
+        }
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut session = MaterializedSession::empty("1234567890");
+        session.applied_event_ordinal = 5;
+        session.queued_prompts.push(MaterializedQueuedPrompt {
+            accepted_ordinal: None,
+            command_id: "queued-config".into(),
+            kind: QueuedCommandKind::SetConfig {
+                key: "model".into(),
+                value: "sonnet".into(),
+            },
+            content: vec![serde_json::json!({"type": "text", "text": "/model sonnet"})],
+            queued_at_ms: 10,
+        });
+        chat.apply_materialized(&session, &[], &[]);
+        state(
+            &mut output,
+            "queued config before editing",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[&format!(
+                    "queue label: {}",
+                    chat.queued_prompts[0].queue_label()
+                )])
+            },
+        );
+        let action = chat.handle_key(ctrl('p'));
+        state(
+            &mut output,
+            "Ctrl-P peels queued config into composer",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| {
+                details(&[
+                    &format!("draft: {:?}", chat.input),
+                    &format!("queue empty: {}", chat.queued_prompts.is_empty()),
+                ])
+            },
+        );
+        chat.phase = WorkerPhase::Running;
+        chat.set_config_options(&[select_config_option("model", "opus", &["opus", "sonnet"])]);
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "resubmitted config retains its command",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        save("chat-queued-prompt-editing", &output);
+    }
+
+    #[test]
+    fn golden_chat_config_slash_commands() {
+        let mut output = String::new();
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[
+            select_config_option("model", "gpt-5.6", &["gpt-5.6", "gpt-5.6-luna"]),
+            select_config_option("effort", "high", &["high", "xhigh"]),
+        ]);
+        chat.set_input("/model gpt-5.6-luna".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "model selector",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.set_input("/effort xhigh".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "effort selector",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[fast_mode_option("off")]);
+        chat.set_input("/fast".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "fast toggles on",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.set_config_options(&[fast_mode_option("on")]);
+        chat.set_input("/fast".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "fast toggles off",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.set_input("/fast on".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "fast argument usage",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("/fast".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "fast unavailable for active model",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.phase = WorkerPhase::Running;
+        chat.set_input("/model".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "busy model command usage",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.set_config_options(&[select_config_option("model", "opus", &["opus", "sonnet"])]);
+        chat.set_input("/model sonnet".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "busy agent accepts queued config update",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| details(&[&format!("draft cleared: {}", chat.input.is_empty())]),
+        );
+        chat.phase = WorkerPhase::Closing;
+        chat.set_input("/model sonnet".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "closing worker refuses config update",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("/model".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "missing model value shows usage",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        save("chat-config-slash-commands", &output);
+    }
+
+    #[test]
+    fn golden_chat_plan_command_capabilities() {
+        let mut output = String::new();
+
+        let mut chat = grok_chat();
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Grok enters plan mode",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.plan_command_pending = false;
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Grok exits plan mode",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = grok_chat();
+        chat.set_input("/plan off".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "explicit plan off",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.set_input("/plan ON".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "explicit plan on",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+        chat.plan_command_pending = false;
+        chat.set_input("/plan sideways".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "unrecognized plan suffix becomes prompt",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[mode_config_option("default", &["default", "plan"])]);
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "advertised mode config",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = grok_chat();
+        chat.set_config_options(&[mode_config_option("default", &["default", "act"])]);
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Grok trusted mode fallback",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_harness_kind(HarnessKind::Muse);
+        advertise(&mut chat, 1, &["plan"]);
+        chat.set_input("/plan the migration".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Muse advertised plan skill",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = grok_chat();
+        advertise(&mut chat, 1, &["plan"]);
+        chat.set_input("/plan the migration".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "unified plan command wins over skill",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "no compatible plan surface",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_harness_kind(HarnessKind::Codex);
+        chat.set_config_options(&[
+            select_config_option("mode", "read-only", &["read-only", "full-access"]),
+            select_config_option("collaboration_mode", "default", &["default", "plan"]),
+        ]);
+        chat.set_input("/plan inspect the migration".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Codex collaboration mode preserves permission mode",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| details(&[&format!("prompt history: {:?}", chat.prompt_history)]),
+        );
+
+        for harness in [HarnessKind::Claude, HarnessKind::Kimi] {
+            let mut chat = ChatState::new(&snapshot(), &[]);
+            chat.set_harness_kind(harness);
+            chat.set_config_options(&[select_config_option(
+                "mode",
+                "default",
+                &["default", "plan"],
+            )]);
+            chat.set_input("/plan".into());
+            let action = chat.handle_key(key(KeyCode::Enter));
+            state(
+                &mut output,
+                &format!("{harness:?} exact mode config"),
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                Some(action),
+                |_| Vec::new(),
+            );
+        }
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_harness_kind(HarnessKind::Grok);
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Grok set mode without catalogue",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = grok_chat();
+        chat.set_harness_kind(HarnessKind::Muse);
+        for command in ["/plan design it", "/implement"] {
+            chat.set_input(command.into());
+            let action = chat.handle_key(key(KeyCode::Enter));
+            state(
+                &mut output,
+                &format!("unsupported plan command {command}"),
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                Some(action),
+                |_| Vec::new(),
+            );
+        }
+
+        let mut chat = grok_chat();
+        chat.finish_plan_mode_change(true);
+        chat.set_input("/implement start with the parser".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "implement exits plan and carries instruction",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        let mut chat = grok_chat();
+        chat.finish_plan_mode_change(true);
+        let request = ElicitationRequest {
+            id: "plan-review-1".into(),
+            message: "review".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+        };
+        for (action_name, feedback) in [
+            ("implement", None),
+            ("revise", Some("add tests")),
+            ("exit", None),
+        ] {
+            let mut content = std::collections::BTreeMap::new();
+            content.insert(
+                "action".into(),
+                ElicitationValue::String(action_name.into()),
+            );
+            if let Some(feedback) = feedback {
+                content.insert("feedback".into(), ElicitationValue::String(feedback.into()));
+            }
+            let response = ElicitationResponse::Accept { content };
+            let followup = chat.plan_review_followup(&request, &response);
+            state(
+                &mut output,
+                &format!("plan review choice {action_name}"),
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                None,
+                |_| details(&[&format!("followup: {followup:?}")]),
+            );
+        }
+
+        let mut chat = grok_chat();
+        chat.phase = WorkerPhase::Running;
+        chat.set_input("/plan".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "plan waits for idle agent",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
+        save("chat-plan-command-capabilities", &output);
+    }
+
+    #[test]
+    fn golden_chat_transcript_rendering() {
+        let mut output = String::new();
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_input("inspect renderer".into());
+        chat.toggle_render_mode();
+        state(
+            &mut output,
+            "raw transcript and composer state",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("render mode: {:?}", chat.render_mode)]),
+        );
+        chat.toggle_render_mode();
+        for key_event in [alt('t'), ctrl('t'), alt('v')] {
+            let action = chat.handle_key(key_event);
+            state(
+                &mut output,
+                "retired transcript shortcut remains local",
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                Some(action),
+                |chat| details(&[&format!("render mode: {:?}", chat.render_mode)]),
+            );
+        }
+
+        let runtime = RuntimeEvent::SessionUpdate {
+            update: serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "done"}
+            }),
+        };
+        let events = vec![
+            SequencedEvent {
+                seq: 1,
+                recorded_at_ms: None,
+                request_id: Some("prompt-1".into()),
+                event: WorkerEvent::PromptAccepted {
+                    request_id: "prompt-1".into(),
+                    text: "work".into(),
+                    attachments: vec![],
+                },
+            },
+            SequencedEvent {
+                seq: 2,
+                recorded_at_ms: None,
+                request_id: None,
+                event: WorkerEvent::Adapter {
+                    kind: "session_update".into(),
+                    payload: serde_json::to_value(runtime).unwrap(),
+                },
+            },
+        ];
+        let mut initial = snapshot();
+        initial.latest_seq = 2;
+        let mut replayed = ChatState::new(&initial, &events);
+        state(
+            &mut output,
+            "replayed user and agent transcript",
+            &mut replayed,
+            WIDTH,
+            HEIGHT,
+            None,
+            |_| Vec::new(),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.apply_session_update(
+            1,
+            &serde_json::json!({"sessionUpdate":"tool_call", "toolCallId":"grep-config", "title":"grep config", "status":"pending"}),
+        );
+        state(
+            &mut output,
+            "pending tool call title",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |_| Vec::new(),
+        );
+        chat.apply_session_update(
+            2,
+            &serde_json::json!({"sessionUpdate":"tool_call_update", "toolCallId":"grep-config", "status":"completed", "content":[{"type":"content", "content":{"type":"text", "text":"noise"}}]}),
+        );
+        state(
+            &mut output,
+            "completed tool call keeps title and suppresses update noise",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| details(&[&format!("entry text: {:?}", chat.entries[0].text)]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        for (seq, status) in [(1, "pending"), (2, "completed")] {
+            chat.apply_session_update(
+                seq,
+                &serde_json::json!({
+                    "sessionUpdate":"plan",
+                    "entries":[{"content":"inspect renderer", "priority":"high", "status":status}]
+                }),
+            );
+            state(
+                &mut output,
+                &format!("plan entry {status}"),
+                &mut chat,
+                WIDTH,
+                HEIGHT,
+                None,
+                |chat| {
+                    details(&[
+                        &format!("plan entries: {}", chat.entries[0].plan.len()),
+                        &format!(
+                            "completed: {}",
+                            chat.entries[0].plan[0].status == PlanStatus::Completed
+                        ),
+                    ])
+                },
+            );
+        }
+
+        save("chat-transcript-rendering", &output);
+    }
+
+    #[test]
+    fn golden_chat_unanswered_prompt_recovery() {
+        let mut output = String::new();
+        let unanswered = mj_core::acp::PROMPT_UNANSWERED_STOP_REASON;
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut session = unanswered_session("prompt-1", 4, "rename the module", unanswered);
+        let transcript_item = std::sync::Arc::make_mut(&mut session.transcript[0]);
+        transcript_item.created_at_ms = i64::MIN;
+        transcript_item.last_changed_at_ms = i64::MIN;
+        chat.apply_materialized(&session, &[], &[]);
+        chat.apply_materialized(&session, &[], &[]);
+        chat.unsent_prompts[0].recorded_at_ms = i64::MIN;
+        state(
+            &mut output,
+            "unanswered prompt appears once and can be restored",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[
+                    &format!("unsent prompt count: {}", chat.unsent_prompts.len()),
+                    &format!("headline: {}", chat.unsent_prompts[0].kind.headline()),
+                ])
+            },
+        );
+        let action = chat.handle_key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        state(
+            &mut output,
+            "Ctrl-Alt-R restores unanswered prompt to composer",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |chat| details(&[&format!("restored draft: {:?}", chat.draft_payload().text)]),
+        );
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let mut finished = MaterializedSession::empty("1234567890");
+        finished.applied_event_ordinal = 9;
+        finished.last_turn_outcome = Some(unanswered_outcome("EndTurn"));
+        chat.apply_materialized(&finished, &[], &[]);
+        state(
+            &mut output,
+            "normally completed turn has no restore row",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            None,
+            |chat| {
+                details(&[&format!(
+                    "unsent prompt count: {}",
+                    chat.unsent_prompts.len()
+                )])
+            },
+        );
+
+        save("chat-unanswered-prompt-recovery", &output);
+    }
 }

@@ -1085,23 +1085,6 @@ mod tests {
         assert_eq!(older.head_descends_from_base, None);
     }
 
-    #[test]
-    fn an_unavailable_subagent_choice_gets_the_command_line_remedy() {
-        let failure = |code: Option<&str>| ApiError {
-            status: reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-            message: "Selected subagent model \"x\" is unavailable.".to_owned(),
-            busy: None,
-            code: code.map(str::to_owned),
-        };
-        let coded = format!(
-            "{:#}",
-            failure(Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)).into_error()
-        );
-        assert!(coded.contains("--subagent-model"), "{coded}");
-        let plain = format!("{:#}", failure(None).into_error());
-        assert!(!plain.contains("--subagent-model"), "{plain}");
-    }
-
     #[tokio::test]
     async fn every_call_carries_the_bearer_token_and_reads_the_typed_response() {
         let (url, seen) = serve(Some("1")).await;
@@ -1147,6 +1130,7 @@ mod tests {
     /// A 429 is sent before the daemon admits anything, so the client sends
     /// the request again until it is admitted, and gives up with the
     /// daemon's own reason once its time runs out.
+    // Hard-won: b6e05b62: a 429 refusal for an unaccepted lifecycle request made sequential session creation fail.
     #[tokio::test]
     async fn a_busy_daemon_is_retried_until_it_admits_the_request() {
         let refusals = Arc::new(Mutex::new(2_usize));
@@ -1379,6 +1363,7 @@ mod tests {
         (url, pin)
     }
 
+    // Hard-won: 374b1915: the CLI rejected the viewer certificate that its daemon publishes and pins.
     #[tokio::test]
     async fn the_cli_reaches_a_viewer_serving_a_self_signed_ca_certificate_by_its_pin() {
         let (url, pin) = serve_https(true).await;

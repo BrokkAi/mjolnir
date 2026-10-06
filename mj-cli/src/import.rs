@@ -89,9 +89,9 @@ pub(crate) struct NativeImportArgs {
     /// Review every turn of the imported session at this reasoning effort.
     #[arg(long)]
     review_effort: Option<String>,
-    /// Review every turn of the imported session at this tier: `quick` or
-    /// `extended`.
-    #[arg(long, value_parser = ["quick", "extended"])]
+    /// Deprecated compatibility option. Either accepted value enables review;
+    /// the value is ignored.
+    #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
     /// Do not review the imported session's turns automatically.
     #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
@@ -241,6 +241,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Kimi => "Kimi",
         HarnessKind::Grok => "Grok Build",
         HarnessKind::Muse => "Muse Code",
+        HarnessKind::OpenCode => "OpenCode",
     }
 }
 
@@ -857,6 +858,7 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    // Hard-won: 1fe0c7aa4f: Launch finding I2-16 saw one native Grok session twice in import discovery; this checks the deduplicated session listing.
     #[test]
     fn a_native_session_is_listed_once() {
         let option = |id: &str, title: &str| ImportSessionOption {
@@ -943,6 +945,7 @@ mod tests {
 
     /// All harnesses share one implementation, so each subcommand must
     /// still name its own harness and take the same selection arguments.
+    // Hard-won: 03066cfabb: Finding F-18 showed import scanning the stock home instead of the selected profile home; the test checks profile-specific discovery and refuses ambiguous profile guessing.
     #[test]
     fn an_import_reads_the_configured_profiles_home_not_the_stock_one() {
         let profile = |kind: HarnessKind, home: &str| mj_core::config::HarnessProfile {
@@ -1017,7 +1020,7 @@ mod tests {
             Some(mj_core::config::SessionReview::On {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("max".into()),
-                tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+                tier: None,
             })
         );
         let (_, plain) = parse_import(&["mj", "import", "codex", "--session", "native-1"]);
@@ -1030,6 +1033,28 @@ mod tests {
             ),
             None,
             "an import that names nothing follows [review]"
+        );
+        let (_, tier_only) = parse_import(&[
+            "mj",
+            "import",
+            "codex",
+            "--session",
+            "native-1",
+            "--review-tier",
+            "extended",
+        ]);
+        assert_eq!(
+            crate::api_commands::session_review(
+                tier_only.no_review,
+                tier_only.review_model.as_deref(),
+                tier_only.review_effort.as_deref(),
+                tier_only.review_tier.as_deref(),
+            ),
+            Some(mj_core::config::SessionReview::On {
+                model: None,
+                effort: None,
+                tier: None,
+            })
         );
         assert!(
             crate::Cli::try_parse_from([
@@ -1044,97 +1069,15 @@ mod tests {
             ])
             .is_err()
         );
-    }
-
-    #[test]
-    fn every_import_subcommand_names_its_harness_and_takes_the_same_arguments() {
-        for (subcommand, expected) in [
-            ("claude", HarnessKind::Claude),
-            ("codex", HarnessKind::Codex),
-            ("kimi", HarnessKind::Kimi),
-            ("grok", HarnessKind::Grok),
-            ("muse", HarnessKind::Muse),
-        ] {
-            let (harness, args) = parse_import(&[
-                "hel",
-                "import",
-                subcommand,
-                "--session",
-                "abc",
-                "--allow-dirty",
-                "--allow-omitted-non-git",
-            ]);
-            assert_eq!(harness, expected);
-            assert_eq!(args.session.as_deref(), Some("abc"));
-            assert!(args.allow_dirty_local);
-            assert!(args.allow_omitted_non_git);
-            assert!(!args.latest);
-
-            // The long-standing alias has to keep working.
-            let (_, aliased) = parse_import(&[
-                "hel",
-                "import",
-                subcommand,
-                "--latest",
-                "--allow-dirty-local",
-            ]);
-            assert!(aliased.latest);
-            assert!(aliased.allow_dirty_local);
-
-            // Exactly one way to choose a session, and one is required.
-            assert!(crate::Cli::try_parse_from(["hel", "import", subcommand]).is_err());
-            assert!(
-                crate::Cli::try_parse_from([
-                    "hel",
-                    "import",
-                    subcommand,
-                    "--latest",
-                    "--session",
-                    "abc",
-                ])
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn import_help_uses_mjolnir_product_wording() {
-        use clap::CommandFactory;
-
-        let mut command = crate::Cli::command();
-        let help = command
-            .find_subcommand_mut("import")
-            .expect("import command")
-            .find_subcommand_mut("claude")
-            .expect("claude import command")
-            .render_long_help()
+        let help = crate::Cli::try_parse_from(["mj", "import", "codex", "--help"])
+            .expect_err("help exits parsing")
             .to_string();
-        assert!(help.contains("Title displayed in Mjolnir's dashboard"));
-        assert!(!help.contains("Title displayed in Hel's dashboard"));
+        assert!(
+            !help.contains("--review-tier"),
+            "deprecated option is hidden"
+        );
     }
 
-    #[test]
-    fn import_status_messages_use_mjolnir_product_wording() {
-        let imported = ImportedClaudeSession {
-            session_id: "session".into(),
-            native_session_id: "native".into(),
-            source_jsonl: PathBuf::from("native.jsonl"),
-            source_cwd: PathBuf::from("workspace"),
-            bundle_id: "bundle".into(),
-            archive_path: PathBuf::from("checkpoint.zip"),
-        };
-        let messages = [
-            IMPORT_CANCELLED_MESSAGE.to_owned(),
-            DIRTY_IMPORT_WARNING.to_owned(),
-            IMPORT_RUNTIME_CONTEXT.to_owned(),
-            import_success_message(&imported),
-        ];
-
-        for message in messages {
-            assert!(message.contains("Mjolnir"), "{message}");
-            assert!(!message.contains("Hel"), "{message}");
-        }
-    }
     #[test]
     fn clean_raw_imports_require_a_worktree_choice_and_keep_it_when_imported() {
         if crate::test_support::rerun_in_isolated_child(

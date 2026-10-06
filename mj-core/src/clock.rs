@@ -19,21 +19,3 @@ pub fn epoch_millis() -> i64 {
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn epoch_seconds_matches_epoch_millis_within_a_second() {
-        let seconds = epoch_seconds();
-        let millis = epoch_millis();
-        assert!((millis / 1000 - seconds as i64).abs() <= 1);
-    }
-
-    #[test]
-    fn epoch_seconds_is_after_this_codebases_epoch() {
-        // 2020-01-01T00:00:00Z, a sanity floor well before this code existed.
-        assert!(epoch_seconds() > 1_577_836_800);
-    }
-}

@@ -2,7 +2,7 @@ use super::*;
 
 /// Log one finished worker upgrade, and tell the surfaces about the one that
 /// changed something.
-pub(super) fn report_worker_upgrade(
+pub(super) async fn report_worker_upgrade(
     state: &RuntimeState,
     result: &crate::worker_upgrade::WorkerUpgradeResult,
 ) {
@@ -36,6 +36,15 @@ pub(super) fn report_worker_upgrade(
         }
         Err(error) => {
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
+            if let Some(failure) = &result.preparation_failure {
+                state
+                    .fail_harness_preparation(
+                        session_id.clone(),
+                        failure.clone(),
+                        result.observed_updated_at.clone(),
+                    )
+                    .await;
+            }
         }
     }
 }
@@ -88,20 +97,23 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
-            .map(|stage| ProvisionStageGuard::new(self, stage));
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
         self.inner.execute_cleanup(command)
     }
 
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage
-            .map(|stage| ProvisionStageGuard::new(self, stage));
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
         let started = std::time::Instant::now();
         let result = self.inner.execute(command);
         tracing::info!(
             session_id = %self.session_id,
             stage = command
                 .stage
+                .as_ref()
                 .map(ProvisionStage::label)
                 .unwrap_or_else(|| "command".to_owned()),
             purpose = %command.purpose,
@@ -119,13 +131,15 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
     ) -> Result<CommandOutput> {
         let _stage = command
             .stage
-            .map(|stage| ProvisionStageGuard::new(self, stage));
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
         let started = std::time::Instant::now();
         let result = self.inner.execute_with_stdin(command, input);
         tracing::info!(
             session_id = %self.session_id,
             stage = command
                 .stage
+                .as_ref()
                 .map(ProvisionStage::label)
                 .unwrap_or_else(|| "command".to_owned()),
             purpose = %command.purpose,

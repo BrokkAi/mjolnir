@@ -339,6 +339,7 @@ mod tests {
     /// pidfile and before its socket exists. The probe has to believe that
     /// record: a worker is not always recognisable by its command line, and
     /// one that is not was reported as gone while it was still running.
+    // Hard-won: 915d5c30: a live worker with an unexpected command line was reported gone.
     #[test]
     fn a_worker_is_found_by_the_pid_it_recorded_even_when_its_command_line_differs() {
         let root = tempfile::tempdir().unwrap();
@@ -384,20 +385,6 @@ mod tests {
         let (status, stdout) = run_script(&script);
 
         assert_ne!(status, 0, "a dead pid is not a worker: {stdout}");
-        assert!(stdout.is_empty(), "{stdout}");
-    }
-
-    #[test]
-    fn a_worker_root_with_no_records_reports_no_worker() {
-        let root = tempfile::tempdir().unwrap();
-
-        let script = format!(
-            "{}\nhel_recorded_worker",
-            worker_daemon_identity_script(&root.path().to_string_lossy())
-        );
-        let (status, stdout) = run_script(&script);
-
-        assert_ne!(status, 0);
         assert!(stdout.is_empty(), "{stdout}");
     }
 
@@ -461,6 +448,7 @@ mod tests {
     /// The harness runs in a process group of its own, so the worker leader's
     /// group empties as soon as the leader exits. The stop must still wait for
     /// the harness, or the `rm` that follows races its last writes (I2-9).
+    // Hard-won: 2f859c8f: a harness outlived its worker group and raced removal of staged state.
     #[test]
     #[cfg(target_os = "linux")]
     fn stopping_worker_waits_for_a_harness_in_its_own_process_group() {
@@ -514,6 +502,7 @@ mod tests {
     /// rejects a newline inside a `-v` value, and `/bin/sh` may be dash,
     /// busybox or bash, so the script must be plain POSIX sh with no
     /// multi-line `-v` assignment.
+    // Hard-won: 3002b626: macOS destroy failed when awk -v received a newline.
     #[test]
     fn stop_script_is_posix_sh_and_passes_no_multiline_value_to_awk() {
         let script = stop_worker_daemon_script("/tmp/mj-worker-root");

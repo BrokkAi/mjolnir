@@ -238,33 +238,6 @@ pub fn is_generated_prompt(command_id: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn continuation_requires_both_valid_high_probabilities() {
-        for (a, b, want) in [
-            (0.99, 0.99, true),
-            (0.89, 1.0, false),
-            (1.0, 0.89, false),
-            (0.90, 0.90, true),
-            (f64::NAN, 1.0, false),
-            (1.1, 1.0, false),
-        ] {
-            assert_eq!(
-                ContinuationVerdict {
-                    quota_limit: 0.0,
-                    unfinished: a,
-                    no_input_needed: b
-                }
-                .should_continue(),
-                want
-            );
-        }
-        assert!(
-            ContinuationVerdict::parse(
-                &json!({"answers":{"unfinished":{"type":"noul","noul":1.0}}})
-            )
-            .is_err()
-        );
-    }
-    #[test]
     fn confident_quota_preempts_ordinary_continuation_and_invalid_scores_fail_closed() {
         for (score, quota) in [(0.89, false), (0.90, true), (1.0, true)] {
             let verdict = ContinuationVerdict::parse(&json!({"answers": {

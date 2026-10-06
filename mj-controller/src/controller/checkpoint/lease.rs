@@ -50,7 +50,7 @@ impl ControllerRelayLease {
         }
     }
 
-    pub(super) async fn sync_snapshot(&mut self) -> Result<ManagedSessionSnapshot> {
+    pub(in crate::controller) async fn sync_snapshot(&mut self) -> Result<ManagedSessionSnapshot> {
         match self {
             Self::Managed {
                 lease: Some(lease), ..

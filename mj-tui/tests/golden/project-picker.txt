@@ -1,0 +1,1952 @@
+action: None
+action: LoadMountHistory
+=== project_picker_skips_empty_saved_projects_and_offers_github_from_recent (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+action: None
+project request: Github { query: "" }
+action: None
+=== saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                               ✦  M J O L N I R                               │
+│Create new work                                                                                                       │
+│                                                                                                                      │
+│                  ╭ × New session · 3/4 choose a project ─────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2  BrokkAi/bifrost-dev  +1 more                               Add…     │                   │
+│                  │ hel       BrokkAi/hel                                                Remove   │                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2 · 2 repositories                                                     │                   │
+│                  │                                                                               │                   │
+│                  │   BrokkAi/bifrost-dev  (primary)                                              │  ─────────────────╯
+│                  │                                                                               │  ─────────────────╮
+│                  │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0             │                   │
+│                  │ -9d1a-0123456789ab/bifrost                                                    │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Back     Next                                                    │  ────────── ▁   ▪ ╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                     ─────────────────╯
+│                                                                                                     ────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                               ✦  M J O L N I R                               │
+│Create new work                                                                                                       │
+│                                                                                                                      │
+│                  ╭ × New session · 3/4 choose a project ─────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2  BrokkAi/bifrost-dev  +1 more                               Add…     │                   │
+│                  │ hel       BrokkAi/hel                                                Remove   │                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2 · 2 repositories                                                     │                   │
+│                  │                                                                               │                   │
+│                  │   BrokkAi/bifrost-dev  (primary)                                              │  ─────────────────╯
+│                  │                                                                               │  ─────────────────╮
+│                  │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0             │                   │
+│                  │ -9d1a-0123456789ab/bifrost                                                    │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Back     Next                                                    │  ────────── ▁   ▪ ╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                     ─────────────────╯
+│                                                                                                     ────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                               ✦  M J O L N I R                               │
+│Create new work                                                                                                       │
+│                                                                                                                      │
+│                  ╭ × New session · 3/4 choose a project ─────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2  BrokkAi/bifrost-dev  +1 more                               Add…     │                   │
+│                  │ hel       BrokkAi/hel                                                Remove   │                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2 · 2 repositories                                                     │                   │
+│                  │                                                                               │                   │
+│                  │   BrokkAi/bifrost-dev  (primary)                                              │  ─────────────────╯
+│                  │                                                                               │  ─────────────────╮
+│                  │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0             │                   │
+│                  │ -9d1a-0123456789ab/bifrost                                                    │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Back     Next                                                    │  ────────── ▁   ▪ ╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                     ─────────────────╯
+│                                                                                                     ────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
+╭ Wor                                                                                                              ⋯───╮
+│ def                                                                                                                  │
+╰────  ╭ × Choose a project ───────────────────────────────────────────────────────────────────────────────────╮       │
+╭ Ses  │                                                                                                       │       │
+│ Cre  │   ●Recent     GitHub     Folders     Paste URL                                                        │       │
+│No s  │                                                                                                       │       │
+│Crea  │ Pick up a recent project, or find another on GitHub or in Folders.                                    │       │
+│      │                                                                                                       │       │
+│      │ No recent projects yet. Choose GitHub or Folders above to get started.                                │       │
+│      │                                                                                                       │       │
+│      │ ☐ Use several repositories together                                                                   │       │
+│      │                                                                                                       │       │
+│      │                                                                                                       │       │
+│      │                                                                                                       │       │
+│      │                                                                                                       │       │
+│      │                                                                                                       │  ─────╯
+│      │                                                                                                       │  ─────╮
+│      │                                                                                                       │       │
+│      │                                                                                                       │       │
+│      │                                                                                                       │  ─────╯
+│      │                                                                                                       │     ▪ ╮
+│      │                                                                                                       │       │
+│      │                                                                                                       │  ─────╯
+│      │                                                                                                       │     ▪ ╮
+│      │                                                                                                       │       │
+│      │                                                                                                       │       │
+│      │   Cancel     Back     Use project                                                                     │       │
+│      ╰───────────────────────────────────────────────────────────────────────────────────────────────────────╯       │
+╰────                                                                                                             ─────╯
+/ sea
+=== saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                               ✦  M J O L N I R                               │
+│Create new work                                                                                                       │
+│                                                                                                                      │
+│                  ╭ × New session · 3/4 choose a project ─────────────────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2  BrokkAi/bifrost-dev  +1 more                               Add…     │                   │
+│                  │ hel       BrokkAi/hel                                                Remove   │                   │
+│                  │                                                                               │                   │
+│                  │ bifrost2 · 2 repositories                                                     │                   │
+│                  │                                                                               │                   │
+│                  │   BrokkAi/bifrost-dev  (primary)                                              │  ─────────────────╯
+│                  │                                                                               │  ─────────────────╮
+│                  │   /tmp/claude-1000/-home-jonathan-Projects-hel/b295cc91-b89b-4bf0             │                   │
+│                  │ -9d1a-0123456789ab/bifrost                                                    │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Back     Next                                                    │  ────────── ▁   ▪ ╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                     ─────────────────╯
+│                                                                                                     ────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+action: None
+action: CreateBundle { sources: ["owner/only"] }
+action: None
+=== project_picker_url_enter_creates_one_repository_and_advances_to_review (100x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│No sessions yet                       ││                     ✦  M J O L N I R                     │
+│Creat                                                                                             │
+│                                                                                                  │
+│       ╭ × New session · 4/4 review ──────────────────────────────────────────────────────╮       │
+│       │                                                                                  │       │
+│       │ Profile: claude-1                                                                │       │
+│       │ Project: hel                                                                     │       │
+│       │ Target: podman (local Podman)                                                    │       │
+│       │ Compute: 8 CPU / 32.0G                                                           │       │
+│       │                                                                                  │       │
+│       │ Attached directories: 0                                                          │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │                                                                                  │       │
+│       │                                                                                  │  d    │
+│       │   Cancel     Back     Add directory…     Create                                  │  ─────╯
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▪ ╮
+│                                                                                                  │
+│                                                                                             ─────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Selected project hel.
+action: None
+=== project_picker_multiple_sources_wait_for_submit_and_remove_selected (100x30) ===
+╭ Wo                                                                                            ───╮
+│ de                                                                                               │
+╰───  ╭ × Choose a project ──────────────────────────────────────────────────────────────────╮     │
+╭ Se  │                                                                                      │     │
+│ Cr  │   Recent     GitHub     Folders     ●Paste URL                                       │     │
+│No   │                                                                                      │     │
+│Cre  │ Paste a GitHub URL, owner/repository, or local repository path.                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │ ☑ Use several repositories together                                                  │     │
+│     │                                                                                      │     │
+│     │ Main  owner/main                                                                     │     │
+│     │ Also  owner/remove                                                                   │     │
+│     │ Also  owner/shared                                                                   │     │
+│     │                                                                                      │  ───╯
+│     │   Add repository     Make main     Remove                                            │  ───╮
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │   Cancel     Back     Use 3 repositories                                             │     │
+│     ╰──────────────────────────────────────────────────────────────────────────────────────╯     │
+╰───                                                                                            ───╯
+/ se
+=== project_picker_multiple_sources_wait_for_submit_and_remove_selected (100x30) ===
+╭ Wo                                                                                            ───╮
+│ de                                                                                               │
+╰───  ╭ × Choose a project ──────────────────────────────────────────────────────────────────╮     │
+╭ Se  │                                                                                      │     │
+│ Cr  │   Recent     GitHub     Folders     ●Paste URL                                       │     │
+│No   │                                                                                      │     │
+│Cre  │ Paste a GitHub URL, owner/repository, or local repository path.                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │ ☑ Use several repositories together                                                  │     │
+│     │                                                                                      │     │
+│     │ Main  owner/main                                                                     │     │
+│     │ Also  owner/shared                                                                   │     │
+│     │                                                                                      │     │
+│     │   Add repository     Make main     Remove                                            │  ───╯
+│     │                                                                                      │  ───╮
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │   Cancel     Back     Use 2 repositories                                             │     │
+│     ╰──────────────────────────────────────────────────────────────────────────────────────╯     │
+╰───                                                                                            ───╯
+/ se
+action: CreateBundle { sources: ["owner/main", "owner/shared"] }
+action: None
+selection: keyboard-selected owner/app is submitted
+action: None
+project request: Github { query: "" }
+project request: Github { query: "owner/app" }
+=== project_picker_github_search_chooses_the_keyboard_selected_result (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │ owner/app                                                          │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │   apple  owner/apple                                               │  r │
+╰──  │   app  owner/app                                                   │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │ ☐ Use several repositories together                                │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+action: CreateBundle { sources: ["owner/app"] }
+action: None
+project request: Directory { path: "", filter: "" }
+project request: Directory { path: "/home/user/src", filter: "" }
+project request: Directory { path: "/home/user", filter: "" }
+project request: Directory { path: "", filter: "" }
+project request: Directory { path: "/home/user/src", filter: "" }
+=== project_picker_folders_navigate_up_home_and_choose_current_repository (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     ●Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Browse folders on this computer.                                   │    │
+│    │                                                                    │    │
+│    │ /home/user/src                                                     │    │
+│    │                                                                    │  ──╯
+│    │   Open folder     Up one folder     Home                           │  ──╮
+│    │                                                                    │    │
+│    │ Filter:                                                            │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   Use src  Use this repository                                     │  ▪ ╮
+│    │                                                                    │    │
+╰──  │ ☐ Use several repositories together                                │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+action: CreateBundle { sources: ["/home/user/src"] }
+action: None
+project request: Github { query: "" }
+=== project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary (100x30) ===
+╭ Wo                                                                                            ───╮
+│ de                                                                                               │
+╰───  ╭ × Choose a project ──────────────────────────────────────────────────────────────────╮     │
+╭ Se  │                                                                                      │     │
+│ Cr  │   Recent     ●GitHub     Folders     Paste URL                                       │     │
+│No   │                                                                                      │     │
+│Cre  │ Your GitHub repositories. Search by name or owner/repository.                        │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │   Search                                                                             │     │
+│     │                                                                                      │     │
+│     │ ✓ app  owner/app                                                                     │     │
+│     │   shared  owner/shared                                                               │     │
+│     │                                                                                      │     │
+│     │ ☑ Use several repositories together                                                  │  ───╯
+│     │                                                                                      │  ───╮
+│     │ Main  owner/app                                                                      │     │
+│     │                                                                                      │     │
+│     │   Add repository     Make main     Remove                                            │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │   Cancel     Back     Use 1 repository                                               │     │
+│     ╰──────────────────────────────────────────────────────────────────────────────────────╯     │
+╰───                                                                                            ───╯
+/ se
+=== project_picker_multiple_discovery_selection_toggles_members_and_can_change_primary (100x30) ===
+╭ Wo                                                                                            ───╮
+│ de                                                                                               │
+╰───  ╭ × Choose a project ──────────────────────────────────────────────────────────────────╮     │
+╭ Se  │                                                                                      │     │
+│ Cr  │   Recent     ●GitHub     Folders     Paste URL                                       │     │
+│No   │                                                                                      │     │
+│Cre  │ Your GitHub repositories. Search by name or owner/repository.                        │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │   Search                                                                             │     │
+│     │                                                                                      │     │
+│     │ ✓ app  owner/app                                                                     │     │
+│     │ ✓ shared  owner/shared                                                               │     │
+│     │                                                                                      │     │
+│     │ ☑ Use several repositories together                                                  │  ───╯
+│     │                                                                                      │  ───╮
+│     │ Main  owner/shared                                                                   │     │
+│     │ Also  owner/app                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │   Add repository     Make main     Remove                                            │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │  ───╯
+│     │                                                                                      │   ▪ ╮
+│     │                                                                                      │     │
+│     │                                                                                      │     │
+│     │   Cancel     Back     Use 2 repositories                                             │     │
+│     ╰──────────────────────────────────────────────────────────────────────────────────────╯     │
+╰───                                                                                            ───╯
+/ se
+action: CreateBundle { sources: ["owner/shared", "owner/app"] }
+action: None
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │ Loading projects…                                                  │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │ ☐ Use several repositories together                                │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+project request: Github { query: "" }
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │   visible  owner/visible                                           │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │ ☐ Use several repositories together                                │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │   visible  owner/visible                                           │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │ ☐ Use several repositories together                                │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │   visible  owner/visible                                           │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │ ☐ Use several repositories together                                │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │   visible  owner/visible                                           │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │ ☐ Use several repositories together                                │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+action: CreateBundle { sources: ["owner/visible"] }
+action: None
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   ●Recent     GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Pick up a recent project, or find another on     │  ─╯
+╭   │ GitHub or in Folders.                            │  ─╮
+│   │                                                  │   │
+╰─  │ No recent projects yet. Choose GitHub or Folders │  ─╯
+╭   │ above to get started.                            │  ─╮
+│N  │                                                  │   │
+╰─  │ ☐ Use several repositories together              │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   ●Recent     GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Pick up a recent project, or find another on     │  ─╯
+╭   │ GitHub or in Folders.                            │  ─╮
+│   │                                                  │   │
+╰─  │ No recent projects yet. Choose GitHub or Folders │  ─╯
+╭   │ above to get started.                            │  ─╮
+│N  │                                                  │   │
+╰─  │ ☐ Use several repositories together              │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     ●GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Your GitHub repositories. Search by name or      │  ─╯
+╭   │ owner/repository.                                │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │   Search                                         │   │
+╰─  │                                                  │  ─╯
+╭   │ Loading projects…                                │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+project request: Github { query: "" }
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     ●GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Your GitHub repositories. Search by name or      │  ─╯
+╭   │ owner/repository.                                │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │   Search                                         │   │
+╰─  │                                                  │  ─╯
+╭   │   visible  owner/visible                         │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     ●GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Your GitHub repositories. Search by name or      │  ─╯
+╭   │ owner/repository.                                │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │   Search                                         │   │
+╰─  │                                                  │  ─╯
+╭   │   visible  owner/visible                         │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     ●GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Your GitHub repositories. Search by name or      │  ─╯
+╭   │ owner/repository.                                │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │   Search                                         │   │
+╰─  │                                                  │  ─╯
+╭   │   visible  owner/visible                         │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_tabs_and_single_repository_choice_work_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     ●GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Your GitHub repositories. Search by name or      │  ─╯
+╭   │ owner/repository.                                │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │   Search                                         │   │
+╰─  │                                                  │  ─╯
+╭   │   visible  owner/visible                         │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+action: CreateBundle { sources: ["owner/visible"] }
+action: None
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     ●Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Browse folders on this computer.                                   │    │
+│    │                                                                    │    │
+│    │ Home                                                               │    │
+│    │                                                                    │  ──╯
+│    │   Open folder     Up one folder     Home                           │  ──╮
+│    │                                                                    │    │
+│    │ Filter:                                                            │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │ Loading projects…                                                  │  ▪ ╮
+│    │                                                                    │    │
+╰──  │ ☐ Use several repositories together                                │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+project request: Directory { path: "", filter: "" }
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     ●Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Browse folders on this computer.                                   │    │
+│    │                                                                    │    │
+│    │ /work                                                              │    │
+│    │                                                                    │  ──╯
+│    │   Open folder     Up one folder     Home                           │  ──╮
+│    │                                                                    │    │
+│    │ Filter:                                                            │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   visible  /work/visible                                           │  ▪ ╮
+│    │                                                                    │    │
+╰──  │ ☐ Use several repositories together                                │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     ●Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Browse folders on this computer.                                   │    │
+│    │                                                                    │    │
+│    │ /work                                                              │    │
+│    │                                                                    │  ──╯
+│    │   Open folder     Up one folder     Home                           │  ──╮
+│    │                                                                    │    │
+│    │ Filter:                                                            │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   visible  /work/visible                                           │  ▪ ╮
+│    │                                                                    │    │
+╰──  │ ☐ Use several repositories together                                │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     ●Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Browse folders on this computer.                                   │    │
+│    │                                                                    │    │
+│    │ /work                                                              │    │
+│    │                                                                    │  ──╯
+│    │   Open folder     Up one folder     Home                           │  ──╮
+│    │                                                                    │    │
+│    │ Filter:                                                            │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   visible  /work/visible                                           │  ▪ ╮
+│    │                                                                    │    │
+╰──  │ ☐ Use several repositories together                                │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+action: CreateBundle { sources: ["/work/visible"] }
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     ●Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Browse folders on this computer.                                   │    │
+│    │                                                                    │    │
+│    │ /work                                                              │    │
+│    │                                                                    │  ──╯
+│    │   Open folder     Up one folder     Home                           │  ──╮
+│    │                                                                    │    │
+│    │ Filter:                                                            │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   visible  /work/visible                                           │  ▪ ╮
+│    │                                                                    │    │
+╰──  │ Preparing project…                                                 │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Preparing…                                   │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+Pre
+action: None
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   ●Recent     GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Pick up a recent project, or find another on     │  ─╯
+╭   │ GitHub or in Folders.                            │  ─╮
+│   │                                                  │   │
+╰─  │ No recent projects yet. Choose GitHub or Folders │  ─╯
+╭   │ above to get started.                            │  ─╮
+│N  │                                                  │   │
+╰─  │ ☐ Use several repositories together              │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   ●Recent     GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Pick up a recent project, or find another on     │  ─╯
+╭   │ GitHub or in Folders.                            │  ─╮
+│   │                                                  │   │
+╰─  │ No recent projects yet. Choose GitHub or Folders │  ─╯
+╭   │ above to get started.                            │  ─╮
+│N  │                                                  │   │
+╰─  │ ☐ Use several repositories together              │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     ●Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Browse folders on this computer.                 │  ─╯
+╭   │                                                  │  ─╮
+│   │ Home                                             │   │
+╰─  │                                                  │  ─╯
+╭   │   Open folder     Up one folder     Home         │  ─╮
+│N  │                                                  │   │
+╰─  │ Filter:                                          │  ─╯
+╭   │                                                  │   ╮
+│   │ Loading projects…                                │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+project request: Directory { path: "", filter: "" }
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     ●Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Browse folders on this computer.                 │  ─╯
+╭   │                                                  │  ─╮
+│   │ /work                                            │   │
+╰─  │                                                  │  ─╯
+╭   │   Open folder     Up one folder     Home         │  ─╮
+│N  │                                                  │   │
+╰─  │ Filter:                                          │  ─╯
+╭   │                                                  │   ╮
+│   │   visible  /work/visible                         │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     ●Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Browse folders on this computer.                 │  ─╯
+╭   │                                                  │  ─╮
+│   │ /work                                            │   │
+╰─  │                                                  │  ─╯
+╭   │   Open folder     Up one folder     Home         │  ─╮
+│N  │                                                  │   │
+╰─  │ Filter:                                          │  ─╯
+╭   │                                                  │   ╮
+│   │   visible  /work/visible                         │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     ●Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Browse folders on this computer.                 │  ─╯
+╭   │                                                  │  ─╮
+│   │ /work                                            │   │
+╰─  │                                                  │  ─╯
+╭   │   Open folder     Up one folder     Home         │  ─╮
+│N  │                                                  │   │
+╰─  │ Filter:                                          │  ─╯
+╭   │                                                  │   ╮
+│   │   visible  /work/visible                         │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+action: CreateBundle { sources: ["/work/visible"] }
+=== project_picker_folder_choices_and_filter_remain_visible_on_small_terminals (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     ●Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Browse folders on this computer.                 │  ─╯
+╭   │                                                  │  ─╮
+│   │ /work                                            │   │
+╰─  │                                                  │  ─╯
+╭   │   Open folder     Up one folder     Home         │  ─╮
+│N  │                                                  │   │
+╰─  │ Filter:                                          │  ─╯
+╭   │                                                  │   ╮
+│   │   visible  /work/visible                         │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Preparing…                 │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+Pr
+action: None
+project request: Github { query: "" }
+=== project_picker_results_remain_visible_with_multiple_selected_repositories (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     ●GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Your GitHub repositories. Search by name or owner/repository.      │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │   Search                                                           │  ──╮
+│    │                                                                    │    │
+│    │ ✓ app  owner/app                                                   │  r │
+╰──  │ ✓ shared  owner/shared                                             │  ──╯
+╭ T  │ ✓ docs  owner/docs                                                 │  ▪ ╮
+│    │   next  owner/next                                                 │    │
+╰──  │                                                                    │  ──╯
+╭ P  │ ☑ Use several repositories together                                │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use 3 repositories                           │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+action: CreateBundle { sources: ["owner/app", "owner/shared", "owner/docs", "owner/next"] }
+action: None
+project request: Github { query: "" }
+=== project_picker_results_remain_visible_with_multiple_selected_repositories (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │ Your GitHub repositories. Search by name or      │   │
+│N  │ owner/repository.                                │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│   │                                                  │   │
+╰─  │   Search                                         │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ✓ app  owner/app                                 │   │
+╰─  │ ✓ shared  owner/shared                           │  ─╯
+╭   │ ✓ docs  owner/docs                               │   ╮
+│   │   next  owner/next                               │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use 3 repositories         │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+action: CreateBundle { sources: ["owner/app", "owner/shared", "owner/docs", "owner/next"] }
+action: None
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   ●Recent     GitHub     Folders     Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Pick up a recent project, or find another on GitHub or in Folders. │    │
+│    │                                                                    │    │
+│    │ No recent projects yet. Choose GitHub or Folders above to get      │    │
+│    │ started.                                                           │  ──╯
+│    │                                                                    │  ──╮
+│    │ ☐ Use several repositories together                                │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☐ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☐ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☐ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │                                                                    │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │   Add repository     Make main     Remove                          │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │ owner/visible                                                      │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │   Add repository     Make main     Remove                          │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │ owner/visible                                                      │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │   Add repository     Make main     Remove                          │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │ owner/visible                                                      │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │   Add repository     Make main     Remove                          │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use project                                  │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │ Main  owner/visible                                                │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   Add repository     Make main     Remove                          │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use 1 repository                             │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │ Main  owner/visible                                                │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   Add repository     Make main     Remove                          │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use 1 repository                             │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │ Main  owner/visible                                                │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   Add repository     Make main     Remove                          │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use 1 repository                             │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │ Main  owner/visible                                                │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   Add repository     Make main     Remove                          │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use 1 repository                             │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (80x24) ===
+╭ W                                                                          ──╮
+│ d                                                                            │
+╰──  ╭ × Choose a project ────────────────────────────────────────────────╮    │
+╭ S  │                                                                    │    │
+│ C  │   Recent     GitHub     Folders     ●Paste URL                     │  . │
+│No  │                                                                    │    │
+│Cr  │ Paste a GitHub URL, owner/repository, or local repository path.    │    │
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │                                                                    │  ──╯
+│    │ ☑ Use several repositories together                                │  ──╮
+│    │                                                                    │    │
+│    │ Main  owner/visible                                                │  r │
+╰──  │                                                                    │  ──╯
+╭ T  │   Add repository     Make main     Remove                          │  ▪ ╮
+│    │                                                                    │    │
+╰──  │                                                                    │  ──╯
+╭ P  │                                                                    │  ▪ ╮
+│    │                                                                    │    │
+│    │                                                                    │    │
+│    │   Cancel     Back     Use 1 repository                             │    │
+│    ╰────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                          ──╯
+/ s
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   ●Recent     GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Pick up a recent project, or find another on     │  ─╯
+╭   │ GitHub or in Folders.                            │  ─╮
+│   │                                                  │   │
+╰─  │ No recent projects yet. Choose GitHub or Folders │  ─╯
+╭   │ above to get started.                            │  ─╮
+│N  │                                                  │   │
+╰─  │ ☐ Use several repositories together              │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   ●Recent     GitHub     Folders     Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Pick up a recent project, or find another on     │  ─╯
+╭   │ GitHub or in Folders.                            │  ─╮
+│   │                                                  │   │
+╰─  │ No recent projects yet. Choose GitHub or Folders │  ─╯
+╭   │ above to get started.                            │  ─╮
+│N  │                                                  │   │
+╰─  │ ☐ Use several repositories together              │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☐ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☐ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☐ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │   Add repository     Make main     Remove        │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │ owner/visible                                    │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │   Add repository     Make main     Remove        │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │ owner/visible                                    │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │   Add repository     Make main     Remove        │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │ owner/visible                                    │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │   Add repository     Make main     Remove        │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use project                │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │ Main  owner/visible                              │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use 1 repository           │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │ Main  owner/visible                              │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use 1 repository           │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │   Recent     GitHub     Folders     ●Paste URL   │   │
+│N  │                                                  │   │
+╰─  │ Paste a GitHub URL, owner/repository, or local   │  ─╯
+╭   │ repository path.                                 │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │                                                  │  ─╮
+│N  │ ☑ Use several repositories together              │   │
+╰─  │                                                  │  ─╯
+╭   │ Main  owner/visible                              │   ╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use 1 repository           │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+│N  │ Paste a GitHub URL, owner/repository, or local   │   │
+╰─  │ repository path.                                 │  ─╯
+╭   │                                                  │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │ ☑ Use several repositories together              │  ─╮
+│N  │                                                  │   │
+╰─  │ Main  owner/visible                              │  ─╯
+╭   │                                                  │   ╮
+│   │   Add repository     Make main     Remove        │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use 1 repository           │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+=== project_picker_mouse_multiple_toggle_and_url_add_keep_input_above_actions (60x20) ===
+╭                                                          ╮
+│                                                          │
+╰─  ╭ × Choose a project ──────────────────────────────╮  ─╯
+╭   │                                                  │   ╮
+│   │                                                  │   │
+│N  │ Paste a GitHub URL, owner/repository, or local   │   │
+╰─  │ repository path.                                 │  ─╯
+╭   │                                                  │  ─╮
+│   │                                                  │   │
+╰─  │                                                  │  ─╯
+╭   │ ☑ Use several repositories together              │  ─╮
+│N  │                                                  │   │
+╰─  │ Main  owner/visible                              │  ─╯
+╭   │                                                  │   ╮
+│   │   Add repository     Make main     Remove        │   │
+╰─  │                                                  │  ─╯
+╭   │   Cancel     Back     Use 1 repository           │   ╮
+│   ╰──────────────────────────────────────────────────╯   ▐
+╰─                                                        ─╯
+/                                                         ys
+action: None
+=== directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│No sessions yet                       ││                     ✦  M J O L N I R                     │
+│Creat                                                                                             │
+│                                                                                                  │
+│       ╭ × Add attached directory ────────────────────────────────────────────────────────╮       │
+│       │                                                                                  │       │
+│       │ Target: po╭ matches ─────────────────────────────────────────────────────────╮   │       │
+│       │           │/opt/directory-0/                                                 │   │       │
+│       │ Podman use│/opt/directory-1/                                                 │   │       │
+│       │           │/opt/directory-2/                                                 │   │       │
+│       │ Source:   │/opt/directory-3/                                                 │   │       │
+│       │           │/opt/directory-4/                                                 │   │  ─────╯
+│       │ Destinatio│/opt/directory-5/                                                 │   │  ─────╮
+│       │           │/opt/directory-6/                                                 │   │       │
+│       │ Access:   ╰──────────────────────────────────────────────────────────────────╯   │  d    │
+│       │                                                                                  │  ─────╯
+│       │   Cancel     Back     Add directory                                              │     ▪ ╮
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                             ─────╯
+│                                                                                                ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+=== directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│No sessions yet                       ││                     ✦  M J O L N I R                     │
+│Creat                                                                                             │
+│                                                                                                  │
+│       ╭ × Add attached directory ────────────────────────────────────────────────────────╮       │
+│       │                                                                                  │       │
+│       │ Target: podman (local Podman)                                                    │       │
+│       │                                                                                  │       │
+│       │ Podman uses :O copy-on-write overlays; read-only skips the overlay.              │       │
+│       │                                                                                  │       │
+│       │ Source:   /opt/directory-1/                                                      │       │
+│       │                                                                                  │  ─────╯
+│       │ Destinatio                                                                       │  ─────╮
+│       │                                                                                  │       │
+│       │ Access:   ro · read-only ▾                                                       │  d    │
+│       │                                                                                  │  ─────╯
+│       │   Cancel     Back     Add directory                                              │     ▪ ╮
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
+│                                                                                             ─────╯
+│                                                                                                ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
+action: None
+=== clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a session.          ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                ╭ × New session · 2/3 local project ─────────────────────────────────────────────────────────────────────╮                │
+│                │                                                                                                        │                │
+│                │ Absolute project directory on this machine:                                                            │                │
+│                │                                                                                                        │                │
+│                │ /work/newer                                                                                            │                │
+│                │                                                                                                        │                │
+│                │ Error: previous path was invalid                                                                       │                │
+│                │                                                                                                        │                │
+│                │ Recent on this host:                                                                                   │                │
+│                │                                                                                                        │                │
+│                │ › /work/newer                                                                                          │                │
+│                │   /work/older                                                                                          │                │
+│                │                                                                                                        │                │
+│                │   Cancel     Back     Next                                                                             │  ──────────────╯
+│                ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╮
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a session.          ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                ╭ × New session · 2/3 local project ─────────────────────────────────────────────────────────────────────╮                │
+│                │                                                                                                        │                │
+│                │ Absolute project directory on this machine:                                                            │                │
+│                │                                                                                                        │                │
+│                │ /work/newer                                                                                            │                │
+│                │                                                                                                        │                │
+│                │ Error: previous path was invalid                                                                       │                │
+│                │                                                                                                        │                │
+│                │ Recent on this host:                                                                                   │                │
+│                │                                                                                                        │                │
+│                │ › /work/newer                                                                                          │                │
+│                │   /work/older                                                                                          │                │
+│                │                                                                                                        │                │
+│                │   Cancel     Back     Next                                                                             │  ──────────────╯
+│                ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╮
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a session.          ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                      ✦  M J O L N I R                                      │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                ╭ × New session · 2/3 local project ─────────────────────────────────────────────────────────────────────╮                │
+│                │                                                                                                        │                │
+│                │ Absolute project directory on this machine:                                                            │                │
+│                │                                                                                                        │                │
+│                │ /work/older                                                                                            │                │
+│                │                                                                                                        │                │
+│                │ Recent on this host:                                                                                   │                │
+│                │                                                                                                        │                │
+│                │   /work/newer                                                                                          │                │
+│                │ › /work/older                                                                                          │                │
+│                │                                                                                                        │                │
+│                │   Cancel     Back     Next                                                                             │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ──────────────╯
+│                                                                                                                            ──────────────╮
+│                                                                                                                                          │
+│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+action: ValidateProjectDirectory { target_template_id: "localhost", directory: "/work/older" }

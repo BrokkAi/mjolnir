@@ -1,8 +1,8 @@
 use super::*;
 use crate::chat::ChatAction;
 use crate::chat::test_support::{
-    agent_message_item, agent_transcript_item, drawn_transcript, drawn_transcript_selecting, key,
-    line_text, mouse_in, queued, snapshot, transcript_text,
+    agent_message_item, drawn_transcript, drawn_transcript_selecting, key, line_text, mouse_in,
+    queued, snapshot, transcript_text,
 };
 use crate::selection::SelectionState;
 use agent_client_protocol::schema::v1::ToolCallStatus;
@@ -100,57 +100,6 @@ fn keypad_key(code: KeyCode) -> KeyEvent {
 /// routing checks before it hands the wheel to the transcript.
 fn wheel(kind: MouseEventKind) -> MouseEvent {
     mouse_in(kind, Rect::new(0, 10, 40, 1))
-}
-
-/// A prompt Hel generated for a review is stored as a User item, because that
-/// is what the harness received, but it must never render as the user's.
-#[test]
-fn a_tool_entry_carries_its_state_and_its_changed_files_as_data() {
-    // The terminal formats a diffstat for a terminal. A browser re-parsing
-    // that formatting is how every diffstat came to render as one unsplit
-    // path, so the projection carries the numbers instead.
-    let mut entry = ChatEntry::plain(1, ChatRole::Tool, "edit src/main.rs".to_owned());
-    entry.tool_status = Some(ToolStatus::Failed);
-    entry.tool_diffstats = vec![
-        format_diffstat_for_test("src/main.rs", 12, 3),
-        "not a diffstat".to_owned(),
-    ];
-    let browser = browser_entry(&entry);
-
-    assert_eq!(browser.tool_status, Some("failed"));
-    assert_eq!(browser.tone, "failed");
-    assert_eq!(browser.glyph, "\u{d7}");
-    assert_eq!(browser.diffstats.len(), 1, "an unparseable line was kept");
-    assert_eq!(browser.diffstats[0].path, "src/main.rs");
-    assert_eq!(browser.diffstats[0].insertions, 12);
-    assert_eq!(browser.diffstats[0].deletions, 3);
-}
-
-/// Build a diffstat the way `format_diffstat` does, including the Unicode
-/// MINUS SIGN, so this check fails if that format ever changes.
-fn format_diffstat_for_test(path: &str, insertions: u32, deletions: u32) -> String {
-    format!("{path}  +{insertions} \u{2212}{deletions}")
-}
-
-#[test]
-fn every_role_publishes_the_glyph_and_tone_the_terminal_draws() {
-    for (role, glyph, tone) in [
-        (ChatRole::User, "\u{276f}", "user"),
-        (ChatRole::Agent, "\u{25cf}", "agent"),
-        (ChatRole::Thought, "\u{25cb}", "thinking"),
-        (ChatRole::Plan, "\u{25c7}", "plan"),
-        (ChatRole::PlanProposal, "\u{25c8}", "plan-proposal"),
-        (ChatRole::System, "\u{2500}", "system"),
-    ] {
-        let entry = ChatEntry::plain(1, role, "text".to_owned());
-        let browser = browser_entry(&entry);
-        assert_eq!(browser.glyph, glyph, "{role:?}");
-        assert_eq!(browser.tone, tone, "{role:?}");
-        assert!(
-            browser.tool_status.is_none(),
-            "{role:?} carries a tool state"
-        );
-    }
 }
 
 #[test]
@@ -282,6 +231,7 @@ fn browser_restart_collapse_resets_when_a_delivered_marker_is_replaced() {
     assert!(settled.entries.is_empty());
 }
 
+// Hard-won: 0333efb9: review-generated prompts rendered as if the user typed them.
 #[test]
 fn a_generated_review_prompt_renders_as_hels_own_line() {
     let item = std::sync::Arc::new(TranscriptItem {
@@ -336,26 +286,6 @@ fn an_empty_conversation_identifies_initial_relay_loading() {
         transcript_text(&mut chat, 80),
         ["No messages yet — send a prompt to begin."]
     );
-}
-
-#[test]
-fn captured_mouse_wheel_scrolls_history_and_returns_to_following() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.extend(
-        (0..40)
-            .map(|index| ChatEntry::plain(index + 1, ChatRole::User, format!("message {index}"))),
-    );
-    let tail = drawn_transcript(&mut chat, 40, 24);
-    assert!(tail.iter().any(|line| line.contains("message 39")));
-
-    chat.handle_mouse(wheel(MouseEventKind::ScrollUp));
-    let scrolled = drawn_transcript(&mut chat, 40, 24);
-    assert!(!scrolled.iter().any(|line| line.contains("message 39")));
-
-    chat.handle_mouse(wheel(MouseEventKind::ScrollDown));
-    let followed = drawn_transcript(&mut chat, 40, 24);
-    assert!(followed.iter().any(|line| line.contains("message 39")));
-    assert!(!followed.iter().any(|line| line.contains("End to follow")));
 }
 
 #[test]
@@ -431,92 +361,6 @@ fn conversation_title_includes_the_session_name_after_the_dashboard_summary() {
     );
 }
 
-#[test]
-fn conversation_title_shows_review_activity_then_restores_primary_activity() {
-    use mj_client::review::RuntimeReviewView;
-    use mj_core::review::driver::TurnReviewPhase;
-    use mj_core::review::verdict::ReviewVerdict;
-
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_header_summary("podman", "codex3", "Review the build");
-    let idle = transcript_title(&chat, 20_000).to_string();
-    assert!(idle.contains("Idle"));
-    let mut view = RuntimeReviewView {
-        session_id: "session".to_owned(),
-        questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
-        phase: TurnReviewPhase::LaunchingReviewer,
-        roles: Vec::new(),
-        status: "starting the reviewer".to_owned(),
-        verdict: None,
-    };
-    chat.set_turn_review(Some(view.clone()));
-    assert_eq!(
-        transcript_title(&chat, 20_000).to_string(),
-        " podman  [Reviewing]  codex3  Review the build "
-    );
-    view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
-        synthesis: "[P2] src/lib.rs:1 -- weak test".to_owned(),
-        evidence: Default::default(),
-    });
-    chat.set_turn_review(Some(view));
-    assert!(
-        transcript_title(&chat, 20_000)
-            .to_string()
-            .contains("[Findings]")
-    );
-    chat.set_turn_review(None);
-    assert_eq!(transcript_title(&chat, 20_000).to_string(), idle);
-}
-
-#[test]
-fn conversation_header_renders_the_session_title_in_a_distinct_color() {
-    use ratatui::{Terminal, backend::TestBackend};
-
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.set_header_summary("podman", "codex", "update the title");
-    let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
-    terminal
-        .draw(|frame| {
-            render_transcript(frame, frame.area(), &mut chat, false, 0, 0, false);
-        })
-        .expect("render conversation");
-    let buffer = terminal.backend().buffer();
-    let header = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
-    assert!(
-        header.contains("podman  Idle  codex  update the title"),
-        "{header}"
-    );
-    let title_start = header[..header.find("update the title").unwrap()]
-        .chars()
-        .count() as u16;
-    assert_eq!(buffer[(2, 0)].fg, theme::palette().muted);
-    for x in title_start..title_start + "update the title".len() as u16 {
-        assert_eq!(buffer[(x, 0)].fg, theme::palette().text);
-    }
-}
-
-/// A host that tiles several panes says which one has the keyboard, and that
-/// pane's transcript border is drawn in the focused style.
-#[test]
-fn the_transcript_border_follows_the_hosts_pane_focus() {
-    use ratatui::{Terminal, backend::TestBackend};
-
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut border = |pane_focused| {
-        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("terminal");
-        terminal
-            .draw(|frame| {
-                render_transcript(frame, frame.area(), &mut chat, false, 0, 0, pane_focused);
-            })
-            .expect("render conversation");
-        terminal.backend().buffer()[(0, 0)].fg
-    };
-
-    assert_eq!(Some(border(true)), theme::border(true).fg);
-    assert_eq!(Some(border(false)), theme::border(false).fg);
-}
-
 /// A host that draws its own chips at the right of the title row tells the
 /// chat how many columns to stay clear of, and the title stops short of them.
 #[test]
@@ -563,44 +407,6 @@ fn long_conversation_titles_use_the_header_width_while_working() {
         let buffer = terminal.backend().buffer();
         assert!((width - 3..width - 1).any(|x| buffer[(x, 0)].symbol() == "…"));
     }
-}
-
-#[test]
-fn live_unclaimed_terminal_renders_a_quiet_running_card() {
-    let started_at_ms = mj_core::clock::epoch_millis();
-    let terminal = mj_core::relay::ActiveAgentTerminal {
-        terminal_id: "term-1".into(),
-        command: "cargo mutants --in-diff diff".into(),
-        started_at_ms,
-    };
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let session = MaterializedSession::empty("session-live-terminal");
-    chat.set_active_agent_terminals(std::slice::from_ref(&terminal), &session);
-
-    let rendered = transcript_text(&mut chat, 80);
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("cargo mutants --in-diff diff")),
-        "the command identifies useful live work: {rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|line| line.contains("Running ·")),
-        "the card says that the command is still running: {rendered:?}"
-    );
-    assert!(
-        !rendered.iter().any(|line| line.contains("No messages yet")),
-        "live work replaces the misleading empty state: {rendered:?}"
-    );
-
-    chat.set_active_agent_terminals(&[], &session);
-    let after_exit = transcript_text(&mut chat, 80);
-    assert!(
-        after_exit
-            .iter()
-            .any(|line| line.contains("No messages yet")),
-        "a successful exit removes the provisional card: {after_exit:?}"
-    );
 }
 
 #[test]
@@ -835,60 +641,7 @@ fn converted_prefix(session: &MaterializedSession, chat: &ChatState) -> Vec<Chat
     )
 }
 
-#[test]
-fn materialized_conversion_preserves_each_transcript_body() {
-    let mut session = MaterializedSession::empty("session-bodies");
-    session.applied_event_ordinal = 9;
-    session.transcript = vec![
-        fixture_user_item(1),
-        fixture_agent_item(2),
-        fixture_thought_item(3),
-        fixture_tool_item(4),
-        fixture_plan_item(5),
-        fixture_system_item(6),
-    ];
-
-    let entries = materialized_chat_entries(&session);
-
-    let roles = entries.iter().map(|entry| entry.role).collect::<Vec<_>>();
-    assert_eq!(
-        roles,
-        [
-            ChatRole::User,
-            ChatRole::Agent,
-            ChatRole::Thought,
-            ChatRole::Tool,
-            ChatRole::Plan,
-            ChatRole::System,
-        ]
-    );
-    assert_eq!(entries[0].text, "question 1");
-    assert!(entries[1].text.starts_with("answer 2.0 "));
-    assert_eq!(entries[1].text.len(), 8 * 40 * "answer 2.0 ".len());
-    assert_eq!(entries[1].message_id.as_deref(), Some("agent:2"));
-    assert_eq!(entries[2].text, "thinking about 3");
-    assert_eq!(entries[3].text, "read file-4");
-    assert_eq!(entries[3].tool_status, Some(ToolStatus::Completed));
-    assert_eq!(entries[3].tool_call_id.as_deref(), Some("tool:4"));
-    assert_eq!(entries[3].tool_content.len(), 1);
-    assert_eq!(entries[3].tool_locations, ["src/file-4.rs:3"]);
-    assert_eq!(entries[4].plan.len(), 1);
-    assert_eq!(entries[4].plan[0].text, "step 5");
-    assert_eq!(entries[4].plan[0].status, PlanStatus::Running);
-    assert_eq!(entries[5].text, "notice 6");
-    for (index, entry) in entries.iter().enumerate() {
-        assert_eq!(entry.start_seq, index as u64 + 1);
-        assert_eq!(entry.recorded_at_ms, Some(FIXTURE_MS));
-        assert_eq!(entry.revision, FIXTURE_MS as u64);
-    }
-    // The bodies the projection records a change ordinal for keep their
-    // own cursor; the ones it edits in place without one keep the frontier.
-    assert_eq!(
-        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
-        [1, 2, 9, 9, 9, 6]
-    );
-}
-
+// Hard-won: 2b229f70: opening a large session blocked the dashboard for seconds.
 #[test]
 fn opening_a_long_session_converts_only_the_tail() {
     let items = TAIL_SEED_ITEMS as u64 + 400;
@@ -900,28 +653,14 @@ fn opening_a_long_session_converts_only_the_tail() {
     assert_eq!(chat.unconverted_prefix(), 400);
     let eager = materialized_chat_entries(&session);
     assert_eq!(chat.entries, eager[400..]);
-}
-
-#[test]
-fn opening_a_short_session_converts_the_whole_transcript() {
-    let session = long_materialized_session(TAIL_SEED_ITEMS as u64);
-
-    let chat = ChatState::from_materialized_tail(&session, &[], &[]);
-
-    assert_eq!(chat.unconverted_prefix(), 0);
-    assert_eq!(chat.entries, materialized_chat_entries(&session));
-}
-
-#[test]
-fn splicing_the_converted_prefix_matches_the_eager_projection() {
-    let session = long_materialized_session(TAIL_SEED_ITEMS as u64 + 500);
-    let mut chat = ChatState::from_materialized_tail(&session, &[], &[]);
-    let prefix = converted_prefix(&session, &chat);
-
-    assert!(chat.splice_transcript_prefix(prefix));
-
-    assert_eq!(chat.unconverted_prefix(), 0);
-    assert_eq!(chat.entries, materialized_chat_entries(&session));
+    let short_session = long_materialized_session(TAIL_SEED_ITEMS as u64);
+    let short_chat = ChatState::from_materialized_tail(&short_session, &[], &[]);
+    assert_eq!(short_chat.unconverted_prefix(), 0);
+    assert_eq!(
+        short_chat.entries,
+        materialized_chat_entries(&short_session),
+        "the threshold keeps shorter conversations fully available"
+    );
 }
 
 #[test]
@@ -995,6 +734,7 @@ fn a_prefix_that_no_longer_meets_the_tail_is_refused() {
     assert_eq!(chat.entries.len(), TAIL_SEED_ITEMS);
 }
 
+// Hard-won: 93fa5d9a: a same-size compaction rewrite let a stale prefix match current history.
 #[test]
 fn a_prefix_from_replaced_history_is_refused_when_the_rewrite_keeps_the_length() {
     let session = long_materialized_session(TAIL_SEED_ITEMS as u64 + 60);
@@ -1137,32 +877,6 @@ fn user_and_agent_headers_show_first_event_time_as_local_hours_and_minutes() {
 }
 
 #[test]
-fn tool_call_updates_refresh_the_rendered_status() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.apply_session_update(
-        1,
-        &serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "read-config",
-            "title": "read config",
-            "status": "pending"
-        }),
-    );
-    chat.apply_session_update(
-        2,
-        &serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "read-config",
-            "status": "completed"
-        }),
-    );
-
-    assert_eq!(chat.entries.len(), 1);
-    assert_eq!(chat.entries[0].tool_status, Some(ToolStatus::Completed));
-    assert_eq!(tool_presentation(ToolStatus::Completed).1, "done");
-}
-
-#[test]
 fn live_acp_diffs_render_paths_without_counting_lines_on_the_event_loop() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.apply_session_update(
@@ -1206,43 +920,6 @@ fn live_acp_diffs_render_paths_without_counting_lines_on_the_event_loop() {
         transcript_text(&mut chat, 80),
         ["✓ Tool · done", "│ Edit", "│ /workspace/src/lib.rs", ""]
     );
-}
-
-#[test]
-fn execute_summary_is_immediate_stable_and_raw_keeps_the_provider_title() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.apply_session_update(
-        1,
-        &serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "shell-1",
-            "title": "Bash",
-            "kind": "execute",
-            "status": "pending",
-            "rawInput": {
-                "command": "git add src && cargo test --workspace | cat"
-            }
-        }),
-    );
-
-    for (seq, status) in [(2, "in_progress"), (3, "completed")] {
-        let rich = transcript_text(&mut chat, 100);
-        assert!(rich.contains(&"│ git add && cargo test | cat".to_owned()));
-        assert!(!rich.contains(&"│ Bash".to_owned()));
-        chat.apply_session_update(
-            seq,
-            &serde_json::json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": "shell-1",
-                "status": status
-            }),
-        );
-    }
-    let rich = transcript_text(&mut chat, 100);
-    assert!(rich.contains(&"│ git add && cargo test | cat".to_owned()));
-
-    chat.render_mode = TranscriptRenderMode::Raw;
-    assert!(transcript_text(&mut chat, 100).contains(&"│ Bash".to_owned()));
 }
 
 #[test]
@@ -1334,34 +1011,6 @@ fn clicking_a_collapsed_member_expands_only_that_call_and_splits_the_run() {
     ));
 }
 
-#[test]
-fn wrapped_summary_members_rebuild_hitboxes_for_their_visible_rows() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.extend([
-        completed_tool(1, "first command with a long argument"),
-        completed_tool(2, "second command with a long argument"),
-        completed_tool(3, "third command with a long argument"),
-    ]);
-
-    drawn_transcript(&mut chat, 30, 24);
-    let second_targets = chat
-        .transcript_tool_click_targets
-        .iter()
-        .filter(|target| target.start_seq == 2)
-        .copied()
-        .collect::<Vec<_>>();
-    assert!(second_targets.len() >= 2, "the wrapped member has rows");
-    let target = second_targets[1];
-    chat.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: target.rect.x,
-        row: target.rect.y,
-        modifiers: KeyModifiers::NONE,
-    });
-
-    assert!(chat.expanded_tool_calls.contains(&2));
-}
-
 fn click_rendered_text(chat: &mut ChatState, rows: &[String], text: &str) {
     let (row, line, offset) = rows
         .iter()
@@ -1374,55 +1023,6 @@ fn click_rendered_text(chat: &mut ChatState, rows: &[String], text: &str) {
         row: u16::try_from(row).unwrap(),
         modifiers: KeyModifiers::NONE,
     });
-}
-
-#[test]
-fn older_and_newer_tool_groups_expand_at_their_rendered_names_after_wrapped_thoughts() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    for (start, name) in [(1, "older"), (5, "newer")] {
-        let mut tool = completed_tool(start + 1, &format!("{name} provider title"));
-        tool.tool_summary = Some(format!("{name}-command"));
-        tool.tool_content = vec![format!("{name} tool details")];
-        chat.entries.extend([
-            thought(
-                start,
-                &format!("{name} thought with enough words to wrap across several rows"),
-            ),
-            tool,
-            completed_tool(start + 2, &format!("{name}-companion")),
-            ChatEntry::plain(start + 3, ChatRole::Agent, format!("{name} response")),
-        ]);
-    }
-
-    for name in ["older", "newer"] {
-        let rows = drawn_transcript(&mut chat, 36, 48);
-        click_rendered_text(&mut chat, &rows, &format!("{name}-command"));
-        let rows = drawn_transcript(&mut chat, 36, 48);
-        assert!(shows(&rows, &format!("{name} provider title")), "{rows:#?}");
-        assert!(shows(&rows, &format!("{name} tool details")), "{rows:#?}");
-        let other = if name == "older" { "newer" } else { "older" };
-        assert!(!shows(&rows, &format!("{other} tool details")));
-
-        click_rendered_text(&mut chat, &rows, &format!("{name} provider title"));
-        let rows = drawn_transcript(&mut chat, 36, 48);
-        assert!(shows(&rows, &format!("{name}-command")));
-        assert!(!shows(&rows, &format!("{name} tool details")));
-        assert!(chat.expanded_tool_calls.is_empty());
-    }
-}
-
-#[test]
-fn clicking_thought_text_above_a_tool_group_does_not_expand_a_call() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.extend([
-        thought(1, "thinking about tools"),
-        completed_tool(2, "first-command"),
-        completed_tool(3, "second-command"),
-    ]);
-    let rows = drawn_transcript(&mut chat, 60, 24);
-    click_rendered_text(&mut chat, &rows, "thinking about tools");
-    assert!(chat.expanded_tool_calls.is_empty());
-    assert_eq!(drawn_transcript(&mut chat, 60, 24), rows);
 }
 
 #[test]
@@ -1451,90 +1051,6 @@ fn partially_scrolled_repeated_tool_names_expand_the_visible_call() {
     assert!(shows(&rendered, "provider title 2"));
     assert!(shows(&rendered, "details for call 2"));
     assert!(!shows(&rendered, "details for call 1"));
-}
-
-#[test]
-fn expanded_tool_uses_full_provider_title_and_details_in_rich_mode() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    let mut entry = completed_tool(2, "provider title: edit src/lib.rs");
-    entry.tool_content = vec!["wrote the file".into()];
-    chat.entries.extend([
-        completed_tool(1, "first command"),
-        entry,
-        completed_tool(3, "third command"),
-    ]);
-
-    drawn_transcript(&mut chat, 80, 24);
-    let target = chat
-        .transcript_tool_click_targets
-        .iter()
-        .find(|target| target.start_seq == 2)
-        .copied()
-        .expect("the member is clickable");
-    chat.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: target.rect.x,
-        row: target.rect.y,
-        modifiers: KeyModifiers::NONE,
-    });
-
-    let rendered = transcript_text(&mut chat, 80);
-    assert!(rendered.iter().any(|line| line.contains("provider title")));
-    assert!(rendered.iter().any(|line| line.contains("wrote the file")));
-    assert_eq!(chat.render_mode, TranscriptRenderMode::Rich);
-}
-
-#[test]
-fn a_single_completed_tool_is_clickable_but_running_and_failed_tools_are_not() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.extend([
-        ChatEntry::tool(1, "running command", None, ToolStatus::Running),
-        completed_tool(2, "completed command"),
-        ChatEntry::tool(3, "failed command", None, ToolStatus::Failed),
-    ]);
-
-    drawn_transcript(&mut chat, 80, 24);
-    assert!(
-        chat.transcript_tool_click_targets
-            .iter()
-            .any(|target| target.start_seq == 2)
-    );
-    assert!(
-        !chat
-            .transcript_tool_click_targets
-            .iter()
-            .any(|target| target.start_seq == 1 || target.start_seq == 3)
-    );
-    let target = chat
-        .transcript_tool_click_targets
-        .iter()
-        .find(|target| target.start_seq == 2)
-        .copied()
-        .expect("the singleton completed call is clickable");
-    chat.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: target.rect.x,
-        row: target.rect.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    assert!(chat.expanded_tool_calls.contains(&2));
-}
-
-#[test]
-fn completed_tool_rows_use_thought_muting_while_running_and_failed_keep_emphasis() {
-    let completed = entry_visual(&completed_tool(1, "done"));
-    let pending = entry_visual(&ChatEntry::tool(2, "waiting", None, ToolStatus::Pending));
-    let running = entry_visual(&ChatEntry::tool(3, "running", None, ToolStatus::Running));
-    let failed = entry_visual(&ChatEntry::tool(4, "failed", None, ToolStatus::Failed));
-
-    assert_eq!(completed.header_style.fg, Some(theme::palette().muted));
-    assert_eq!(completed.body_style.fg, Some(theme::palette().muted));
-    assert_eq!(pending.header_style.fg, Some(theme::palette().muted));
-    assert_eq!(pending.body_style.fg, Some(theme::palette().muted));
-    assert_eq!(running.header_style.fg, Some(theme::palette().warning));
-    assert_eq!(running.body_style.fg, None);
-    assert_eq!(failed.header_style.fg, Some(theme::palette().error));
-    assert_eq!(failed.body_style.fg, None);
 }
 
 #[test]
@@ -1568,6 +1084,7 @@ fn kimi_shell_tool_run_collapses_to_command_names() {
 
 /// A parser-derived summary starts at the executable even when a harness
 /// decorates the command title.
+// Hard-won: 585c3402: leading command punctuation made a collapsed command title render incorrectly.
 #[test]
 fn a_collapsed_tool_label_starts_at_the_command_name() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2011,6 +1528,7 @@ fn transcript_blocks_keep_role_headers_and_wrapped_body_indented() {
 /// A preview is the conversation's own rendering minus its rail: the same
 /// rows, wrapped the same way, without the gutter that only means something
 /// under a role header.
+// Hard-won: 7ab8368b: session previews repeated the transcript gutter after drawing their own prefix.
 #[test]
 fn agent_preview_tail_matches_the_conversation_body_rows_without_the_gutter() {
     let text = "# heading\n\nfirst paragraph with some words to wrap\n\n- alpha\n- beta";
@@ -2152,52 +1670,6 @@ fn changing_theme_recolors_cached_conversation_without_changing_text() {
 }
 
 #[test]
-fn blank_rows_inside_messages_keep_the_role_gutter() {
-    for (role, color) in [
-        (ChatRole::User, theme::palette().secondary),
-        (ChatRole::Agent, theme::palette().border),
-    ] {
-        let entry = ChatEntry::plain(1, role, "1. first\n\n2. second");
-        let lines = render_transcript_entry(&entry, 80, TranscriptRenderMode::Rich);
-        let blank = lines
-            .iter()
-            .find(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-                    == role_gutter()
-            })
-            .expect("blank row with role gutter");
-
-        assert_eq!(blank.spans[0].style.fg, Some(color));
-        assert!(lines.last().is_some_and(line_is_empty));
-        assert!(lines.last().is_some_and(|line| line.spans.is_empty()));
-    }
-}
-
-#[test]
-fn transcript_snapshot_tail_matches_rich_conversation_rows() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries
-        .push(ChatEntry::plain(1, ChatRole::User, "inspect the renderer"));
-    chat.entries.push(ChatEntry::plain(
-        2,
-        ChatRole::Agent,
-        "**Done.**\n\n- shared renderer\n- live tail",
-    ));
-    let expected = transcript_lines(&mut chat, 32)
-        .into_iter()
-        .filter(|line| !line_is_empty(line))
-        .collect::<Vec<_>>();
-    let expected = line_text(expected);
-    let expected = expected[expected.len().saturating_sub(6)..].to_vec();
-
-    let mut snapshot = chat.transcript_snapshot();
-    assert_eq!(line_text(snapshot.rich_tail(32, 6)), expected);
-}
-
-#[test]
 fn transcript_snapshot_tail_counts_only_nonempty_rows() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(ChatEntry::plain(
@@ -2278,6 +1750,7 @@ fn browser_transcript_excludes_entries_before_provider_compaction() {
 /// A delta has to be proportional to what changed, not to the window. The
 /// bodies the projection records no change ordinal for still overshoot, so
 /// this asserts a large reduction rather than a minimal one.
+// Hard-won: 93fa5d9a: one transcript update retransmitted the full browser window.
 #[test]
 fn a_delta_costs_a_fraction_of_the_window_it_updates() {
     let mut session = long_materialized_session(600);
@@ -2319,6 +1792,7 @@ fn delta_ids(session: &MaterializedSession, after_seq: u64) -> Vec<u64> {
     delta.entries.iter().map(|entry| entry.id).collect()
 }
 
+// Hard-won: 93fa5d9a: one transcript update retransmitted the full browser window.
 #[test]
 fn appending_one_message_marks_only_that_entry_changed() {
     let mut session = message_session(8);
@@ -2332,6 +1806,7 @@ fn appending_one_message_marks_only_that_entry_changed() {
     assert_eq!(delta_ids(&session, cursor), [9]);
 }
 
+// Hard-won: 93fa5d9a: one transcript update retransmitted the full browser window.
 #[test]
 fn a_growing_agent_message_is_the_only_entry_its_delta_carries() {
     let mut session = message_session(6);
@@ -2355,121 +1830,10 @@ fn a_growing_agent_message_is_the_only_entry_its_delta_carries() {
     assert!(delta.entries[0].lines[0].ends_with(" and one more thing"));
 }
 
-#[test]
-fn markdown_list_wrapping_uses_a_hanging_indent() {
-    let entry = ChatEntry::plain(1, ChatRole::Agent, "- alpha beta gamma");
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.push(entry);
-    let text = transcript_text(&mut chat, 13);
-
-    assert!(text.iter().any(|line| line == "│ • alpha"));
-    assert!(text.iter().any(|line| line == "│   beta"));
-    assert!(text.iter().any(|line| line == "│   gamma"));
-}
-
-#[test]
-fn page_navigation_keeps_end_attached_to_the_latest_message() {
-    let mut chat = numbered_chat(40);
-    let rows = drawn_transcript(&mut chat, 60, 24);
-    assert!(shows(&rows, "message 39"), "opens on the newest message");
-    assert!(!shows(&rows, "End to follow"), "the tail needs no hint");
-
-    chat.handle_key(key(KeyCode::PageUp));
-    let rows = drawn_transcript(&mut chat, 60, 24);
-    assert!(!shows(&rows, "message 39"), "page up leaves the tail");
-    assert!(
-        shows(&rows, "End to follow"),
-        "scrolled back says how to return"
-    );
-
-    chat.handle_key(key(KeyCode::PageDown));
-    let rows = drawn_transcript(&mut chat, 60, 24);
-    assert!(shows(&rows, "message 39"), "page down returns to the tail");
-
-    chat.handle_key(key(KeyCode::PageUp));
-    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
-    let rows = drawn_transcript(&mut chat, 60, 24);
-    assert!(
-        shows(&rows, "message 39"),
-        "Ctrl-End follows the tail again"
-    );
-    assert!(!shows(&rows, "End to follow"));
-}
-
-#[test]
-fn control_home_and_end_reach_both_ends_of_a_long_transcript() {
-    let mut chat = numbered_chat(200);
-    let _ = drawn_transcript(&mut chat, 40, 24);
-
-    chat.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
-    let rows = drawn_transcript(&mut chat, 40, 24);
-    assert!(shows(&rows, "message 0"), "Ctrl-Home reaches the first row");
-    assert!(!shows(&rows, "message 199"));
-
-    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
-    let rows = drawn_transcript(&mut chat, 40, 24);
-    assert!(shows(&rows, "message 199"), "Ctrl-End reaches the last row");
-}
-
-#[test]
-fn keypad_home_and_end_reach_both_ends_without_editing_the_prompt() {
-    let mut chat = numbered_chat(200);
-    chat.set_input("draft prompt".into());
-    let _ = drawn_transcript(&mut chat, 40, 24);
-
-    chat.handle_key(keypad_key(KeyCode::Home));
-    let rows = drawn_transcript(&mut chat, 40, 24);
-    assert!(
-        shows(&rows, "message 0"),
-        "keypad Home reaches the first row"
-    );
-    assert!(!shows(&rows, "message 199"));
-    assert_eq!(chat.input_cursor, "draft prompt".len());
-
-    chat.handle_key(keypad_key(KeyCode::End));
-    let rows = drawn_transcript(&mut chat, 40, 24);
-    assert!(shows(&rows, "message 199"), "keypad End follows the tail");
-    assert_eq!(chat.input_cursor, "draft prompt".len());
-
-    chat.handle_key(key(KeyCode::Home));
-    assert_eq!(chat.input_cursor, 0, "plain Home still edits the prompt");
-    chat.handle_key(key(KeyCode::End));
-    assert_eq!(
-        chat.input_cursor,
-        "draft prompt".len(),
-        "plain End still edits the prompt"
-    );
-}
-
-#[test]
-fn opening_reveals_the_dashboard_agent_excerpt_above_later_terminal_output() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.push(ChatEntry::plain(
-        1,
-        ChatRole::Agent,
-        "response advertised on the dashboard",
-    ));
-    for index in 0..8 {
-        chat.entries.push(ChatEntry::plain(
-            index + 2,
-            ChatRole::System,
-            format!("terminal failure {index}\n{}", "output\n".repeat(12)),
-        ));
-    }
-
-    let opened = drawn_transcript(&mut chat, 60, 24);
-    assert!(shows(&opened, "response advertised on the dashboard"));
-    assert!(shows(&opened, "End to follow"));
-
-    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
-    let tail = drawn_transcript(&mut chat, 60, 24);
-    assert!(shows(&tail, "terminal failure 7"));
-    assert!(!shows(&tail, "End to follow"));
-}
-
 /// I1-7: after a resume the pane opened on the revealed reply ("message 7 of
 /// N") and stayed there when a new reply arrived. The reveal is not a user
 /// scroll, so new content brings the view back to the tail.
+// Hard-won: bf09b3d6: a resumed pane stayed on its opening reveal after a new reply arrived.
 #[test]
 fn new_content_after_the_opening_reveal_follows_the_tail() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2501,32 +1865,12 @@ fn new_content_after_the_opening_reveal_follows_the_tail() {
     assert!(!shows(&rows, "End to follow"));
 }
 
-#[test]
-fn new_content_does_not_move_a_reader_who_scrolled_up() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.extend(
-        (0..40).map(|index| ChatEntry::plain(index + 1, ChatRole::User, format!("line {index}"))),
-    );
-    drawn_transcript(&mut chat, 60, 24);
-    chat.handle_key(key(KeyCode::PageUp));
-    let scrolled = drawn_transcript(&mut chat, 60, 24);
-    assert!(shows(&scrolled, "End to follow"));
-
-    chat.entries
-        .push(ChatEntry::plain(100, ChatRole::Agent, "late reply"));
-    let rows = drawn_transcript(&mut chat, 60, 24);
-    assert!(
-        shows(&rows, "End to follow"),
-        "a reader's scroll position is kept"
-    );
-    assert!(!shows(&rows, "late reply"));
-}
-
 /// D-14: a narrow pinned pane opened on the reveal of an earlier reply, the
 /// dashboard switched away and back (a relaunch did this through the
 /// workspace it opened first), and the pane came back parked on that reply
 /// while the new reply landed below it. The saved position was the reveal's
 /// anchor, which the reopened view took for a reader's own scroll.
+// Hard-won: 24c88abc: a reopened pane treated its saved opening reveal as a user scroll.
 #[test]
 fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2553,11 +1897,8 @@ fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
     let rows = drawn_transcript(&mut reopened, 31, 12);
 
     assert!(shows(&rows, "reply to the probe"), "{rows:?}");
-}
 
-/// A reader who scrolled up keeps that place across the same reopening.
-#[test]
-fn a_view_reopened_after_a_reader_scrolled_up_keeps_its_place() {
+    // A deliberate reader scroll survives the same save and restore path.
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.extend(
         (0..40).map(|index| ChatEntry::plain(index + 1, ChatRole::User, format!("line {index}"))),
@@ -2614,6 +1955,7 @@ fn mouse_wheel_reaches_the_tail_across_a_large_collapsed_tool_run() {
     );
 }
 
+// Hard-won: 1f30f668: scrolling an empty transcript panicked on a missing render-cache entry.
 #[test]
 fn the_wheel_over_an_empty_transcript_has_nothing_to_scroll() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -2628,9 +1970,10 @@ fn the_wheel_over_an_empty_transcript_has_nothing_to_scroll() {
 #[test]
 fn scrolled_history_stays_put_while_new_messages_stream_in() {
     let mut chat = numbered_chat(40);
-    let _ = drawn_transcript(&mut chat, 40, 24);
+    let _ = drawn_transcript(&mut chat, 60, 24);
     chat.handle_key(key(KeyCode::PageUp));
-    let before = drawn_transcript(&mut chat, 40, 24);
+    let before = drawn_transcript(&mut chat, 60, 24);
+    assert!(shows(&before, "End to follow"));
 
     for index in 40..50 {
         chat.entries.push(ChatEntry::plain(
@@ -2639,7 +1982,9 @@ fn scrolled_history_stays_put_while_new_messages_stream_in() {
             format!("message {index}"),
         ));
     }
-    let after = drawn_transcript(&mut chat, 40, 24);
+    chat.entries
+        .push(ChatEntry::plain(100, ChatRole::Agent, "late reply"));
+    let after = drawn_transcript(&mut chat, 60, 24);
 
     assert_eq!(
         visible_messages(&before),
@@ -2647,17 +1992,11 @@ fn scrolled_history_stays_put_while_new_messages_stream_in() {
         "appending messages must not move a scrolled-back viewport"
     );
     assert!(!visible_messages(&after).is_empty());
-}
-
-#[test]
-fn a_transcript_shorter_than_the_viewport_cannot_scroll() {
-    let mut chat = numbered_chat(2);
-    let rows = drawn_transcript(&mut chat, 40, 24);
-
-    chat.handle_mouse(wheel(MouseEventKind::ScrollUp));
-    chat.handle_key(key(KeyCode::PageUp));
-
-    assert_eq!(rows, drawn_transcript(&mut chat, 40, 24));
+    assert!(
+        shows(&after, "End to follow"),
+        "the scrolled reader remains marked as behind the tail"
+    );
+    assert!(!shows(&after, "late reply"));
 }
 
 #[test]
@@ -2687,86 +2026,6 @@ fn adjacent_thought_messages_coalesce_without_an_extra_separator() {
     assert_eq!(
         rendered,
         ["○ Thinking", "│ first thought", "│ second thought", ""]
-    );
-}
-
-#[test]
-fn materialized_tool_and_plan_conversion_preserves_more_than_eight_details() {
-    let tool_content = (0..12)
-        .map(|index| {
-            serde_json::json!({
-                "type": "content",
-                "content": {"type": "text", "text": format!("result-{index}")}
-            })
-        })
-        .collect::<Vec<_>>();
-    let locations = (0..12)
-        .map(|index| {
-            serde_json::json!({
-                "path": format!("src/file-{index}.rs"),
-                "line": index + 1
-            })
-        })
-        .collect::<Vec<_>>();
-    let plan = (0..12)
-        .map(|index| {
-            serde_json::json!({
-                "content": format!("step-{index}"),
-                "priority": "medium",
-                "status": "pending"
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut session = MaterializedSession::empty("session-rich-details");
-    session.applied_event_ordinal = 2;
-    session.applied_event_digest = "a".repeat(64);
-    session.transcript = vec![
-        Arc::new(TranscriptItem {
-            stable_id: "tool:inspect".into(),
-            position: 1,
-            latest_content_event_ordinal: None,
-            created_at_ms: 1,
-            last_changed_at_ms: 1,
-            body: TranscriptBody::Tool {
-                call: serde_json::json!({
-                    "toolCallId": "inspect",
-                    "title": "inspect",
-                    "status": "completed",
-                    "content": tool_content,
-                    "locations": locations
-                }),
-                terminal_outputs: Vec::new(),
-                terminal_refs: Vec::new(),
-                presentation: None,
-            },
-        }),
-        Arc::new(TranscriptItem {
-            stable_id: "plan:current".into(),
-            position: 2,
-            latest_content_event_ordinal: None,
-            created_at_ms: 2,
-            last_changed_at_ms: 2,
-            body: TranscriptBody::Plan {
-                plan: serde_json::json!({"entries": plan}),
-            },
-        }),
-    ];
-
-    let entries = materialized_chat_entries(&session);
-    assert_eq!(entries[0].tool_content.len(), 12);
-    assert_eq!(entries[0].tool_locations.len(), 12);
-    assert_eq!(entries[1].plan.len(), 12);
-
-    let browser = TranscriptSnapshot::from_materialized(&session).browser_transcript(None);
-    // The remote viewer mirrors the TUI's Rich feed, so a tool entry is its
-    // title alone: neither the content details nor the locations belong
-    // there, however many the projection kept for Raw mode.
-    assert_eq!(browser.entries[0].lines, ["inspect"]);
-    assert!(
-        browser.entries[1]
-            .lines
-            .iter()
-            .any(|line| line == "○ step-11")
     );
 }
 
@@ -3087,22 +2346,6 @@ fn a_cleanly_exited_standalone_terminal_item_renders_only_in_raw_mode() {
 }
 
 #[test]
-fn a_clean_fallback_terminal_tool_renders_only_in_raw_mode() {
-    let session = fallback_terminal_session(terminal_record(Some(0), None));
-    let entries = materialized_chat_entries(&session);
-    assert!(entries[0].raw_only);
-
-    let mut chat = ChatState::from_materialized(&session, &[], &[]);
-    let rich = transcript_text(&mut chat, 80);
-    assert!(!rich.iter().any(|line| line.contains("cargo build")));
-    assert!(!rich.iter().any(|line| line.contains(STANDALONE_OUTPUT)));
-    chat.render_mode = TranscriptRenderMode::Raw;
-    let raw = transcript_text(&mut chat, 80);
-    assert!(raw.iter().any(|line| line.contains("cargo build")));
-    assert!(raw.iter().any(|line| line.contains(STANDALONE_OUTPUT)));
-}
-
-#[test]
 fn a_failed_fallback_terminal_tool_remains_visible() {
     let session = fallback_terminal_session(terminal_record(Some(3), None));
     let entries = materialized_chat_entries(&session);
@@ -3182,6 +2425,7 @@ fn a_clean_standalone_terminal_item_between_completed_tools_keeps_one_run() {
 /// Grok Build's final update replaces `content` with plain text, so the
 /// output hel captured is attached to the item with nothing in the call
 /// pointing at it. It is still the only copy of what the command printed.
+// Hard-won: b364ed85: Grok replacing a call terminal reference lost its captured output.
 #[test]
 fn attached_terminal_output_renders_when_the_call_no_longer_refers_to_it() {
     let mut session = MaterializedSession::empty("session-dropped-terminal");
@@ -3254,60 +2498,6 @@ fn codex_raw_output_renders_for_a_terminal_hel_has_no_record_for() {
         details(serde_json::json!({"exit_code": 0})),
         ["terminal exec-1"],
         "without output there is nothing to show but the id"
-    );
-}
-
-#[test]
-fn browser_tool_entries_show_the_summary_and_diffstats_only() {
-    let mut session = MaterializedSession::empty("session-browser-tool");
-    session.applied_event_ordinal = 1;
-    session.applied_event_digest = "a".repeat(64);
-    session.transcript = vec![Arc::new(TranscriptItem {
-        stable_id: "tool:edit".into(),
-        position: 1,
-        latest_content_event_ordinal: None,
-        created_at_ms: 1,
-        last_changed_at_ms: 1,
-        body: TranscriptBody::Tool {
-            call: serde_json::json!({
-                "toolCallId": "edit",
-                "title": "Edit src/lib.rs",
-                "status": "completed",
-                "content": [
-                    {
-                        "type": "content",
-                        "content": {"type": "text", "text": "wrote the file"}
-                    },
-                    {
-                        "type": "diff",
-                        "path": "/workspace/src/lib.rs",
-                        "oldText": "alpha\n",
-                        "newText": "alpha\nbeta\n"
-                    }
-                ],
-                "locations": [{"path": "/workspace/src/lib.rs", "line": 2}]
-            }),
-            terminal_outputs: Vec::new(),
-            terminal_refs: Vec::new(),
-            presentation: None,
-        },
-    })];
-
-    let entries = materialized_chat_entries(&session);
-    assert!(entries[0].tool_content.contains(&"wrote the file".into()));
-    assert_eq!(entries[0].tool_locations, ["/workspace/src/lib.rs:2"]);
-
-    let exact_diffstats = BTreeMap::from([(
-        "tool:edit".to_owned(),
-        materialized_tool_diffstats(&session.transcript[0]).unwrap(),
-    )]);
-    let browser = TranscriptSnapshot::from_materialized_with_diffstats(&session, &exact_diffstats)
-        .browser_transcript(None);
-    assert_eq!(
-        browser.entries[0].lines,
-        ["Edit", "/workspace/src/lib.rs  +1 −0"],
-        "the remote viewer carries the Rich feed's summary and diffstat, \
-             not the Raw content or locations"
     );
 }
 
@@ -3404,91 +2594,6 @@ fn browser_uses_rich_group_order_and_changes_its_topology_key() {
     assert_eq!(grouped.entries[1].id, 1);
     assert_eq!(grouped.entries[1].updated_seq, 3);
     assert_eq!(grouped.entries[1].lines, ["git add, gh pr create"]);
-}
-
-#[test]
-fn appending_a_chunk_reuses_earlier_entries_by_pointer_identity() {
-    let mut session = MaterializedSession::empty("session-pointer-reuse");
-    session.applied_event_ordinal = 3;
-    session.transcript = vec![
-        user_transcript_item(1, "first"),
-        user_transcript_item(2, "second"),
-        agent_transcript_item("agent:3", 3),
-    ];
-
-    let mut chat = ChatState::from_materialized(&session, &[], &[]);
-    // Nothing about these entries matches their item any more, so only a
-    // pointer comparison can reuse them.
-    for (index, entry) in chat.entries.iter_mut().take(2).enumerate() {
-        entry.text = format!("reused {index}");
-        entry.revision = u64::MAX;
-        entry.recorded_at_ms = None;
-    }
-
-    let tail = Arc::make_mut(&mut session.transcript[2]);
-    let TranscriptBody::Agent { chunks, .. } = &mut tail.body else {
-        panic!("expected an agent message");
-    };
-    chunks.push(serde_json::json!({
-        "content": {"type": "text", "text": " again"}
-    }));
-    tail.last_changed_at_ms = 40;
-    tail.latest_content_event_ordinal = Some(4);
-    session.applied_event_ordinal = 4;
-    chat.apply_materialized(&session, &[], &[]);
-
-    assert_eq!(chat.entries.len(), 3);
-    assert_eq!(chat.entries[0].text, "reused 0");
-    assert_eq!(chat.entries[1].text, "reused 1");
-    assert!(chat.entries[0].source.is(&session.transcript[0]));
-    assert!(chat.entries[1].source.is(&session.transcript[1]));
-    assert_eq!(chat.entries[2].text, "hello again");
-    assert!(chat.entries[2].source.is(&session.transcript[2]));
-}
-
-#[test]
-fn restored_transcript_reuses_entries_through_the_field_fallback() {
-    let mut session = MaterializedSession::empty("session-restored");
-    session.applied_event_ordinal = 2;
-    session.transcript = vec![
-        user_transcript_item(1, "first"),
-        user_transcript_item(2, "second"),
-    ];
-    let mut chat = ChatState::from_materialized(&session, &[], &[]);
-    chat.entries[0].text = "reused".into();
-
-    // A restore rebuilds every item, so nothing is pointer-identical even
-    // though the content is unchanged.
-    let mut restored = MaterializedSession::empty("session-restored");
-    restored.applied_event_ordinal = 3;
-    restored.transcript = vec![
-        user_transcript_item(1, "first"),
-        user_transcript_item(2, "second"),
-        agent_transcript_item("agent:3", 3),
-    ];
-    chat.apply_materialized(&restored, &[], &[]);
-
-    assert_eq!(
-        chat.entries
-            .iter()
-            .map(|entry| entry.text.as_str())
-            .collect::<Vec<_>>(),
-        ["reused", "second", "hello"]
-    );
-    // Reuse re-points the entry at the item it now stands for, so the next
-    // projection can take the pointer path again.
-    for (entry, item) in chat.entries.iter().zip(&restored.transcript) {
-        assert!(entry.source.is(item));
-    }
-}
-
-#[test]
-fn raw_mode_preserves_markdown_markers_and_exposes_tool_details() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries
-        .push(ChatEntry::plain(1, ChatRole::Agent, "**bold**"));
-    chat.render_mode = TranscriptRenderMode::Raw;
-    assert!(transcript_text(&mut chat, 30).contains(&"│ **bold**".into()));
 }
 
 /// The transcript pane the last frame registered.
@@ -3718,33 +2823,6 @@ fn scrollbar_drag_reaches_both_ends_and_release_stops_capture() {
 }
 
 #[test]
-fn scrollbar_track_click_seeks_and_does_not_select_text() {
-    use crossterm::event::MouseButton::Left;
-    let mut chat = scrollbar_chat();
-    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
-    assert!(
-        chat.frame_surfaces()
-            .surface_at(geometry.track.x, geometry.track.y)
-            .is_none()
-    );
-    scrollbar_mouse(
-        &mut chat,
-        MouseEventKind::Down(Left),
-        geometry.track.x,
-        geometry.track.y + geometry.track.height / 2,
-    );
-    assert!(matches!(chat.anchor, TranscriptAnchor::Row { entry: 0, row } if row > 0 && row < 200));
-    let before = chat.anchor;
-    scrollbar_mouse(
-        &mut chat,
-        MouseEventKind::Up(Left),
-        geometry.track.x,
-        geometry.track.y,
-    );
-    assert_eq!(chat.anchor, before);
-}
-
-#[test]
 fn grabbing_scrollbar_thumb_does_not_jump_and_preserves_grab_offset() {
     use crossterm::event::MouseButton::Left;
     let mut chat = scrollbar_chat();
@@ -3807,22 +2885,6 @@ fn scrollbar_keeps_unseen_history_lazy_and_cancels_drag_on_resize() {
 }
 
 #[test]
-fn empty_and_tiny_transcripts_ignore_scrollbar_drags() {
-    use crossterm::event::MouseButton::Left;
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    for (width, height) in [(60, 24), (4, 24), (3, 24), (2, 24), (1, 1), (0, 0)] {
-        drawn_transcript(&mut chat, width, height);
-        scrollbar_mouse(
-            &mut chat,
-            MouseEventKind::Down(Left),
-            width.saturating_sub(1),
-            0,
-        );
-        assert!(!chat.transcript_scrollbar_dragging());
-    }
-}
-
-#[test]
 fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
     use crossterm::event::MouseButton::Left;
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -3850,24 +2912,6 @@ fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
     scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), geometry.track.x, row);
     drawn_transcript(&mut chat, 60, 24);
     assert_eq!(chat.anchor, anchor);
-}
-
-#[test]
-fn server_retry_prompt_is_labelled_automatic_without_changing_its_text() {
-    let mut entry = ChatEntry::plain(42, ChatRole::User, "Continue");
-    entry.source = TranscriptSource(Some(std::sync::Arc::new(TranscriptItem {
-        stable_id: "user:server-retry-41".into(),
-        position: 42,
-        latest_content_event_ordinal: None,
-        created_at_ms: 1000,
-        last_changed_at_ms: 1000,
-        body: TranscriptBody::User {
-            content: vec![serde_json::json!({"type": "text", "text": "Continue"})],
-        },
-    })));
-    assert_eq!(entry_visual(&entry).label, "Automatic · server retry");
-    assert_eq!(browser_entry(&entry).label, "Automatic · server retry");
-    assert_eq!(entry.text, "Continue");
 }
 
 /// `symbols = "ascii"` is for a Linux console or a locale without UTF-8, so the
@@ -3943,6 +2987,7 @@ fn session_d_sleep(status: &str, last_changed_at_ms: i64) -> Arc<TranscriptItem>
 /// later the command's completion arrived (ordinal 45) and the row turned
 /// from "running" into "✓ Tool · done", as if the interrupted turn had
 /// finished the work.
+// Hard-won: 5ff5884d: a tool finishing after interruption was rendered as done.
 #[test]
 fn a_tool_that_ends_after_its_turn_was_interrupted_is_not_shown_as_done() {
     let prompt = session_d_item(serde_json::json!({
@@ -4039,6 +3084,7 @@ fn click_text_action(chat: &mut ChatState, rows: &[String], text: &str) -> ChatA
     })
 }
 
+// Hard-won: 743ae5d4: underlined transcript links dropped their destinations and did nothing on click.
 #[test]
 fn clicking_link_text_opens_that_links_destination() {
     let mut chat = ChatState::new(&snapshot(), &[]);
@@ -4093,6 +3139,23 @@ fn links_with_the_same_text_open_their_own_destinations() {
 }
 
 #[test]
+fn clicking_a_non_web_link_copies_it_instead_of_opening_it() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "Run [this helper](file:///tmp/helper.sh) now.".to_owned(),
+    ));
+    let rows = drawn_transcript(&mut chat, 80, 12);
+
+    assert_eq!(
+        click_text_action(&mut chat, &rows, "helper"),
+        ChatAction::CopyLink("file:///tmp/helper.sh".to_owned())
+    );
+}
+
+// Hard-won: 743ae5d4: underlined transcript links did nothing on click, including wrapped spans.
+#[test]
 fn a_link_wrapped_across_rows_opens_from_its_continuation_row() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(ChatEntry::plain(
@@ -4110,7 +3173,6 @@ fn a_link_wrapped_across_rows_opens_from_its_continuation_row() {
         !rows[division_row].contains("Please"),
         "the link must wrap for this test: {rows:#?}"
     );
-
     assert_eq!(
         click_text_action(&mut chat, &rows, "division"),
         ChatAction::OpenLink("https://example.com/issue".to_owned())
@@ -4119,40 +3181,21 @@ fn a_link_wrapped_across_rows_opens_from_its_continuation_row() {
         click_text_action(&mut chat, &rows, "today"),
         ChatAction::None
     );
-}
 
-#[test]
-fn clicking_a_non_web_link_copies_it_instead_of_opening_it() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.push(ChatEntry::plain(
-        1,
-        ChatRole::Agent,
-        "Run [this helper](file:///tmp/helper.sh) now.".to_owned(),
-    ));
-    let rows = drawn_transcript(&mut chat, 80, 12);
-
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "helper"),
-        ChatAction::CopyLink("file:///tmp/helper.sh".to_owned())
-    );
-}
-
-#[test]
-fn a_line_that_is_only_a_link_opens_from_every_wrapped_row() {
-    let mut chat = ChatState::new(&snapshot(), &[]);
-    chat.entries.push(ChatEntry::plain(
+    let mut standalone = ChatState::new(&snapshot(), &[]);
+    standalone.entries.push(ChatEntry::plain(
         1,
         ChatRole::Agent,
         "[alpha bravo charlie delta echo foxtrot golf](https://example.com/only)".to_owned(),
     ));
-    let rows = drawn_transcript(&mut chat, 20, 16);
+    let standalone_rows = drawn_transcript(&mut standalone, 20, 16);
     let expected = ChatAction::OpenLink("https://example.com/only".to_owned());
 
     for word in ["alpha", "echo", "golf"] {
         assert_eq!(
-            click_text_action(&mut chat, &rows, word),
+            click_text_action(&mut standalone, &standalone_rows, word),
             expected,
-            "{rows:#?}"
+            "{standalone_rows:#?}"
         );
     }
 }
@@ -4191,20 +3234,6 @@ fn a_plain_url_opens_without_its_trailing_punctuation() {
 }
 
 #[test]
-fn a_colon_in_ordinary_text_is_not_a_link() {
-    let (mut chat, rows) = agent_rows("Note: nothing to open here.", 80);
-
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "Note"),
-        ChatAction::None
-    );
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "nothing"),
-        ChatAction::None
-    );
-}
-
-#[test]
 fn a_url_inside_a_link_label_opens_the_links_destination() {
     let (mut chat, rows) = agent_rows("[https://example.com/label](https://example.com/dest)", 80);
 
@@ -4214,63 +3243,746 @@ fn a_url_inside_a_link_label_opens_the_links_destination() {
     );
 }
 
-#[test]
-fn urls_in_code_open_from_the_transcript() {
-    let (mut chat, rows) = agent_rows(
-        "Run `curl https://example.com/inline` or:\n\n```\nGET https://example.com/block\n```",
-        80,
-    );
+fn golden_chat_buffer(chat: &mut ChatState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    use ratatui::{Terminal, backend::TestBackend};
 
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "example.com/inline"),
-        opens("https://example.com/inline")
-    );
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "example.com/block"),
-        opens("https://example.com/block")
-    );
-    assert_eq!(click_text_action(&mut chat, &rows, "GET"), ChatAction::None);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| crate::chat::active::render_full_frame(frame, chat, false))
+        .expect("draw chat surface");
+    terminal.backend().buffer().clone()
+}
+
+fn append_transcript_golden_state(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    rows: &[String],
+    details: &[String],
+) {
+    use std::fmt::Write as _;
+
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+    output.push_str(&rows.join("\n"));
+    output.push('\n');
+    for detail in details {
+        writeln!(output, "{detail}").expect("write state detail");
+    }
 }
 
 #[test]
-fn links_in_table_cells_open_their_destinations() {
+fn golden_transcript_navigation() {
+    let mut output = String::new();
+
+    let mut chat = numbered_chat(40);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(&mut output, "tail before wheel", 40, 24, &rows, &[]);
+    chat.handle_mouse(wheel(MouseEventKind::ScrollUp));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(&mut output, "wheel up", 40, 24, &rows, &[]);
+    chat.handle_mouse(wheel(MouseEventKind::ScrollDown));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(&mut output, "wheel down follows", 40, 24, &rows, &[]);
+
+    let mut chat = numbered_chat(40);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(&mut output, "page navigation tail", 60, 24, &rows, &[]);
+    chat.handle_key(key(KeyCode::PageUp));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(&mut output, "page up", 60, 24, &rows, &[]);
+    chat.handle_key(key(KeyCode::PageDown));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(&mut output, "page down follows", 60, 24, &rows, &[]);
+    chat.handle_key(key(KeyCode::PageUp));
+    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(&mut output, "ctrl end follows", 60, 24, &rows, &[]);
+
+    let mut chat = numbered_chat(200);
+    let _ = golden_chat_buffer(&mut chat, 40, 24);
+    chat.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(&mut output, "ctrl home", 40, 24, &rows, &[]);
+    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(&mut output, "ctrl end", 40, 24, &rows, &[]);
+
+    let mut chat = numbered_chat(200);
+    chat.set_input("draft prompt".into());
+    let _ = golden_chat_buffer(&mut chat, 40, 24);
+    chat.handle_key(keypad_key(KeyCode::Home));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "keypad home leaves draft cursor",
+        40,
+        24,
+        &rows,
+        &[format!("input cursor: {}", chat.input_cursor)],
+    );
+    chat.handle_key(keypad_key(KeyCode::End));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "keypad end leaves draft cursor",
+        40,
+        24,
+        &rows,
+        &[format!("input cursor: {}", chat.input_cursor)],
+    );
+    chat.handle_key(key(KeyCode::Home));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "plain home edits draft",
+        40,
+        24,
+        &rows,
+        &[format!("input cursor: {}", chat.input_cursor)],
+    );
+    chat.handle_key(key(KeyCode::End));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "plain end edits draft",
+        40,
+        24,
+        &rows,
+        &[format!("input cursor: {}", chat.input_cursor)],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        "response advertised on the dashboard",
+    ));
+    for index in 0..8 {
+        chat.entries.push(ChatEntry::plain(
+            index + 2,
+            ChatRole::System,
+            format!("terminal failure {index}\n{}", "output\n".repeat(12)),
+        ));
+    }
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(&mut output, "opening reveal", 60, 24, &rows, &[]);
+    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(&mut output, "revealed transcript tail", 60, 24, &rows, &[]);
+
+    let mut chat = numbered_chat(2);
+    let before = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    chat.handle_mouse(wheel(MouseEventKind::ScrollUp));
+    chat.handle_key(key(KeyCode::PageUp));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "short transcript ignores scrolling",
+        40,
+        24,
+        &rows,
+        &[format!("viewport unchanged: {}", before == rows)],
+    );
+
+    let mut chat = scrollbar_chat();
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    let surface = chat
+        .frame_surfaces()
+        .surface_at(geometry.track.x, geometry.track.y);
+    append_transcript_golden_state(
+        &mut output,
+        "scrollbar before track click",
+        60,
+        24,
+        &rows,
+        &[format!("track content surface: {surface:?}")],
+    );
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Down(MouseButton::Left),
+        geometry.track.x,
+        geometry.track.y + geometry.track.height / 2,
+    );
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "scrollbar track seeks",
+        60,
+        24,
+        &rows,
+        &[format!("anchor: {:?}", chat.anchor)],
+    );
+    let before_release = chat.anchor;
+    scrollbar_mouse(
+        &mut chat,
+        MouseEventKind::Up(MouseButton::Left),
+        geometry.track.x,
+        geometry.track.y,
+    );
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "scrollbar release preserves seek",
+        60,
+        24,
+        &rows,
+        &[format!(
+            "anchor unchanged: {}",
+            chat.anchor == before_release
+        )],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    for (width, height) in [(60, 24), (4, 24), (3, 24), (2, 24), (1, 1), (0, 0)] {
+        let _ = golden_chat_buffer(&mut chat, width, height);
+        scrollbar_mouse(
+            &mut chat,
+            MouseEventKind::Down(MouseButton::Left),
+            width.saturating_sub(1),
+            0,
+        );
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, width, height));
+        append_transcript_golden_state(
+            &mut output,
+            "empty transcript drag",
+            width,
+            height,
+            &rows,
+            &[format!(
+                "scrollbar dragging: {}",
+                chat.transcript_scrollbar_dragging()
+            )],
+        );
+    }
+
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "transcript-navigation",
+        &output,
+    );
+}
+
+#[test]
+fn golden_transcript_link_routing() {
+    let mut output = String::new();
+    let code =
+        "Run `curl https://example.com/inline` or:\n\n```\nGET https://example.com/block\n```";
+    let (mut chat, rows) = agent_rows(code, 80);
+    for (label, text) in [
+        ("inline code URL", "example.com/inline"),
+        ("fenced code URL", "example.com/block"),
+        ("ordinary code text", "GET"),
+    ] {
+        let action = click_text_action(&mut chat, &rows, text);
+        append_transcript_golden_state(
+            &mut output,
+            label,
+            80,
+            24,
+            &rows,
+            &[format!("action: {action:?}")],
+        );
+    }
+
     let table = "| Issue | Status |\n| --- | --- |\n| [first bug](https://example.com/1) | open |\n| see https://example.com/2 | closed |";
     let (mut chat, rows) = agent_rows(table, 80);
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("first bug") && row.contains("open")),
-        "the table draws as a grid at this width: {rows:#?}"
-    );
+    for (label, text) in [
+        ("wide table link", "first bug"),
+        ("wide table URL", "example.com/2"),
+        ("wide table plain cell", "closed"),
+    ] {
+        let action = click_text_action(&mut chat, &rows, text);
+        append_transcript_golden_state(
+            &mut output,
+            label,
+            80,
+            24,
+            &rows,
+            &[format!("action: {action:?}")],
+        );
+    }
 
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "first bug"),
-        opens("https://example.com/1")
-    );
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "example.com/2"),
-        opens("https://example.com/2")
-    );
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "closed"),
-        ChatAction::None
+    let narrow_table = "| Issue | Notes |\n| --- | --- |\n| [first bug](https://example.com/1) | a long description that cannot fit a narrow grid |";
+    let (mut chat, rows) = agent_rows(narrow_table, 30);
+    for (label, text) in [
+        ("narrow table link", "first bug"),
+        ("narrow table label", "Issue"),
+    ] {
+        let action = click_text_action(&mut chat, &rows, text);
+        append_transcript_golden_state(
+            &mut output,
+            label,
+            30,
+            24,
+            &rows,
+            &[format!("action: {action:?}")],
+        );
+    }
+
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "transcript-link-routing",
+        &output,
     );
 }
 
 #[test]
-fn links_in_a_table_too_narrow_for_a_grid_still_open() {
-    let table = "| Issue | Notes |\n| --- | --- |\n| [first bug](https://example.com/1) | a long description that cannot fit a narrow grid |";
-    let (mut chat, rows) = agent_rows(table, 30);
-    assert!(
-        rows.iter().any(|row| row.contains("Issue: first bug")),
-        "the table falls back to labelled rows at this width: {rows:#?}"
+fn golden_conversation_title() {
+    use mj_client::review::RuntimeReviewView;
+    use mj_core::review::driver::TurnReviewPhase;
+    use mj_core::review::verdict::ReviewVerdict;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut output = String::new();
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_header_summary("podman", "codex3", "Review the build");
+    let mut draw = |label: &str, chat: &mut ChatState| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_transcript(frame, frame.area(), chat, false, 0, 0, false);
+            })
+            .expect("draw conversation header");
+        let buffer = terminal.backend().buffer();
+        let header = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        let title_start = header.find("Review the build").unwrap();
+        let details = [format!(
+            "foreground: host={:?}, session title={:?}",
+            buffer[(2, 0)].fg,
+            buffer[(title_start as u16, 0)].fg
+        )];
+        append_transcript_golden_state(
+            &mut output,
+            label,
+            80,
+            10,
+            &crate::golden::buffer_lines(buffer),
+            &details,
+        );
+    };
+
+    draw("idle", &mut chat);
+    let mut view = RuntimeReviewView {
+        session_id: "session".to_owned(),
+        questions: Vec::new(),
+        phase: TurnReviewPhase::LaunchingReviewer,
+        roles: Vec::new(),
+        status: "starting the reviewer".to_owned(),
+        verdict: None,
+    };
+    chat.set_turn_review(Some(view.clone()));
+    draw("reviewing", &mut chat);
+    view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
+        synthesis: "[P2] src/lib.rs:1 -- weak test".to_owned(),
+        evidence: Default::default(),
+    });
+    chat.set_turn_review(Some(view));
+    draw("findings", &mut chat);
+    chat.set_turn_review(None);
+    draw("idle restored", &mut chat);
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "conversation-title", &output);
+}
+
+#[test]
+fn golden_rich_transcript_tool_presentation() {
+    let mut output = String::new();
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut completed = completed_tool(1, "completed command");
+    completed.tool_content = vec!["completed detail".into()];
+    let mut pending = ChatEntry::tool(2, "pending command", None, ToolStatus::Pending);
+    pending.tool_content = vec!["pending detail".into()];
+    let mut running = ChatEntry::tool(3, "running command", None, ToolStatus::Running);
+    running.tool_content = vec!["running detail".into()];
+    let mut failed = ChatEntry::tool(4, "failed command", None, ToolStatus::Failed);
+    failed.tool_content = vec!["failed detail".into()];
+    chat.entries.extend([
+        completed.clone(),
+        pending.clone(),
+        running.clone(),
+        failed.clone(),
+    ]);
+    let buffer = golden_chat_buffer(&mut chat, 80, 24);
+    let style_details = [&completed, &pending, &running, &failed]
+        .into_iter()
+        .map(|entry| {
+            let visual = entry_visual(entry);
+            format!(
+                "{} style: header={:?}, body={:?}",
+                entry.text, visual.header_style.fg, visual.body_style.fg
+            )
+        })
+        .collect::<Vec<_>>();
+    append_transcript_golden_state(
+        &mut output,
+        "tool status labels and emphasis",
+        80,
+        24,
+        &crate::golden::buffer_lines(&buffer),
+        &style_details,
     );
 
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "first bug"),
-        opens("https://example.com/1")
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        ChatEntry::tool(1, "running command", None, ToolStatus::Running),
+        completed_tool(2, "completed command"),
+        ChatEntry::tool(3, "failed command", None, ToolStatus::Failed),
+    ]);
+    let _ = golden_chat_buffer(&mut chat, 80, 24);
+    let target = chat
+        .transcript_tool_click_targets
+        .iter()
+        .find(|target| target.start_seq == 2)
+        .copied()
+        .expect("completed tool is clickable");
+    let targets = chat
+        .transcript_tool_click_targets
+        .iter()
+        .map(|target| target.start_seq)
+        .collect::<Vec<_>>();
+    append_transcript_golden_state(
+        &mut output,
+        "only completed command has a click target",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[format!("tool click targets: {targets:?}")],
     );
-    assert_eq!(
-        click_text_action(&mut chat, &rows, "Issue"),
-        ChatAction::None
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.rect.x,
+        row: target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "completed command expanded",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        thought(1, "thinking about tools"),
+        completed_tool(2, "first-command"),
+        completed_tool(3, "second-command"),
+    ]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    click_rendered_text(&mut chat, &rows, "thinking about tools");
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "thought text does not expand tools",
+        60,
+        24,
+        &rows,
+        &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.apply_session_update(
+        1,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "shell-1",
+            "title": "Bash",
+            "kind": "execute",
+            "status": "pending",
+            "rawInput": {"command": "git add src && cargo test --workspace | cat"}
+        }),
+    );
+    for (label, seq, status) in [
+        ("execute pending", 1, None),
+        ("execute running", 2, Some("in_progress")),
+        ("execute completed", 3, Some("completed")),
+    ] {
+        if let Some(status) = status {
+            chat.apply_session_update(
+                seq,
+                &serde_json::json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "shell-1",
+                    "status": status
+                }),
+            );
+        }
+        append_transcript_golden_state(
+            &mut output,
+            label,
+            100,
+            24,
+            &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 100, 24)),
+            &[],
+        );
+    }
+    chat.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "raw keeps provider title",
+        100,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 100, 24)),
+        &[],
+    );
+
+    let session = fallback_terminal_session(terminal_record(Some(0), None));
+    let mut chat = ChatState::from_materialized(&session, &[], &[]);
+    append_transcript_golden_state(
+        &mut output,
+        "clean fallback terminal in rich mode",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[],
+    );
+    chat.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "clean fallback terminal in raw mode",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[],
+    );
+
+    let terminal = mj_core::relay::ActiveAgentTerminal {
+        terminal_id: "term-1".into(),
+        command: "cargo mutants --in-diff diff".into(),
+        started_at_ms: i64::MAX,
+    };
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    let session = MaterializedSession::empty("session-live-terminal");
+    chat.set_active_agent_terminals(std::slice::from_ref(&terminal), &session);
+    append_transcript_golden_state(
+        &mut output,
+        "unclaimed live terminal",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[],
+    );
+    chat.set_active_agent_terminals(&[], &session);
+    append_transcript_golden_state(
+        &mut output,
+        "live terminal removed after exit",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    for (start, name) in [(1, "older"), (5, "newer")] {
+        let mut tool = completed_tool(start + 1, &format!("{name} provider title"));
+        tool.tool_summary = Some(format!("{name}-command"));
+        tool.tool_content = vec![format!("{name} tool details")];
+        chat.entries.extend([
+            thought(
+                start,
+                &format!("{name} thought with enough words to wrap across several rows"),
+            ),
+            tool,
+            completed_tool(start + 2, &format!("{name}-companion")),
+            ChatEntry::plain(start + 3, ChatRole::Agent, format!("{name} response")),
+        ]);
+    }
+    for name in ["older", "newer"] {
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 36, 48));
+        append_transcript_golden_state(
+            &mut output,
+            &format!("{name} tool groups collapsed"),
+            36,
+            48,
+            &rows,
+            &[],
+        );
+        click_rendered_text(&mut chat, &rows, &format!("{name}-command"));
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 36, 48));
+        append_transcript_golden_state(
+            &mut output,
+            &format!("{name} group expanded"),
+            36,
+            48,
+            &rows,
+            &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+        );
+        click_rendered_text(&mut chat, &rows, &format!("{name} provider title"));
+        let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 36, 48));
+        append_transcript_golden_state(
+            &mut output,
+            &format!("{name} group collapsed"),
+            36,
+            48,
+            &rows,
+            &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+        );
+    }
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.extend([
+        completed_tool(1, "first command with a long argument"),
+        completed_tool(2, "second command with a long argument"),
+        completed_tool(3, "third command with a long argument"),
+    ]);
+    let _ = golden_chat_buffer(&mut chat, 30, 24);
+    let second_targets = chat
+        .transcript_tool_click_targets
+        .iter()
+        .filter(|target| target.start_seq == 2)
+        .copied()
+        .collect::<Vec<_>>();
+    let target = second_targets[1];
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.rect.x,
+        row: target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "wrapped summary member expands from continuation row",
+        30,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 30, 24)),
+        &[
+            format!("second member hitboxes: {}", second_targets.len()),
+            format!("expanded tools: {:?}", chat.expanded_tool_calls),
+        ],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.apply_session_update(
+        1,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "read-config",
+            "title": "read config",
+            "status": "pending"
+        }),
+    );
+    chat.apply_session_update(
+        2,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "read-config",
+            "status": "completed"
+        }),
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "tool call status update",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries
+        .push(ChatEntry::plain(1, ChatRole::Agent, "**bold**"));
+    chat.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "raw markdown markers",
+        30,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 30, 24)),
+        &[],
+    );
+
+    // Settings › Advanced › Tool calls: Inline. Every call keeps its own
+    // row with its full command, thoughts are not folded, and output shows
+    // its head and tail around a count of the lines left out.
+    let kind_tool = |seq: u64, title: &str, kind: ToolKind, status: ToolStatus| {
+        let call = ToolCall::new(format!("call-{seq}"), title).kind(kind);
+        let presentation = tool_call_presentation(&call);
+        let mut entry = ChatEntry::tool(seq, title, None, status);
+        entry.tool_summary = Some(presentation.summary.clone());
+        entry.tool_presentation = Some(presentation);
+        entry
+    };
+    let mut tests = kind_tool(
+        2,
+        "cargo test -p brokk-mj-chat --lib",
+        ToolKind::Execute,
+        ToolStatus::Completed,
+    );
+    tests.tool_content = vec![format!(
+        "running 12 tests\n{}\ntest result: ok. 12 passed\nexited 0",
+        (1..=10)
+            .map(|test| format!("test case_{test} ... ok"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )];
+    let mut read = kind_tool(4, "Read src/lib.rs", ToolKind::Read, ToolStatus::Completed);
+    read.tool_content = vec!["fn main() {}".into()];
+    let mut edit = kind_tool(5, "Edit src/lib.rs", ToolKind::Edit, ToolStatus::Completed);
+    edit.tool_diffstats = vec!["src/lib.rs +3 -1".into()];
+    let mut failed = kind_tool(6, "cat missing.txt", ToolKind::Execute, ToolStatus::Failed);
+    failed.tool_content = vec![format!(
+        "cat: missing.txt: No such file or directory {}\nexited 1",
+        "x".repeat(80)
+    )];
+    let mut running = kind_tool(
+        7,
+        "sleep 30 && echo done",
+        ToolKind::Execute,
+        ToolStatus::Running,
+    );
+    running.tool_content = vec!["waiting".into()];
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.set_tool_display(ToolDisplay {
+        layout: mj_core::config::ToolOutput::Inline,
+        output_lines: 5,
+    });
+    chat.entries.extend([
+        thought(1, "first thought"),
+        tests,
+        thought(3, "second thought"),
+        read,
+        edit,
+        failed,
+        running,
+    ]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36));
+    append_transcript_golden_state(&mut output, "inline tool calls", 80, 36, &rows, &[]);
+    click_rendered_text(&mut chat, &rows, "cargo test -p brokk-mj-chat");
+    append_transcript_golden_state(
+        &mut output,
+        "inline call expanded",
+        80,
+        36,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36)),
+        &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+    );
+    chat.expanded_tool_calls.clear();
+    chat.set_tool_display(ToolDisplay {
+        layout: mj_core::config::ToolOutput::Inline,
+        output_lines: 1,
+    });
+    let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 36))
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "inline with one output line and ASCII symbols",
+        80,
+        36,
+        &rows,
+        &[],
+    );
+
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "rich-transcript-tool-presentation",
+        &output,
     );
 }

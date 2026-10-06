@@ -33,6 +33,12 @@ use crate::import::{DashboardImportSafety, PendingDashboardImport};
 use crate::pollers::{LifecycleSuccess, spawn_aws_resource_options_resolution};
 use crate::short_id;
 
+struct MbxInstallCompletion {
+    install_result: Result<String, String>,
+    preview_result: Result<Option<mj_core::state::BuildCachePreview>, String>,
+    install_mbx_available: bool,
+}
+
 /// The chat-scoped toggles the host's keys can run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChatToggle {
@@ -352,12 +358,116 @@ pub(crate) async fn apply_dashboard_action(
                     // round trip each.
                     let executor = CancellableProcessExecutor::new(cancelled)
                         .with_deadline(std::time::Duration::from_secs(60));
-                    mj_controller::controller::preview_build_cache(&machine, &executor)
+                    let result =
+                        mj_controller::controller::preview_build_cache(&machine, &executor)?;
+                    let install_mbx_available = result.as_ref().is_some_and(|preview| {
+                        mj_controller::controller::mbx_install_kind(preview).is_some()
+                    });
+                    Ok((result, install_mbx_available))
                 },
-                move |result| DashboardIoUpdate::BuildCachePreviewed {
-                    generation,
-                    key,
-                    result,
+                move |result| match result {
+                    Ok((result, install_mbx_available)) => DashboardIoUpdate::BuildCachePreviewed {
+                        generation,
+                        key,
+                        result: Ok(result),
+                        install_mbx_available,
+                    },
+                    Err(error) => DashboardIoUpdate::BuildCachePreviewed {
+                        generation,
+                        key,
+                        result: Err(error),
+                        install_mbx_available: false,
+                    },
+                },
+            );
+        }
+        DashboardAction::InstallMbx {
+            generation,
+            key,
+            machine_id,
+            machine,
+        } => {
+            if !context
+                .dashboard
+                .mbx_install_started(generation, &key, &machine_id)
+            {
+                return Ok(());
+            }
+            let operation_label = format!("installing mbx on machine {machine_id}");
+            spawn_cancellable_io_with_token(
+                context.critical_operations.clone(),
+                operation_label,
+                context.dashboard_io_tx.clone(),
+                move |cancelled| {
+                    let install_executor = CancellableProcessExecutor::new(cancelled.clone())
+                        .with_deadline(std::time::Duration::from_secs(240));
+                    let install_result = mj_controller::controller::install_mbx(
+                        &machine,
+                        &install_executor,
+                    )
+                    .map(|result| {
+                        let verb = match result.kind {
+                            mj_controller::controller::MbxInstallKind::Install => "Installed",
+                            mj_controller::controller::MbxInstallKind::Upgrade => "Upgraded",
+                        };
+                        let profile = if result.profile_changed {
+                            format!("updated {}", result.profile_file)
+                        } else {
+                            format!(
+                                "left {} unchanged because its marked PATH block already exists",
+                                result.profile_file
+                            )
+                        };
+                        let mut message = format!(
+                            "{verb} mbx at {} (version {}). {profile}. New login shells will pick up the PATH change.",
+                            result.program.display(),
+                            result.version
+                        );
+                        if let Some(warning) = result.profile_warning {
+                            message.push(' ');
+                            message.push_str(&warning);
+                        }
+                        if let Some(path_line) = result.manual_path_line {
+                            message.push(' ');
+                            message.push_str(&path_line);
+                        }
+                        message
+                    })
+                    .map_err(|error| format!("{error:#}"));
+                    let preview_executor = CancellableProcessExecutor::new(cancelled)
+                        .with_deadline(std::time::Duration::from_secs(60));
+                    let preview_result =
+                        mj_controller::controller::preview_build_cache(&machine, &preview_executor)
+                            .map_err(|error| format!("{error:#}"));
+                    let install_mbx_available = preview_result
+                        .as_ref()
+                        .ok()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|preview| {
+                            mj_controller::controller::mbx_install_kind(preview).is_some()
+                        });
+                    Ok(MbxInstallCompletion {
+                        install_result,
+                        preview_result,
+                        install_mbx_available,
+                    })
+                },
+                move |result| {
+                    let completion = result.unwrap_or_else(|error| MbxInstallCompletion {
+                        install_result: Err(error),
+                        preview_result: Err(
+                            "preview refresh was skipped because the background task failed".into(),
+                        ),
+                        install_mbx_available: false,
+                    });
+                    DashboardIoUpdate::MbxInstalled {
+                        generation,
+                        key,
+                        machine_id,
+                        result: completion.install_result,
+                        preview: completion.preview_result,
+                        install_mbx_available: completion.install_mbx_available,
+                    }
                 },
             );
         }
@@ -1981,6 +2091,7 @@ mod tests {
     /// Stopping a session retires its relay actor, which closes the open
     /// chat's feed. The chat is told before that happens so it reads the
     /// closure as the expected end of a deliberate stop.
+    // Hard-won: 66c73159: an intentional stop triggered a misleading feed-loss warning and reconnect loop.
     #[tokio::test]
     async fn stopping_the_open_chats_session_marks_that_chat_retiring() {
         let mut chat = open_chat("session-open");
@@ -2000,6 +2111,7 @@ mod tests {
         assert!(!chat.session_retiring());
     }
 
+    // Hard-won: f2fc48f3: Restart removed the workspace and temporary volumes before restarting.
     #[tokio::test]
     async fn restart_dispatch_sends_one_daemon_restart_action() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

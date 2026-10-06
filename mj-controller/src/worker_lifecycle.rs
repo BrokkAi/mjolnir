@@ -344,6 +344,7 @@ mod tests {
     use crate::targets::{CancellableProcessExecutor, ProcessExecutor};
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    // Hard-won: a6ad3cc3: separate replacement decisions let two workers write one relay journal.
     #[tokio::test]
     async fn same_session_waits_while_background_defers_and_other_sessions_progress() {
         let id = "worker-owner-serialized";
@@ -373,6 +374,7 @@ mod tests {
         drop(other);
     }
 
+    // Hard-won: a6ad3cc3: cancellation could release a session permit while another operation owned it.
     #[tokio::test]
     async fn cancelling_a_waiter_does_not_release_the_current_owner() {
         let id = "worker-owner-cancelled-waiter";
@@ -393,6 +395,7 @@ mod tests {
         assert!(WorkerPermit::try_acquire(id, "recovery").unwrap().is_some());
     }
 
+    // Hard-won: a6ad3cc3: aborting a waiter could release the permit during a blocking worker swap.
     #[tokio::test]
     async fn dropping_an_executor_waiter_cannot_release_an_executing_swap() {
         let id = "worker-owner-executor-cancellation";

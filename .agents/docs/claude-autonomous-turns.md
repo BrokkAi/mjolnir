@@ -4,9 +4,11 @@ Claude Code re-invokes itself. When a background command it started finishes,
 its adapter opens a new SDK turn and works through it with no `session/prompt`
 open on Hel's side. The adapter calls these "autonomous cycles" and reports
 five origins for them: `task-notification`, `peer`, `coordinator`, `observer`,
-and `observer-activity`. A prompt that arrives during one is queued, not
-dropped: the adapter's `prompt` handler pushes it onto its turn queue and its
-SDK input stream, and answers it at the next turn boundary.
+and `observer-activity`. A prompt that arrives during one is normally queued:
+the adapter's `prompt` handler pushes it onto its turn queue and SDK input
+stream, then answers it at the next boundary. Version 0.86.0 drops prompts
+from that queue when cancellation arrives, so Mjolnir keeps them in its own
+durable queue until the turn settles.
 
 Hel models such a cycle as a **harness-initiated turn** in the relay state
 machine, so everything that already keys on execution state — the UI, the
@@ -14,13 +16,19 @@ checkpoint barrier, the recovery boundary — is right without further changes.
 
 ## The adapter contract
 
-Checked on `@agentclientprotocol/claude-agent-acp@0.81.0` with Claude Code
-2.1.280, the versions pinned in `mj-core/src/harness_runtime.rs`. It is
-**observed behaviour, not a documented protocol**, so Hel treats it as a
-per-harness contract and degrades to its previous behaviour wherever it is
-absent.
+The adapter contract below was observed on
+`@agentclientprotocol/claude-agent-acp@0.81.0` with Claude Code 2.1.280. The
+current bridge pin is 0.86.0; that version drops prompts already queued inside
+the adapter when `session/cancel` arrives. Hel therefore keeps mid-cycle
+prompts in its own durable queue until the turn settles. The remaining details
+are **observed behaviour, not a documented protocol**, so Hel treats them as a
+per-harness contract.
 
 - The adapter streams a cycle through ordinary `session/update` notifications.
+- It queues a `session/prompt` that arrives during an autonomous cycle and
+  would ordinarily answer it at the next boundary. Since 0.86.0, cancelling
+  that cycle discards prompts in this adapter queue; Hel must not dispatch a
+  queued user prompt there before the cycle ends.
 - Claude Code ends every model cycle with one SDK `result` message. New and
   resumed sessions ask for it through `_meta.claudeCode.emitRawSDKMessages`
   (`{"type":"result"}`, beside the background-task level), and the adapter
@@ -152,6 +160,16 @@ worker interrupts in-flight commands first), so the projection's restart arm —
 which cannot see `active_prompt` — closes streams and goes idle whenever the
 session was running.
 
+Each ending path also releases prompts held in Mjolnir's queue. A result,
+prompt terminal outcome, or stop timeout is followed by the coordinator's
+command-claim pass, which promotes the queue head once. A bridge exit or crash
+records `SessionRestarted`; promotion waits until the replacement bridge sends
+`SessionConfigured`, so no prompt reaches a dead or half-open adapter. A worker
+restart recovers the journal, records the same restart boundary, and promotes
+after session readiness. Close seals the relay behind a checkpoint: it does
+not send queued prompts to the closing bridge, and the checkpoint retains them
+for promotion after a later resume has configured its bridge.
+
 ## What downstream reads
 
 - The transcript gets one system line, `Agent continued on its own`, with the
@@ -168,10 +186,19 @@ session was running.
 - `RelayOperationalState` exposes `harness_turn` (open turns only) and
   `last_harness_turn_started_ordinal` (monotonic), so a checkpoint can tell
   whether a cycle began during its capture window.
-- A queued checkpoint barrier waits for an open harness turn exactly as it waits
-  for a prompt. A **prompt** does not wait: `promote_next_queued_command` gates
-  on `active_prompt`, not on execution state, so a prompt typed mid-cycle
-  dispatches at once and the adapter queues it.
+- Prompt promotion and checkpoint admission use the same relay-owned turn
+  boundary (`active_prompt` or `harness_turn`). Prompts and queued
+  configuration changes stay in Mjolnir's FIFO queue during that turn. The
+  adapter queues prompts internally and can discard them on cancel; it rejects
+  config, mode, and clear-context requests while a prompt loop is active.
+  Mjolnir starts each only after the turn ends. Native goal controls and turn
+  controls have independent live-turn handlers; user shells run outside the
+  ACP queue.
+- Automatic steering remains limited to `active_prompt` turns. A steer cannot
+  reach the model while a harness-initiated turn is blocked in a long tool
+  call, so Esc cancels that cycle and the relay sends its queued prompt once
+  the cycle settles. With no `active_prompt`, Esc uses non-targeted
+  `CancelTurn`; targeted `CancelTurnFor` is only valid for a live prompt.
 - Stop works during a Claude harness turn. The chat's Esc, the phone's
   interrupt, `CancelTurn`, and the older `Cancel` all reach the adapter as
   `session/cancel`, which interrupts the running cycle; that cycle's result

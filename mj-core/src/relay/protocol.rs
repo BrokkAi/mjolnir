@@ -147,6 +147,11 @@ pub enum RelayRequest {
     /// Fetch controller work queued by the parent session's private MCP
     /// socket. Connection-only: request payloads do not enter chat history.
     SubagentRequests,
+    /// Open or close worker-owned admission for requests that change child
+    /// state. Closing is serialized with the private MCP queue's enqueue lock.
+    SetSubagentAdmission {
+        open: bool,
+    },
     /// Connection-only history queries; never part of the durable transcript.
     HistoryQuery {
         query: crate::history::HistoryQuery,
@@ -168,11 +173,10 @@ pub enum RelayRequest {
     /// nested here, so the reviewer's conversation is journaled and replayed
     /// the same way the primary's is.
     Reviewer {
-        /// Which reviewing agent this is for. Absent means the default role,
-        /// which is the one plan review uses; a turn review in the extended
-        /// tier also names its supervisor, its intent analyst, and each
-        /// specialist lane. An older controller sends no role, and an older
-        /// worker ignores one, so the field is additive in both directions.
+        /// Which isolated reviewing agent this is for. Absent means the
+        /// default role shared by plan and turn review. Named roles let
+        /// background work such as settings discovery avoid that reviewer.
+        /// The field is additive for older workers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<String>,
         request: ReviewerRequest,
@@ -235,10 +239,6 @@ pub enum ReviewerRequest {
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    /// Collect the specialist lanes the review supervisor asked for through
-    /// its MCP tool since the last time the controller asked. This request is
-    /// answered by the sidecar itself rather than by any one role.
-    TakeLaneDispatches,
 }
 
 /// What one repository contributed to a cumulative review delta.
@@ -292,7 +292,6 @@ impl ReviewerRequest {
             Self::Pause | Self::PauseGeneration { .. } => "reviewer_pause",
             Self::CaptureDelta { .. } => "reviewer_capture_delta",
             Self::AdvanceBaseline { .. } => "reviewer_advance_baseline",
-            Self::TakeLaneDispatches => "reviewer_take_lane_dispatches",
         }
     }
 }
@@ -325,6 +324,7 @@ impl RelayRequest {
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
+            Self::SetSubagentAdmission { .. } => "set_subagent_admission",
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
             Self::CompleteHistoryRequest { .. } => "complete_history_request",
@@ -350,6 +350,7 @@ impl RelayRequest {
             | Self::ReadAttachment { .. } => 8,
             Self::StopBackgroundTask { .. } => 9,
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
+            Self::SetSubagentAdmission { .. } => 32,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
@@ -504,6 +505,9 @@ pub enum RelayResponsePayload {
         requests: Vec<crate::subagent::SubagentToolRequest>,
         results: Vec<crate::subagent::SubagentToolResult>,
     },
+    SubagentAdmissionChanged {
+        open: bool,
+    },
     SubagentRequestCompleted,
     HistoryRequests {
         requests: Vec<crate::history::HistoryRequest>,
@@ -531,10 +535,6 @@ pub enum RelayResponsePayload {
     },
     /// The review baselines now name the trees the controller sent.
     ReviewBaselineAdvanced,
-    /// Specialist lanes the review supervisor asked for.
-    LaneDispatches {
-        requests: Vec<crate::review::lanes::ReviewSubagentRequest>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

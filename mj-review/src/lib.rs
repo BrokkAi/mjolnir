@@ -7,36 +7,22 @@
 //! split pane and either forwards the findings to the primary, dismisses them,
 //! or cancels.
 //!
-//! The review engine is ported from the sibling `mjolnir` repository's
-//! `mj-agents/src/discrete_review.rs`, whose prompts, lane roster and verdict
-//! contract this module keeps as close to the original as the different runtime
-//! allows: mj runs review agents through its own subagent pool, while Hel runs
-//! them as reviewer sidecars inside the session's worker container. Keeping the
-//! text identical is deliberate -- the two repositories may re-merge, so every
-//! gratuitous divergence is a cost. `.agents/docs/turn-review-mj-parity.md`
-//! records exactly what was ported and what was not.
+//! The reviewer follows Codex's `/review` rubric and JSON output contract,
+//! while the driver owns capture, forwarding, cancellation and restart recovery.
 //!
 //! Terms used throughout:
 //!
-//! * A *lane* is one read-only specialist reviewer with a narrow brief (control
-//!   flow, duplication, error handling, dead code, tests, contracts).
-//! * The *quick tier* is one general reviewer. Its findings go straight to
-//!   the primary agent, which checks them against source as it acts on them.
-//! * The *extended tier* adds a supervisor that chooses which lanes to launch
-//!   and synthesizes their reports into one verdict.
+//! * A *reviewer* reads the user messages, changed-file counts and captured
+//!   tree ids, then gets the diff through its own harness tools.
 //! * A *baseline* is the Git tree id of a repository's working tree as of the
 //!   last completed review. It advances only when a review resolves, so
 //!   cancelling one review folds its changes into the next.
 
-pub mod bifrost;
 pub mod delta;
 pub mod driver;
 pub mod lanes;
-pub use mj_core::review::mcp;
 pub mod verdict;
 
-/// How much of a lane report the next prompt may quote.
-pub const LANE_REPORT_LIMIT: usize = 16 * 1024;
 /// How much of the primary's user messages a review prompt embeds.
 pub const USER_MESSAGES_LIMIT: usize = 128 * 1024;
 /// How much of the per-file line-count table a prompt embeds. At roughly 60
@@ -45,12 +31,9 @@ pub const USER_MESSAGES_LIMIT: usize = 128 * 1024;
 pub const CHANGED_FILES_LIMIT: usize = 32 * 1024;
 /// How much of a synthesis is retained as the review's verdict text.
 pub const SYNTHESIS_LIMIT: usize = 32 * 1024;
-/// How much captured diff any one reviewing role sees. Six copies of an
-/// unbounded diff is the one place this design can blow up a context window.
-pub const LANE_DIFF_LIMIT: usize = 96 * 1024;
-
-/// Bound a section of tagged evidence, keeping the head and the tail so a
-/// truncated diff still shows where the change ends.
+/// Bound the diff retained in a capture for existing review status consumers.
+pub const REVIEW_CAPTURE_DIFF_LIMIT: usize = 96 * 1024;
+/// Bound a captured Git patch retained for existing review status consumers.
 #[must_use]
 pub fn bound_review_section(text: &str, limit: usize, label: &str) -> String {
     if text.len() <= limit {
@@ -65,8 +48,8 @@ pub fn bound_review_section(text: &str, limit: usize, label: &str) -> String {
     format!("{}{}{}", &text[..head_end], marker, &text[tail_start..])
 }
 
-/// Model-authored prose (a lane report, a synthesis) puts its conclusions
-/// first, so bound it by keeping the head rather than both ends.
+/// Model-authored prose puts its conclusions first, so bound it by keeping the
+/// head rather than both ends.
 #[must_use]
 pub fn bound_tail(text: &str, limit: usize, label: &str) -> String {
     if text.len() <= limit {
@@ -98,11 +81,5 @@ mod tests {
         assert!(bounded.starts_with("headhead"));
         assert!(bounded.ends_with("…[synthesis truncated]…"));
         assert!(!bounded.contains("tail"));
-    }
-
-    #[test]
-    fn bounding_leaves_short_text_untouched() {
-        assert_eq!(bound_review_section("short", 100, "diff"), "short");
-        assert_eq!(bound_tail("short", 100, "synthesis"), "short");
     }
 }

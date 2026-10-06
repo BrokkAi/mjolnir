@@ -1,0 +1,115 @@
+=== readline word and line kill/yank initial (40x4) ===
+value: "alpha beta"; cursor-byte: 10; kill-buffer: ""
+alpha beta
+
+
+
+=== readline word and line kill/yank: Ctrl-W => Changed (40x4) ===
+value: "alpha "; cursor-byte: 6; kill-buffer: "beta"
+alpha
+
+
+
+=== readline word and line kill/yank: Ctrl-Y => Changed (40x4) ===
+value: "alpha beta"; cursor-byte: 10; kill-buffer: "beta"
+alpha beta
+
+
+
+=== readline word and line kill/yank: Ctrl-A => Handled (40x4) ===
+value: "alpha beta"; cursor-byte: 0; kill-buffer: "beta"
+alpha beta
+
+
+
+=== readline word and line kill/yank: Ctrl-K => Changed (40x4) ===
+value: ""; cursor-byte: 0; kill-buffer: "alpha beta"
+
+
+
+
+=== readline word and line kill/yank: Ctrl-Y => Changed (40x4) ===
+value: "alpha beta"; cursor-byte: 10; kill-buffer: "alpha beta"
+alpha beta
+
+
+
+=== multiline line motion and kill/yank initial (40x4) ===
+value: "alpha beta\ngamma"; cursor-byte: 16; kill-buffer: ""
+alpha beta
+gamma
+
+
+=== multiline line motion and kill/yank: Ctrl-A to line start => Handled (40x4) ===
+value: "alpha beta\ngamma"; cursor-byte: 11; kill-buffer: ""
+alpha beta
+gamma
+
+
+=== multiline line motion and kill/yank: Ctrl-A to input start => Handled (40x4) ===
+value: "alpha beta\ngamma"; cursor-byte: 0; kill-buffer: ""
+alpha beta
+gamma
+
+
+=== multiline line motion and kill/yank: Ctrl-E => Handled (40x4) ===
+value: "alpha beta\ngamma"; cursor-byte: 10; kill-buffer: ""
+alpha beta
+gamma
+
+
+=== multiline line motion and kill/yank: Ctrl-K => Changed (40x4) ===
+value: "alpha betagamma"; cursor-byte: 10; kill-buffer: "\n"
+alpha betagamma
+
+
+
+=== multiline line motion and kill/yank: Ctrl-Y => Changed (40x4) ===
+value: "alpha beta\ngamma"; cursor-byte: 11; kill-buffer: "\n"
+alpha beta
+gamma
+
+
+=== single-line whole-value motions initial (40x4) ===
+value: "alpha beta"; cursor-byte: 10; kill-buffer: ""
+alpha beta
+
+
+
+=== single-line whole-value motions: Ctrl-A => Handled (40x4) ===
+value: "alpha beta"; cursor-byte: 0; kill-buffer: ""
+alpha beta
+
+
+
+=== single-line whole-value motions: Ctrl-E => Handled (40x4) ===
+value: "alpha beta"; cursor-byte: 10; kill-buffer: ""
+alpha beta
+
+
+
+=== single-line whole-value motions: Ctrl-U => Changed (40x4) ===
+value: ""; cursor-byte: 0; kill-buffer: "alpha beta"
+
+
+
+
+=== optional history restores the draft initial (40x4) ===
+value: "draft"; cursor-byte: 5; kill-buffer: ""
+draft
+
+
+
+=== optional history restores the draft: Up => Changed (40x4) ===
+value: "second"; cursor-byte: 6; kill-buffer: ""
+second
+
+
+
+=== optional history restores the draft: Down => Changed (40x4) ===
+value: "draft"; cursor-byte: 5; kill-buffer: ""
+draft
+
+
+
+=== end of rendered states ===

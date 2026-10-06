@@ -1,157 +1,130 @@
 use super::*;
 
-fn exe(path: &str) -> Option<&Path> {
-    Some(Path::new(path))
+fn fake_update_executable(path: &Path) -> PathBuf {
+    std::fs::create_dir_all(path.parent().unwrap()).expect("executable directory");
+    std::fs::write(path, b"test executable").expect("executable file");
+    path.to_path_buf()
 }
 
-fn detect_with_env(markers: &[&str], exe_path: Option<&Path>) -> InstallMethod {
-    InstallMethod::detect(
-        |name| markers.contains(&name).then(|| OsString::from("true")),
-        exe_path,
-    )
-}
-
-#[test]
-fn launcher_markers_override_path_forensics() {
-    let npm_bundle = "/usr/lib/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj";
-    assert_eq!(
-        detect_with_env(&[NPM_MANAGED_ENV], exe("/home/user/.local/bin/mj")),
-        InstallMethod::Npm
-    );
-    assert_eq!(
-        detect_with_env(&[NPX_MANAGED_ENV, NPM_MANAGED_ENV], exe(npm_bundle)),
-        InstallMethod::Npx
-    );
-    assert_eq!(
-        detect_with_env(&[HOMEBREW_MANAGED_ENV], exe(npm_bundle)),
-        InstallMethod::Homebrew
-    );
+fn update_command_text(command: &Command) -> String {
+    std::iter::once(command.get_program().to_string_lossy().into_owned())
+        .chain(
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        )
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[test]
-fn marker_free_detection_reads_the_executable_path() {
-    assert_eq!(
-        InstallMethod::detect(
-            |_| None,
-            exe("/opt/homebrew/Cellar/mjolnir/2.4.0/libexec/mj")
-        ),
-        InstallMethod::Homebrew
-    );
-    assert_eq!(
-        InstallMethod::detect(
-            |_| None,
-            exe("/home/linuxbrew/.linuxbrew/Cellar/mjolnir/2.4.0/libexec/mj")
-        ),
-        InstallMethod::Homebrew
-    );
-    assert_eq!(
-        InstallMethod::detect(
-            |_| None,
-            exe(
-                "/usr/lib/node_modules/@brokkai/mjolnir/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj"
-            )
-        ),
-        InstallMethod::Npm
-    );
-    assert_eq!(
-        InstallMethod::detect(|_| None, exe("/home/user/.local/bin/mj")),
-        InstallMethod::Direct
-    );
-    assert_eq!(InstallMethod::detect(|_| None, None), InstallMethod::Direct);
-}
-
-#[test]
-fn cargo_detection_requires_a_matching_install_record() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let bin_dir = root.path().join("bin");
-    std::fs::create_dir(&bin_dir).expect("bin dir");
-    let executable = bin_dir.join(BIN_NAME);
-    std::fs::write(&executable, b"mj").expect("executable");
-    let recorded = |body: &str| {
-        std::fs::write(root.path().join(".crates.toml"), body).expect("manifest");
-        InstallMethod::detect(|_| None, Some(executable.as_path()))
-    };
-    // The record must name the running version, so the fixture derives it
-    // from the crate instead of hardcoding one: CI builds this tree at
-    // whatever version master carries, not the version this branch began
-    // from.
+fn golden_install_method_detection_uses_cargo_and_package_manager_formats() {
+    let root = tempfile::tempdir().expect("install roots");
     let version = env!("CARGO_PKG_VERSION");
-    let registry = "registry+https://github.com/rust-lang/crates.io-index";
-    let record = |package: &str, version: &str, binary: &str| {
-        format!("\"{package} {version} ({registry})\" = [\"{binary}\"]\n")
+    let source =
+        format!("brokk-mjolnir {version} (registry+https://github.com/rust-lang/crates.io-index)");
+    let voice_source = format!(
+        "brokk-mj-voice-worker {version} (registry+https://github.com/rust-lang/crates.io-index)"
+    );
+
+    // Cargo's documented v1 install record shape, as written to .crates2.json.
+    let cargo_json = root.path().join("cargo-json");
+    std::fs::create_dir_all(cargo_json.join("bin")).expect("Cargo JSON bin directory");
+    std::fs::write(
+        cargo_json.join(".crates2.json"),
+        serde_json::json!({
+            "v1": 1,
+            "installs": {
+                (source.clone()): {"version": version, "bins": ["mj"], "features": []},
+                (voice_source.clone()): {"version": version, "bins": ["mj-voice-worker"], "features": []}
+            }
+        })
+        .to_string(),
+    )
+    .expect("Cargo JSON install record");
+    let cargo_json_exe = fake_update_executable(&cargo_json.join("bin/mj"));
+
+    // Cargo's compatibility v1 TOML install record, including a stale version
+    // that must not be mistaken for the executable at the current version.
+    let cargo_toml = root.path().join("cargo-toml");
+    std::fs::create_dir_all(cargo_toml.join("bin")).expect("Cargo TOML bin directory");
+    std::fs::write(
+        cargo_toml.join(".crates.toml"),
+        format!(
+            "[v1]\n\"{source}\" = [\"mj\"]\n\"{voice_source}\" = [\"mj-voice-worker\"]\n\"brokk-mjolnir 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"mj\"]\n"
+        ),
+    )
+    .expect("Cargo TOML install record");
+    let cargo_toml_exe = fake_update_executable(&cargo_toml.join("bin/mj"));
+
+    let homebrew_exe =
+        fake_update_executable(&root.path().join("homebrew/Cellar/mjolnir/2.4.0/bin/mj"));
+    let npm_exe =
+        fake_update_executable(&root.path().join("npm/node_modules/@brokkai/mjolnir/bin/mj"));
+    let direct_exe = fake_update_executable(&root.path().join("direct/mj"));
+
+    let variables = |entries: &[(&str, &str)]| {
+        entries
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), OsString::from(value)))
+            .collect::<std::collections::HashMap<_, _>>()
     };
+    let cases = [
+        (
+            "npx marker takes precedence",
+            direct_exe.clone(),
+            variables(&[
+                (NPX_MANAGED_ENV, "1"),
+                (NPM_MANAGED_ENV, "1"),
+                (HOMEBREW_MANAGED_ENV, "1"),
+            ]),
+        ),
+        (
+            "npm marker",
+            direct_exe.clone(),
+            variables(&[(NPM_MANAGED_ENV, "1")]),
+        ),
+        (
+            "Homebrew marker",
+            direct_exe.clone(),
+            variables(&[(HOMEBREW_MANAGED_ENV, "1")]),
+        ),
+        ("Homebrew Cellar layout", homebrew_exe, variables(&[])),
+        ("npm bundle layout", npm_exe, variables(&[])),
+        ("Cargo .crates2.json", cargo_json_exe, variables(&[])),
+        ("Cargo .crates.toml", cargo_toml_exe, variables(&[])),
+        ("unrecorded executable", direct_exe, variables(&[])),
+    ];
 
-    assert_eq!(
-        recorded(&format!(
-            "[v1]\n{}{}",
-            record("brokk-mjolnir", version, "mj"),
-            record("brokk-mj-voice-worker", version, "mj-voice-worker"),
-        )),
-        InstallMethod::Cargo { voice_worker: true }
+    let mut rendered = String::new();
+    for (label, executable, environment) in cases {
+        let method =
+            InstallMethod::detect(|name| environment.get(name).cloned(), Some(&executable));
+        rendered.push_str(&format!(
+            "=== {label} ===\nmethod: {method:?}\nupgrade: {}\n\n",
+            method
+                .update_command()
+                .unwrap_or_else(|| "(none)".to_owned())
+        ));
+    }
+    rendered.push_str("=== package-manager commands ===\n");
+    rendered.push_str(&format!(
+        "npm: {}\n",
+        update_command_text(&npm_upgrade_command())
+    ));
+    rendered.push_str(&format!(
+        "brew update: {}\n",
+        update_command_text(&brew_update_command())
+    ));
+    rendered.push_str(&format!(
+        "brew upgrade: {}",
+        update_command_text(&brew_upgrade_command())
+    ));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "install-method-detection",
+        &rendered,
     );
-    assert_eq!(
-        recorded(&format!("[v1]\n{}", record("brokk-mjolnir", version, "mj"),)),
-        InstallMethod::Cargo {
-            voice_worker: false
-        }
-    );
-    // A record for a different installed version is not this install.
-    assert_eq!(
-        recorded(&format!("[v1]\n{}", record("brokk-mjolnir", "0.0.0", "mj"),)),
-        InstallMethod::Direct
-    );
-}
-
-#[test]
-fn managed_install_methods_provide_their_own_update_commands() {
-    assert_eq!(
-        InstallMethod::Npm.update_command().as_deref(),
-        Some("npm install -g @brokkai/mjolnir@latest")
-    );
-    assert_eq!(
-        InstallMethod::Npx.update_command().as_deref(),
-        Some("npx -y @brokkai/mjolnir@latest")
-    );
-    assert_eq!(
-        InstallMethod::Homebrew.update_command().as_deref(),
-        Some("brew upgrade --formula brokkai/tap/mjolnir")
-    );
-    assert_eq!(
-        InstallMethod::Cargo { voice_worker: true }
-            .update_command()
-            .as_deref(),
-        Some("cargo install --locked brokk-mjolnir brokk-mj-voice-worker")
-    );
-    assert_eq!(InstallMethod::Direct.update_command(), None);
-}
-
-#[test]
-fn channels_name_their_distribution_source() {
-    assert_eq!(InstallMethod::Npm.channel_name(), "npm");
-    assert_eq!(InstallMethod::Homebrew.channel_name(), "Homebrew");
-    assert_eq!(
-        InstallMethod::Cargo {
-            voice_worker: false
-        }
-        .channel_name(),
-        "crates.io"
-    );
-    assert_eq!(InstallMethod::Direct.channel_name(), "GitHub Releases");
-}
-
-#[test]
-fn parses_homebrew_formula_version() {
-    let formula = r#"
-class Mjolnir < Formula
-  desc "Session control plane for ACP coding agents"
-  version "2.5.0"
-end
-"#;
-    assert_eq!(
-        parse_homebrew_formula_version(formula).expect("version"),
-        Version::parse("2.5.0").expect("semver")
-    );
-    assert!(parse_homebrew_formula_version("class Mjolnir < Formula\nend").is_err());
 }
 
 #[test]
@@ -170,14 +143,6 @@ fn cargo_index_uses_latest_non_yanked_version() {
     );
 }
 
-#[test]
-fn parse_version_tolerates_release_tags() {
-    assert_eq!(
-        parse_version("v2.5.0").expect("version"),
-        Version::parse("2.5.0").expect("semver")
-    );
-}
-
 fn asset(name: &str) -> ReleaseAsset {
     ReleaseAsset {
         name: name.to_string(),
@@ -191,62 +156,6 @@ fn linux_x64() -> Platform {
         arch: "x86_64",
         rust_target: "x86_64-unknown-linux-gnu".to_string(),
     }
-}
-
-fn mac_arm() -> Platform {
-    Platform {
-        os_family: "macos",
-        arch: "aarch64",
-        rust_target: "aarch64-apple-darwin".to_string(),
-    }
-}
-
-#[test]
-fn release_newer_than_current_returns_update_info() {
-    let release = GitHubRelease {
-        tag_name: "v2.5.0".to_string(),
-        assets: vec![
-            asset("brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"),
-            asset("brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"),
-        ],
-    };
-
-    let update = update_info_from_release(
-        &release,
-        &Version::parse("2.4.0").expect("version"),
-        &linux_x64(),
-    )
-    .expect("update info")
-    .expect("update");
-
-    assert_eq!(update.version, Version::parse("2.5.0").expect("version"));
-    assert_eq!(
-        update.asset.name,
-        "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"
-    );
-    assert_eq!(
-        update.checksum_asset.name,
-        "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256"
-    );
-}
-
-#[test]
-fn release_not_newer_returns_none() {
-    let release = GitHubRelease {
-        tag_name: "v2.4.0".to_string(),
-        assets: vec![asset(
-            "brokk-mjolnir-v2.4.0-x86_64-unknown-linux-gnu.tar.gz",
-        )],
-    };
-
-    let update = update_info_from_release(
-        &release,
-        &Version::parse("2.4.0").expect("version"),
-        &linux_x64(),
-    )
-    .expect("update info");
-
-    assert!(update.is_none());
 }
 
 #[test]
@@ -271,50 +180,6 @@ fn release_newer_than_current_requires_checksum_asset() {
 }
 
 #[test]
-fn macos_prefers_universal_asset() {
-    let assets = vec![
-        asset("brokk-mjolnir-v2.5.0-aarch64-apple-darwin.tar.gz"),
-        asset("brokk-mjolnir-v2.5.0-universal-apple-darwin.tar.gz"),
-    ];
-
-    let selected = select_mj_asset(&assets, &mac_arm()).expect("select");
-
-    assert_eq!(
-        selected.name,
-        "brokk-mjolnir-v2.5.0-universal-apple-darwin.tar.gz"
-    );
-}
-
-#[test]
-fn linux_selects_target_asset() {
-    let assets = vec![
-        asset("brokk-mjolnir-v2.5.0-aarch64-unknown-linux-gnu.tar.gz"),
-        asset("brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"),
-    ];
-
-    let selected = select_mj_asset(&assets, &linux_x64()).expect("select");
-
-    assert_eq!(
-        selected.name,
-        "brokk-mjolnir-v2.5.0-x86_64-unknown-linux-gnu.tar.gz"
-    );
-}
-
-#[test]
-fn empty_prompt_answer_accepts_the_upgrade() {
-    assert!(prompt_answer_is_yes(""));
-    assert!(prompt_answer_is_yes("\n"));
-    assert!(prompt_answer_is_yes(" y \n"));
-    assert!(prompt_answer_is_yes("Y"));
-    assert!(prompt_answer_is_yes("yes"));
-    assert!(prompt_answer_is_yes("YES"));
-    assert!(!prompt_answer_is_yes("n"));
-    assert!(!prompt_answer_is_yes("N"));
-    assert!(!prompt_answer_is_yes("no"));
-    assert!(!prompt_answer_is_yes("later"));
-}
-
-#[test]
 fn prompt_eof_declines_but_enter_accepts() {
     assert!(!read_update_answer(&mut Cursor::new(b"")).expect("read EOF"));
     assert!(read_update_answer(&mut Cursor::new(b"\n")).expect("read Enter"));
@@ -323,55 +188,25 @@ fn prompt_eof_declines_but_enter_accepts() {
 }
 
 #[test]
-fn managed_update_notice_names_channel_version_and_command() {
-    assert_eq!(
-        managed_update_notice(
-            &Version::parse("2.5.0").expect("version"),
-            &InstallMethod::Homebrew,
-            "2.4.0",
-        )
-        .as_deref(),
-        Some(
-            "mj 2.5.0 is available through Homebrew; current version is 2.4.0. Run: brew upgrade --formula brokkai/tap/mjolnir"
-        )
-    );
-    assert_eq!(
-        managed_update_notice(
-            &Version::parse("2.5.0").expect("version"),
-            &InstallMethod::Cargo {
-                voice_worker: false
+fn golden_mj_update_output() {
+    let version = Version::parse("2.5.0").expect("version");
+    let mut output = String::new();
+    for (label, method) in [
+        ("Homebrew", InstallMethod::Homebrew),
+        (
+            "Cargo",
+            InstallMethod::Cargo {
+                voice_worker: false,
             },
-            "2.4.0",
-        )
-        .as_deref(),
-        Some(
-            "mj 2.5.0 is available through crates.io; current version is 2.4.0. Run: cargo install --locked brokk-mjolnir"
-        )
-    );
-}
-
-#[test]
-fn delegated_upgrades_run_the_package_managers_own_commands() {
-    let npm = npm_upgrade_command();
-    assert_eq!(npm.get_program(), "npm");
-    let npm_args: Vec<String> = npm
-        .get_args()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(npm_args, ["install", "-g", "@brokkai/mjolnir@latest"]);
-
-    let brew_update = brew_update_command();
-    assert_eq!(brew_update.get_program(), "brew");
-    assert_eq!(brew_update.get_args().count(), 1);
-    assert_eq!(brew_update.get_args().next().unwrap(), "update");
-
-    let brew_upgrade = brew_upgrade_command();
-    assert_eq!(brew_upgrade.get_program(), "brew");
-    let brew_args: Vec<String> = brew_upgrade
-        .get_args()
-        .map(|argument| argument.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(brew_args, ["upgrade", "--formula", "brokkai/tap/mjolnir"]);
+        ),
+    ] {
+        let notice = managed_update_notice(&version, &method, "2.4.0").expect("update notice");
+        output.push_str(&format!(
+            "=== {label} update notice (stdout) ===\n{notice}\n\n"
+        ));
+    }
+    output.pop();
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "mj-update-output", &output);
 }
 
 #[test]
@@ -679,7 +514,13 @@ async fn homebrew_formula_update_is_offered_when_newer() {
         .await
         .expect("update check");
 
-    assert!(matches!(update, Some(AvailableUpdate::Managed { .. })));
+    assert_eq!(
+        update,
+        Some(AvailableUpdate::Managed {
+            version: Version::parse("9.9.9").expect("version"),
+            method: InstallMethod::Homebrew,
+        })
+    );
 }
 
 #[tokio::test]
@@ -696,6 +537,10 @@ async fn failed_channel_fetch_is_reported_as_an_error() {
 
 #[tokio::test]
 async fn direct_installs_read_the_release_endpoint() {
+    if std::env::consts::OS != "linux" || std::env::consts::ARCH != "x86_64" {
+        return;
+    }
+
     let release = concat!(
         r#"{"tag_name":"v9.9.9","assets":["#,
         r#"{"name":"brokk-mjolnir-v9.9.9-x86_64-unknown-linux-gnu.tar.gz","#,
@@ -705,20 +550,23 @@ async fn direct_installs_read_the_release_endpoint() {
     );
     let (sources, _) = serve_update_sources(vec![("/release", release)]).await;
 
-    // Asset selection is platform-shaped, and the stub only carries the
-    // Linux x86_64 archive, so this end-to-end trip is Linux-only; the
-    // pure selection tests above cover the other platforms.
-    let Ok(update) = latest_update(&sources, &InstallMethod::Direct).await else {
-        return;
-    };
-    if std::env::consts::OS != "linux" && std::env::consts::ARCH != "x86_64" {
-        return;
-    }
+    let update = latest_update(&sources, &InstallMethod::Direct)
+        .await
+        .expect("release response")
+        .expect("newer release");
 
-    match update.expect("update") {
+    match update {
         AvailableUpdate::Direct(info) => {
             assert_eq!(info.version, Version::parse("9.9.9").expect("version"));
             assert_eq!(info.tag, "v9.9.9");
+            assert_eq!(
+                info.asset.name,
+                "brokk-mjolnir-v9.9.9-x86_64-unknown-linux-gnu.tar.gz"
+            );
+            assert_eq!(
+                info.checksum_asset.name,
+                "brokk-mjolnir-v9.9.9-x86_64-unknown-linux-gnu.tar.gz.sha256"
+            );
         }
         other => panic!("expected a direct update, got {other:?}"),
     }

@@ -2305,14 +2305,6 @@ fn expire_daemon_running_again(
     notices.dismiss(now)
 }
 
-#[cfg(test)]
-fn dashboard_event_action(dashboard: &mut DashboardState, event: Event) -> DashboardAction {
-    dashboard
-        .handle_event_result(event)
-        .action
-        .unwrap_or(DashboardAction::None)
-}
-
 pub(crate) fn resume_progress_notice(
     session_name: &str,
     profile_id: &str,

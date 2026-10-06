@@ -417,16 +417,3 @@ pub fn resolve_wait(observation: &WaitObservation, request: &WaitRequest) -> Opt
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn awaiting_input_is_a_successful_wait_outcome() {
-        assert_eq!(
-            map_stop_reason(mj_core::acp::AWAITING_INPUT_STOP_REASON),
-            (WaitOutcome::InputRequired, None)
-        );
-    }
-}

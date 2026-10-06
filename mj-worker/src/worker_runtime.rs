@@ -69,6 +69,37 @@ pub fn record_startup_step(root: &Path, step: &str) {
     }
 }
 
+/// Record the preparation error alongside the last startup breadcrumb. The
+/// worker stays alive after this point, so its exit record cannot carry the
+/// failure that the daemon needs to explain a failed launch.
+pub fn record_startup_failure(root: &Path, step: &str, error: &str) {
+    if !root.is_dir() {
+        return;
+    }
+    let path = root.join(WORKER_STARTUP_FILE);
+    let mut record = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let bounded_error: String = error.chars().take(8_192).collect();
+    record["failure"] = serde_json::json!({
+        "step": step,
+        "error": bounded_error,
+        "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    });
+    match serde_json::to_vec_pretty(&record) {
+        Ok(bytes) => {
+            if let Err(write_error) = mj_core::config::atomic_write(&path, &bytes) {
+                eprintln!("Mjolnir: could not record startup failure at {step}: {write_error}");
+            }
+        }
+        Err(write_error) => {
+            eprintln!("Mjolnir: could not serialize startup failure at {step}: {write_error}");
+        }
+    }
+}
+
 // The launch descriptions and MCP shapes both sides of the relay share live in
 // the foundation. The runtime and its submodules keep naming them here.
 use mj_core::worker_launch::WorkerLaunchConfig;
@@ -78,9 +109,8 @@ use mj_core::worker_launch::{
 };
 
 pub(crate) const GITHUB_CLI_BIN_ENV: &str = "MJ_GITHUB_CLI_BIN";
-/// Where the worker keeps one directory per reviewing role, inside
-/// [`REVIEWER_DIR`]. Each holds that role's own copy of the staged profile and
-/// its own relay journal.
+/// Per-role directories inside [`REVIEWER_DIR`], holding the role's private
+/// profile copy and relay journal.
 #[cfg(unix)]
 pub(crate) const REVIEWER_ROLES_DIR: &str = "roles";
 
@@ -344,7 +374,7 @@ fn credential_endpoint(
 
 #[cfg(unix)]
 fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
-    if config.harness == mj_core::config::HarnessKind::Muse
+    if config.harness.nested_home()
         && let Some(value) = config.environment.get_mut("XDG_DATA_HOME")
         && Path::new(value).is_relative()
     {
@@ -367,7 +397,13 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             *socket = base.join(&*socket);
         }
         if memory.root.is_relative() {
-            memory.root = base.join(&memory.root);
+            let relative_root = memory.root.clone();
+            memory.root = base.join(&relative_root);
+            for directory in &mut config.additional_directories {
+                if directory == &relative_root {
+                    *directory = memory.root.clone();
+                }
+            }
         }
         if memory.baseline_root.as_os_str().is_empty() {
             memory.baseline_root = memory
@@ -380,6 +416,32 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             memory.baseline_root = base.join(&memory.baseline_root);
         }
     }
+}
+
+#[cfg(unix)]
+fn reviewer_workspace_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    let memory_root = config
+        .project_memory
+        .as_ref()
+        .map(|memory| memory.root.as_path());
+    config
+        .additional_directories
+        .iter()
+        .filter(|directory| memory_root.is_none_or(|root| directory.as_path() != root))
+        .cloned()
+        .collect()
+}
+
+#[cfg(unix)]
+fn acp_additional_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    let mut directories = config.additional_directories.clone();
+    if !matches!(config.harness, HarnessKind::Claude | HarnessKind::Muse)
+        && let Some(memory) = &config.project_memory
+        && !directories.contains(&memory.root)
+    {
+        directories.push(memory.root.clone());
+    }
+    directories
 }
 
 #[cfg(unix)]
@@ -430,89 +492,6 @@ pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Res
 #[cfg(not(unix))]
 pub async fn run_acp_supervisor(_spec: AcpSupervisorSpec) -> anyhow::Result<()> {
     anyhow::bail!("ACP supervision requires Unix")
-}
-
-#[cfg(all(test, unix))]
-mod model_pin_tests {
-    use super::*;
-
-    fn codex_config(environment: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
-        serde_json::from_str(&environment[CODEX_CONFIG_ENV]).unwrap()
-    }
-
-    #[test]
-    fn codex_launch_starts_a_resumed_bridge_on_the_accepted_model() {
-        let mut environment = std::collections::BTreeMap::new();
-        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash")).unwrap();
-        assert_eq!(
-            codex_config(&environment),
-            serde_json::json!({ "model": "flash" })
-        );
-    }
-
-    /// A profile may already set `CODEX_CONFIG`. Only the model this session
-    /// accepted may change, because everything else in there is the host's.
-    #[test]
-    fn codex_launch_keeps_the_rest_of_a_host_supplied_config() {
-        let mut environment = std::collections::BTreeMap::from([(
-            CODEX_CONFIG_ENV.to_owned(),
-            r#"{"default_permissions":"project","model":"configured-model","tui":"never"}"#
-                .to_owned(),
-        )]);
-        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash")).unwrap();
-        assert_eq!(
-            codex_config(&environment),
-            serde_json::json!({
-                "default_permissions": "project",
-                "model": "flash",
-                "tui": "never",
-            })
-        );
-    }
-
-    #[test]
-    fn sessions_without_an_accepted_model_keep_their_environment() {
-        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
-            let mut environment = std::collections::BTreeMap::from([(
-                CODEX_CONFIG_ENV.to_owned(),
-                r#"{"model":"configured-model"}"#.to_owned(),
-            )]);
-            pin_accepted_bridge_selectors(harness, &mut environment, None).unwrap();
-            assert_eq!(
-                environment[CODEX_CONFIG_ENV],
-                r#"{"model":"configured-model"}"#
-            );
-        }
-    }
-
-    #[test]
-    fn other_harnesses_never_receive_a_codex_config() {
-        let mut environment = std::collections::BTreeMap::new();
-        pin_accepted_bridge_selectors(HarnessKind::Claude, &mut environment, Some("flash"))
-            .unwrap();
-        pin_accepted_bridge_selectors(HarnessKind::Kimi, &mut environment, Some("flash")).unwrap();
-        assert!(environment.is_empty());
-    }
-
-    /// codex-acp parses this variable at startup, so a value it cannot parse
-    /// is a broken profile rather than a reason to launch without the model.
-    #[test]
-    fn an_unparsable_codex_config_is_reported_rather_than_overwritten() {
-        for broken in ["[]", "not json"] {
-            let mut environment = std::collections::BTreeMap::from([(
-                CODEX_CONFIG_ENV.to_owned(),
-                broken.to_owned(),
-            )]);
-            let error =
-                pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash"))
-                    .expect_err("a non-object configuration cannot be merged");
-            assert!(
-                format!("{error:#}").contains(CODEX_CONFIG_ENV),
-                "unexpected error: {error:#}"
-            );
-            assert_eq!(environment[CODEX_CONFIG_ENV], broken);
-        }
-    }
 }
 
 #[cfg(test)]

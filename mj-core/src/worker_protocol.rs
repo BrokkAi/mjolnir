@@ -223,6 +223,7 @@ mod tests {
         ));
     }
 
+    // Hard-won: 0df43902b8: bad compact and elicitation parameters were reported as unsupported methods.
     #[test]
     fn a_served_method_with_bad_parameters_is_invalid_not_unsupported() {
         // Connection-served methods are as much this relay's own as the

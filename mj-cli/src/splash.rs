@@ -164,6 +164,7 @@ mod tests {
     use super::*;
     use mj_chat::theme::SymbolSet;
 
+    // Hard-won: 5d41d8daac: Finding T-1 showed configured ASCII symbols still displayed the Unicode splash; the test checks the ASCII path and safe handling of unreadable config.
     #[test]
     fn configured_ascii_symbols_skip_the_splash_and_unreadable_config_does_not_panic() {
         let dir = tempfile::tempdir().unwrap();

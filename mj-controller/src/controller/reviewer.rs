@@ -19,8 +19,7 @@ use super::worker_binary::{
 use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
 use mj_core::worker_launch::{
-    REVIEWER_DIR, ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig,
-    reviewer_staging_profile_home,
+    ReviewMcpDelivery, ReviewMcpServer, ReviewerLaunchConfig, reviewer_staging_profile_home,
 };
 
 /// Build the capability used by client-side chat views to stage reviewers.
@@ -72,35 +71,6 @@ impl Controller {
             profile_id,
             generation,
             &[],
-            &ProcessExecutor,
-        )
-    }
-
-    /// Stage a reviewer that also gets `mcp_servers`, which is how a turn
-    /// review attaches its analyzer tools.
-    ///
-    /// `dispatch_tool` adds the review supervisor's own tool, which is this
-    /// worker's binary in another mode. Only the controller knows where that
-    /// binary and its socket sit on the target, so it is built here rather
-    /// than by the caller.
-    pub fn stage_reviewer_profile_with_mcp(
-        &self,
-        session_id: &str,
-        profile_id: &str,
-        generation: u64,
-        mcp_servers: &[ReviewMcpServer],
-        dispatch_tool: bool,
-    ) -> Result<ReviewerLaunchConfig> {
-        let mut servers = mcp_servers.to_vec();
-        if dispatch_tool {
-            let (_, worker_root) = self.worker_placement(session_id)?;
-            servers.push(review_dispatch_server(&worker_root));
-        }
-        self.stage_reviewer_profile_controlled(
-            session_id,
-            profile_id,
-            generation,
-            &servers,
             &ProcessExecutor,
         )
     }
@@ -180,6 +150,14 @@ impl Controller {
         // A reviewer on a ChatGPT Codex profile must not fall back to an API
         // key any more than a session may.
         let excluded_environment = profile.exclude_harness_environment(&mut environment);
+        // A Podman session runs as uid 0, where Claude Code rejects
+        // bypassPermissions unless told it is already sandboxed. The session's
+        // own launch sets this only when the session itself runs Claude.
+        if backend.container_engine() == Some("podman")
+            && profile.kind == mj_core::config::HarnessKind::Claude
+        {
+            environment.insert("IS_SANDBOX".into(), "1".into());
+        }
         Ok(ReviewerLaunchConfig {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
@@ -266,27 +244,6 @@ fn configure_staged_review_mcp(
     body.push(b'\n');
     mj_core::config::atomic_write(&path, &body)
         .with_context(|| format!("write staged reviewer configuration {}", path.display()))
-}
-
-/// The review supervisor's dispatch tool, as it runs inside the container:
-/// this worker's own binary in `review-mcp` mode, talking to the socket the
-/// worker serves in its reviewer directory.
-fn review_dispatch_server(worker_root: &str) -> ReviewMcpServer {
-    let socket = format!(
-        "{worker_root}/{}/{}",
-        REVIEWER_DIR,
-        mj_core::review::mcp::REVIEW_DISPATCH_SOCKET
-    );
-    ReviewMcpServer {
-        name: mj_core::review::mcp::REVIEW_MCP_SERVER_NAME.to_owned(),
-        command: Path::new(worker_root).join("hel"),
-        args: vec![
-            "worker".to_owned(),
-            "review-mcp".to_owned(),
-            "--socket".to_owned(),
-            socket,
-        ],
-    }
 }
 
 /// Where one immutable reviewer profile snapshot lives on the target.
@@ -665,6 +622,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 251e812e42b5: SSH container uploads targeted a path that existed only inside the container.
     #[test]
     fn remote_container_targets_stage_the_reviewer_on_the_host_not_in_the_worker_root() {
         // The worker root is a path inside the container. Uploading to it over
@@ -725,6 +683,7 @@ mod tests {
     }
 
     #[test]
+
     fn local_container_targets_stage_the_reviewer_through_their_engine() {
         let directory = tempfile::tempdir().unwrap();
         let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
@@ -782,25 +741,38 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_staging_preserves_owned_approval_for_both_mcp_delivery_paths() {
+    fn a_claude_reviewer_in_a_podman_session_is_told_it_is_sandboxed() {
         let directory = tempfile::tempdir().unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        let mut servers =
-            mj_review::bifrost::review_mcp_servers(&[directory.path().to_owned()], "review");
-        servers.push(review_dispatch_server("/worker"));
-        for profile in ["codex", "claude"] {
-            let executor = RecordingExecutor::new();
+        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
+        let podman = mj_core::state::TargetLocator::LocalPodman {
+            borrowed_from: None,
+            container_id: container_id.clone(),
+            workspace_storage: Default::default(),
+        };
+        let docker = mj_core::state::TargetLocator::LocalDocker {
+            borrowed_from: None,
+            container_id,
+        };
+        for (locator, profile_id, sandboxed) in [
+            (podman.clone(), "claude", true),
+            (podman, "codex", false),
+            (docker, "claude", false),
+        ] {
+            let (controller, session_id) = fixture(directory.path(), locator);
             let config = controller
-                .stage_reviewer_profile_controlled(&session_id, profile, 1, &servers, &executor)
+                .stage_reviewer_profile_controlled(
+                    &session_id,
+                    profile_id,
+                    0,
+                    &[],
+                    &RecordingExecutor::new(),
+                )
                 .unwrap();
-            assert_eq!(config.mcp_servers, servers);
-            assert!(!config.mcp_servers[0].is_review_dispatch(Path::new("/worker/hel")));
-            assert!(config.mcp_servers[1].is_review_dispatch(Path::new("/worker/hel")));
+            assert_eq!(
+                config.environment.get("IS_SANDBOX").map(String::as_str),
+                sandboxed.then_some("1"),
+                "{profile_id}"
+            );
         }
     }
 
@@ -889,25 +861,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged["permissions"]["default_profile"], ":unrestricted");
-    }
-
-    #[test]
-    fn an_unknown_profile_is_refused_before_anything_is_copied() {
-        let directory = tempfile::tempdir().unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        let error = controller
-            .stage_reviewer_profile_controlled(&session_id, "missing", 0, &[], &executor)
-            .unwrap_err();
-
-        assert!(format!("{error:#}").contains("unknown profile"));
-        assert!(executor.commands.borrow().is_empty());
     }
 
     #[test]

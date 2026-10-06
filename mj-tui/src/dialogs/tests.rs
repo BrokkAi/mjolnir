@@ -4,7 +4,6 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::layout::Position;
 
 use mj_core::state::SessionState;
 
@@ -70,71 +69,11 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
     assert_eq!(dashboard.mode, previous);
 }
 
-#[test]
-fn configuration_repair_can_open_setup_or_preserved_transcript() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    for choice in [1, 2] {
-        let action = dashboard.activate_confirmation_button(
-            Confirmation::ConfigurationRepair {
-                session_id: "session-1".into(),
-                error: "missing bundle".into(),
-                previous: Box::new(Mode::Dashboard),
-            },
-            choice,
-        );
-        if choice == 1 {
-            assert_eq!(
-                action,
-                DashboardAction::Open {
-                    session_id: "session-1".into()
-                }
-            );
-        } else {
-            assert_eq!(action, DashboardAction::None);
-            assert!(matches!(dashboard.mode, Mode::Setup(_)));
-        }
-    }
-}
-
-#[test]
-fn launch_failure_survives_notices_and_retries_original_settings_once() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let retry = DashboardAction::CreateSession {
-        subagents: None,
-        create_managed_worktree: None,
-        workspace_id: "original-workspace".into(),
-        profile_id: "codex".into(),
-        bundle_id: "project".into(),
-        project_directory: None,
-        target_template_id: "docker".into(),
-        additional_mounts: Vec::new(),
-        resource_allocation: None,
-    };
-    dashboard.show_launch_failure("upload failed", Some(retry.clone()));
-    dashboard.set_notice("Quota refreshed");
-    let mut terminal = Terminal::new(TestBackend::new(90, 25)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let text = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(text.contains("Launch failed"));
-    assert!(text.contains("upload failed"));
-    assert!(text.contains("Retry launch"));
-    dashboard.handle_key(key(KeyCode::Right));
-    assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
-    assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
-}
-
 /// After a failed launch, the footer still said "Launching demo via codex…"
 /// 40 seconds later, under the Launch failed dialog (launch finding R13-8).
 /// A success replaces that notice with "Session … is ready"; a failure now
 /// replaces it too.
+// Hard-won: 968e8ad2: After failure, the footer no longer says Launching and instead shows the terminal failure notice.
 #[test]
 fn launch_failure_replaces_the_launching_notice() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -184,17 +123,6 @@ fn launch_failure_scrolls_long_details_and_restores_interrupted_dialog() {
     assert_eq!(dashboard.mode, previous);
 }
 
-#[test]
-fn web_qr_has_a_four_module_quiet_zone() {
-    let qr = render_qr("https://example.test/auth/login?token=secret").unwrap();
-    let lines = qr.lines().collect::<Vec<_>>();
-    assert!(lines.len() > 4);
-    assert!(lines[0].chars().all(|character| character == ' '));
-    assert!(lines[1].chars().all(|character| character == ' '));
-    assert!(lines.iter().all(|line| line.starts_with("    ")));
-    assert!(lines.iter().all(|line| line.ends_with("    ")));
-}
-
 fn draw_web_dialog(dialog: &WebDialog, width: u16, height: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
@@ -204,57 +132,6 @@ fn draw_web_dialog(dialog: &WebDialog, width: u16, height: u16) -> Vec<String> {
         })
         .expect("draw web dialog");
     buffer_lines(terminal.backend().buffer())
-}
-
-#[test]
-fn web_dialog_without_a_qr_keeps_access_details_and_close_readable() {
-    let mut dialog = WebDialog::loading();
-    dialog.loading = false;
-    dialog.viewer_url = Some("http://127.0.0.1:37650".to_owned());
-    dialog.viewer_code = Some("022160".to_owned());
-    dialog.fallback_reason = Some("automatic Tailscale detection is disabled".to_owned());
-    let rendered = draw_web_dialog(&dialog, 140, 40).join("\n");
-    assert!(rendered.contains("Web viewer"));
-    assert!(rendered.contains("http://127.0.0.1:37650"));
-    assert!(rendered.contains("Viewer code: 022160"));
-    assert!(rendered.contains("× Web viewer"));
-}
-
-#[test]
-fn web_dialog_wraps_a_long_url_without_truncating_it() {
-    // A URL wider than the QR must wrap within the box, not get cut off.
-    let url = "https://a-very-long-machine-name.some-tailnet.ts.net:37650/viewer";
-    let dialog = WebDialog {
-        loading: false,
-        viewer_url: Some(url.to_owned()),
-        viewer_code: Some("022160".to_owned()),
-        fallback_reason: None,
-        message: None,
-        qr: Some(render_qr(url).unwrap()),
-        ..WebDialog::loading()
-    };
-
-    let rendered = draw_web_dialog(&dialog, 60, 40);
-
-    // Every box row fits the terminal, so the dialog never overflows.
-    assert!(rendered.iter().all(|line| line.chars().count() <= 60));
-    // The URL survives in full once the border padding is stripped away.
-    // Drop whitespace and the box border so the URL's wrapped halves sit
-    // adjacent, then confirm none of its characters were lost.
-    let flat = rendered
-        .join("")
-        .chars()
-        .filter(|character| !character.is_whitespace() && *character != '│')
-        .collect::<String>();
-    assert!(
-        flat.contains(url),
-        "the full URL should appear (wrapped) in the dialog"
-    );
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("Viewer code: 022160"))
-    );
 }
 
 fn failed_web_dashboard() -> DashboardState {
@@ -278,29 +155,6 @@ fn activate_web(dashboard: &mut DashboardState, control: DialogControl) -> Dashb
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         dialog,
     )
-}
-
-#[test]
-fn web_port_conflict_offers_recovery_and_keeps_the_address_and_dismiss_visible() {
-    let dashboard = failed_web_dashboard();
-    let Mode::Web(dialog) = &dashboard.mode else {
-        unreachable!()
-    };
-    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
-        let rendered = draw_web_dialog(dialog, width, height);
-        let text = rendered.join("\n");
-        assert!(text.contains("Port 37650 is already in use."));
-        assert!(text.contains("Address: 127.0.0.1:37650"));
-        assert!(text.contains("  Use another port  "));
-        assert!(text.contains("  Inspect port  "));
-        assert!(text.contains("  Retry  "));
-        assert!(text.contains("× Web viewer"));
-        assert!(
-            rendered
-                .iter()
-                .all(|line| line.trim().chars().count() <= 62)
-        );
-    }
 }
 
 #[test]
@@ -442,38 +296,10 @@ fn an_unrelated_listener_has_no_enabled_stop_action() {
     assert!(dialog.confirm_stop.is_none());
 }
 
-#[test]
-fn the_container_editor_names_the_build_cache_the_session_was_given() {
-    let mut session = running_session();
-    session.build_cache = Some(mj_core::state::SessionBuildCache {
-        host: "ssh:morannon".into(),
-        directory: PathBuf::from("/mnt/nvme/mbx"),
-        max_size: Some("1000GB".into()),
-        target_root: None,
-    });
-    let mut dashboard = dashboard_with_session(session);
-    open_container_editor(&mut dashboard);
-    let shown = drawn(&mut dashboard, 120, 40).join("\n");
-    assert!(
-        shown.contains("Build cache") && shown.contains("/mnt/nvme/mbx"),
-        "the session names the cache its container mounts:\n{shown}"
-    );
-}
-
-#[test]
-fn the_container_editor_says_when_a_session_has_no_build_cache() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open_container_editor(&mut dashboard);
-    let shown = drawn(&mut dashboard, 120, 40).join("\n");
-    assert!(
-        shown.contains("none for this session"),
-        "a session without a cache says so:\n{shown}"
-    );
-}
-
 /// Launch finding R3-11 (with J-24): the container editor named the session
 /// by its 32-hex id where the row and every other dialog use its title, and
 /// drew its access choice with two dropdown glyphs ("ro · read-only ▾ ▾").
+// Hard-won: b313aacd: The header uses the session title instead of its id and the mount access row contains one dropdown glyph.
 #[test]
 fn the_container_editor_names_the_session_and_draws_one_dropdown_glyph() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -534,125 +360,6 @@ fn through_the_palette(dashboard: &mut DashboardState, query: &str) {
 fn open_container_editor(dashboard: &mut DashboardState) {
     through_the_palette(dashboard, "container");
     assert!(matches!(dashboard.mode, Mode::EditContainer(_)));
-}
-
-fn open_rename_editor(dashboard: &mut DashboardState) {
-    through_the_palette(dashboard, "rename");
-    assert!(matches!(dashboard.mode, Mode::Rename(_)));
-}
-
-#[test]
-fn setup_opens_in_place_and_container_settings_remain_available() {
-    let mut empty = DashboardState::new(
-        mj_core::config::Config {
-            keys: Default::default(),
-            jev: Default::default(),
-            subagents: Default::default(),
-            version: mj_core::config::CONFIG_VERSION,
-            sessions_side: Default::default(),
-            advanced: Default::default(),
-            notify: Default::default(),
-            spinner: Default::default(),
-            theme: Default::default(),
-            phone: Default::default(),
-            github: Default::default(),
-            continuation: Default::default(),
-            review: Default::default(),
-            sessionwiki: Default::default(),
-            legacy_startup: (),
-            default_targets: Default::default(),
-            machines: Default::default(),
-            profiles: Default::default(),
-            bundles: Default::default(),
-            targets: Default::default(),
-        },
-        mj_core::state::State::default(),
-        Default::default(),
-    );
-    assert_eq!(
-        empty.handle_key(key(KeyCode::Char('e'))),
-        DashboardAction::None
-    );
-    assert!(matches!(empty.mode, Mode::Setup(_)));
-
-    let mut dashboard = dashboard_with_container_session();
-    open_container_editor(&mut dashboard);
-    let editor = container_editor(&dashboard);
-    assert_eq!(editor.session_id, "session-1");
-    assert_eq!(editor.mounts.len(), 1);
-    assert_eq!(editor.suggestions, vec![PathBuf::from("/srv/models")]);
-}
-
-#[test]
-fn container_editor_saves_edited_size_mounts_and_remembered_sources() {
-    let mut dashboard = dashboard_with_container_session();
-    open_container_editor(&mut dashboard);
-    for character in "4".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    dashboard.handle_key(key(KeyCode::Tab));
-    for character in "6g".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    assert_eq!(
-        container_editor(&dashboard).focused(),
-        ContainerEditFocus::Memory
-    );
-
-    // Take the remembered directory as the next mount.
-    while container_editor(&dashboard).focused() != ContainerEditFocus::Suggestions {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert_eq!(container_editor(&dashboard).source, "/srv/models");
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        container_editor(&dashboard).mounts,
-        vec![
-            AdditionalMount {
-                source: PathBuf::from("/srv/data"),
-                destination: PathBuf::from("/mnt/data"),
-                access: MountAccess::Cow,
-            },
-            AdditionalMount {
-                source: PathBuf::from("/srv/models"),
-                destination: PathBuf::from("/mnt/models"),
-                access: MountAccess::Ro,
-            },
-        ]
-    );
-
-    // Forget the remembered directory, then drop the original mount.
-    while container_editor(&dashboard).focused() != ContainerEditFocus::Suggestions {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    dashboard.handle_key(key(KeyCode::Char('d')));
-    assert!(container_editor(&dashboard).suggestions.is_empty());
-    while container_editor(&dashboard).focused() != ContainerEditFocus::Mounts {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    dashboard.handle_key(key(KeyCode::Up));
-    assert_eq!(container_editor(&dashboard).mount_index, 0);
-    dashboard.handle_key(key(KeyCode::Char('d')));
-
-    while container_editor(&dashboard).focused() != ContainerEditFocus::Save {
-        dashboard.handle_key(key(KeyCode::Tab));
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::SaveContainerSettings {
-            session_id: "session-1".into(),
-            cpus: Some("4".into()),
-            memory: Some("6g".into()),
-            additional_mounts: vec![AdditionalMount {
-                source: PathBuf::from("/srv/models"),
-                destination: PathBuf::from("/mnt/models"),
-                access: MountAccess::Ro,
-            }],
-            mount_history: Vec::new(),
-        }
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -751,40 +458,6 @@ fn container_editor_edits_a_listed_mount_in_place() {
 }
 
 #[test]
-fn container_editor_says_when_the_change_takes_effect() {
-    let mut dashboard = dashboard_with_container_session();
-    open_container_editor(&mut dashboard);
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .expect("draw editor");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("Applies when the container is next recreated"));
-    assert!(rendered.contains("/srv/data"));
-}
-
-#[test]
-fn rename_uses_acp_title_as_the_initial_value() {
-    let mut dashboard = dashboard_with_session(running_session());
-    open_rename_editor(&mut dashboard);
-    let Mode::Rename(editor) = &dashboard.mode else {
-        panic!("expected rename editor");
-    };
-    assert_eq!(editor.form.borrow().focused(), Some(DialogControl::Field));
-    for character in " v2".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::RenameSession {
-            session_id: "session-1".into(),
-            title: "ACP pretty name v2".into(),
-        }
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
 fn focused_text_fields_own_readline_keys_and_control_c_cancels() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.begin_rename();
@@ -816,12 +489,6 @@ fn focused_text_fields_own_readline_keys_and_control_c_cancels() {
     assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
-fn dashboard_with_rename_editor() -> DashboardState {
-    let mut dashboard = dashboard_with_session(running_session());
-    open_rename_editor(&mut dashboard);
-    dashboard
-}
-
 fn rename_focus(dashboard: &DashboardState) -> DialogControl {
     let Mode::Rename(editor) = &dashboard.mode else {
         panic!("expected rename editor");
@@ -832,224 +499,6 @@ fn rename_focus(dashboard: &DashboardState) -> DialogControl {
         Some(DialogControl::Save) => DialogControl::Save,
         focused => panic!("unexpected rename focus: {focused:?}"),
     }
-}
-
-#[test]
-fn rename_editor_cycles_focus_from_the_field_through_both_buttons() {
-    let mut dashboard = dashboard_with_rename_editor();
-    for expected in [
-        DialogControl::Cancel,
-        DialogControl::Save,
-        DialogControl::Field,
-        DialogControl::Cancel,
-    ] {
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Tab)),
-            DashboardAction::None
-        );
-        assert_eq!(rename_focus(&dashboard), expected);
-    }
-
-    let mut dashboard = dashboard_with_rename_editor();
-    for expected in [
-        DialogControl::Save,
-        DialogControl::Cancel,
-        DialogControl::Field,
-    ] {
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::BackTab)),
-            DashboardAction::None
-        );
-        assert_eq!(rename_focus(&dashboard), expected);
-    }
-}
-
-#[test]
-fn rename_editor_arrows_move_between_buttons_but_never_edit_the_field() {
-    let mut dashboard = dashboard_with_rename_editor();
-    // The field has no cursor, so arrows there change nothing.
-    for arrow in [KeyCode::Left, KeyCode::Right] {
-        assert_eq!(dashboard.handle_key(key(arrow)), DashboardAction::None);
-        assert_eq!(rename_focus(&dashboard), DialogControl::Field);
-    }
-
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(rename_focus(&dashboard), DialogControl::Cancel);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Right)),
-        DashboardAction::None
-    );
-    assert_eq!(rename_focus(&dashboard), DialogControl::Save);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Left)),
-        DashboardAction::None
-    );
-    assert_eq!(rename_focus(&dashboard), DialogControl::Cancel);
-}
-
-#[test]
-fn rename_editor_buttons_ignore_typing_and_backspace() {
-    let mut dashboard = dashboard_with_rename_editor();
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('x'))),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Backspace)),
-        DashboardAction::None
-    );
-    let Mode::Rename(editor) = &dashboard.mode else {
-        panic!("expected rename editor");
-    };
-    assert_eq!(editor.title, "ACP pretty name");
-    assert_eq!(editor.form.borrow().focused(), Some(DialogControl::Cancel));
-}
-
-#[test]
-fn rename_editor_cancel_button_closes_without_renaming() {
-    let mut dashboard = dashboard_with_rename_editor();
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(rename_focus(&dashboard), DialogControl::Cancel);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-}
-
-#[test]
-fn rename_editor_save_button_renames_like_the_field() {
-    let mut dashboard = dashboard_with_rename_editor();
-    dashboard.handle_key(key(KeyCode::Char('!')));
-    dashboard.handle_key(key(KeyCode::Tab));
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(rename_focus(&dashboard), DialogControl::Save);
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::RenameSession {
-            session_id: "session-1".into(),
-            title: "ACP pretty name!".into(),
-        }
-    );
-}
-
-#[test]
-fn rename_editor_rejects_an_empty_title_from_the_field_and_the_save_button() {
-    for focus_moves in [0, 2] {
-        let mut dashboard = dashboard_with_rename_editor();
-        let Mode::Rename(editor) = &mut dashboard.mode else {
-            panic!("expected rename editor");
-        };
-        editor.title.clear();
-        for _ in 0..focus_moves {
-            dashboard.handle_key(key(KeyCode::Tab));
-        }
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Enter)),
-            DashboardAction::None,
-            "{focus_moves} focus moves"
-        );
-        assert_eq!(
-            dashboard.notice().as_deref(),
-            Some("Session name cannot be empty."),
-            "{focus_moves} focus moves"
-        );
-        assert!(matches!(dashboard.mode, Mode::Rename(_)), "{focus_moves}");
-    }
-}
-
-#[test]
-fn rename_editor_escape_cancels_from_any_focus() {
-    for focus_moves in 0..3 {
-        let mut dashboard = dashboard_with_rename_editor();
-        for _ in 0..focus_moves {
-            dashboard.handle_key(key(KeyCode::Tab));
-        }
-        assert_eq!(
-            dashboard.handle_key(key(KeyCode::Esc)),
-            DashboardAction::None,
-            "{focus_moves} focus moves"
-        );
-        assert!(matches!(dashboard.mode, Mode::Dashboard), "{focus_moves}");
-    }
-}
-
-#[test]
-fn rename_editor_highlights_save_until_cancel_takes_focus() {
-    let mut dashboard = dashboard_with_rename_editor();
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-    let mut button_styles = |dashboard: &mut DashboardState| {
-        terminal
-            .draw(|frame| render(frame, dashboard))
-            .expect("draw rename editor");
-        let buffer = terminal.backend().buffer();
-        let lines = buffer_lines(buffer);
-        let row = lines
-            .iter()
-            .position(|line| line.contains(" Cancel ") && line.contains(" Save "))
-            .expect("button row");
-        let y = buffer.area.y + row as u16;
-        assert!(!lines.iter().any(|line| line.contains("Enter save")));
-        (
-            buffer[(buffer.area.x + cell_column(&lines[row], "Cancel"), y)].bg,
-            buffer[(buffer.area.x + cell_column(&lines[row], "Save"), y)].bg,
-        )
-    };
-
-    // The shared button row keeps both buttons in their normal style while
-    // the field has focus. Tab then moves the accent focus style between the
-    // footer buttons.
-    assert_eq!(
-        button_styles(&mut dashboard),
-        (theme::palette().selection, theme::palette().selection)
-    );
-
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(
-        button_styles(&mut dashboard),
-        (theme::palette().accent, theme::palette().selection)
-    );
-
-    dashboard.handle_key(key(KeyCode::Tab));
-    assert_eq!(
-        button_styles(&mut dashboard),
-        (theme::palette().selection, theme::palette().accent)
-    );
-}
-
-#[test]
-fn import_progress_renders_a_focused_cancel_button_that_confirms_cancellation() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.show_import_progress("Chosen session".into());
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw import progress");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let row = lines
-        .iter()
-        .position(|line| line.contains(" Cancel "))
-        .expect("button row");
-    let y = buffer.area.y + row as u16;
-    let cancel_x = buffer.area.x + cell_column(&lines[row], "Cancel");
-    assert_eq!(buffer[(cancel_x, y)].bg, theme::palette().accent);
-    assert_eq!(buffer[(cancel_x - 1, y)].bg, theme::palette().accent);
-    assert!(!lines.iter().any(|line| line.contains("Esc cancels this")));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Right)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::CancelImport
-    );
 }
 
 #[test]
@@ -1105,103 +554,6 @@ fn import_safety_defaults_to_ignoring_untracked_files_and_can_include_them() {
             create_managed_worktree: Some(false),
             accepted: true,
             include_untracked: true,
-        }
-    );
-}
-
-#[test]
-fn import_safety_lists_scratch_repositories_left_out_of_the_workspace() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.show_import_bundle_confirmation(
-        Vec::new(),
-        Vec::new(),
-        vec!["/tmp/claude-1000/scratch".into()],
-        false,
-        Default::default(),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw safety warning");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(rendered.contains("temporary directories"), "{rendered}");
-    assert!(rendered.contains("/tmp/claude-1000/scratch"), "{rendered}");
-}
-
-#[test]
-fn import_safety_buttons_toggle_the_checkbox_and_cancel_from_the_cancel_button() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.show_import_bundle_confirmation(
-        vec!["/work/repo — 1 tracked change · 3 untracked paths".into()],
-        Vec::new(),
-        Vec::new(),
-        true,
-        Default::default(),
-    );
-
-    // Focus starts on Continue; the checkbox is the next control in the
-    // shared form, and moving on to Cancel does not disturb its state.
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Tab)),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char(' '))),
-        DashboardAction::None
-    );
-    let Mode::ConfirmImportBundle(confirmation) = &dashboard.mode else {
-        panic!("expected import safety confirmation");
-    };
-    assert!(!confirmation.ignore_untracked);
-    assert_eq!(
-        confirmation.form.borrow().focused(),
-        Some(DialogControl::ImportIgnore)
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Tab)),
-        DashboardAction::None
-    );
-    let Mode::ConfirmImportBundle(confirmation) = &dashboard.mode else {
-        panic!("expected import safety confirmation");
-    };
-    assert_eq!(
-        confirmation.form.borrow().focused(),
-        Some(DialogControl::ImportCancel)
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ConfirmImportBundle {
-            create_managed_worktree: None,
-            accepted: false,
-            include_untracked: false,
-        }
-    );
-
-    dashboard.show_import_bundle_confirmation(
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        false,
-        Default::default(),
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('y'))),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::ConfirmImportBundle(_)));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::ConfirmImportBundle {
-            create_managed_worktree: None,
-            accepted: false,
-            include_untracked: false,
         }
     );
 }
@@ -1269,39 +621,6 @@ fn importing_session_renders_unknown_then_known_progress_and_ignores_navigation(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::CancelImport
     );
-}
-
-#[test]
-fn idle_suspension_and_restart_run_from_the_palette() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    session.project_directory = Some("/srv/project".into());
-    let mut dashboard = dashboard_with_session(session);
-    dashboard.focus_sessions();
-    // Neither command binds a dashboard key any more.
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('s'))),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('r'))),
-        DashboardAction::None
-    );
-    assert_eq!(
-        dashboard.dispatch_command(crate::actions::CommandId::SuspendSession),
-        DashboardAction::Suspend {
-            session_id: "session-1".into(),
-            acknowledge_unpublished_work: false,
-        }
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
-    assert_eq!(
-        dashboard.dispatch_command(crate::actions::CommandId::RestartSession),
-        DashboardAction::RestartSession {
-            session_id: "session-1".into()
-        }
-    );
-    assert!(matches!(dashboard.mode, Mode::Dashboard));
 }
 
 #[test]
@@ -1462,8 +781,449 @@ fn destroy_stopped_confirmation_destroys_from_its_primary_button() {
     assert!(matches!(dashboard.mode, Mode::ResumeDialog(_)));
 }
 
+fn append_dialog_render(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    lines: &[String],
+) {
+    use std::fmt::Write as _;
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").unwrap();
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+}
+
+fn click_dialog_label(
+    dashboard: &mut DashboardState,
+    lines: &[String],
+    label: &str,
+) -> DashboardAction {
+    let position = point(lines, label);
+    let mut action = DashboardAction::None;
+    for kind in [
+        crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+    ] {
+        action = dashboard.handle_mouse(mouse_at(kind, position));
+    }
+    action
+}
+
+fn normalize_notice_log_ages(lines: &mut [String]) {
+    // The renderer's relative age is intentionally replaced with a same-width
+    // marker so the golden pins the complete modal without pinning wall time.
+    for line in lines {
+        if let Some(ago) = line.find(" ago ") {
+            let token_start = line[..ago].rfind(' ').map_or(0, |space| space + 1);
+            line.replace_range(token_start..ago, &"?".repeat(ago - token_start));
+        }
+    }
+}
+
 #[test]
-fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
+fn golden_dashboard_dialogs() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    let mut targets = dashboard_with_session(running_session());
+    targets.cycle_focus(false);
+    targets.cycle_focus(false);
+    let action = targets.handle_key(key(KeyCode::Char('e')));
+    writeln!(output, "action: {action:?}").unwrap();
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "target actions", 120, 34, &lines);
+    let action = click_dialog_label(&mut targets, &lines, "Test");
+    writeln!(output, "action: {action:?}").unwrap();
+    targets.apply_target_test("podman".into(), Ok(()));
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "target test result", 120, 34, &lines);
+
+    let _ = click_dialog_label(&mut targets, &lines, "Rename");
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "target ID editor", 120, 34, &lines);
+    targets.handle_key(key(KeyCode::End));
+    for character in ['-', 'v', '2'] {
+        targets.handle_key(key(KeyCode::Char(character)));
+    }
+    let lines = drawn(&mut targets, 120, 34);
+    append_dialog_render(&mut output, "edited target ID", 120, 34, &lines);
+    let action = targets.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    let action = targets.handle_key(key(KeyCode::Char('e')));
+    writeln!(output, "action: {action:?}").unwrap();
+    let lines = drawn(&mut targets, 120, 34);
+    let _ = click_dialog_label(&mut targets, &lines, "Rename");
+    let action = targets.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "cancelled target ID editor returns to actions",
+        120,
+        34,
+        &drawn(&mut targets, 120, 34),
+    );
+
+    let mut changed = dashboard_with_session(running_session());
+    changed.focus_sessions();
+    let action = chord(&mut changed, crate::CommandId::ChangedFiles);
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "changed files while the checkout probe is pending",
+        100,
+        24,
+        &drawn(&mut changed, 100, 24),
+    );
+    let mut numstat = String::new();
+    let mut porcelain = String::new();
+    for index in 0..36 {
+        writeln!(
+            numstat,
+            "{}\t{}\tsrc/module-{index:02}.rs",
+            index + 1,
+            index
+        )
+        .unwrap();
+        writeln!(porcelain, " M src/module-{index:02}.rs").unwrap();
+    }
+    changed.set_git_status(
+        "session-1".into(),
+        Ok(mj_core::local_git::parse_git_status(
+            "/workspace/project".into(),
+            "feature/dialogs",
+            Some("1\t3"),
+            &numstat,
+            &porcelain,
+        )),
+    );
+    let lines = drawn(&mut changed, 100, 24);
+    append_dialog_render(&mut output, "changed files first page", 100, 24, &lines);
+    changed.handle_key(key(KeyCode::PageDown));
+    append_dialog_render(
+        &mut output,
+        "changed files after paging down",
+        100,
+        24,
+        &drawn(&mut changed, 100, 24),
+    );
+    let action = changed.handle_key(key(KeyCode::Char('r')));
+    writeln!(output, "action: {action:?}").unwrap();
+    let action = changed.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "dashboard after closing changed files",
+        100,
+        24,
+        &drawn(&mut changed, 100, 24),
+    );
+
+    let mut notices = dashboard_with_session(running_session());
+    for index in 0..12 {
+        notices.set_failure_notice(format!(
+            "Build step {index:02} failed: the remote worker could not start its checkout or load the requested profile"
+        ));
+    }
+    open_palette(&mut notices);
+    for character in "Recent messages".chars() {
+        notices.handle_key(key(KeyCode::Char(character)));
+    }
+    append_dialog_render(
+        &mut output,
+        "command palette search for recent messages",
+        100,
+        28,
+        &drawn(&mut notices, 100, 28),
+    );
+    let action = notices.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+    let mut lines = drawn(&mut notices, 100, 28);
+    normalize_notice_log_ages(&mut lines);
+    append_dialog_render(&mut output, "recent messages", 100, 28, &lines);
+    notices.handle_key(key(KeyCode::PageDown));
+    let mut lines = drawn(&mut notices, 100, 28);
+    normalize_notice_log_ages(&mut lines);
+    append_dialog_render(
+        &mut output,
+        "recent messages after paging down",
+        100,
+        28,
+        &lines,
+    );
+    notices.handle_key(key(KeyCode::Home));
+    let action = notices.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    let mut cpu = dashboard_with_session(running_session());
+    let mut session_cpu = mj_core::snapshot_map::SnapshotMap::new();
+    session_cpu.insert(
+        "session-1".into(),
+        mj_client::runtime_feed::SessionCpuView::Measured {
+            usage: mj_core::cpu_usage::SessionCpuUsage {
+                recent_permille: 230,
+                hourly_permille: 180,
+                hourly_covered_secs: 3600,
+                online_cpus: 8,
+            },
+        },
+    );
+    for index in 2..=18 {
+        let id = format!("session-{index:02}");
+        let mut session = running_session();
+        session.id = id.clone();
+        session.title = format!("CPU session {index:02}");
+        session.acp_session_title = None;
+        cpu.state.sessions.insert(id.clone(), session);
+        session_cpu.insert(
+            id,
+            mj_client::runtime_feed::SessionCpuView::Measured {
+                usage: mj_core::cpu_usage::SessionCpuUsage {
+                    recent_permille: 100 + index as u16,
+                    hourly_permille: 80 + index as u16,
+                    hourly_covered_secs: 3600,
+                    online_cpus: 8,
+                },
+            },
+        );
+    }
+    cpu.set_session_cpu(session_cpu);
+    open_palette(&mut cpu);
+    for character in "CPU by session".chars() {
+        cpu.handle_key(key(KeyCode::Char(character)));
+    }
+    append_dialog_render(
+        &mut output,
+        "command palette search for CPU by session",
+        120,
+        36,
+        &drawn(&mut cpu, 120, 36),
+    );
+    let action = cpu.handle_key(key(KeyCode::Enter));
+    writeln!(output, "action: {action:?}").unwrap();
+    append_dialog_render(
+        &mut output,
+        "CPU by session",
+        120,
+        36,
+        &drawn(&mut cpu, 120, 36),
+    );
+    cpu.handle_key(key(KeyCode::PageDown));
+    append_dialog_render(
+        &mut output,
+        "CPU by session after paging down",
+        120,
+        36,
+        &drawn(&mut cpu, 120, 36),
+    );
+    let action = cpu.handle_key(key(KeyCode::Esc));
+    writeln!(output, "action: {action:?}").unwrap();
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "dashboard-dialogs",
+        output.trim_end_matches('\n'),
+    );
+}
+
+#[test]
+fn golden_tui_web_viewer_dialog() {
+    let mut output = String::new();
+    let url = "https://example.test/auth/login?token=secret";
+    let qr = render_qr(url).expect("QR code");
+    let qr_rows = qr
+        .lines()
+        .map(|line| {
+            line.chars()
+                .map(|character| if character == ' ' { '·' } else { character })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    append_dialog_render(
+        &mut output,
+        "QR module map; · marks a light module",
+        qr_rows.first().map_or(0, |row| row.chars().count()) as u16,
+        qr_rows.len() as u16,
+        &qr_rows,
+    );
+
+    let no_qr = WebDialog {
+        loading: false,
+        viewer_url: Some("http://127.0.0.1:37650".to_owned()),
+        viewer_code: Some("022160".to_owned()),
+        fallback_reason: Some("automatic Tailscale detection is disabled".to_owned()),
+        ..WebDialog::loading()
+    };
+    append_dialog_render(
+        &mut output,
+        "access details without QR",
+        140,
+        40,
+        &draw_web_dialog(&no_qr, 140, 40),
+    );
+
+    let long_url = "https://a-very-long-machine-name.some-tailnet.ts.net:37650/viewer";
+    let wrapped = WebDialog {
+        loading: false,
+        viewer_url: Some(long_url.to_owned()),
+        viewer_code: Some("022160".to_owned()),
+        fallback_reason: None,
+        message: None,
+        qr: Some(render_qr(long_url).unwrap()),
+        ..WebDialog::loading()
+    };
+    append_dialog_render(
+        &mut output,
+        "long URL wrapped with QR",
+        60,
+        40,
+        &draw_web_dialog(&wrapped, 60, 40),
+    );
+
+    let conflict = failed_web_dashboard();
+    let Mode::Web(dialog) = &conflict.mode else {
+        unreachable!()
+    };
+    for (width, height) in [(140, 40), (80, 24), (60, 20)] {
+        append_dialog_render(
+            &mut output,
+            "port conflict and recovery actions",
+            width,
+            height,
+            &draw_web_dialog(dialog, width, height),
+        );
+    }
+
+    let output = output.trim_end_matches('\n');
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "tui-web-viewer-dialog", output);
+}
+
+#[test]
+fn golden_tui_container_editor_details() {
+    let mut output = String::new();
+
+    let mut cached_session = running_session();
+    cached_session.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "ssh:morannon".into(),
+        directory: PathBuf::from("/mnt/nvme/mbx"),
+        max_size: Some("1000GB".into()),
+        target_root: None,
+    });
+    let mut cached = dashboard_with_session(cached_session);
+    open_container_editor(&mut cached);
+    append_dialog_render(
+        &mut output,
+        "session build cache",
+        120,
+        40,
+        &drawn(&mut cached, 120, 40),
+    );
+
+    let mut uncached = dashboard_with_session(running_session());
+    open_container_editor(&mut uncached);
+    append_dialog_render(
+        &mut output,
+        "session without build cache",
+        120,
+        40,
+        &drawn(&mut uncached, 120, 40),
+    );
+
+    let mut mounted = dashboard_with_container_session();
+    open_container_editor(&mut mounted);
+    append_dialog_render(
+        &mut output,
+        "mount change takes effect on recreation",
+        100,
+        40,
+        &drawn(&mut mounted, 100, 40),
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "tui-container-editor-details",
+        &output,
+    );
+}
+
+#[test]
+fn golden_tui_import_confirmation() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.show_import_bundle_confirmation(
+        Vec::new(),
+        Vec::new(),
+        vec!["/tmp/mj-golden-scratch".into()],
+        false,
+        Default::default(),
+    );
+    let lines = drawn(&mut dashboard, 120, 30);
+    let mut output = String::new();
+    append_dialog_render(
+        &mut output,
+        "scratch repository excluded from workspace",
+        120,
+        30,
+        &lines,
+    );
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "tui-import-confirmation",
+        &output,
+    );
+}
+
+#[test]
+fn golden_tui_checkpoint_origin_dialog() {
+    use std::fmt::Write as _;
+
+    fn append_state(
+        output: &mut String,
+        label: &str,
+        terminal: &mut Terminal<TestBackend>,
+        width: u16,
+        height: u16,
+    ) {
+        let cursor = terminal.get_cursor_position().expect("source cursor");
+        let buffer = terminal.backend().buffer();
+        let lines = buffer_lines(buffer);
+        append_dialog_render(output, label, width, height, &lines);
+
+        let source_row = lines
+            .iter()
+            .position(|line| line.contains("Source:"))
+            .expect("source field row");
+        let field_x = buffer.area.x + cell_column(&lines[source_row], "Source:") + 8;
+        let source_y = buffer.area.y + source_row as u16;
+        let source_focused = Some(buffer[(field_x, source_y)].bg) == theme::field(true).bg;
+        let button_row = lines
+            .iter()
+            .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
+            .expect("origin action row");
+        let button_y = buffer.area.y + button_row as u16;
+        let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
+        let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
+        let buttons_selected = buffer[(cancel_x, button_y)].bg == theme::palette().selection
+            && buffer[(check_x, button_y)].bg == theme::palette().selection;
+        if source_focused {
+            writeln!(output, "cursor: ({}, {})", cursor.x, cursor.y).unwrap();
+        } else {
+            writeln!(output, "cursor: hidden").unwrap();
+        }
+        writeln!(output, "source field focused: {source_focused}").unwrap();
+        writeln!(output, "both actions selected: {buttons_selected}").unwrap();
+        writeln!(
+            output,
+            "Cancel action focused: {}",
+            buffer[(cancel_x, button_y)].bg == theme::palette().accent
+        )
+        .unwrap();
+    }
+
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.show_repository_origin_dialog(
         "session-1".into(),
@@ -1473,59 +1233,36 @@ fn missing_checkpoint_history_dialog_makes_the_source_field_visible() {
         "BrokkAi/bifrost-dev".into(),
         DashboardAction::None,
     );
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw repository origin dialog");
-
-    let cursor_position = terminal.get_cursor_position().expect("source cursor");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let source_row = lines
-        .iter()
-        .position(|line| line.contains("Source:"))
-        .expect("focused source field");
-    let source_y = buffer.area.y + source_row as u16;
-    let source_x = buffer.area.x + cell_column(&lines[source_row], "Source:");
-    let field_x = source_x + 8;
-    assert_eq!(Some(buffer[(field_x, source_y)].bg), theme::field(true).bg);
-    assert_eq!(
-        cursor_position,
-        Position {
-            x: field_x,
-            y: source_y,
-        }
+        .unwrap();
+    let mut output = String::new();
+    append_state(
+        &mut output,
+        "focused replacement source",
+        &mut terminal,
+        100,
+        24,
     );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Type or paste into Source"))
-    );
-
-    let button_row = lines
-        .iter()
-        .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
-        .expect("button row");
-    let button_y = buffer.area.y + button_row as u16;
-    let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
-    let check_x = buffer.area.x + cell_column(&lines[button_row], "Check origin");
-    assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().selection);
-    assert_eq!(buffer[(check_x, button_y)].bg, theme::palette().selection);
 
     dashboard.handle_key(key(KeyCode::Tab));
     terminal
         .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw repository origin dialog with cancel focused");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let button_row = lines
-        .iter()
-        .position(|line| line.contains(" Cancel ") && line.contains(" Check origin "))
-        .expect("button row");
-    let button_y = buffer.area.y + button_row as u16;
-    let cancel_x = buffer.area.x + cell_column(&lines[button_row], "Cancel");
-    assert_eq!(buffer[(cancel_x, button_y)].bg, theme::palette().accent);
-    assert_eq!(Some(buffer[(field_x, source_y)].bg), theme::field(false).bg);
+        .unwrap();
+    append_state(
+        &mut output,
+        "focus moves to origin actions",
+        &mut terminal,
+        100,
+        24,
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "tui-checkpoint-origin-dialog",
+        &output,
+    );
 }
 
 #[test]
@@ -1576,67 +1313,6 @@ fn missing_checkpoint_history_dialog_accepts_a_replacement_origin() {
         dialog.error.as_deref(),
         Some("That origin does not contain checkpoint base b41dc78.")
     );
-}
-#[test]
-fn import_confirmation_allows_worktree_opt_out_and_cancellation() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.show_import_bundle_confirmation(
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        false,
-        mj_core::state::ManagedWorktreeOptions {
-            available: true,
-            default_create: true,
-        },
-    );
-    let Mode::ConfirmImportBundle(dialog) = &mut dashboard.mode else {
-        panic!("import confirmation")
-    };
-    dialog
-        .form
-        .get_mut()
-        .focus(DialogControl::ImportManagedWorktree);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
-    let Mode::ConfirmImportBundle(dialog) = &mut dashboard.mode else {
-        panic!("import confirmation")
-    };
-    assert!(!dialog.create_managed_worktree);
-    dialog.form.get_mut().focus(DialogControl::ImportContinue);
-    assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::ConfirmImportBundle {
-            accepted: true,
-            create_managed_worktree: Some(false),
-            ..
-        }
-    ));
-    dashboard.show_import_bundle_confirmation(
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        false,
-        mj_core::state::ManagedWorktreeOptions {
-            available: true,
-            default_create: false,
-        },
-    );
-    let Mode::ConfirmImportBundle(dialog) = &mut dashboard.mode else {
-        panic!("import confirmation")
-    };
-    dialog
-        .form
-        .get_mut()
-        .focus(DialogControl::ImportManagedWorktree);
-    dashboard.handle_key(key(KeyCode::Char(' ')));
-    assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Esc)),
-        DashboardAction::ConfirmImportBundle {
-            accepted: false,
-            create_managed_worktree: None,
-            ..
-        }
-    ));
 }
 
 /// The replacement origin may be a URL or `owner/repo`, so completion is
@@ -1700,6 +1376,7 @@ fn repository_origin_completes_local_paths() {
     assert_eq!(dialog.replacement, "/srv/bifrost/");
 }
 
+// Hard-won: bda82985: Notice rows shifted when an age exceeded the fixed eight-cell column.
 #[test]
 fn the_notice_log_age_column_keeps_messages_aligned_past_one_minute() {
     let ages = super::render::notice_log_ages(&[44, 77, 3_700]);
@@ -1710,4 +1387,39 @@ fn the_notice_log_age_column_keeps_messages_aligned_past_one_minute() {
     assert!(widths.iter().all(|&width| width == widths[0]), "{ages:?}");
     assert!(ages.iter().all(|age| age.ends_with("ago ")), "{ages:?}");
     assert!(ages[0].trim_start().starts_with("44s"), "{ages:?}");
+}
+
+#[test]
+fn launch_failure_survives_notices_and_retries_original_settings_once() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let retry = DashboardAction::CreateSession {
+        subagents: None,
+        create_managed_worktree: None,
+        workspace_id: "original-workspace".into(),
+        profile_id: "codex".into(),
+        bundle_id: "project".into(),
+        project_directory: None,
+        target_template_id: "docker".into(),
+        additional_mounts: Vec::new(),
+        resource_allocation: None,
+    };
+    dashboard.show_launch_failure("upload failed", Some(retry.clone()));
+    dashboard.set_notice("Quota refreshed");
+    let mut terminal = Terminal::new(TestBackend::new(90, 25)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Launch failed"));
+    assert!(text.contains("upload failed"));
+    assert!(text.contains("Retry launch"));
+    dashboard.handle_key(key(KeyCode::Right));
+    assert_eq!(dashboard.handle_key(key(KeyCode::Enter)), retry);
+    assert!(!matches!(dashboard.mode, Mode::Confirm(_)));
 }

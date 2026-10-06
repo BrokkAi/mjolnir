@@ -1,5 +1,6 @@
 //! Transcript conversion and presentation rules shared by terminal and web clients.
 use agent_client_protocol::schema::v1::{Plan, ToolCall, ToolCallStatus};
+use mj_core::config::ToolOutput;
 use mj_core::hex::lower_hex;
 use mj_core::state::{MaterializedSession, TerminalOutputRecord, TranscriptBody, TranscriptItem};
 use serde::Deserialize;
@@ -72,8 +73,12 @@ pub fn browser_transcript(
 ) -> BrowserTranscript {
     let collapsed_restarts =
         collapsed_session_restart_states(source_entries, TranscriptRenderMode::Rich);
-    let collapse =
-        entry_collapse_states(source_entries, TranscriptRenderMode::Rich, &BTreeSet::new());
+    let collapse = entry_collapse_states(
+        source_entries,
+        TranscriptRenderMode::Rich,
+        ToolOutput::Grouped,
+        &BTreeSet::new(),
+    );
     let restart_collapse_window_start = restart_collapse_window_start_seq(
         source_entries,
         &collapsed_restarts,
@@ -880,9 +885,12 @@ pub fn restart_collapse_window_start_seq(
 /// rather than breaking it, since nothing of it is on screen to separate the
 /// surrounding entries. Raw mode does not tool-collapse or omit entries, but
 /// it still coalesces adjacent restart markers as a presentation rule.
+/// `ToolOutput::Inline` keeps the Rich omissions but forms no streaks: every
+/// tool and thought renders on its own.
 pub fn entry_collapse_states(
     entries: &[ChatEntry],
     mode: TranscriptRenderMode,
+    tools: ToolOutput,
     expanded_tool_calls: &BTreeSet<u64>,
 ) -> Vec<EntryCollapse> {
     let mut states = vec![EntryCollapse::None; entries.len()];
@@ -909,10 +917,11 @@ pub fn entry_collapse_states(
     // A tool that ended after its turn was interrupted keeps its own row, so
     // a summary of finished work never speaks for it.
     let streak_member = |index: usize| {
-        entries[index].role == ChatRole::Thought
-            || (is_completed_tool(&entries[index])
-                && !entries[index].ended_after_interrupt
-                && !expanded_tool_calls.contains(&entries[index].start_seq))
+        tools == ToolOutput::Grouped
+            && (entries[index].role == ChatRole::Thought
+                || (is_completed_tool(&entries[index])
+                    && !entries[index].ended_after_interrupt
+                    && !expanded_tool_calls.contains(&entries[index].start_seq)))
     };
     let mut start = 0;
     while start < entries.len() {
@@ -1183,6 +1192,7 @@ mod tests {
     /// A browser polling with `after_seq` is sent an entry again only when
     /// that entry changed, for every item kind: here a tool call and a thought
     /// that did not change stay behind while a new message is sent.
+    // Hard-won: 8891aa9adda7: browser polls resent unchanged thought, tool, plan, and terminal entries every time
     #[test]
     fn a_browser_is_sent_only_the_entries_that_changed() {
         let mut session = MaterializedSession::empty("exact-cursors");

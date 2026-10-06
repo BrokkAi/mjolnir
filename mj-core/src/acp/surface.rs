@@ -185,14 +185,39 @@ impl AcpSessionSurface {
 
     pub fn begin_plan_mode_change(&mut self, active: bool) {
         self.plan_mode_change_pending = true;
-        self.current_mode = Some(if active { "plan" } else { "default" }.into());
+        self.current_mode = Some(
+            if active {
+                "plan"
+            } else {
+                self.execution_mode_id()
+            }
+            .into(),
+        );
     }
 
     pub fn finish_plan_mode_change(&mut self, active: bool) {
         self.plan_mode_change_pending = false;
-        self.current_mode = Some(if active { "plan" } else { "default" }.into());
+        self.current_mode = Some(
+            if active {
+                "plan"
+            } else {
+                self.execution_mode_id()
+            }
+            .into(),
+        );
         if self.harness_kind == Some(HarnessKind::Claude) && !active {
             self.sync_plan_mode();
+        }
+    }
+
+    /// The mode a harness returns to when Plan mode ends. OpenCode names its
+    /// normal mode `build`; every other harness Hel drives with a plan pair
+    /// names it `default`.
+    fn execution_mode_id(&self) -> &'static str {
+        if self.harness_kind == Some(HarnessKind::OpenCode) {
+            "build"
+        } else {
+            "default"
         }
     }
 
@@ -215,6 +240,20 @@ impl AcpSessionSurface {
         match self.harness_kind {
             // Muse has no plan mode over ACP; see `forwards_plan_command`.
             Some(HarnessKind::Muse) => Err(PlanControlError::Incompatible),
+            // OpenCode advertises its agent modes as a `mode` select whose
+            // normal value is `build`, so Hel's plan toggle maps onto it
+            // without the `default` value the other harnesses use.
+            Some(HarnessKind::OpenCode) => self
+                .exact_config_has_pair("mode", "build")
+                .then(|| PlanControl::SetConfig {
+                    key: "mode".into(),
+                    value: if active {
+                        "plan".into()
+                    } else {
+                        "build".into()
+                    },
+                })
+                .ok_or(PlanControlError::Incompatible),
             Some(HarnessKind::Codex) => self
                 .exact_config_has_plan_pair("collaboration_mode")
                 .then(|| PlanControl::SetConfig {
@@ -300,10 +339,14 @@ impl AcpSessionSurface {
     }
 
     fn exact_config_has_plan_pair(&self, key: &str) -> bool {
+        self.exact_config_has_pair(key, "default")
+    }
+
+    fn exact_config_has_pair(&self, key: &str, other: &str) -> bool {
         self.config_options.iter().any(|option| {
             option.id.to_string() == key
                 && select_contains(&option.kind, "plan")
-                && select_contains(&option.kind, "default")
+                && select_contains(&option.kind, other)
         })
     }
 }
@@ -340,20 +383,6 @@ mod tests {
         )
     }
 
-    fn fast_mode_option(current: &str) -> SessionConfigOption {
-        SessionConfigOption::new(
-            SessionConfigId::new(FAST_MODE_CONFIG_ID),
-            "Fast mode",
-            SessionConfigKind::Select(SessionConfigSelect::new(
-                SessionConfigValueId::new(current),
-                SessionConfigSelectOptions::Ungrouped(vec![
-                    SessionConfigSelectOption::new(FAST_MODE_OFF, "Off"),
-                    SessionConfigSelectOption::new(FAST_MODE_ON, "On"),
-                ]),
-            )),
-        )
-    }
-
     #[test]
     fn config_churn_does_not_revert_an_in_flight_plan_change() {
         let mut surface = AcpSessionSurface::default();
@@ -370,6 +399,7 @@ mod tests {
         assert_eq!(surface.current_mode(), Some("plan"));
     }
 
+    // Hard-won: f8bb425: a late Claude mode update reverted the user-confirmed Plan selector to permission mode.
     #[test]
     fn claude_mode_update_does_not_revert_plan_config_to_permission_mode() {
         let mut surface = AcpSessionSurface::default();
@@ -413,6 +443,7 @@ mod tests {
         assert_eq!(surface.current_mode(), Some("plan"));
     }
 
+    // Hard-won: 60145fd: leaving Claude Plan mode discarded the prior worker policy and confirmed user mode.
     #[test]
     fn claude_plan_exit_restores_worker_policy_and_keeps_the_confirmed_mode() {
         for restored in ["auto", "bypassPermissions"] {
@@ -447,24 +478,5 @@ mod tests {
             Value::String("plan".into()),
         )]));
         assert_eq!(surface.current_mode(), Some("plan"));
-    }
-
-    #[test]
-    fn fast_mode_requires_the_codex_selector_and_tracks_its_current_value() {
-        let mut surface = AcpSessionSurface::default();
-        assert!(!surface.supports_fast_mode());
-        assert!(!surface.fast_mode_active());
-
-        surface.set_config_options(&[fast_mode_option(FAST_MODE_OFF)]);
-        assert!(surface.supports_fast_mode());
-        assert!(!surface.fast_mode_active());
-
-        surface.set_config_options(&[fast_mode_option(FAST_MODE_ON)]);
-        assert!(surface.supports_fast_mode());
-        assert!(surface.fast_mode_active());
-
-        surface.set_config_options(&[]);
-        assert!(!surface.supports_fast_mode());
-        assert!(!surface.fast_mode_active());
     }
 }

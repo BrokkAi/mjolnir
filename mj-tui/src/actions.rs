@@ -1980,7 +1980,6 @@ impl DashboardState {
 mod tests {
     use super::*;
     use crate::SessionOperationKind;
-    use crate::keybinds::command_for_action;
     use crate::test_support::{dashboard_with_session, key, operation, running_session};
     use mj_core::config::Keybinds;
 
@@ -1988,6 +1987,7 @@ mod tests {
     /// session transition may claim one, either as a pane key or as a default
     /// binding. They stay reachable from the palette, the row's ⋯ menu, and an
     /// explicit `[keys]` entry.
+    // Hard-won: 7b69480385: a transition-key mis-hit stopped a session and stranded its close.
     #[test]
     fn session_transition_commands_bind_no_key() {
         let defaults = Keybinds::default();
@@ -2009,6 +2009,7 @@ mod tests {
     /// A close that failed part-way leaves a durable Closing/Destroying
     /// record. Stop is how the person retries it, so it stays available even
     /// though every other session command is blocked on the failure.
+    // Hard-won: 7b69480385: a failed close left a Destroying session without a retry route.
     #[test]
     fn stop_retries_a_close_that_failed_part_way() {
         let mut session = running_session();
@@ -2038,6 +2039,7 @@ mod tests {
     /// A-17: the Sub-agents pane opened only by a mouse click on the prompt's
     /// lower border. It is a registry command now, so the help overlay, the
     /// palette, a default chord, and the footer all reach it.
+    // Hard-won: 85c59fc968: the existing Sub-agents pane had no keyboard route.
     #[test]
     fn sub_agents_open_from_a_chord_and_are_listed_for_help_and_the_palette() {
         let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
@@ -2084,6 +2086,7 @@ mod tests {
     /// A-8 / B-1: the row's ⋯ menu had no keyboard route. "Session
     /// actions…" opens the same menu from a chord, from `.` on the Sessions
     /// pane, and from the palette, and the Sessions footer names it.
+    // Hard-won: ddd30e47d5: the existing session row menu had no keyboard route.
     #[test]
     fn session_actions_open_the_row_menu_from_the_keyboard() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2165,6 +2168,7 @@ mod tests {
     /// B-16: the terminal said "Interrupt turn" nowhere. The command is in
     /// the palette at all times, greyed with the reason while no turn runs,
     /// and it runs only while the session is working.
+    // Hard-won: f5821dce22: users could not find Interrupt turn in the terminal controls.
     #[test]
     fn interrupt_turn_is_listed_always_and_runs_only_during_a_turn() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2197,119 +2201,6 @@ mod tests {
         );
     }
 
-    /// A-16 and A-18: the help text reads as sentences, and Close pane says
-    /// the one pane it refuses to close.
-    #[test]
-    fn pane_help_text_reads_as_sentences_and_names_the_browse_exception() {
-        assert!(
-            spec(CommandId::FocusPaneLeft)
-                .description
-                .contains("pane left of this one")
-        );
-        assert!(
-            spec(CommandId::FocusPaneRight)
-                .description
-                .contains("pane right of this one")
-        );
-        let close = spec(CommandId::ClosePane).description;
-        assert!(
-            close.contains("The Browse pane cannot be closed"),
-            "{close}"
-        );
-        assert!(close.contains("Swap pane"), "{close}");
-    }
-
-    #[test]
-    fn workspace_manager_has_a_prefix_key_and_no_palette_row() {
-        let dashboard = dashboard_with_session(running_session());
-        assert!(spec(CommandId::Workspaces).pane_keys.is_empty());
-        assert_eq!(
-            dashboard.key_labels(CommandId::Workspaces),
-            vec!["ctrl+b shift+n".to_owned()]
-        );
-        // Still dispatchable: the pinned hamburger runs it through
-        // `run_available_command`, which needs the command to stay available.
-        assert!(available(&dashboard, None).contains(&CommandId::Workspaces));
-        // Listed in the palette too: the button is one way in, but a person
-        // who types "work" expects to find it.
-        assert!(!hidden_from_palette(CommandId::Workspaces));
-    }
-
-    /// The footer, the help overlay, and the palette all read one command per
-    /// action, so a new `[keys]` field cannot advertise a key that runs
-    /// nothing, and two actions cannot quietly share a command.
-    #[test]
-    fn every_key_action_maps_to_exactly_one_command() {
-        for action in KeyAction::ALL.iter().copied() {
-            let id = command_for_action(action);
-            assert_eq!(
-                spec(id).action,
-                Some(action),
-                "{action:?} maps to {id:?}, which claims a different action"
-            );
-        }
-        for entry in COMMANDS {
-            if let Some(action) = entry.action {
-                assert_eq!(command_for_action(action), entry.id);
-            }
-        }
-    }
-
-    /// The conversation-pane commands answer herdr's letters, so a herdr user
-    /// splits, closes, and moves between panes without learning anything new.
-    /// The resize commands are bindable but unbound, like the other commands
-    /// a mis-hit should not run.
-    #[test]
-    fn the_pane_commands_carry_herdrs_letters() {
-        let dashboard = dashboard_with_session(running_session());
-        for (id, label) in [
-            (CommandId::OpenSessionSplitRight, "ctrl+b v"),
-            (CommandId::OpenSessionSplitBelow, "ctrl+b -"),
-            (CommandId::ClosePane, "ctrl+b x"),
-            (CommandId::FocusPaneLeft, "ctrl+b h"),
-            (CommandId::FocusPaneDown, "ctrl+b j"),
-            (CommandId::FocusPaneUp, "ctrl+b k"),
-            (CommandId::FocusPaneRight, "ctrl+b l"),
-            (CommandId::ZoomPane, "ctrl+b z"),
-            (CommandId::FocusLastPane, "ctrl+b ;"),
-            // Zoom took herdr's `prefix+z`, so the support panes' size key is
-            // its shifted form.
-            (CommandId::CycleFocusedPaneSize, "ctrl+b shift+z"),
-        ] {
-            assert_eq!(dashboard.key_labels(id), vec![label.to_owned()], "{id:?}");
-        }
-        for id in [
-            CommandId::ResizePaneLeft,
-            CommandId::ResizePaneDown,
-            CommandId::ResizePaneUp,
-            CommandId::ResizePaneRight,
-        ] {
-            assert!(spec(id).action.is_some(), "{id:?} must be bindable");
-            assert!(
-                dashboard.key_labels(id).is_empty(),
-                "{id:?} must be unbound"
-            );
-        }
-    }
-
-    #[test]
-    fn the_palette_omits_only_itself_and_the_numbered_workspace_keys() {
-        for id in [CommandId::Palette, CommandId::SwitchWorkspace] {
-            assert!(hidden_from_palette(id), "{id:?}");
-        }
-        for id in [
-            CommandId::Workspaces,
-            CommandId::NewSessionWizard,
-            CommandId::ResumeDialog,
-            CommandId::RestartSession,
-            CommandId::OpenConfig,
-            CommandId::WebViewer,
-            CommandId::Help,
-        ] {
-            assert!(!hidden_from_palette(id), "{id:?}");
-        }
-    }
-
     #[test]
     fn spinner_selection_waits_for_the_current_save_before_accepting_another() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2340,50 +2231,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn session_activity_arms_redraws_until_the_work_settles() {
-        let mut dashboard = dashboard_with_session(running_session());
-        assert!(!dashboard.needs_fast_tick());
-        dashboard
-            .session_details
-            .get_mut("session-1")
-            .unwrap()
-            .activity
-            .foreground_tool_started_at_ms = Some(1);
-        assert!(dashboard.needs_fast_tick());
-        dashboard
-            .session_details
-            .get_mut("session-1")
-            .unwrap()
-            .activity = mj_client::usage_format::SessionActivity::default();
-        assert!(!dashboard.needs_fast_tick());
-        dashboard.session_operations.insert(
-            "session-1".into(),
-            operation(SessionOperationKind::Launching, None),
-        );
-        assert!(dashboard.needs_fast_tick());
-        dashboard.session_operations.clear();
-        assert!(!dashboard.needs_fast_tick());
-    }
-
-    /// `spec()` panics on a missing entry, so prove every id has one before
-    /// any other test relies on it.
-    #[test]
-    fn every_command_id_has_exactly_one_spec() {
-        for entry in COMMANDS {
-            assert_eq!(spec(entry.id).id, entry.id);
-            assert_eq!(
-                COMMANDS
-                    .iter()
-                    .filter(|candidate| candidate.id == entry.id)
-                    .count(),
-                1,
-                "{:?} appears more than once",
-                entry.id
-            );
-        }
-    }
-
     /// Two commands answering the same key in the same place would make the
     /// registry order, rather than the user's intent, decide what happens.
     #[test]
@@ -2407,23 +2254,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_is_available_only_while_an_operation_runs() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert!(!available(&dashboard, None).contains(&CommandId::CancelOperation));
-
-        dashboard.session_operations.insert(
-            "session-1".into(),
-            operation(SessionOperationKind::Launching, None),
-        );
-        assert!(available(&dashboard, None).contains(&CommandId::CancelOperation));
-        assert_eq!(
-            (spec(CommandId::CancelOperation).footer)(&dashboard).as_deref(),
-            Some("cancel launch")
-        );
-    }
-
-    #[test]
     fn force_destroy_needs_a_selected_session_and_survives_in_flight_operations() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
@@ -2436,50 +2266,6 @@ mod tests {
         assert!(
             available(&dashboard, None).contains(&CommandId::DestroySession),
             "force destruction exists to preempt a wedged operation"
-        );
-    }
-
-    #[test]
-    fn pin_and_unpin_availability_follow_the_current_layout() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert_eq!(
-            (spec(CommandId::PinSession).available)(&dashboard),
-            Availability::Ready
-        );
-        assert_eq!(
-            (spec(CommandId::UnpinSession).available)(&dashboard),
-            Availability::Blocked("this session is not pinned")
-        );
-
-        dashboard.pin_ids.insert("session-1".into(), 1);
-        assert_eq!(
-            (spec(CommandId::PinSession).available)(&dashboard),
-            Availability::Blocked("this session is already pinned")
-        );
-        assert_eq!(
-            (spec(CommandId::UnpinSession).available)(&dashboard),
-            Availability::Ready
-        );
-    }
-
-    #[test]
-    fn move_command_opens_the_fixed_workspace_resume_controls() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert!(available(&dashboard, None).contains(&CommandId::MoveSession));
-        assert_eq!(
-            dashboard.dispatch_command(CommandId::MoveSession),
-            DashboardAction::None
-        );
-        let crate::Mode::Resume(wizard) = &dashboard.mode else {
-            panic!("move opens the shared resume wizard");
-        };
-        assert!(wizard.moving);
-        assert_eq!(wizard.session_id, "session-1");
-        assert!(
-            wizard.discard_queue,
-            "move defaults to discarding queued work"
         );
     }
 

@@ -764,9 +764,9 @@ impl ChatState {
                         // Arming is configuration, not a session gesture: a
                         // slash command that edited config.toml would change a
                         // machine-wide setting from inside one conversation.
-                        "on" | "off" | "quick" | "extended" => {
+                        "on" | "off" => {
                             self.set_notice(
-                                "automatic review is configured in config.toml: [review] enabled, tier",
+                                "automatic review is configured in config.toml: [review] enabled",
                             );
                             ChatAction::None
                         }

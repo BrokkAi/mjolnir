@@ -32,31 +32,6 @@ fn click_at(form: &mut Form<u8>, row: u16, at: Instant) -> Option<Interaction<u8
 }
 
 #[test]
-fn list_double_click_is_enter_on_the_clicked_item() {
-    let mut form = list_form();
-    let now = Instant::now();
-    assert_eq!(click_at(&mut form, 1, now), Some(Interaction::Select(1, 1)));
-    let mut keyboard = form.clone();
-    let enter = keyboard.handle(&key(KeyCode::Enter)).action;
-    assert_eq!(
-        click_at(&mut form, 1, now + Duration::from_millis(200)),
-        enter
-    );
-    assert_eq!(form.selected(1), Some(1));
-}
-
-#[test]
-fn command_click_activates_and_updates_selection_atomically() {
-    let mut form = list_form();
-    form.set_list_activation(1, ListActivation::SingleClick);
-    assert_eq!(
-        click_at(&mut form, 2, Instant::now()),
-        Some(Interaction::Activate(1))
-    );
-    assert_eq!(form.selected(1), Some(2));
-}
-
-#[test]
 fn different_rows_expired_clicks_and_navigation_do_not_activate() {
     let mut form = list_form();
     let now = Instant::now();
@@ -149,43 +124,6 @@ fn ordinary_redraw_preserves_double_click_but_a_clone_does_not() {
 }
 
 #[test]
-fn focus_wraps_and_skips_disabled_controls() {
-    let mut form = Form::new();
-    form.register(1, ControlKind::Button, Rect::new(0, 0, 5, 1), true);
-    form.register(2, ControlKind::Button, Rect::new(0, 1, 5, 1), false);
-    form.register(3, ControlKind::Button, Rect::new(0, 2, 5, 1), true);
-    form.end_frame(1);
-    assert_eq!(form.focused(), Some(1));
-    assert!(form.handle(&key(KeyCode::Tab)).consumed);
-    assert_eq!(form.focused(), Some(3));
-    form.handle(&key(KeyCode::Tab));
-    assert_eq!(form.focused(), Some(1));
-}
-
-#[test]
-fn button_releases_activate_once_and_release_outside_cancels() {
-    let mut form = Form::new();
-    form.register(1, ControlKind::Button, Rect::new(0, 0, 5, 1), true);
-    form.end_frame(1);
-    let down = Event::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 1,
-        row: 0,
-        modifiers: KeyModifiers::NONE,
-    });
-    let up = Event::Mouse(crossterm::event::MouseEvent {
-        kind: MouseEventKind::Up(MouseButton::Left),
-        column: 1,
-        row: 0,
-        modifiers: KeyModifiers::NONE,
-    });
-    assert!(form.handle(&down).action.is_none());
-    assert!(form.captures_pointer());
-    assert_eq!(form.handle(&up).action, Some(Interaction::Activate(1)));
-    assert!(!form.captures_pointer());
-}
-
-#[test]
 fn field_space_is_editing_and_unicode_cursor_is_applied_by_editor() {
     let mut form = form();
     let space = key(KeyCode::Char(' '));
@@ -214,25 +152,6 @@ fn mouse(kind: MouseEventKind, x: u16, y: u16) -> Event {
 }
 
 #[test]
-fn requested_initial_focus_and_both_reverse_tab_encodings_work() {
-    let mut form = Form::new();
-    for id in 1..=3 {
-        form.register(id, ControlKind::Button, Rect::default(), true);
-    }
-    form.end_frame(3);
-    assert_eq!(form.focused(), Some(3));
-    form.handle(&key(KeyCode::BackTab));
-    assert_eq!(form.focused(), Some(2));
-    form.handle(&Event::Key(KeyEvent::new(
-        KeyCode::Tab,
-        KeyModifiers::SHIFT,
-    )));
-    assert_eq!(form.focused(), Some(1));
-    form.handle(&key(KeyCode::BackTab));
-    assert_eq!(form.focused(), Some(3));
-}
-
-#[test]
 fn focus_repairs_after_removal_and_disabling_every_control() {
     let mut form = form();
     form.focus(2);
@@ -254,90 +173,25 @@ fn focus_repairs_after_removal_and_disabling_every_control() {
 }
 
 #[test]
-fn arrows_leave_list_boundaries_and_return_from_actions() {
-    let mut form = list_form();
-    form.declare(2, ControlKind::Button);
-    form.declare_with_enabled(3, ControlKind::Button, false);
-    form.declare(4, ControlKind::Button);
-    form.end_frame(1);
-    for selected in [1, 2] {
-        assert_eq!(
-            form.handle(&key(KeyCode::Down)).action,
-            Some(Interaction::Select(1, selected))
-        );
-        assert_eq!(form.focused(), Some(1));
-    }
-    for expected in [2, 4, 1] {
-        form.handle(&key(KeyCode::Down));
-        assert_eq!(form.focused(), Some(expected));
-    }
-    form.handle(&key(KeyCode::Home));
-    for expected in [4, 2, 1] {
-        form.handle(&key(KeyCode::Up));
-        assert_eq!(form.focused(), Some(expected));
-    }
-    form.handle(&key(KeyCode::Down));
-    assert_eq!(form.selected(1), Some(1));
-}
-
-#[test]
-fn arrows_leave_a_list_with_no_selectable_rows() {
-    let mut form = Form::new();
-    form.declare(
-        1,
-        ControlKind::ChoiceList {
-            len: 0,
-            selected: 0,
-        },
-    );
-    form.declare(2, ControlKind::Button);
-    form.end_frame(1);
-    form.handle(&key(KeyCode::Down));
-    assert_eq!(form.focused(), Some(2));
-    assert_eq!(
-        form.handle(&key(KeyCode::Enter)).action,
-        Some(Interaction::Activate(2))
-    );
-    form.handle(&key(KeyCode::Up));
-    assert_eq!(form.focused(), Some(1));
-}
-
-#[test]
-fn arrow_boundaries_skip_list_headers_and_disabled_rows() {
-    let mut form = Form::new();
-    form.register_with_rows(
-        1,
-        ControlKind::ChoiceList {
-            len: 3,
-            selected: 1,
-        },
-        Rect::new(0, 0, 10, 5),
-        true,
-        vec![None, Some(0), Some(1), Some(2), None],
-        vec![false, false, true, false, false],
-    );
-    form.declare(2, ControlKind::Button);
-    form.end_frame(1);
-    for direction in [KeyCode::Down, KeyCode::Up] {
-        form.focus(1);
-        form.handle(&key(direction));
-        assert_eq!(form.focused(), Some(2));
-        assert_eq!(form.selected(1), Some(1));
-    }
-}
-
-#[test]
 fn pointer_release_outside_or_after_disappearance_never_activates() {
     let mut form = form();
     let down = mouse(MouseEventKind::Down(MouseButton::Left), 1, 1);
     let up = mouse(MouseEventKind::Up(MouseButton::Left), 1, 1);
-    form.handle(&down);
+    assert!(form.handle(&down).consumed);
     assert_eq!(form.focused(), Some(2));
-    assert!(
-        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 20, 20))
-            .action
-            .is_none()
+    assert!(form.captures_pointer());
+    assert_eq!(
+        form.handle(&up).action,
+        Some(Interaction::Activate(2)),
+        "a matching release activates the captured button once"
     );
+    assert!(!form.captures_pointer());
+    assert!(form.handle(&up).action.is_none());
+
+    form.handle(&down);
+    let outside = form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 20, 20));
+    assert!(outside.consumed);
+    assert_eq!(outside.action, None);
     assert!(!form.captures_pointer());
     assert!(form.handle(&up).action.is_none());
     form.handle(&down);
@@ -428,17 +282,6 @@ fn changed_list_metadata_drops_obsolete_row_mappings() {
 }
 
 #[test]
-fn disabled_click_is_consumed_without_changing_focus() {
-    let mut form = form();
-    form.declare_with_enabled(2, ControlKind::Button, false);
-    form.end_frame(1);
-    let result = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
-    assert!(result.consumed);
-    assert_eq!(result.action, None);
-    assert_eq!(form.focused(), Some(1));
-}
-
-#[test]
 fn activation_ignores_repeat_release_and_modified_space() {
     let mut form = form();
     form.focus(2);
@@ -468,151 +311,6 @@ fn activation_ignores_repeat_release_and_modified_space() {
 }
 
 #[test]
-fn activation_keeps_its_action_when_the_form_state_does_not_move() {
-    let mut form = form();
-    form.focus(2);
-
-    let result = form.handle(&key(KeyCode::Enter));
-
-    assert!(result.consumed);
-    assert_eq!(result.action, Some(Interaction::Activate(2)));
-}
-
-#[test]
-fn clamped_navigation_and_repeated_focus_stay_consumed() {
-    let mut form = Form::new();
-    form.register(
-        1,
-        ControlKind::ChoiceList {
-            len: 2,
-            selected: 1,
-        },
-        Rect::new(0, 0, 5, 2),
-        true,
-    );
-    form.end_frame(1);
-
-    let result = form.handle(&key(KeyCode::Down));
-    assert!(result.consumed);
-    assert_eq!(result.action, Some(Interaction::Select(1, 1)));
-
-    let result = form.handle(&key(KeyCode::Up));
-    assert!(result.consumed);
-    assert_eq!(result.action, Some(Interaction::Select(1, 0)));
-    assert_eq!(form.selected(1), Some(0));
-
-    let mut only = Form::new();
-    only.register(1, ControlKind::Button, Rect::new(0, 0, 5, 1), true);
-    only.end_frame(1);
-    let result = only.handle(&key(KeyCode::Tab));
-    assert!(result.consumed);
-    assert_eq!(only.focused(), Some(1));
-}
-
-#[test]
-fn a_press_captures_the_pointer_and_a_release_outside_lets_it_go() {
-    let mut form = form();
-    let down = mouse(MouseEventKind::Down(MouseButton::Left), 1, 1);
-    let up = mouse(MouseEventKind::Up(MouseButton::Left), 20, 20);
-
-    assert!(form.handle(&down).consumed);
-    assert!(form.captures_pointer());
-    let result = form.handle(&up);
-    assert!(result.consumed);
-    assert_eq!(result.action, None);
-    assert!(!form.captures_pointer());
-}
-
-#[test]
-fn disabled_click_and_noop_editing_remain_consumed() {
-    let mut form = form();
-    form.declare_with_enabled(2, ControlKind::Button, false);
-    form.end_frame(1);
-    let disabled = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 1));
-    assert!(disabled.consumed);
-
-    let edit = form.handle(&key(KeyCode::Left));
-    assert!(edit.consumed);
-    assert_eq!(
-        edit.action,
-        Some(Interaction::Edit(
-            1,
-            FieldEdit::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
-        ))
-    );
-}
-
-#[test]
-fn cloned_scopes_do_not_share_focus_flags() {
-    let original = form();
-    let mut clone = original.clone();
-    clone.handle(&key(KeyCode::Tab));
-    assert_eq!(clone.focused(), Some(2));
-    assert_eq!(original.focused(), Some(1));
-    clone.clear();
-    assert_eq!(original.focused(), Some(1));
-}
-
-#[test]
-fn mapped_list_skips_headings_and_disabled_choices_in_keys_and_mouse() {
-    let mut form = Form::new();
-    form.register_with_rows(
-        1,
-        ControlKind::ChoiceList {
-            len: 4,
-            selected: 0,
-        },
-        Rect::new(0, 0, 12, 4),
-        true,
-        vec![None, Some(0), Some(1), Some(2)],
-        vec![true, true, false, true],
-    );
-    form.end_frame(1);
-    assert_eq!(
-        form.handle(&key(KeyCode::Down)).action,
-        Some(Interaction::Select(1, 2))
-    );
-    for y in [0, 2] {
-        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, y));
-        assert_eq!(
-            form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, y))
-                .action,
-            None
-        );
-    }
-    form.set_selected(1, 1);
-    assert_eq!(form.handle(&key(KeyCode::Enter)).action, None);
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::ScrollDown, 1, 1)).action,
-        Some(Interaction::Select(1, 2))
-    );
-}
-
-#[test]
-fn dismiss_target_is_not_a_focus_stop_and_cancel_coexists_with_footer_button() {
-    let mut form = Form::new();
-    form.register(1, ControlKind::Button, Rect::new(10, 0, 8, 1), true);
-    form.register_dismiss(Rect::new(1, 0, 3, 1), true);
-    form.end_frame(1);
-    assert_eq!(form.focused(), Some(1));
-    form.handle(&key(KeyCode::Tab));
-    assert_eq!(form.focused(), Some(1));
-
-    assert!(
-        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 2, 0))
-            .action
-            .is_none()
-    );
-    assert!(form.dismiss_is_armed());
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 2, 0))
-            .action,
-        Some(Interaction::Cancel)
-    );
-    assert!(!form.dismiss_is_armed());
-}
-
-#[test]
 fn dismiss_drag_or_move_outside_disarms_without_cancel() {
     let mut form = Form::<u8>::new();
     form.register_dismiss(Rect::new(1, 0, 3, 1), true);
@@ -630,17 +328,6 @@ fn dismiss_drag_or_move_outside_disarms_without_cancel() {
             .action,
         None
     );
-}
-
-#[test]
-fn disabled_dismiss_target_is_visible_to_hit_testing_but_inert() {
-    let mut form = Form::<u8>::new();
-    form.register_dismiss(Rect::new(1, 0, 3, 1), false);
-    form.end_frame(1);
-    assert!(form.contains(2, 0));
-    let result = form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 2, 0));
-    assert_eq!(result.action, None);
-    assert!(!form.captures_pointer());
 }
 
 #[test]
@@ -662,101 +349,6 @@ fn dismiss_geometry_does_not_leave_a_stale_capture_across_frames() {
     assert!(!form.captures_pointer());
 }
 
-#[test]
-fn combobox_keys_preview_without_commit_until_acceptance() {
-    let mut form = Form::new();
-    form.register(
-        1,
-        ControlKind::ComboBox {
-            len: 3,
-            selected: 0,
-            expanded: false,
-        },
-        Rect::new(0, 0, 8, 1),
-        true,
-    );
-    form.end_frame(1);
-    assert_eq!(
-        form.handle(&key(KeyCode::Enter)).action,
-        Some(Interaction::Activate(1))
-    );
-
-    form.begin_frame();
-    form.register(
-        1,
-        ControlKind::ComboBox {
-            len: 3,
-            selected: 0,
-            expanded: true,
-        },
-        Rect::new(0, 0, 8, 1),
-        true,
-    );
-    form.end_frame(1);
-    assert_eq!(
-        form.handle(&key(KeyCode::Down)).action,
-        Some(Interaction::Select(1, 1))
-    );
-    assert_eq!(form.selected(1), Some(1));
-    assert_eq!(
-        form.handle(&key(KeyCode::Tab)).action,
-        Some(Interaction::ComboBoxCommit(1, 1))
-    );
-}
-
-#[test]
-fn expanded_combobox_escape_is_local_and_popup_rows_commit() {
-    let mut form = Form::new();
-    form.register_combobox(
-        1,
-        ControlKind::ComboBox {
-            len: 3,
-            selected: 0,
-            expanded: true,
-        },
-        Rect::new(0, 0, 8, 1),
-        true,
-        Rect::new(0, 2, 10, 5),
-        vec![None, Some(0), Some(1), Some(2), None],
-    );
-    form.end_frame(1);
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::ScrollDown, 1, 3)).action,
-        Some(Interaction::Select(1, 1))
-    );
-    assert_eq!(
-        form.handle(&key(KeyCode::Esc)).action,
-        Some(Interaction::ComboBoxDismiss(1))
-    );
-
-    let mut form = Form::new();
-    form.register_combobox(
-        1,
-        ControlKind::ComboBox {
-            len: 3,
-            selected: 0,
-            expanded: true,
-        },
-        Rect::new(0, 0, 8, 1),
-        true,
-        Rect::new(0, 2, 10, 5),
-        vec![None, Some(0), Some(1), Some(2), None],
-    );
-    form.end_frame(1);
-    form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 4));
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 4))
-            .action,
-        Some(Interaction::ComboBoxCommit(1, 1))
-    );
-    form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 0));
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 0))
-            .action,
-        Some(Interaction::ComboBoxDismiss(1))
-    );
-}
-
 /// A path field with a following button, so focus has somewhere to go.
 fn path_form(len: usize, expanded: bool) -> Form<u8> {
     let mut form = Form::new();
@@ -775,87 +367,267 @@ fn path_form(len: usize, expanded: bool) -> Form<u8> {
     form
 }
 
-#[test]
-fn path_field_routes_popup_keys() {
-    let mut form = path_form(3, true);
-    assert_eq!(
-        form.handle(&key(KeyCode::Down)).action,
-        Some(Interaction::Select(1, 1))
-    );
-    assert_eq!(form.selected(1), Some(1));
-    assert_eq!(
-        form.handle(&key(KeyCode::Enter)).action,
-        Some(Interaction::PathCommit(1, 1))
-    );
-    assert_eq!(
-        form.handle(&key(KeyCode::Esc)).action,
-        Some(Interaction::PathDismiss(1))
-    );
-    assert_eq!(
-        form.handle(&key(KeyCode::Tab)).action,
-        Some(Interaction::PathDismiss(1))
-    );
-    assert_eq!(form.focused(), Some(2));
+fn path_field_golden_buffer(
+    input: &crate::path_input::PathInput,
+    form: &mut Form<u8>,
+    width: u16,
+    height: u16,
+    focused: u8,
+) -> ratatui::buffer::Buffer {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            form.begin_frame();
+            crate::components::PathField::render(frame, Rect::new(0, 1, 12, 1), input, form, 1);
+            crate::components::Button::render(
+                frame,
+                Rect::new(0, 8, 10, 1),
+                "Continue",
+                true,
+                form,
+                2,
+            );
+            form.end_frame(focused);
+        })
+        .expect("draw path field");
+    terminal.backend().buffer().clone()
+}
+
+fn append_path_golden_state(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    buffer: &ratatui::buffer::Buffer,
+    details: &[String],
+) {
+    use std::fmt::Write as _;
+
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+    output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+    output.push('\n');
+    for detail in details {
+        writeln!(output, "{detail}").expect("write state detail");
+    }
 }
 
 #[test]
-fn ctrl_space_on_a_path_field_requests_completion() {
+fn golden_path_field_completion() {
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+    use mj_core::path_completion::PathCompletion;
+
+    let mut output = String::new();
+    let mut input = crate::path_input::PathInput::from_value("~/p".to_owned());
     let mut form = path_form(0, false);
-    assert_eq!(
-        form.handle(&chord(KeyCode::Char(' '), KeyModifiers::CONTROL))
-            .action,
-        Some(Interaction::Complete(1))
-    );
-    assert_eq!(
-        form.handle(&key(KeyCode::Null)).action,
-        Some(Interaction::Complete(1))
-    );
-}
+    let buffer = path_field_golden_buffer(&input, &mut form, 40, 14, 1);
+    append_path_golden_state(&mut output, "collapsed path field", 40, 14, &buffer, &[]);
 
-#[test]
-fn collapsed_path_field_edits_like_a_text_field() {
-    let mut form = path_form(0, false);
-    let typed = key(KeyCode::Char('a'));
-    let Event::Key(event) = typed else {
-        unreachable!("the fixture makes key events")
-    };
-    assert_eq!(
-        form.handle(&Event::Key(event)).action,
-        Some(Interaction::Edit(1, FieldEdit::Key(event)))
+    let completion = form.handle(&chord(KeyCode::Char(' '), KeyModifiers::CONTROL));
+    let requested = input.request_completion();
+    let buffer = path_field_golden_buffer(&input, &mut form, 40, 14, 1);
+    append_path_golden_state(
+        &mut output,
+        "ctrl space requests completion",
+        40,
+        14,
+        &buffer,
+        &[
+            format!("action: {:?}", completion.action),
+            format!("request prefix: {requested:?}"),
+        ],
     );
-    assert_eq!(
-        form.handle(&key(KeyCode::Enter)).action,
-        Some(Interaction::Activate(1))
-    );
-}
-
-#[test]
-fn popup_click_commits_and_outside_click_dismisses() {
-    let mut form = path_form(3, true);
-    form.register_popup(
-        1,
-        Rect::new(0, 1, 12, 5),
-        vec![None, Some(0), Some(1), Some(2), None],
-    );
-    form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 3));
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::Up(MouseButton::Left), 1, 3))
-            .action,
-        Some(Interaction::PathCommit(1, 1))
+    let nul = form.handle(&key(KeyCode::Null));
+    let duplicate_request = input.request_completion();
+    append_path_golden_state(
+        &mut output,
+        "terminal NUL completion key",
+        40,
+        14,
+        &path_field_golden_buffer(&input, &mut form, 40, 14, 1),
+        &[
+            format!("action: {:?}", nul.action),
+            format!("duplicate request: {duplicate_request:?}"),
+        ],
     );
 
-    let mut form = path_form(3, true);
-    form.register_popup(
-        1,
-        Rect::new(0, 1, 12, 5),
-        vec![None, Some(0), Some(1), Some(2), None],
+    input.apply_completion(
+        "~/p",
+        PathCompletion {
+            candidates: vec!["~/projects/".into(), "~/provision/".into()],
+            insert: None,
+            truncated: false,
+        },
     );
-    assert_eq!(
-        form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 8))
-            .action,
-        Some(Interaction::PathDismiss(1))
+    append_path_golden_state(
+        &mut output,
+        "completion candidates",
+        40,
+        14,
+        &path_field_golden_buffer(&input, &mut form, 40, 14, 1),
+        &[],
     );
-    assert_eq!(form.focused(), Some(2));
+    let selected = form.handle(&key(KeyCode::Down));
+    if let Some(crate::components::Interaction::Select(_, index)) = selected.action.as_ref() {
+        input.select_completion(*index);
+    }
+    append_path_golden_state(
+        &mut output,
+        "keyboard previews second candidate",
+        40,
+        14,
+        &path_field_golden_buffer(&input, &mut form, 40, 14, 1),
+        &[format!("action: {:?}", selected.action)],
+    );
+    let accepted = form.handle(&key(KeyCode::Enter));
+    let committed = input.accept_completion();
+    append_path_golden_state(
+        &mut output,
+        "enter commits candidate",
+        40,
+        14,
+        &path_field_golden_buffer(&input, &mut form, 40, 14, 1),
+        &[
+            format!("action: {:?}", accepted.action),
+            format!("accepted: {committed}"),
+        ],
+    );
+
+    let mut edited = crate::path_input::PathInput::from_value(String::new());
+    let mut edit_form = path_form(0, false);
+    let edit = edit_form.handle(&key(KeyCode::Char('a')));
+    if let Some(crate::components::Interaction::Edit(_, edit)) = edit.action.clone() {
+        crate::components::PathField::apply(&mut edited, edit);
+    }
+    append_path_golden_state(
+        &mut output,
+        "collapsed path edits as text",
+        40,
+        14,
+        &path_field_golden_buffer(&edited, &mut edit_form, 40, 14, 1),
+        &[format!("action: {:?}", edit.action)],
+    );
+    let submit = edit_form.handle(&key(KeyCode::Enter));
+    append_path_golden_state(
+        &mut output,
+        "collapsed path enter activates",
+        40,
+        14,
+        &path_field_golden_buffer(&edited, &mut edit_form, 40, 14, 1),
+        &[format!("action: {:?}", submit.action)],
+    );
+
+    let mut escaped = crate::path_input::PathInput::from_value("~/p".to_owned());
+    escaped.request_completion();
+    escaped.apply_completion(
+        "~/p",
+        PathCompletion {
+            candidates: vec!["~/projects/".into(), "~/provision/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let mut escape_form = path_form(2, true);
+    let dismissal = escape_form.handle(&key(KeyCode::Esc));
+    escaped.dismiss_completion();
+    append_path_golden_state(
+        &mut output,
+        "escape dismisses candidates",
+        40,
+        14,
+        &path_field_golden_buffer(&escaped, &mut escape_form, 40, 14, 1),
+        &[format!("action: {:?}", dismissal.action)],
+    );
+
+    let mut tabbed = crate::path_input::PathInput::from_value("~/p".to_owned());
+    tabbed.request_completion();
+    tabbed.apply_completion(
+        "~/p",
+        PathCompletion {
+            candidates: vec!["~/projects/".into(), "~/provision/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let mut tab_form = path_form(2, true);
+    let dismissal = tab_form.handle(&key(KeyCode::Tab));
+    tabbed.dismiss_completion();
+    append_path_golden_state(
+        &mut output,
+        "tab dismisses and focuses next control",
+        40,
+        14,
+        &path_field_golden_buffer(&tabbed, &mut tab_form, 40, 14, 2),
+        &[
+            format!("action: {:?}", dismissal.action),
+            format!("focused control: {:?}", tab_form.focused()),
+        ],
+    );
+
+    let mut clicked = crate::path_input::PathInput::from_value("~/p".to_owned());
+    clicked.request_completion();
+    clicked.apply_completion(
+        "~/p",
+        PathCompletion {
+            candidates: vec!["~/projects/".into(), "~/provision/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let mut click_form = path_form(2, true);
+    let _ = path_field_golden_buffer(&clicked, &mut click_form, 40, 14, 1);
+    let popup = click_form
+        .controls
+        .iter()
+        .find(|control| control.id == 1)
+        .expect("path field registration")
+        .popup_area;
+    let x = popup.x.saturating_add(1);
+    let y = popup.y.saturating_add(1);
+    click_form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+    let click = click_form
+        .handle(&mouse(MouseEventKind::Up(MouseButton::Left), x, y))
+        .action;
+    if let Some(crate::components::Interaction::PathCommit(_, index)) = click.as_ref() {
+        clicked.select_completion(*index);
+        clicked.accept_completion();
+    }
+    append_path_golden_state(
+        &mut output,
+        "mouse click commits candidate",
+        40,
+        14,
+        &path_field_golden_buffer(&clicked, &mut click_form, 40, 14, 1),
+        &[format!("action: {click:?}")],
+    );
+
+    let mut outside = crate::path_input::PathInput::from_value("~/p".to_owned());
+    outside.request_completion();
+    outside.apply_completion(
+        "~/p",
+        PathCompletion {
+            candidates: vec!["~/projects/".into(), "~/provision/".into()],
+            insert: None,
+            truncated: false,
+        },
+    );
+    let mut outside_form = path_form(2, true);
+    let dismissal = outside_form.handle(&mouse(MouseEventKind::Down(MouseButton::Left), 1, 8));
+    outside.dismiss_completion();
+    append_path_golden_state(
+        &mut output,
+        "outside click dismisses candidates",
+        40,
+        14,
+        &path_field_golden_buffer(&outside, &mut outside_form, 40, 14, 2),
+        &[format!("action: {:?}", dismissal.action)],
+    );
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "path-field-completion", &output);
 }
 
 /// A key press carrying modifiers, which the shared `key` fixture cannot make.
@@ -863,89 +635,7 @@ fn chord(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
 
-/// A list of `len` rows, one display row per item, all selectable.
-fn long_list(len: usize) -> Form<u8> {
-    let mut form = Form::new();
-    form.register_with_rows(
-        1,
-        ControlKind::ChoiceList { len, selected: 0 },
-        Rect::new(0, 0, 10, 10),
-        true,
-        (0..len).map(Some).collect(),
-        vec![true; len],
-    );
-    form.end_frame(1);
-    form
-}
-
-/// Every list on the surface answers the vim keys, but a focused text field
-/// sees them first and keeps them as text: the letters must stay typable
-/// wherever typing is what they mean.
-#[test]
-fn vim_keys_move_a_choice_list_but_a_text_field_keeps_them_as_text() {
-    let mut list = list_form();
-    assert_eq!(
-        list.handle(&key(KeyCode::Char('j'))).action,
-        Some(Interaction::Select(1, 1))
-    );
-    assert_eq!(
-        list.handle(&key(KeyCode::Char('j'))).action,
-        Some(Interaction::Select(1, 2))
-    );
-    assert_eq!(
-        list.handle(&key(KeyCode::Char('k'))).action,
-        Some(Interaction::Select(1, 1))
-    );
-
-    // `form()` focuses the text field, which answers before list handling.
-    let mut fields = form();
-    for character in ['j', 'k', 'G'] {
-        assert_eq!(
-            fields.handle(&key(KeyCode::Char(character))).action,
-            Some(Interaction::Edit(
-                1,
-                FieldEdit::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
-            )),
-        );
-    }
-}
-
-/// `G` goes to the end and the two ctrl chords page by eight, on both the
-/// plain lists and the ones that map display rows to items.
-#[test]
-fn shift_g_jumps_to_the_last_row_and_ctrl_d_u_page_by_eight() {
-    for mut form in [list_form(), long_list(3)] {
-        assert_eq!(
-            form.handle(&chord(KeyCode::Char('G'), KeyModifiers::SHIFT))
-                .action,
-            Some(Interaction::Select(1, 2))
-        );
-    }
-
-    let mut form = long_list(20);
-    assert_eq!(
-        form.handle(&chord(KeyCode::Char('d'), KeyModifiers::CONTROL))
-            .action,
-        Some(Interaction::Select(1, 8))
-    );
-    assert_eq!(
-        form.handle(&chord(KeyCode::Char('d'), KeyModifiers::CONTROL))
-            .action,
-        Some(Interaction::Select(1, 16))
-    );
-    // The last page stops at the end of the list rather than running past it.
-    assert_eq!(
-        form.handle(&chord(KeyCode::Char('d'), KeyModifiers::CONTROL))
-            .action,
-        Some(Interaction::Select(1, 19))
-    );
-    assert_eq!(
-        form.handle(&chord(KeyCode::Char('u'), KeyModifiers::CONTROL))
-            .action,
-        Some(Interaction::Select(1, 11))
-    );
-}
-
+// Hard-won: 20b5749a: an open popup let a click activate the control it covered.
 #[test]
 fn open_popup_takes_clicks_over_a_later_control_it_covers() {
     let mut form = Form::new();

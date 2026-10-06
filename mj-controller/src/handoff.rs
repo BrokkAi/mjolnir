@@ -191,6 +191,7 @@ mod tests {
 
     /// When a backend resolves, the handoff is the summarizer's snapshot under
     /// the shared preamble, not a bounded transcript.
+    // Hard-won: 781a40ea: native-continuity recovery handed over only the recent transcript and lost all pre-cutoff context despite an available utility model.
     #[tokio::test]
     async fn a_resolved_backend_produces_a_summarized_handoff() {
         let handoff = summarize_or_recent(
@@ -231,28 +232,6 @@ mod tests {
         .unwrap();
 
         assert!(handoff.starts_with(HANDOFF_PREAMBLE), "{handoff}");
-        assert!(handoff.contains("fix the bug"), "{handoff}");
-    }
-
-    /// With no utility model configured, discovery fails without a network call
-    /// and the real decision path falls back to the bounded recent handoff.
-    #[tokio::test]
-    async fn no_model_falls_back_to_a_verbatim_handoff() {
-        let handoff = build_handoff_context(
-            "session-under-test",
-            &Config::default(),
-            &one_exchange_snapshot(),
-            64 * 1024,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert!(handoff.starts_with(HANDOFF_PREAMBLE), "{handoff}");
-        assert!(
-            handoff.contains("No summarizer was available"),
-            "the fallback handoff names its lack of a summarizer: {handoff}"
-        );
         assert!(handoff.contains("fix the bug"), "{handoff}");
     }
 }

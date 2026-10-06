@@ -11,13 +11,10 @@
 //! the terms the primary's is, so the controller projects and renders it with
 //! the code it already has instead of a parallel transcript pipeline.
 //!
-//! A sidecar holds several *roles*, not one reviewer. Plan review uses the one
-//! called `reviewer`; a turn review in the extended tier also runs an intent
-//! analyst, a supervisor, and the specialist lanes the supervisor launches.
-//! Each role is a separate harness process with its own relay, journal and
-//! copy of the staged profile, so two roles can never share a config home or
-//! be mistaken for one another. Each role also locks independently: launching
-//! a lane must not block the controller polling another role's journal.
+//! The sidecar owns independent roles. Plan review and turn review use the
+//! default `reviewer` role; review-settings discovery uses a named role so it
+//! cannot interrupt a live review. Each role has its own harness home, relay,
+//! journal and lock.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -56,14 +53,7 @@ const PAUSE_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Interval between reads of the reviewer relay's durable state while waiting.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// Specialist lanes admitted at once. Lower than mjolnir's six because these
-/// run inside one resource-limited container beside the primary agent, and a
-/// lane that waits a little costs the review nothing: the supervisor may not
-/// conclude until every launched lane has reported anyway.
-const MAX_PARALLEL_LANES: usize = 3;
-/// The role plan review uses, and the one a request without a role means. It
-/// is the turn review's own reviewer role, so the two features name the same
-/// harness the same way.
+/// The default role. Requests without a role mean this role.
 pub use mj_core::review::driver::REVIEWER_ROLE as DEFAULT_ROLE;
 /// File inside a role root naming the reviewer generation it was copied for.
 const ROLE_GENERATION_MARKER: &str = ".hel-reviewer-generation";
@@ -153,7 +143,7 @@ impl ReviewerPlacement {
     }
 
     /// Where one role lives. The default role keeps the original layout, so a
-    /// worker that was staged before roles existed still finds its journal.
+    /// worker staged before roles existed still finds its journal.
     #[must_use]
     fn role_root(&self, role: &str) -> PathBuf {
         if role == DEFAULT_ROLE {
@@ -174,10 +164,8 @@ impl ReviewerPlacement {
         }
     }
 
-    /// Relay session id for one role. It is derived from the primary's so
-    /// worker logs name the pair, and it is distinct so the relays can never
-    /// be mistaken for one another. The default role keeps the original
-    /// `-reviewer` suffix, which the controller's projection already uses.
+    /// Relay session id for one role. The default role keeps the historical
+    /// suffix used by the controller's projection.
     #[must_use]
     fn relay_session_id(&self, role: &str) -> String {
         if role == DEFAULT_ROLE {
@@ -192,14 +180,10 @@ impl ReviewerPlacement {
 struct RunningReviewer {
     config: ReviewerLaunchConfig,
     commands: mpsc::Sender<CommandRequest>,
-    dispatch_wake: mpsc::Sender<()>,
+    coordinator_wake: mpsc::Sender<()>,
     runtime: JoinHandle<Result<()>>,
     shutdown: CancellationToken,
     _admission: ReviewerAdmission,
-    /// A specialist lane's admission slot, held for as long as its harness
-    /// runs. Roles that are not lanes hold none: the supervisor and the intent
-    /// analyst are not what the cap is protecting the container from.
-    _lane_slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Drop for RunningReviewer {
@@ -234,8 +218,7 @@ impl ReviewerLifecycle {
     }
 }
 
-/// One reviewing agent: its harness process, its relay, and its own copy of
-/// the staged profile.
+/// The reviewer's harness process, relay and private copy of the staged profile.
 struct ReviewerRole {
     role: String,
     placement: ReviewerPlacement,
@@ -253,24 +236,12 @@ struct ReviewerRole {
     )>,
 }
 
-/// Owns every reviewing role beside one primary worker.
-///
-/// Roles are locked one at a time rather than behind a single sidecar lock:
-/// launching a specialist lane takes seconds, and the controller polls other
-/// roles' journals throughout.
+/// Owns every role beside one primary worker.
 pub struct ReviewerSidecar {
     placement: ReviewerPlacement,
     primary_relay: Arc<Mutex<DurableRelay>>,
     roles:
         std::sync::Mutex<std::collections::BTreeMap<String, Arc<tokio::sync::Mutex<ReviewerRole>>>>,
-    /// Admission for specialist lanes, so a supervisor that dispatches the
-    /// whole roster cannot put six harnesses in one container at once.
-    lane_slots: Arc<tokio::sync::Semaphore>,
-    /// Lanes the supervisor has asked for and the controller has not collected
-    /// yet. The worker records them and answers the tool at once; starting a
-    /// lane is the controller's job, because only it holds the diff, the job
-    /// and the rendered prompts.
-    pending_dispatches: std::sync::Mutex<Vec<mj_core::review::lanes::ReviewSubagentRequest>>,
     /// Admitted role operations outlive their requesting socket. A role lock
     /// moves into its task, so cancellation cannot release it over a live
     /// blocking mutation. Only one operation per role is spawned at a time.
@@ -283,67 +254,11 @@ impl ReviewerSidecar {
     pub fn new(placement: ReviewerPlacement, primary_relay: Arc<Mutex<DurableRelay>>) -> Self {
         Self {
             placement,
-            pending_dispatches: std::sync::Mutex::new(Vec::new()),
             primary_relay,
             roles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            lane_slots: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_LANES)),
             operations: Mutex::new(JoinSet::new()),
             shutdown: CancellationToken::new(),
         }
-    }
-
-    /// Records one `spawn_specialist` dispatch from the supervisor's MCP
-    /// tool, answering with the lanes it accepted.
-    ///
-    /// The reply says "started" because that is what the supervisor needs to
-    /// know: these lanes are now the review's business, and it may not
-    /// conclude until each has reported. A lane the controller then cannot
-    /// launch reaches the supervisor as a failed report, exactly as a lane
-    /// that dies mid-run does.
-    #[must_use]
-    pub fn record_dispatch(
-        &self,
-        dispatch: mj_core::review::lanes::LaneDispatch,
-    ) -> mj_core::review::lanes::LaneDispatchReply {
-        if let Err(message) = mj_review::lanes::validate_dispatch(&dispatch.reviewers) {
-            return mj_core::review::lanes::LaneDispatchReply {
-                started: Vec::new(),
-                error: Some(message),
-            };
-        }
-        let mut pending = self
-            .pending_dispatches
-            .lock()
-            .expect("review dispatch queue lock poisoned");
-        let mut started = Vec::new();
-        for request in dispatch.reviewers {
-            // A lane the supervisor already launched is not launched twice:
-            // its report is still coming, and a second copy would double the
-            // container's load for no new evidence.
-            if pending
-                .iter()
-                .any(|queued| queued.agent_type == request.agent_type)
-            {
-                continue;
-            }
-            started.push(request.agent_type.clone());
-            pending.push(request);
-        }
-        mj_core::review::lanes::LaneDispatchReply {
-            started,
-            error: None,
-        }
-    }
-
-    /// Hands the controller every dispatch recorded since it last asked.
-    #[must_use]
-    pub fn take_dispatches(&self) -> Vec<mj_core::review::lanes::ReviewSubagentRequest> {
-        std::mem::take(
-            &mut *self
-                .pending_dispatches
-                .lock()
-                .expect("review dispatch queue lock poisoned"),
-        )
     }
 
     #[cfg(test)]
@@ -358,6 +273,17 @@ impl ReviewerSidecar {
         let (proceed, blocked) = std::sync::mpsc::channel();
         self.role(role).lock().await.preparation_pause = Some((entered, blocked));
         (observed, proceed)
+    }
+
+    /// The roles this sidecar has touched, in a stable order.
+    #[must_use]
+    pub fn known_roles(&self) -> Vec<String> {
+        self.roles
+            .lock()
+            .expect("reviewer role map lock poisoned")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// The role's own state, created on first use.
@@ -380,17 +306,6 @@ impl ReviewerSidecar {
                 }))
             })
             .clone()
-    }
-
-    /// Every role this sidecar has touched, in a stable order.
-    #[must_use]
-    pub fn known_roles(&self) -> Vec<String> {
-        self.roles
-            .lock()
-            .expect("reviewer role map lock poisoned")
-            .keys()
-            .cloned()
-            .collect()
     }
 
     /// Serves one reviewer request. Every variant answers with an ordinary
@@ -427,7 +342,8 @@ impl ReviewerSidecar {
         let request_id = envelope.request_id;
         let protocol_version = envelope.protocol_version;
         let role = role.unwrap_or_else(|| DEFAULT_ROLE.to_owned());
-        let body = match self.dispatch(&role, request, disconnected).await {
+        let body = self.dispatch(&role, request, disconnected).await;
+        let body = match body {
             Ok(body) => body,
             Err(error) => reviewer_error(format!("{error:#}")),
         };
@@ -438,7 +354,7 @@ impl ReviewerSidecar {
         }
     }
 
-    /// Stops every running role. Called when the worker's session closes, so
+    /// Stops every role. Called when the worker's session closes, so
     /// no reviewing harness outlives the session it was reviewing for.
     pub async fn pause_all(&self) {
         self.shutdown.cancel();
@@ -488,15 +404,8 @@ impl ReviewerSidecar {
         disconnected: impl std::future::Future<Output = ReviewerCancellation>,
     ) -> Result<RelayResponseBody> {
         use mj_core::relay::ReviewerRequest;
-        if let ReviewerRequest::TakeLaneDispatches = request {
-            return Ok(RelayResponseBody::Ok {
-                payload: RelayResponsePayload::LaneDispatches {
-                    requests: self.take_dispatches(),
-                },
-            });
-        }
-        let handle = self.role(role);
         tokio::pin!(disconnected);
+        let handle = self.role(role);
         let mut role = tokio::select! {
             biased;
             () = self.shutdown.cancelled() => bail!("reviewer sidecar is stopping"),
@@ -518,7 +427,6 @@ impl ReviewerSidecar {
         let cancellation = self.shutdown.child_token();
         let _cancel_on_drop = cancellation.clone().drop_guard();
         role.request_cancel = cancellation.clone();
-        let lane_slots = self.lane_slots.clone();
         let (respond, response) = tokio::sync::oneshot::channel();
         // Journal reads and already accepted mutations never own the live
         // reviewer's lifetime. Losing their reply cannot cancel its turn.
@@ -539,7 +447,7 @@ impl ReviewerSidecar {
             }
             operations.spawn(async move {
                 let _operation_admission = operation_admission;
-                let result = role.dispatch(&lane_slots, request).await;
+                let result = role.dispatch(request).await;
                 if owns_runtime && role.request_cancel.is_cancelled() {
                     if let Err(error) = role.pause().await {
                         tracing::error!(%error, "cancelled reviewer operation remains stopping");
@@ -568,13 +476,12 @@ impl ReviewerSidecar {
 impl ReviewerRole {
     async fn dispatch(
         &mut self,
-        lane_slots: &Arc<tokio::sync::Semaphore>,
         request: mj_core::relay::ReviewerRequest,
     ) -> Result<RelayResponseBody> {
         use mj_core::relay::ReviewerRequest;
 
         match request {
-            ReviewerRequest::Start { config } => self.start(lane_slots, *config).await,
+            ReviewerRequest::Start { config } => self.start(*config).await,
             ReviewerRequest::PauseGeneration { generation } => {
                 if self.lifecycle.generation() == Some(generation) {
                     self.pause().await?;
@@ -611,7 +518,7 @@ impl ReviewerRole {
                     command_id,
                     command,
                 })?;
-                self.wake_dispatch();
+                self.wake_coordinator();
                 Ok(response)
             }
             ReviewerRequest::Status => self.forward(RelayRequest::Status),
@@ -621,9 +528,6 @@ impl ReviewerRole {
             } => self.respond_elicitation(elicitation_id, response).await,
             ReviewerRequest::CaptureDelta { baselines } => self.capture_delta(baselines).await,
             ReviewerRequest::AdvanceBaseline { trees } => self.advance_baseline(trees).await,
-            ReviewerRequest::TakeLaneDispatches => {
-                unreachable!("lane dispatches are answered by the sidecar, not by one role")
-            }
         }
     }
 
@@ -652,11 +556,6 @@ impl ReviewerRole {
              needs an eligible reviewer in Settings before it starts; resume or restart the session after configuring one"
         );
         let repositories = self.review_repositories();
-        // Before any reviewer of this review starts its Bifrost server, which
-        // writes `.bifrost/` into the root it serves.
-        for repository in &repositories {
-            crate::review::bifrost::exclude_bifrost_state(repository).await;
-        }
         let untracked_at_start = self
             .placement
             .untracked_at_start
@@ -744,11 +643,7 @@ impl ReviewerRole {
     /// Starts the reviewer, or reports the running one when it already matches
     /// `config`. A configuration that names a different profile or a newer
     /// generation replaces the running reviewer rather than reusing it.
-    async fn start(
-        &mut self,
-        lane_slots: &Arc<tokio::sync::Semaphore>,
-        config: ReviewerLaunchConfig,
-    ) -> Result<RelayResponseBody> {
+    async fn start(&mut self, config: ReviewerLaunchConfig) -> Result<RelayResponseBody> {
         let profile_home = self.placement.staged_profile_home(config.generation);
         if !profile_home.is_dir() {
             bail!(
@@ -771,7 +666,7 @@ impl ReviewerRole {
             None => false,
         };
         if !reused {
-            self.launch(lane_slots, &config).await?;
+            self.launch(&config).await?;
         }
         self.request_plan_mode(&config).await;
         self.apply_configuration(&config).await?;
@@ -788,11 +683,7 @@ impl ReviewerRole {
 
     /// Spawns the reviewer's harness and waits for it to open a session and
     /// advertise its configuration.
-    async fn launch(
-        &mut self,
-        lane_slots: &Arc<tokio::sync::Semaphore>,
-        config: &ReviewerLaunchConfig,
-    ) -> Result<()> {
+    async fn launch(&mut self, config: &ReviewerLaunchConfig) -> Result<()> {
         let admission = ReviewerAdmission::acquire(
             self.primary_relay.clone(),
             format!("reviewer runtime {}", self.role),
@@ -815,17 +706,6 @@ impl ReviewerRole {
         if generation_changed {
             Self::commit_generation(&root, config).await?;
         }
-        // A lane waits for a slot before its harness starts, so a supervisor
-        // that dispatches the whole roster cannot fill the container.
-        let lane_slot = if is_lane(&self.role) {
-            Some(tokio::select! {
-                slot = lane_slots.clone().acquire_owned() =>
-                    slot.context("the reviewer lane admission semaphore closed")?,
-                () = self.request_cancel.cancelled() => bail!("reviewer preparation cancelled"),
-            })
-        } else {
-            None
-        };
         let relay = self.open_relay()?;
 
         let mut environment = self.placement.target_environment.clone();
@@ -922,9 +802,7 @@ impl ReviewerRole {
                 .mcp_servers
                 .iter()
                 .cloned()
-                .map(|server| {
-                    crate::acp::ReviewerMcpServer::new(server, &self.placement.worker_root)
-                })
+                .map(crate::acp::ReviewerMcpServer::new)
                 .collect(),
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             subagent_mcp_socket: None,
@@ -989,10 +867,9 @@ impl ReviewerRole {
         self.lifecycle = ReviewerLifecycle::Running(RunningReviewer {
             config: config.clone(),
             commands: commands_tx,
-            dispatch_wake: wake_tx,
+            coordinator_wake: wake_tx,
             runtime,
             shutdown,
-            _lane_slot: lane_slot,
             _admission: admission,
         });
 
@@ -1058,7 +935,7 @@ impl ReviewerRole {
         {
             return;
         }
-        self.wake_dispatch();
+        self.wake_coordinator();
         // A harness that refuses plan mode is not a failure: the review still
         // runs, and the prompt is what actually asks the reviewer not to act.
         let _ = self
@@ -1127,7 +1004,7 @@ impl ReviewerRole {
                 error.message
             );
         }
-        self.wake_dispatch();
+        self.wake_coordinator();
         // Waiting for the command's own completion, not for the value in
         // the relay's configuration map, is what makes the refreshed
         // option list part of the answer: the runtime records the value,
@@ -1166,7 +1043,7 @@ impl ReviewerRole {
                 })
                 .is_ok()
             {
-                self.wake_dispatch();
+                self.wake_coordinator();
                 if !self.request_cancel.is_cancelled() {
                     let _ = self
                         .wait_for(CANCEL_TIMEOUT, |state| state.active_prompt.is_none())
@@ -1185,12 +1062,12 @@ impl ReviewerRole {
             self.lifecycle = ReviewerLifecycle::Stopped;
             return Ok(());
         };
-        // Borrow the handle: a timeout leaves the task, process ownership and
-        // lane permit in Stopping. No replacement may touch this role's files
+        // Borrow the handle: a timeout leaves the task and process ownership
+        // in Stopping. No replacement may touch this role's files
         // until a later pause observes the runtime's actual completion.
         let joined = tokio::time::timeout(PAUSE_TIMEOUT, &mut running.runtime)
             .await
-            .context("reviewer is still stopping; its lane and files remain reserved")?;
+            .context("reviewer is still stopping; its files remain reserved")?;
         self.lifecycle = ReviewerLifecycle::Stopped;
         joined.context("reviewer runtime task stopped abnormally")??;
         Ok(())
@@ -1373,9 +1250,9 @@ impl ReviewerRole {
         Ok(state)
     }
 
-    fn wake_dispatch(&self) {
+    fn wake_coordinator(&self) {
         if let Some(running) = self.lifecycle.running() {
-            let _ = running.dispatch_wake.try_send(());
+            let _ = running.coordinator_wake.try_send(());
         }
     }
 
@@ -1476,13 +1353,6 @@ impl ReviewerRole {
     }
 }
 
-/// Whether `role` is one of the specialist lanes the admission cap covers.
-/// The default reviewer, the supervisor and the intent analyst are
-/// single-instance roles and are not what the cap protects against.
-fn is_lane(role: &str) -> bool {
-    mj_review::lanes::lane_by_id(role).is_some()
-}
-
 /// Moves a role's old relay files out of the live root. A relay journal is
 /// append-only while it is live, so deleting it would lose the previous
 /// conversation and leave a stale native id available for a new generation.
@@ -1533,7 +1403,7 @@ fn archive_relay(root: &std::path::Path, identity: &str) -> Result<()> {
     Ok(())
 }
 
-/// Recursively copies a staged profile into a role's own home.
+/// Recursively copies a staged profile into the reviewer's private home.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("create {}", to.display()))?;
     for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {

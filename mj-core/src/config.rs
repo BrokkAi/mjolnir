@@ -145,13 +145,13 @@ pub struct ReviewConfig {
     /// a reviewer.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
-    #[serde(default, skip_serializing_if = "is_default_tier")]
-    pub tier: crate::review::lanes::ReviewTier,
+    /// Deprecated review tier. Accepted for old configurations and ignored.
+    #[serde(default, skip_serializing)]
+    pub tier: Option<String>,
     /// The harness profile the reviewing agents run under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Main reviewer overrides for a named profile. Auto uses its fixed policy;
-    /// specialist lanes use provider-specific models.
+    /// Main reviewer overrides for a named profile. Auto uses its fixed policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,11 +174,10 @@ pub enum SessionReview {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
-        /// Quick or extended, for this session's automatic reviews and its
-        /// `/review`. Stored only when chosen, so choices made before tiers
-        /// could be set per session read back unchanged.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tier: Option<crate::review::lanes::ReviewTier>,
+        /// Deprecated review tier. Accepted in old session records and API
+        /// requests, ignored, and omitted from newly serialized values.
+        #[serde(default, skip_serializing)]
+        tier: Option<String>,
     },
 }
 
@@ -190,20 +189,13 @@ impl ReviewConfig {
         match session {
             None => {}
             Some(SessionReview::Off) => config.enabled = false,
-            Some(SessionReview::On {
-                model,
-                effort,
-                tier,
-            }) => {
+            Some(SessionReview::On { model, effort, .. }) => {
                 config.enabled = true;
                 if model.is_some() {
                     config.model.clone_from(model);
                 }
                 if effort.is_some() {
                     config.effort.clone_from(effort);
-                }
-                if let Some(tier) = tier {
-                    config.tier = *tier;
                 }
             }
         }
@@ -253,10 +245,6 @@ impl SessionWikiConfig {
 
 const fn is_false(value: &bool) -> bool {
     !*value
-}
-
-fn is_default_tier(tier: &crate::review::lanes::ReviewTier) -> bool {
-    *tier == crate::review::lanes::ReviewTier::default()
 }
 
 impl ReviewConfig {

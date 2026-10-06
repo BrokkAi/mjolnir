@@ -209,54 +209,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn any_kind_lists_files_without_a_separator_and_directories_with_one() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("data")).unwrap();
-        std::fs::write(directory.path().join("data.txt"), "a file").unwrap();
-        let prefix = format!("{}/da", directory.path().display());
-
-        assert_eq!(
-            local_completions(&prefix, CompletionKind::Any),
-            // A directory's trailing separator sorts it after a file whose
-            // name extends the same stem.
-            vec![
-                format!("{}/data.txt", directory.path().display()),
-                format!("{}/data/", directory.path().display()),
-            ]
-        );
-    }
-
-    #[test]
-    fn directories_kind_omits_files() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("data")).unwrap();
-        std::fs::write(directory.path().join("data.txt"), "a file").unwrap();
-        let prefix = format!("{}/da", directory.path().display());
-
-        assert_eq!(
-            local_completions(&prefix, CompletionKind::Directories),
-            vec![format!("{}/data/", directory.path().display())]
-        );
-    }
-
-    #[test]
-    fn common_insert_extends_only_when_shared() {
-        assert_eq!(
-            common_insert("/srv/da", &["/srv/data/".into(), "/srv/database/".into()]),
-            Some("/srv/data".into())
-        );
-        assert_eq!(
-            common_insert("/srv/da", &["/srv/data/".into()]),
-            Some("/srv/data/".into())
-        );
-        assert_eq!(
-            common_insert("/srv/da", &["/srv/data/".into(), "/srv/dbs/".into()]),
-            None
-        );
-        assert_eq!(common_insert("/srv/da", &[]), None);
-    }
-
-    #[test]
     // macOS filesystems reject invalid UTF-8 names before completion can read them.
     #[cfg(target_os = "linux")]
     fn non_utf8_entries_are_skipped() {

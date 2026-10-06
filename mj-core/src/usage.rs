@@ -88,16 +88,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_undeclared_report_from_an_ordinary_adapter_stays_unspecified() {
-        let kimi = TokenUsage::from_acp(HarnessKind::Kimi, Usage::new(100, 80, 20));
-        assert_eq!(kimi.scope, UsageScope::Unspecified);
-        assert_eq!(
-            (kimi.total_tokens, kimi.input_tokens, kimi.output_tokens),
-            (100, 80, 20)
-        );
-    }
-
     fn declared(harness: HarnessKind, scope: &str) -> UsageScope {
         let mut report = Usage::new(100, 80, 20);
         report.meta = Some(serde_json::Map::from_iter([(

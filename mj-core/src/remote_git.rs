@@ -494,7 +494,7 @@ mod tests {
             destination: "repo".into(),
             git_ref: None,
         };
-        let source = resolve_repository(&repository, &NoopExecutor).unwrap();
+        let source = resolve_repository(&repository, &crate::targets::ProcessExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");
         assert_eq!(source.push_urls, ["https://github.com/BrokkAi/hel.git"]);
     }
@@ -579,13 +579,5 @@ mod tests {
             display_url("git@github.com:org/repo.git"),
             "github.com:org/repo.git"
         );
-    }
-
-    struct NoopExecutor;
-
-    impl CommandExecutor for NoopExecutor {
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            bail!("unexpected command")
-        }
     }
 }

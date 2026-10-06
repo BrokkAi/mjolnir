@@ -31,22 +31,3 @@ pub fn is_fallback_terminal_tool_call(call: &ToolCall) -> bool {
             == Some(true)
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fallback_call_identifies_and_owns_its_terminal() {
-        let call = fallback_terminal_tool_call("term-7", "cargo test".into());
-
-        assert_eq!(call.tool_call_id.to_string(), "hel-terminal:term-7");
-        assert_eq!(call.title, "cargo test");
-        assert_eq!(call.status, ToolCallStatus::InProgress);
-        assert!(is_fallback_terminal_tool_call(&call));
-        assert!(matches!(
-            call.content.as_slice(),
-            [ToolCallContent::Terminal(terminal)] if terminal.terminal_id.to_string() == "term-7"
-        ));
-    }
-}

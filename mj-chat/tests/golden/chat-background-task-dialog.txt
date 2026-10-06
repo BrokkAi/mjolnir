@@ -1,0 +1,402 @@
+=== task count in prompt border (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│> keep this draft                                                                                 │
+│                                                                                                  │
+╰ Tasks (1) › ────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+task label visible: true
+draft: "keep this draft"
+initial task control x: 1
+
+=== queued task border width 32 (32x24) ===
+╭ Conversation ────────────────╮
+│ No messages yet — send a pro▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+│                             ▐│
+╰──────────────────────────────╯
+╭ 🎙︎ ───────────── ●··········· ╮
+│  queued 1: follow up         │
+│                              │
+│> keep this draft             │
+╰ 1 queued · Esc steers next───╯
+ctrl+b then : palette · ? keys
+task control area: None
+queued text: 1
+
+=== queued task border width 48 (48x24) ===
+╭ Conversation ────────────────────────────────╮
+│ No messages yet — send a prompt to begin.   ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+│                                             ▐│
+╰──────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────── ●··········· ╮
+│  queued 1: follow up                         │
+│                                              │
+│> keep this draft                             │
+╰ 1 queued · Esc steers next · Tasks (1) › ────╯
+ctrl+b then : palette · ? keys
+task control area: Some(Rect { x: 30, y: 22, width: 13, height: 1 })
+queued text: 1
+
+=== queued task border width 56 (56x24) ===
+╭ Conversation ────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.           ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+│                                                     ▐│
+╰──────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                 │
+│                                                      │
+│> keep this draft                                     │
+╰ 1 queued · Esc steers next · Tasks (1) › ────────────╯
+ctrl+b then : palette · ? keys
+task control area: Some(Rect { x: 30, y: 22, width: 13, height: 1 })
+queued text: 1
+
+=== queued task border width 80 (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                                         │
+│                                                                              │
+│> keep this draft                                                             │
+╰ 1 queued · Esc steers next · Tasks (1) › ───────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then : palette · ? keys
+task control area: Some(Rect { x: 30, y: 22, width: 13, height: 1 })
+queued text: 1
+
+=== queued task border width 100 (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                                                             │
+│                                                                                                  │
+│> keep this draft                                                                                 │
+╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+task control area: Rect { x: 30, y: 22, width: 13, height: 1 }
+task control shifted right: true
+
+=== mouse opens task dialog (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+
+
+  ╭ × Background tasks ──────────────────────────────────────────────────────────────────────────╮
+  │      0s  cargo test --workspace                                                      [Stop]  ▐
+  │                                                                                              ▐
+  │                                                                                              ▐
+  ╰─────────────────────────────────────────────────────────────────────────────────── Esc close ╯
+
+
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                                                             │
+│                                                                                                  │
+│> keep this draft                                                                                 │
+╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+dialog open: true
+draft cursor: 15
+chat surface claims click: true
+
+=== outside mouse click dismisses task dialog (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                                                             │
+│                                                                                                  │
+│> keep this draft                                                                                 │
+╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+press action: None
+dialog open: false
+chat surface claims outside click: true
+
+=== keyboard opens dialog without replacing draft (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+
+
+  ╭ × Background tasks ──────────────────────────────────────────────────────────────────────────╮
+  │      0s  cargo test --workspace                                                      [Stop]  ▐
+  │                                                                                              ▐
+  │                                                                                              ▐
+  ╰─────────────────────────────────────────────────────────────────────────────────── Esc close ╯
+
+
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                                                             │
+│                                                                                                  │
+│> keep this draft                                                                                 │
+╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+focus action: None
+draft: "keep this draft"
+
+=== Escape closes task dialog (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│  queued 1: follow up                                                                             │
+│                                                                                                  │
+│> keep this draft                                                                                 │
+╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+draft: "keep this draft"
+
+=== narrow task dialog height 1 (24x1) ===
+╭ × Backgrou Esc close ╮
+scroll: 0
+
+=== narrow task dialog height 4 (24x4) ===
+╭ × Background tasks ──╮
+│      0s  c   [Stop]  ▐
+│          a           │
+╰─────────── Esc close ╯
+scroll: 0
+
+=== narrow task dialog height 8 (24x8) ===
+
+
+  ╭ × Background task╮
+  │      0s  cargo   ▐
+  │          test --a│
+  ╰─────── Esc close ╯
+
+
+scroll: 0
+
+=== wrapped task command scroll tail (24x8) ===
+
+
+  ╭ × Background task╮
+  │          s --work│
+  │          space   ▐
+  ╰─────── Esc close ╯
+
+
+scroll: 5
+
+=== long command retains its final argument after scrolling (80x12) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+
+
+  ╭ × Background tasks ──────────────────────────────────────────────────────╮
+  │          --feature example --feature example --feature example           │
+  │          --feature example --feature example --feature example           │
+  │          --feature example --feature example FINAL_ARGUMENT              ▐
+  ╰─────────────────────────────────────────────────────────────── Esc close ╯
+
+
+╰ 1 queued · Esc steers next · Tasks (1) › ───────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then : palette · ? keys
+scroll: 11
+
+=== empty task dialog (80x12) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+
+
+  ╭ × Background tasks ──────────────────────────────────────────────────────╮
+  │No background tasks remain.                                               ▐
+  │                                                                          ▐
+  ╰─────────────────────────────────────────────────────────────── Esc close ╯
+
+
+╰ 1 queued · Esc steers next──────────────────────── Enter  send   /  commands ╯
+Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then : palette · ? keys
+
+=== read-only row has no Stop control (80x16) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+
+
+  ╭ × Background tasks ──────────────────────────────────────────────────────╮
+  │      0s  codex exec                                                      ▐
+  │                                                                          ▐
+  │                                                                          ▐
+  ╰─────────────────────────────────────────────────────────────── Esc close ╯
+
+
+│> What would you like to build?                                               │
+│                                                                              │
+╰ Tasks (1) › ────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: None
+Tab action: None
+dialog remains open: true
+
+=== mouse scrolls task rows (40x8) ===
+
+
+  ╭ × Background tasks ──────────────╮
+  │      0s  work-3          [Stop]  ▐
+  │      0s  work-4          [Stop]  │
+  ╰─────────────────────── Esc close ╯
+
+
+scroll: 3
+
+=== PageUp returns to first task rows (40x8) ===
+
+
+  ╭ × Background tasks ──────────────╮
+  │      0s  work-0          [Stop]  ▐
+  │      0s  work-1          [Stop]  │
+  ╰─────────────────────── Esc close ╯
+
+
+scroll: 0
+
+=== mouse stops first visible task (40x8) ===
+
+
+  ╭ × Background tasks ──────────────╮
+  │      0s  work-0   Interrupting…  ▐
+  │      0s  work-1          [Stop]  │
+  ╰─────────────────────── Esc close ╯
+
+
+action: StopBackgroundTask { id: "task-0" }
+press action: None

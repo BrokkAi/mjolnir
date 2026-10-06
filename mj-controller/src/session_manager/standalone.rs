@@ -346,6 +346,10 @@ impl StandaloneSession {
         Ok(())
     }
 
+    pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {
+        self.client.set_subagent_admission(open).await
+    }
+
     /// Hands one command to the relay and returns the ordinal it accepted it
     /// at, without catching the local projection up to it.
     ///
@@ -632,89 +636,4 @@ pub(super) fn projection_integrity_failure(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<ProjectionIntegrityError>().is_some())
-}
-
-/// A stopped actor and the manager that resolves its live replacement.
-///
-/// This fixture and its constructor are compiled unconditionally and hidden
-/// from the documentation because the chat crate's tests need them, and a
-/// `#[cfg(test)]` item is invisible to another crate.
-#[cfg(test)]
-pub(super) struct ReplacementSessionTestFixture {
-    pub(super) stopped: ManagedSessionHandle,
-    pub(super) control: SessionManagerControl,
-    pub(super) submitted: mpsc::UnboundedReceiver<RelayCommand>,
-}
-
-/// A stopped actor and a manager that resolves its live replacement. Chat
-/// tests use this hand-written actor instead of mocking the session manager
-/// protocol.
-#[cfg(test)]
-pub(super) fn replacement_session_test_fixture(
-    session_id: &str,
-    accepted_ordinal: u64,
-) -> ReplacementSessionTestFixture {
-    let (stopped_commands, stopped_commands_rx) = mpsc::channel(1);
-    drop(stopped_commands_rx);
-    let (stopped_releases, stopped_releases_rx) = mpsc::unbounded_channel();
-    drop(stopped_releases_rx);
-    let (stopped_view_tx, stopped_view) = watch::channel(ManagedSessionView::default());
-    drop(stopped_view_tx);
-    let stopped = ManagedSessionHandle {
-        session_id: session_id.to_owned(),
-        commands: stopped_commands,
-        releases: stopped_releases,
-        view: stopped_view,
-    };
-
-    let (commands, mut commands_rx) = mpsc::channel(4);
-    let (releases, _releases_rx) = mpsc::unbounded_channel();
-    let (view_tx, view) = watch::channel(ManagedSessionView::default());
-    let replacement = ManagedSessionHandle {
-        session_id: session_id.to_owned(),
-        commands,
-        releases,
-        view,
-    };
-    let actor_session_id = session_id.to_owned();
-    let (submitted_tx, submitted) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let _view_tx = view_tx;
-        while let Some(command) = commands_rx.recv().await {
-            match command {
-                ActorCommand::Submit { command, reply, .. } => {
-                    // Tests can drop the optional observer when they only
-                    // care about acceptance/reconnection.
-                    let _ = submitted_tx.send(command);
-                    let _ = reply.send(Ok(accepted_ordinal));
-                }
-                ActorCommand::Sync { reply } => {
-                    let _ = reply.send(Ok(()));
-                }
-                command => command.reject(&actor_session_id, "unsupported test operation"),
-            }
-        }
-    });
-
-    let (manager_commands, mut manager_commands_rx) = mpsc::channel(4);
-    let manager_replacement = replacement.clone();
-    tokio::spawn(async move {
-        while let Some(ManagerCommand::Session {
-            session_id: requested,
-            reply,
-        }) = manager_commands_rx.recv().await
-        {
-            let resolved =
-                (requested == manager_replacement.session_id).then(|| manager_replacement.clone());
-            let _ = reply.send(resolved);
-        }
-    });
-    ReplacementSessionTestFixture {
-        stopped,
-        submitted,
-        control: SessionManagerControl {
-            commands: manager_commands,
-            session_cpu: watch::channel(SessionCpuTable::new()).1,
-        },
-    }
 }

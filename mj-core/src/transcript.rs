@@ -846,58 +846,30 @@ mod tests {
         }
     }
 
+    // Hard-won: ff088d42: A 15,000-chunk thought made daemon RSS grow from gigabytes of stored JSON into many gigabytes.
     #[test]
     fn push_content_chunk_merges_adjacent_text_for_the_same_message_id() {
-        let mut chunks = vec![text_chunk("The", Some("m1"))];
-        push_content_chunk(&mut chunks, text_chunk(" quick", Some("m1")));
-        push_content_chunk(&mut chunks, text_chunk(" fox", Some("m1")));
-        assert_eq!(chunks, vec![text_chunk("The quick fox", Some("m1"))]);
-    }
-
-    #[test]
-    fn push_content_chunk_merges_adjacent_text_without_message_ids() {
-        let mut chunks = vec![text_chunk("one", None)];
-        push_content_chunk(&mut chunks, text_chunk(" two", None));
-        assert_eq!(chunks, vec![text_chunk("one two", None)]);
+        let mut chunks = vec![text_chunk("x", Some("m1"))];
+        for _ in 1..15_001 {
+            push_content_chunk(&mut chunks, text_chunk("x", Some("m1")));
+        }
+        assert_eq!(chunks, vec![text_chunk(&"x".repeat(15_001), Some("m1"))]);
     }
 
     #[test]
     fn push_content_chunk_keeps_chunks_from_different_message_ids_apart() {
+        let image = json!({"content": {"type": "image", "data": "abc", "mimeType": "image/png"}});
         let mut chunks = vec![text_chunk("first", Some("m1"))];
+        push_content_chunk(&mut chunks, text_chunk(" more", Some("m1")));
         push_content_chunk(&mut chunks, text_chunk("second", Some("m2")));
         push_content_chunk(&mut chunks, text_chunk("third", None));
-        assert_eq!(
-            chunks,
-            vec![
-                text_chunk("first", Some("m1")),
-                text_chunk("second", Some("m2")),
-                text_chunk("third", None),
-            ]
-        );
-    }
-
-    #[test]
-    fn push_content_chunk_keeps_non_text_content_separate() {
-        let image = json!({"content": {"type": "image", "data": "abc", "mimeType": "image/png"}});
-        let mut chunks = vec![text_chunk("before", None)];
+        push_content_chunk(&mut chunks, text_chunk(" more", None));
         push_content_chunk(&mut chunks, image.clone());
         push_content_chunk(&mut chunks, image.clone());
-        push_content_chunk(&mut chunks, text_chunk("after", None));
-        assert_eq!(
-            chunks,
-            vec![
-                text_chunk("before", None),
-                image.clone(),
-                image,
-                text_chunk("after", None),
-            ]
+        push_content_chunk(
+            &mut chunks,
+            json!({"content": {"type": "text", "text": "a"}, "meta": {"source": "one"}}),
         );
-    }
-
-    #[test]
-    fn push_content_chunk_keeps_chunks_with_differing_metadata_apart() {
-        let mut chunks =
-            vec![json!({"content": {"type": "text", "text": "a"}, "meta": {"source": "one"}})];
         push_content_chunk(
             &mut chunks,
             json!({"content": {"type": "text", "text": "b"}, "meta": {"source": "two"}}),
@@ -906,61 +878,50 @@ mod tests {
             &mut chunks,
             json!({"content": {"type": "text", "text": "c"}, "meta": {"source": "two"}}),
         );
-        assert_eq!(
-            chunks,
-            vec![
-                json!({"content": {"type": "text", "text": "a"}, "meta": {"source": "one"}}),
-                json!({"content": {"type": "text", "text": "bc"}, "meta": {"source": "two"}}),
-            ]
-        );
-    }
-
-    #[test]
-    fn push_content_chunk_keeps_chunks_with_differing_annotations_apart() {
-        let mut chunks = vec![
-            json!({"content": {"type": "text", "text": "a", "annotations": {"audience": ["user"]}}}),
-        ];
         push_content_chunk(
             &mut chunks,
-            json!({"content": {"type": "text", "text": "b"}}),
+            json!({"content": {"type": "text", "text": "annotated", "annotations": {"audience": ["user"]}}}),
+        );
+        push_content_chunk(
+            &mut chunks,
+            json!({"content": {"type": "text", "text": "plain"}}),
         );
         assert_eq!(
             chunks,
             vec![
-                json!({"content": {"type": "text", "text": "a", "annotations": {"audience": ["user"]}}}),
-                json!({"content": {"type": "text", "text": "b"}}),
+                text_chunk("first more", Some("m1")),
+                text_chunk("second", Some("m2")),
+                text_chunk("third more", None),
+                image.clone(),
+                image,
+                json!({"content": {"type": "text", "text": "a"}, "meta": {"source": "one"}}),
+                json!({"content": {"type": "text", "text": "bc"}, "meta": {"source": "two"}}),
+                json!({"content": {"type": "text", "text": "annotated", "annotations": {"audience": ["user"]}}}),
+                json!({"content": {"type": "text", "text": "plain"}}),
             ]
         );
     }
 
+    // Hard-won: ff088d42: Stored 15,000-chunk transcript rows ballooned daemon RSS after restart.
     #[test]
     fn coalesce_content_chunks_collapses_runs_and_keeps_segment_boundaries() {
-        let mut chunks = vec![
-            text_chunk("He", Some("m1")),
-            text_chunk("llo", Some("m1")),
-            text_chunk("!", Some("m1")),
+        let image = json!({"content": {"type": "image", "data": "x", "mimeType": "image/png"}});
+        let mut chunks = (0..15_001)
+            .map(|_| text_chunk("x", Some("m1")))
+            .collect::<Vec<_>>();
+        chunks.extend([
             text_chunk("next", Some("m2")),
             text_chunk(" turn", Some("m2")),
-        ];
+            image.clone(),
+        ]);
         coalesce_content_chunks(&mut chunks);
         assert_eq!(
             chunks,
             vec![
-                text_chunk("Hello!", Some("m1")),
+                text_chunk(&"x".repeat(15_001), Some("m1")),
                 text_chunk("next turn", Some("m2")),
+                image
             ]
         );
-    }
-
-    #[test]
-    fn coalesce_content_chunks_leaves_unmergeable_chunks_alone() {
-        let original = vec![
-            text_chunk("a", Some("m1")),
-            text_chunk("b", Some("m2")),
-            json!({"content": {"type": "image", "data": "x", "mimeType": "image/png"}}),
-        ];
-        let mut chunks = original.clone();
-        coalesce_content_chunks(&mut chunks);
-        assert_eq!(chunks, original);
     }
 }

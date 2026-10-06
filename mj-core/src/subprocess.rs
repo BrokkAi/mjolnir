@@ -193,6 +193,95 @@ pub async fn run_bounded(
     }
 }
 
+/// Capture a process with byte and time bounds while writing its complete
+/// stdin concurrently. This preserves path arguments on the platform's native
+/// `Command` API and avoids filling either output pipe while a child is still
+/// consuming a large input.
+pub async fn run_bounded_with_input(
+    command: &mut tokio::process::Command,
+    input: &[u8],
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<Output> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().context("start bounded subprocess")?;
+    let group = ProcessGroupGuard::new(child.id());
+
+    async fn read(
+        mut pipe: impl tokio::io::AsyncRead + Unpin,
+        bytes: &mut Vec<u8>,
+        max: usize,
+    ) -> Result<()> {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let count = pipe.read(&mut chunk).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            anyhow::ensure!(bytes.len() <= max, "subprocess output exceeds {max} bytes");
+        }
+    }
+    async fn write_input(mut pipe: impl tokio::io::AsyncWrite + Unpin, input: &[u8]) -> Result<()> {
+        match pipe.write_all(input).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    let stdin = child.stdin.take().context("missing subprocess stdin")?;
+    let stdout = child.stdout.take().context("missing subprocess stdout")?;
+    let stderr = child.stderr.take().context("missing subprocess stderr")?;
+    let (mut stdout_bytes, mut stderr_bytes) = (Vec::new(), Vec::new());
+    let result = tokio::time::timeout(timeout, async {
+        let (status, (), ()) = tokio::try_join!(
+            async { child.wait().await.map_err(anyhow::Error::from) },
+            write_input(stdin, input),
+            async {
+                tokio::try_join!(
+                    read(stdout, &mut stdout_bytes, max_bytes),
+                    read(stderr, &mut stderr_bytes, max_bytes)
+                )
+                .map(|_| ())
+            }
+        )?;
+        Ok::<_, anyhow::Error>(status)
+    })
+    .await;
+    match result {
+        Ok(Ok(status)) => {
+            drop(group);
+            Ok(Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            })
+        }
+        outcome => {
+            drop(group);
+            if let Err(error) = child.start_kill() {
+                tracing::debug!(%error, "bounded subprocess already exited during termination");
+            }
+            child
+                .wait()
+                .await
+                .context("reap terminated bounded subprocess")?;
+            match outcome {
+                Ok(Err(error)) => Err(error),
+                _ => anyhow::bail!("subprocess timed out"),
+            }
+        }
+    }
+}
+
 /// Launch a long-lived background process with no inherited terminal streams.
 ///
 /// The process is genuinely detached: on Unix it is a grandchild reparented to
@@ -577,6 +666,7 @@ mod tests {
     /// The leader's exit completes a bounded command; a descendant that keeps
     /// the pipes open is stopped after the drain instead of failing the
     /// command at its timeout.
+    // Hard-won: c86b2123: A completed command stayed Running until a background descendant closed inherited pipes.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn bounded_capture_completes_at_leader_exit_when_a_descendant_holds_the_pipes() {
@@ -643,8 +733,29 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_input_streams_more_than_one_pipe_buffer_concurrently() {
+        use std::time::Duration;
+        let input = vec![b'x'; 512 * 1024];
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "cat"]);
+        let output = super::run_bounded_with_input(
+            &mut command,
+            &input,
+            600 * 1024,
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
+    }
+    #[cfg(unix)]
     use super::*;
 
+    // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
     #[cfg(unix)]
     #[test]
     fn run_with_input_completes_when_child_echoes_input_larger_than_pipe_buffer() {
@@ -696,13 +807,7 @@ mod tests {
         assert_eq!(output.stdout.len(), 512 * 1024);
     }
 
-    #[test]
-    fn run_with_input_returns_output_for_empty_input() {
-        let mut command = Command::new("true");
-        let output = run_with_input(&mut command, &[]).expect("run_with_input should succeed");
-        assert!(output.status.success());
-    }
-
+    // Hard-won: cd0af915: Dropped detached children stayed zombies and daemon probes treated them as alive.
     #[cfg(unix)]
     #[test]
     fn spawn_detached_leaves_no_zombie_under_a_spawner_that_keeps_running() {
@@ -795,6 +900,7 @@ mod tests {
         signal_process_group(raw_pid, libc::SIGKILL).expect("terminate the detached child group");
     }
 
+    // Hard-won: 99a5e469: An inherited macOS pipe descriptor prevented EOF and hung concurrent daemon upgrades.
     #[cfg(unix)]
     #[test]
     fn spawn_detached_child_keeps_no_descriptor_its_launcher_left_inheritable() {

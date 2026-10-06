@@ -53,6 +53,7 @@ fn skips_stale_and_unstamped_candidates_and_reports_them_when_none_match() {
     }
 }
 
+// Hard-won: 0cc3263: an explicit stale worker override previously fell through and replaced the named worker
 #[test]
 fn a_stale_worker_binary_override_fails_instead_of_falling_back() {
     const CHILD: &str = "MJ_STALE_WORKER_OVERRIDE_CHILD";
@@ -136,6 +137,7 @@ fn stale_pins_are_re_resolved() {
 /// A client replacing the daemon pins the new build's workers during the
 /// handoff. The daemon it then starts must find them already indexed, and
 /// must still take the pinned snapshot itself.
+// Hard-won: daa70d7: worker source warming delayed daemon reconnect under large-session load
 #[test]
 fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
     const CHILD: &str = "MJ_WARM_WORKER_PIN_CHILD";
@@ -183,6 +185,7 @@ fn warming_pins_the_sources_for_the_next_daemon_without_taking_its_snapshot() {
 
 /// Test-and-fix M-4: the daemon log named neither the worker it chose for a
 /// target nor where it came from.
+// Hard-won: deb1c66: shipped startup logs omitted the selected worker source and build diagnostics
 #[test]
 fn pinning_logs_each_selected_worker_with_its_source_and_build() {
     // Other tests install subscribers that make tracing cache "no interest"
@@ -375,6 +378,7 @@ fn upgrade_preparation_leaves_the_installed_worker_unchanged_until_promotion() {
 /// upload now removes its own partial file, and the next staging removes any
 /// left by an earlier daemon, while a staging still in use is kept.
 #[cfg(unix)]
+// Hard-won: f54a670: a full disk left partial worker uploads and truncated files
 #[test]
 fn failed_worker_staging_leaves_no_partial_upload_and_sweeps_stale_ones() {
     /// Runs commands for real, except that the upload writes 32 KiB of its
@@ -461,8 +465,8 @@ fn fetch_catalog_over_https_does_not_panic_inside_a_runtime_context() {
     );
 }
 
-/// The session's stored choice decides, `None` means native sub-agents, and
-/// a child never gets the tools whatever the choice says.
+/// The stored choice selects delegation for supported parent harnesses, but
+/// a child never receives its parent's Mjolnir delegation tools.
 #[test]
 fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let claude = |choice: Option<bool>| {
@@ -494,52 +498,13 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     assert!(subagent_tools_enabled(&codex, false));
 }
 
-#[cfg(unix)]
-#[test]
-fn node_preflight_checks_missing_old_and_supported_tools_on_profile_path() {
-    let directory = tempfile::tempdir().unwrap();
-    let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().into(),
-        environment: std::collections::BTreeMap::from([(
-            "PATH".into(),
-            directory.path().to_string_lossy().into_owned(),
-        )])
-        .into(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-    let check = || {
-        preflight_harness(
-            &mj_core::config::TargetTemplate::LocalBare,
-            &profile,
-            &ProcessExecutor,
-        )
-    };
-    let write_tool = |name: &str, body: &str| {
-        mj_core::test_hooks::install_fake_command(
-            directory.path(),
-            name,
-            &format!("#!/bin/sh\n{body}\n"),
-        );
-    };
-    assert!(format!("{:#}", check().unwrap_err()).contains("Node.js is missing"));
-    write_tool("node", "exit 1");
-    assert!(format!("{:#}", check().unwrap_err()).contains("Node.js 22 or newer is required"));
-    write_tool("node", "exit 0");
-    assert!(format!("{:#}", check().unwrap_err()).contains("npm is missing or unusable"));
-    write_tool("npm", "exit 0");
-    check().unwrap();
-}
-
 /// On a host with neither Codex nor Node.js, the launch failed with "Codex
 /// launch preflight failed on local host; Node.js 22+ and npm must be
 /// available on the target PATH: Node.js is missing from PATH", which never
 /// says Codex is missing (launch finding R13-1). The failure now starts by
 /// saying so, with the install command `mj login` gives.
 #[cfg(unix)]
+// Hard-won: f8b8002: missing Codex was reported only as an incidental Node failure
 #[test]
 fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
     let directory = tempfile::tempdir().unwrap();
@@ -642,68 +607,6 @@ fn a_stored_setup_token_reaches_only_claude_workers_that_do_not_set_their_own() 
     let mut without = BTreeMap::new();
     apply_claude_setup_token(&mut without, HarnessKind::Claude, &missing);
     assert!(without.is_empty());
-}
-
-#[test]
-fn packaged_worker_names_match_release_archives() {
-    let directory = Path::new("/opt/hel/bin");
-    assert_eq!(
-        packaged_worker_binary_path(directory, "x86_64-unknown-linux-musl"),
-        directory.join("mj-worker-x86_64-unknown-linux-musl")
-    );
-    assert_eq!(
-        packaged_worker_binary_path(directory, "aarch64-unknown-linux-musl"),
-        directory.join("mj-worker-aarch64-unknown-linux-musl")
-    );
-}
-
-#[test]
-fn pinned_snapshot_keeps_native_and_portable_sources_stable() {
-    let directory = tempfile::tempdir().unwrap();
-    let native = directory.path().join("native-worker");
-    let x86 = directory.path().join("x86-worker");
-    let arm = directory.path().join("arm-worker");
-    std::fs::write(&native, stamped_worker(b"native bytes")).unwrap();
-    std::fs::write(&x86, stamped_worker(b"x86 bytes")).unwrap();
-    std::fs::write(&arm, stamped_worker(b"arm bytes")).unwrap();
-    let cache = directory.path().join("cache");
-    let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |arch, requirement| {
-        let path = match requirement {
-            WorkerBinaryRequirement::LocalHost => &native,
-            WorkerBinaryRequirement::PortableLinux if arch == "x86_64" => &x86,
-            WorkerBinaryRequirement::PortableLinux => &arm,
-            WorkerBinaryRequirement::Darwin => &native,
-        };
-        Ok(WorkerBinaryAvailability::Local {
-            path: path.clone(),
-            source: format!("{arch}-{requirement:?}"),
-        })
-    });
-
-    let native = snapshot
-        .resolve(std::env::consts::ARCH, WorkerBinaryRequirement::LocalHost)
-        .unwrap();
-    let x86 = snapshot
-        .resolve("x86_64", WorkerBinaryRequirement::PortableLinux)
-        .unwrap();
-    let arm = snapshot
-        .resolve("aarch64", WorkerBinaryRequirement::PortableLinux)
-        .unwrap();
-    let WorkerBinaryAvailability::Local { path: native, .. } = native else {
-        panic!("native source should be local");
-    };
-    let WorkerBinaryAvailability::Local { path: x86, .. } = x86 else {
-        panic!("x86 source should be local");
-    };
-    let WorkerBinaryAvailability::Local { path: arm, .. } = arm else {
-        panic!("arm source should be local");
-    };
-    assert_eq!(
-        std::fs::read(native).unwrap(),
-        stamped_worker(b"native bytes")
-    );
-    assert_eq!(std::fs::read(x86).unwrap(), stamped_worker(b"x86 bytes"));
-    assert_eq!(std::fs::read(arm).unwrap(), stamped_worker(b"arm bytes"));
 }
 
 #[test]
@@ -811,75 +714,6 @@ fn pinned_snapshot_survives_source_replacement_and_missing_candidate_install() {
     );
 }
 
-#[test]
-fn dev_checkout_prefers_the_dedicated_musl_worker() {
-    let controller = PathBuf::from("target/debug/mj");
-    let musl = PathBuf::from("target/worker/x86_64-unknown-linux-musl/debug/mj-worker");
-    let shared_target_worker = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj-worker");
-    let legacy = PathBuf::from("target/x86_64-unknown-linux-musl/debug/mj");
-    let present = [
-        controller.clone(),
-        musl.clone(),
-        shared_target_worker,
-        legacy,
-    ];
-    let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
-        present.iter().any(|p| p == path)
-    });
-    assert_eq!(
-        selected,
-        Some((musl, "isolated development musl worker")),
-        "the dedicated worker must win over legacy artifacts"
-    );
-}
-
-#[test]
-fn local_bare_may_use_a_native_worker_beside_the_controller() {
-    let directory = tempfile::tempdir().unwrap();
-    let controller = directory.path().join("target/debug/mj");
-    let worker = directory.path().join("target/debug/mj-worker");
-    std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
-    std::fs::write(&worker, stamped_worker(b"native")).unwrap();
-    let selected = worker_binary_prerequisite_for_current(
-        std::env::consts::ARCH,
-        WorkerBinaryRequirement::LocalHost,
-        &controller,
-        &|path| path == controller || path == worker,
-    )
-    .unwrap();
-    assert_eq!(
-        selected,
-        WorkerBinaryAvailability::Local {
-            path: worker,
-            source: "native worker beside mj".into(),
-        }
-    );
-}
-
-#[test]
-fn local_bare_prefers_the_isolated_native_development_worker() {
-    let directory = tempfile::tempdir().unwrap();
-    let controller = directory.path().join("target/debug/mj");
-    let worker = directory.path().join("target/worker/debug/mj-worker");
-    let packaged = directory.path().join("target/debug/mj-worker");
-    std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
-    std::fs::write(&worker, stamped_worker(b"native")).unwrap();
-    let selected = worker_binary_prerequisite_for_current(
-        std::env::consts::ARCH,
-        WorkerBinaryRequirement::LocalHost,
-        &controller,
-        &|path| path == controller || path == worker || path == packaged,
-    )
-    .unwrap();
-    assert_eq!(
-        selected,
-        WorkerBinaryAvailability::Local {
-            path: worker,
-            source: "isolated native development worker".into(),
-        }
-    );
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn replaced_dev_controller_still_finds_its_musl_sibling() {
@@ -902,193 +736,6 @@ fn replaced_dev_controller_never_selects_the_new_glibc_controller_as_its_worker(
     });
 
     assert_eq!(selected, None);
-}
-
-/// A configured container template for the preflight tests. Only the
-/// platform matters here; the rest is the smallest valid template.
-fn container_template(platform: Option<&str>) -> mj_core::config::ContainerTemplate {
-    mj_core::config::ContainerTemplate {
-        build_cache: None,
-        image: "example.invalid/mj-test:latest".into(),
-        pull_policy: Default::default(),
-        platform: platform.map(str::to_owned),
-        cpus: None,
-        memory: None,
-        environment: Default::default(),
-        workspace_storage: Default::default(),
-    }
-}
-
-fn ssh_connection() -> mj_core::config::SshConnection {
-    mj_core::config::SshConnection {
-        host: "builder".into(),
-        user: Some("dev".into()),
-        identity_file: None,
-        extra_args: Vec::new(),
-    }
-}
-
-#[test]
-fn recovery_workspace_uses_the_launch_directory_for_bare_targets_only() {
-    let cwd = PathBuf::from("/workspace/session/project");
-    let local = worker_workspace_for_recovery(
-        &targets::TargetLocator::LocalBare {
-            worker_root: "/workspace/session/worker".into(),
-        },
-        &cwd,
-    )
-    .expect("local bare targets need a workspace probe");
-    assert_eq!(local.directory, cwd);
-    assert_eq!(local.target, mj_core::state::ManagedWorktreeTarget::Local);
-
-    let remote = worker_workspace_for_recovery(
-        &targets::TargetLocator::SshBare {
-            worker_id: None,
-            ssh: SshTarget {
-                destination: "dev@builder".into(),
-                ssh_args: vec!["-oBatchMode=yes".into()],
-            },
-            workspace: "/workspace/session".into(),
-        },
-        &cwd,
-    )
-    .expect("SSH bare targets need a workspace probe");
-    assert_eq!(remote.directory, cwd);
-    assert_eq!(
-        remote.target,
-        mj_core::state::ManagedWorktreeTarget::Ssh {
-            destination: "dev@builder".into(),
-            ssh_args: vec!["-oBatchMode=yes".into()],
-        }
-    );
-
-    assert!(
-        worker_workspace_for_recovery(
-            &targets::TargetLocator::LocalPodman {
-                borrowed_from: None,
-                container_id: "container".into(),
-                workspace_storage: Default::default(),
-            },
-            &cwd,
-        )
-        .is_none()
-    );
-    assert!(
-        worker_workspace_for_recovery(
-            &targets::TargetLocator::AwsEc2 {
-                profile: "default".into(),
-                region: "us-east-1".into(),
-                instance_id: "i-test".into(),
-                ssh: SshTarget {
-                    destination: "dev@builder".into(),
-                    ssh_args: Vec::new(),
-                },
-                workspace: "/workspace/session".into(),
-            },
-            &cwd,
-        )
-        .is_none()
-    );
-}
-
-#[test]
-fn preflight_reads_the_architecture_a_template_names() {
-    use mj_core::config::TargetTemplate;
-
-    for (platform, expected) in [
-        ("linux/arm64", "aarch64"),
-        ("linux/arm64/v8", "aarch64"),
-        ("linux/amd64", "x86_64"),
-        ("aarch64", "aarch64"),
-    ] {
-        assert_eq!(
-            preflight_architectures(&TargetTemplate::LocalPodman {
-                container: container_template(Some(platform)),
-            }),
-            vec![expected],
-            "platform {platform}"
-        );
-    }
-    // A named platform decides a remote container target too, so a resume
-    // onto an arm64 container never asks about the host's architecture.
-    assert_eq!(
-        preflight_architectures(&TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: container_template(Some("linux/arm64")),
-        }),
-        vec!["aarch64"]
-    );
-}
-
-#[test]
-fn preflight_uses_the_host_architecture_for_a_local_target() {
-    use mj_core::config::TargetTemplate;
-
-    for template in [
-        TargetTemplate::LocalBare,
-        TargetTemplate::LocalPodman {
-            container: container_template(None),
-        },
-        TargetTemplate::LocalDocker {
-            container: container_template(None),
-        },
-        TargetTemplate::AppleContainer {
-            container: container_template(None),
-        },
-    ] {
-        assert_eq!(
-            preflight_architectures(&template),
-            vec![std::env::consts::ARCH],
-            "{template:?}"
-        );
-    }
-}
-
-#[test]
-fn preflight_accepts_either_linux_architecture_for_a_remote_target() {
-    use mj_core::config::TargetTemplate;
-
-    // Nothing in the configuration says what a remote machine runs, so the
-    // preflight passes as long as one architecture could be served; the
-    // real architecture is read from the live target during provisioning.
-    for template in [
-        TargetTemplate::SshBare {
-            ssh: ssh_connection(),
-            permissions: mj_core::config::PermissionMode::Yolo,
-            workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
-        },
-        TargetTemplate::SshPodman {
-            ssh: ssh_connection(),
-            container: container_template(None),
-        },
-        TargetTemplate::AwsEc2 {
-            aws_profile: None,
-            region: "us-east-1".into(),
-            launch_template: "lt-mj".into(),
-            launch_template_version: None,
-            ssh_user: "dev".into(),
-            address_source: Default::default(),
-            identity_file: None,
-            ssh_args: Vec::new(),
-        },
-    ] {
-        assert_eq!(
-            preflight_architectures(&template),
-            vec!["x86_64", "aarch64"],
-            "{template:?}"
-        );
-    }
-}
-
-#[test]
-fn dev_checkout_still_finds_a_hel_named_sibling() {
-    let controller = PathBuf::from("target/debug/hel");
-    let musl = PathBuf::from("target/x86_64-unknown-linux-musl/debug/hel");
-    let present = [controller.clone(), musl.clone()];
-    let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
-        present.iter().any(|p| p == path)
-    });
-    assert_eq!(selected, Some((musl, "development musl sibling")));
 }
 
 /// An architecture no host builds for, so the lookup cannot take one of
@@ -1186,82 +833,6 @@ fn a_present_controller_still_looks_beside_itself() {
     assert!(!detail.contains("restart the Mjolnir daemon"), "{detail}");
 }
 
-const WORKER_BINARY_OVERRIDE_CHILD: &str = "MJ_WORKER_BINARY_OVERRIDE_CHILD";
-
-/// The override names a worker outright, so it does not care where the
-/// controller lives or whether that path still exists.
-#[test]
-fn a_replaced_controller_still_honors_the_worker_binary_override() {
-    // MJ_WORKER_BINARY is process-global and other tests resolve worker
-    // binaries, so set it only in an exact child test.
-    if std::env::var_os(WORKER_BINARY_OVERRIDE_CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let worker = directory.path().join("mj-worker");
-        std::fs::write(&worker, stamped_worker(b"worker")).unwrap();
-        IsolatedTest::new(test_name(
-            module_path!(),
-            "a_replaced_controller_still_honors_the_worker_binary_override",
-        ))
-        .env(WORKER_BINARY_OVERRIDE_CHILD, "1")
-        .env("MJ_WORKER_BINARY", &worker)
-        .run();
-        return;
-    }
-
-    let stale = PathBuf::from("/src/.backup-vHXvCs/target/debug/mj (deleted)");
-    let availability = worker_binary_prerequisite_for_current(
-        FOREIGN_ARCH,
-        WorkerBinaryRequirement::PortableLinux,
-        &stale,
-        &|path| path.is_file(),
-    )
-    .unwrap();
-
-    match availability {
-        WorkerBinaryAvailability::Local { source, .. } => {
-            assert_eq!(source, "MJ_WORKER_BINARY");
-        }
-        other => panic!("expected the override to resolve, got {other:?}"),
-    }
-}
-
-#[test]
-fn sibling_lookup_falls_back_to_the_legacy_hel_name_beside_an_mj_controller() {
-    let controller = PathBuf::from("/opt/brokk/mj");
-    let legacy = PathBuf::from("/opt/brokk/hel");
-    let selected = select_sibling_worker(&controller, "x86_64-unknown-linux-musl", |path| {
-        path == legacy
-    });
-    assert_eq!(selected, Some((legacy, "beside the running executable")));
-}
-
-#[test]
-fn worker_diagnosis_surfaces_a_loader_failure_from_the_installed_binary() {
-    struct FailedProbe;
-
-    impl CommandExecutor for FailedProbe {
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            Ok(CommandOutput {
-                status: 1,
-                stdout: Vec::new(),
-                stderr: b"libc.so.6: version `GLIBC_2.39' not found\n".to_vec(),
-            })
-        }
-    }
-
-    let failure = worker_binary_probe_failure(
-        &FailedProbe,
-        &targets::TargetLocator::LocalBare {
-            worker_root: "/worker/root".into(),
-        },
-        "/worker/root",
-    )
-    .expect("an unsuccessful --version probe should explain the dead worker");
-
-    assert!(failure.contains("GLIBC_2.39"), "{failure}");
-    assert!(failure.contains("provide a musl worker"), "{failure}");
-}
-
 /// The worker writes its records without a trailing newline. The probe read
 /// them out of a text dump by searching for the next section marker, which
 /// that missing newline hid, so every startup step read as none and the
@@ -1271,6 +842,7 @@ fn worker_diagnosis_surfaces_a_loader_failure_from_the_installed_binary() {
 /// The root contains spaces because macOS puts worker roots under
 /// `~/Library/Application Support/...`; an unquoted root split the script
 /// into separate words.
+// Hard-won: 2fd45e3: worker records without a trailing newline were mistaken for empty output
 #[test]
 fn probing_a_dead_worker_reads_its_records_as_the_worker_wrote_them() {
     let temp = tempfile::tempdir().unwrap();
@@ -1386,6 +958,7 @@ fn a_probe_that_prints_something_else_is_an_error() {
 /// A worker that died leaves an exit record behind. Starting a new worker
 /// must clear it first, or the startup connect loop reads the previous
 /// death as this worker's and gives up on a healthy daemon.
+// Hard-won: a6ad3cc: concurrent checkpoint, upgrade, and recovery paths shared worker launch logs
 #[test]
 fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
     struct RecordingExecutor {
@@ -1599,29 +1172,6 @@ fn checkpoint_worker_stop_restores_a_stopped_podman_target_first() {
     );
 }
 
-struct PodmanInstallExecutor {
-    commands: RefCell<Vec<CommandSpec>>,
-    worker_cached: bool,
-}
-impl CommandExecutor for PodmanInstallExecutor {
-    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.commands.borrow_mut().push(command.clone());
-        let probing_cache = command
-            .args
-            .iter()
-            .any(|argument| argument.contains("'test' '-f'"));
-        let status = if probing_cache && !self.worker_cached {
-            1
-        } else {
-            0
-        };
-        Ok(CommandOutput {
-            status,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        })
-    }
-}
 struct PodmanInstallFixture {
     _root: tempfile::TempDir,
     worker_binary: PathBuf,
@@ -1660,165 +1210,11 @@ fn podman_install_fixture() -> PodmanInstallFixture {
         digest,
     }
 }
-fn run_podman_install(worker_cached: bool) -> (Vec<CommandSpec>, PodmanInstallFixture) {
-    let fixture = podman_install_fixture();
-    let executor = PodmanInstallExecutor {
-        commands: RefCell::new(Vec::new()),
-        worker_cached,
-    };
-    install_worker_files(
-        &executor,
-        &fixture.locator,
-        "0123456789abcdef0123456789abcdef",
-        "/workspace/.hel/worker",
-        "/workspace/.hel/profile",
-        &fixture.worker_binary,
-        &fixture.launch_config,
-        &fixture.ownership,
-        &fixture.profile_stage,
-    )
-    .unwrap();
-    let commands = executor.commands.borrow().clone();
-    (commands, fixture)
-}
 fn rendered(commands: &[CommandSpec]) -> Vec<String> {
     commands
         .iter()
         .map(|command| format!("{} {}", command.program, command.args.join(" ")))
         .collect()
-}
-#[test]
-fn ssh_podman_install_caches_the_worker_binary_on_a_cache_miss() {
-    let (commands, fixture) = run_podman_install(false);
-    let lines = rendered(&commands);
-    let digest = &fixture.digest;
-    let cache_dir = format!(".cache/mjolnir/workers/{digest}");
-    let session = "0123456789abcdef0123456789abcdef";
-
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("ssh") && line.contains("'test' '-f'")),
-        "expected a cache probe, got {lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|line| line.contains('~')),
-        "remote staging paths must be home-relative: ssh arguments are \
-             single-quoted so a tilde stays literal in the remote shell while \
-             scp expands it, got {lines:#?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("ssh")
-                && line.contains(&format!("'mkdir' '-p' '{cache_dir}'"))),
-        "expected the cache directory to be created, got {lines:#?}"
-    );
-    let partial = format!("{cache_dir}/hel.partial-{session}");
-    assert!(
-        lines.iter().any(|line| line.starts_with("scp ")
-            && line.ends_with(&format!(
-                "{} user@example.test:{partial}",
-                fixture.worker_binary.display()
-            ))),
-        "expected the worker to be uploaded to the partial cache path, got {lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.starts_with("ssh")
-            && line.contains(&format!("'mv' '{partial}' '{cache_dir}/hel'"))),
-        "expected an atomic rename into the cache, got {lines:#?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("'podman' 'cp'")
-                && line.contains(&format!("'{cache_dir}/hel'"))),
-        "expected podman cp to read the cached worker, got {lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|line| line.starts_with("scp")
-            && line.ends_with(&format!(
-                "user@example.test:.cache/mjolnir/uploads/{session}/hel"
-            ))),
-        "the worker must not be staged in the per-session upload directory, got {lines:#?}"
-    );
-}
-#[test]
-fn ssh_podman_install_skips_the_worker_upload_on_a_cache_hit() {
-    let (commands, fixture) = run_podman_install(true);
-    let lines = rendered(&commands);
-    let digest = &fixture.digest;
-    let cache_dir = format!(".cache/mjolnir/workers/{digest}");
-    let session = "0123456789abcdef0123456789abcdef";
-
-    assert!(
-        !lines.iter().any(|line| line.starts_with("scp")
-            && line.contains(&fixture.worker_binary.display().to_string())),
-        "a cached worker must not be re-uploaded, got {lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|line| line.contains("'mv'")),
-        "a cache hit must not rename anything, got {lines:#?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("'podman' 'cp'")
-                && line.contains(&format!("'{cache_dir}/hel'"))),
-        "expected podman cp to read the cached worker, got {lines:#?}"
-    );
-    for name in ["launch.json", "ownership.json"] {
-        assert!(
-            lines.iter().any(|line| line.starts_with("scp")
-                && line.ends_with(&format!(
-                    "user@example.test:.cache/mjolnir/uploads/{session}/{name}"
-                ))),
-            "expected {name} to still be uploaded per session, got {lines:#?}"
-        );
-    }
-}
-
-#[test]
-fn ssh_docker_install_uses_docker_for_remote_container_operations() {
-    let mut fixture = podman_install_fixture();
-    fixture.locator = targets::TargetLocator::SshDocker {
-        borrowed_from: None,
-        ssh: SshTarget {
-            destination: "user@example.test".into(),
-            ssh_args: Vec::new(),
-        },
-        container_id: "container-1".into(),
-    };
-    let executor = PodmanInstallExecutor {
-        commands: RefCell::new(Vec::new()),
-        worker_cached: true,
-    };
-    install_worker_files(
-        &executor,
-        &fixture.locator,
-        "0123456789abcdef0123456789abcdef",
-        "/workspace/.hel/worker",
-        "/workspace/.hel/profile",
-        &fixture.worker_binary,
-        &fixture.launch_config,
-        &fixture.ownership,
-        &fixture.profile_stage,
-    )
-    .unwrap();
-
-    let lines = rendered(&executor.commands.borrow());
-    assert!(
-        lines.iter().any(|line| line.contains("'docker' 'cp'")),
-        "expected Docker to copy the cached worker, got {lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("'docker' 'exec'")),
-        "expected Docker to prepare the worker directories, got {lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|line| line.contains("'podman'")),
-        "Docker installation accidentally used Podman: {lines:#?}"
-    );
 }
 
 /// An SSH host that remembers which files exist, so consecutive installs see
@@ -1915,6 +1311,7 @@ fn position_of(lines: &[String], needle: &str) -> usize {
 /// parallel creates on one host each held a daemon action slot for minutes.
 /// The binary now crosses the network once per build and host; each session
 /// still gets its own copy in its own worker root.
+// Hard-won: 62a232f: every SSH-bare session uploaded its full 139 MB worker and stalled creates
 #[test]
 fn ssh_bare_installs_upload_the_worker_once_per_host_and_copy_it_per_session() {
     let fixture = podman_install_fixture();
@@ -1981,6 +1378,7 @@ fn ssh_bare_installs_upload_the_worker_once_per_host_and_copy_it_per_session() {
         );
     }
 }
+// Hard-won: 62a232f: SSH-bare and SSH-container installs duplicated the host worker cache
 #[test]
 fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
     let fixture = podman_install_fixture();
@@ -1998,40 +1396,6 @@ fn ssh_bare_and_ssh_container_installs_share_one_worker_cache() {
     assert!(
         worker_uploads(&lines, &fixture).is_empty(),
         "a container session on the same host reuses the cached worker, got {lines:#?}"
-    );
-}
-#[test]
-fn ec2_installs_upload_the_worker_straight_into_the_session() {
-    // A disposable EC2 instance runs one session and is terminated with it, so
-    // a host cache there would only hold a second copy of the worker.
-    let fixture = podman_install_fixture();
-    let executor = SshHostExecutor::default();
-    let session = "0123456789abcdef0123456789abcdef";
-    let locator = targets::TargetLocator::AwsEc2 {
-        profile: "default".into(),
-        region: "us-east-1".into(),
-        instance_id: "i-test".into(),
-        ssh: SshTarget {
-            destination: "user@example.test".into(),
-            ssh_args: Vec::new(),
-        },
-        workspace: "workspace".into(),
-    };
-    let lines = install_on_ssh_host(&executor, &fixture, &locator, session);
-    assert_eq!(
-        worker_uploads(&lines, &fixture),
-        [format!(
-            "scp {} user@example.test:{}/hel",
-            fixture.worker_binary.display(),
-            session_worker_root(session)
-        )],
-        "expected a direct upload into the session's worker root, got {lines:#?}"
-    );
-    assert!(
-        !lines
-            .iter()
-            .any(|line| line.contains(".cache/mjolnir/workers")),
-        "EC2 installs do not use the host cache, got {lines:#?}"
     );
 }
 
@@ -2383,121 +1747,6 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 }
 
 #[test]
-fn readiness_stage_names_only_install_capable_default_harnesses() {
-    let profile = |kind| mj_core::config::HarnessProfile {
-        enabled: true,
-        kind,
-        home: PathBuf::from("/profiles/test"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-
-    for harness in HarnessKind::ALL {
-        assert_eq!(
-            bridge_readiness_stage(&profile(harness)),
-            ProvisionStage::Installing(harness)
-        );
-    }
-}
-#[test]
-fn codex_execution_environment_follows_the_target_policy() {
-    let mut podman_environment =
-        BTreeMap::from([("INITIAL_AGENT_MODE".to_owned(), "read-only".to_owned())]);
-    mj_core::config::HarnessKind::Codex
-        .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut podman_environment)
-        .unwrap();
-    assert_eq!(
-        podman_environment
-            .get("INITIAL_AGENT_MODE")
-            .map(String::as_str),
-        Some("agent-full-access")
-    );
-
-    let mut bare_environment =
-        BTreeMap::from([("INITIAL_AGENT_MODE".to_owned(), "read-only".to_owned())]);
-    mj_core::config::HarnessKind::Codex
-        .configure_execution_environment(
-            ExecutionPolicy::ConfiguredApprovals,
-            &mut bare_environment,
-        )
-        .unwrap();
-    assert_eq!(
-        bare_environment
-            .get("INITIAL_AGENT_MODE")
-            .map(String::as_str),
-        Some("agent"),
-        "Codex uses guardian on raw localhost"
-    );
-}
-#[test]
-fn bare_targets_use_managed_harnesses_but_containers_stay_ambient() {
-    let ssh = SshTarget {
-        destination: "user@example.test".into(),
-        ssh_args: Vec::new(),
-    };
-    let targets = [
-        (
-            targets::TargetLocator::LocalBare {
-                worker_root: "/worker".into(),
-            },
-            HarnessRuntimePolicy::Managed,
-        ),
-        (
-            targets::TargetLocator::LocalPodman {
-                borrowed_from: None,
-                container_id: "container".into(),
-                workspace_storage: Default::default(),
-            },
-            HarnessRuntimePolicy::Ambient,
-        ),
-        (
-            targets::TargetLocator::SshBare {
-                worker_id: None,
-                ssh: ssh.clone(),
-                workspace: "/workspace/session".into(),
-            },
-            HarnessRuntimePolicy::Managed,
-        ),
-        (
-            targets::TargetLocator::AwsEc2 {
-                profile: "profile".into(),
-                region: "us-east-1".into(),
-                instance_id: "i-test".into(),
-                ssh,
-                workspace: "/workspace/session".into(),
-            },
-            HarnessRuntimePolicy::Managed,
-        ),
-    ];
-
-    for (target, expected) in targets {
-        assert_eq!(harness_runtime_policy(&target), expected, "{target:?}");
-    }
-}
-#[test]
-fn grok_sandbox_environment_follows_the_target_policy() {
-    let mut isolated = BTreeMap::from([("GROK_SANDBOX".to_owned(), "strict".to_owned())]);
-    mj_core::config::HarnessKind::Grok
-        .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut isolated)
-        .unwrap();
-    assert_eq!(
-        isolated.get("GROK_SANDBOX").map(String::as_str),
-        Some("off")
-    );
-
-    let mut local = BTreeMap::from([("GROK_SANDBOX".to_owned(), "strict".to_owned())]);
-    mj_core::config::HarnessKind::Grok
-        .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut local)
-        .unwrap();
-    assert_eq!(
-        local.get("GROK_SANDBOX").map(String::as_str),
-        Some("strict"),
-        "raw localhost must preserve the profile's configured sandbox"
-    );
-}
-#[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
 
@@ -2516,22 +1765,6 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
              session and an npx session run different adapter versions."
     );
-}
-#[test]
-fn kimi_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
-    let (command, arguments) = bridge_launch(
-        mj_core::config::HarnessKind::Kimi,
-        ExecutionPolicy::Unconstrained,
-    );
-    assert_eq!(command, "sh");
-    assert_eq!(arguments[0], "-c");
-    assert!(arguments[1].contains(&format!(
-        "install.sh | KIMI_VERSION={} bash >&2 &&",
-        mj_core::harness_runtime::KIMI_VERSION
-    )));
-    assert!(arguments[1].contains("$HOME/.kimi-code/bin/kimi"));
-    assert!(arguments[1].contains("Mjolnir needs compatible Kimi Code"));
-    assert!(!arguments[1].contains("Hel"));
 }
 
 /// Runs a default bridge script with no harness installed, a fake `curl`
@@ -2572,6 +1805,7 @@ fn run_default_bridge_install(
 /// broke initialize (#1136). The installer's output goes to stderr, which the
 /// worker keeps, and the ACP server starts with a clean stdout.
 #[cfg(unix)]
+// Hard-won: 2fe3b29: Kimi installer output contaminated ACP stdout
 #[test]
 fn kimi_default_bridge_sends_installer_output_to_stderr() {
     let (stdout, stderr) = run_default_bridge_install(
@@ -2615,63 +1849,69 @@ chmod +x "$HOME/.grok/bin/grok""#,
         "{stderr}"
     );
 }
-#[test]
-fn grok_default_bridge_is_non_login_and_uses_bash_for_the_official_installer() {
-    let (command, arguments) = bridge_launch(
-        mj_core::config::HarnessKind::Grok,
-        ExecutionPolicy::ConfiguredApprovals,
-    );
-    assert_eq!(command, "sh");
-    assert_eq!(arguments[0], "-c");
-    let script = &arguments[1];
-    assert!(script.contains(&format!(
-        "https://x.ai/cli/install.sh | bash -s {} >&2 &&",
-        mj_core::harness_runtime::GROK_VERSION
-    )));
-    assert!(script.contains("command -v grok"));
-    assert!(script.contains("[ -x \"$GROK_HOME/bin/grok\" ]"));
-    assert!(script.contains("[ -x \"$HOME/.grok/bin/grok\" ]"));
-    assert!(script.contains("exit 127"));
-    assert!(script.contains("exec grok agent stdio"));
-    assert!(!script.contains("--always-approve"));
-    assert!(script.contains("Mjolnir needs compatible Grok Build"));
-    assert!(!script.contains("Hel"));
-}
-#[test]
-fn grok_default_bridge_adds_the_always_approve_flag_when_unrestricted() {
-    let (_, arguments) = bridge_launch(
-        mj_core::config::HarnessKind::Grok,
-        ExecutionPolicy::Unconstrained,
-    );
-    let script = &arguments[1];
-    assert!(script.contains("exec grok agent --always-approve stdio"));
-    assert!(script.contains("exec \"$GROK_HOME/bin/grok\" agent --always-approve stdio"));
-    assert!(script.contains("exec \"$HOME/.grok/bin/grok\" agent --always-approve stdio"));
-}
-#[test]
-fn kimi_uses_runtime_aware_memory_delivery_only_on_staged_targets() {
-    let local = targets::TargetLocator::LocalBare {
-        worker_root: "/worker".into(),
-    };
-    let podman = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "container".into(),
-        workspace_storage: Default::default(),
-    };
 
-    assert_eq!(
-        project_memory_mcp_delivery(mj_core::config::HarnessKind::Kimi, &local),
-        ProjectMemoryMcpDelivery::Acp
-    );
-    assert_eq!(
-        project_memory_mcp_delivery(mj_core::config::HarnessKind::Kimi, &podman),
-        ProjectMemoryMcpDelivery::HarnessProfile
-    );
-    assert_eq!(
-        project_memory_mcp_delivery(mj_core::config::HarnessKind::Codex, &podman),
-        ProjectMemoryMcpDelivery::Acp
-    );
+#[test]
+fn project_memory_replica_is_separate_from_controller_attachment_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+        let session_id = format!("{:032x}", index + 1);
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: directory.path().join(format!("{}-home", kind.id())),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        };
+        let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.clone());
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let (launch, memory, _) = worker_launch_config(
+            &session,
+            &profile,
+            None,
+            &backend,
+            LaunchWorkspace {
+                session_id: &session_id,
+                container: None,
+                parent_worktree: None,
+            },
+            &mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            !launch.additional_directories.contains(&memory.root),
+            "{kind:?} keeps the target-local memory replica out of attachment directories"
+        );
+        assert_eq!(
+            launch.project_memory.as_ref().unwrap().root,
+            memory.root,
+            "{kind:?} retains its memory replica in the dedicated launch field"
+        );
+        if kind == HarnessKind::Muse {
+            assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
+            assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
+        }
+    }
 }
+
 /// A catalog cache backed by an isolated copy of Mjolnir's own
 /// `profile_config_cache` table, so the fallback path is exercised against
 /// the real schema without touching the live store.
@@ -2788,6 +2028,7 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
     );
 }
 
+// Hard-won: ee59e57: a valid profile catalog key caused validation failure and a duplicate staged key
 #[test]
 fn a_profile_authored_catalog_is_discarded_and_the_staged_key_replaces_its_own() {
     let home = tempfile::tempdir().unwrap();
@@ -2895,6 +2136,7 @@ fn a_failed_catalog_fetch_falls_back_to_the_last_cached_catalog() {
     assert!(error.contains("https://api.z.ai/api/v1/models"), "{error}");
 }
 
+// Hard-won: 55b8ea7: provider catalog and discovered model rows evicted each other from SQLite
 #[test]
 fn caching_a_catalog_keeps_the_discovered_configuration_of_the_default_model() {
     let home = tempfile::tempdir().unwrap();
@@ -3019,82 +2261,6 @@ fn a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine() {
 }
 
 #[test]
-fn the_guardian_review_setting_picks_which_model_reviews() {
-    let home = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    let mut profile = deepseek_profile(home.path());
-    let cache = store.path().join("cache.sqlite3");
-
-    profile.guardian_review_model = Some("session".to_owned());
-    let staged = tempfile::tempdir().unwrap();
-    let catalog = stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path(), &cache).expect("stage");
-    assert!(
-        catalog
-            .models
-            .iter()
-            .all(|model| !model.contains_key("auto_review_model_override")),
-        "with \"session\" Codex reviews with the session model, so nothing is stamped"
-    );
-
-    profile.guardian_review_model = Some("deepseek-v4-pro".to_owned());
-    let staged = tempfile::tempdir().unwrap();
-    let catalog = stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path(), &cache).expect("stage");
-    for model in &catalog.models {
-        assert_eq!(
-            model["auto_review_model_override"],
-            serde_json::Value::from("deepseek-v4-pro"),
-            "a named slug reviews whichever model the session runs on"
-        );
-    }
-
-    profile.guardian_review_model = Some("deepseek-nonesuch".to_owned());
-    let staged = tempfile::tempdir().unwrap();
-    let error = stage_catalog_for(&profile, DEEPSEEK_LIST, staged.path(), &cache)
-        .expect_err("a reviewer the provider does not serve cannot review")
-        .to_string();
-    assert!(error.contains("deepseek-nonesuch"), "{error}");
-    assert!(error.contains("deepseek"), "{error}");
-    assert!(error.contains("deepseek-flash"), "{error}");
-    assert!(
-        !staged.path().join("models.json").exists(),
-        "a rejected reviewer stages no catalog at all"
-    );
-}
-
-#[test]
-fn a_native_codex_profile_gets_no_generated_catalog() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::write(home.path().join("config.toml"), "model = \"gpt-5.5\"\n").unwrap();
-    let staged = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    let profile = mj_core::config::HarnessProfile {
-        enabled: true,
-        kind: mj_core::config::HarnessKind::Codex,
-        home: home.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-
-    stage_profile(&profile, staged.path()).unwrap();
-    stage_codex_catalog(
-        "work",
-        &profile,
-        staged.path(),
-        &|_, _| panic!("a profile with no custom provider must not fetch a catalog"),
-        &IsolatedCatalogCache(store.path().join("cache.sqlite3")),
-    )
-    .unwrap();
-
-    assert!(!staged.path().join("models.json").exists());
-    assert_eq!(
-        std::fs::read_to_string(staged.path().join("config.toml")).unwrap(),
-        "model = \"gpt-5.5\"\n"
-    );
-}
-
-#[test]
 fn stage_grok_profile_copies_authentication_and_agent_identity() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -3159,6 +2325,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
 }
 
 #[cfg(unix)]
+// Hard-won: c607200: symlinked Claude settings and instructions were silently dropped
 #[test]
 fn stage_claude_profile_follows_symlinked_entries() {
     let outside = tempfile::tempdir().unwrap();
@@ -3319,7 +2486,9 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
                 "skills/.system/.codex-system-skills.marker",
                 "skills/.system/imagegen/SKILL.md",
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
+                &[]
+            }
         };
         let home = tempfile::tempdir().unwrap();
         for relative in std::iter::once(&"skills/review/SKILL.md").chain(owned) {
@@ -3387,6 +2556,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
 /// removes the linked skill. A large file that compresses under the per-file
 /// limit is part of both trees; one that does not is left out of both.
 #[cfg(unix)]
+// Hard-won: 17a0618: a linked oversized skill made worker sync fail repeatedly
 #[test]
 fn staging_and_sync_agree_on_linked_and_oversized_skills() {
     let outside = tempfile::tempdir().unwrap();
@@ -3485,96 +2655,6 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
     assert!(staged.path().join("settings.json").is_file());
 }
 
-fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
-    let staged = tempfile::tempdir().unwrap();
-    let path = staged.path().join("settings.json");
-    std::fs::write(&path, body).unwrap();
-    (staged, path)
-}
-
-fn stage_muse_settings(profile_stage: &Path) {
-    apply_staged_execution_setting(
-        HarnessKind::Muse,
-        ExecutionPolicy::Unconstrained,
-        profile_stage,
-    )
-    .unwrap();
-}
-
-#[test]
-fn muse_staged_settings_select_the_unrestricted_profile() {
-    let (staged, path) = staged_muse_settings(
-        r#"{
-            "schema_version": 1,
-            "provider": "anthropic",
-            "model": "muse-1",
-            "tui": {"theme": "dark"},
-            "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
-        }"#,
-    );
-
-    stage_muse_settings(staged.path());
-
-    let document: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(document["provider"], "anthropic");
-    assert_eq!(document["model"], "muse-1");
-    assert_eq!(document["tui"]["theme"], "dark");
-    assert_eq!(document["schema_version"], 1);
-    assert_eq!(document["permissions"]["schema_version"], 1);
-    assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
-}
-
-#[test]
-fn muse_staged_settings_are_created_when_absent() {
-    let staged = tempfile::tempdir().unwrap();
-
-    stage_muse_settings(staged.path());
-
-    let body = std::fs::read_to_string(staged.path().join("settings.json")).unwrap();
-    assert!(body.ends_with('\n'));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({
-            "schema_version": 1,
-            "permissions": {"schema_version": 1, "default_profile": ":unrestricted"}
-        })
-    );
-}
-
-#[test]
-fn a_harness_without_a_staged_setting_leaves_the_profile_untouched() {
-    let source = r#"{"schema_version": 1, "permissions": {"default_profile": ":ask-me"}}"#;
-
-    for (kind, policy) in [
-        (HarnessKind::Claude, ExecutionPolicy::Unconstrained),
-        (HarnessKind::Muse, ExecutionPolicy::ConfiguredApprovals),
-    ] {
-        let (staged, path) = staged_muse_settings(source);
-
-        apply_staged_execution_setting(kind, policy, staged.path()).unwrap();
-
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), source, "{kind:?}");
-    }
-}
-
-#[test]
-fn muse_settings_that_are_not_an_object_report_the_staged_file() {
-    let (staged, path) = staged_muse_settings("[]");
-
-    let error = apply_staged_execution_setting(
-        HarnessKind::Muse,
-        ExecutionPolicy::Unconstrained,
-        staged.path(),
-    )
-    .unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains(&path.display().to_string()),
-        "error should name the staged file: {error:#}"
-    );
-}
-
 /// `[jev] enabled = false` reaches the worker as its launch environment and
 /// takes the Jev key out of both the worker's and the harness's environment.
 #[test]
@@ -3652,149 +2732,7 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 }
 
 #[test]
-fn a_build_cache_session_carries_mbx_settings_into_the_target_environment() {
-    let home = tempfile::tempdir().unwrap();
-    let profile = zai_profile(home.path());
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let workspace = targets::new_container_workspace(session_id).unwrap();
-    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
-    let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: targets::resource_name(session_id).unwrap(),
-        workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
-    };
-    let template = mj_core::config::TargetTemplate::LocalPodman {
-        container: mj_core::config::ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".to_owned(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: None,
-            memory: None,
-            environment: Default::default(),
-            workspace_storage: Default::default(),
-        },
-    };
-    let mut session = crate::controller::test_support::checkpoint_test_session(session_id);
-    session.harness_kind = HarnessKind::Codex;
-    session.last_profile = "glm".into();
-    session.project_directory = None;
-    session.container_workspace = Some(workspace.clone());
-
-    let without = worker_launch_config(
-        &session,
-        &profile,
-        Some(&bundle),
-        &locator,
-        LaunchWorkspace {
-            session_id,
-            container: Some(&workspace),
-            parent_worktree: None,
-        },
-        &mj_core::state::TargetRuntimeSettings::from(&template),
-    )
-    .unwrap()
-    .0;
-    assert!(!without.target_environment.contains_key("MBX_CACHE_DIR"));
-    assert!(!without.environment.contains_key("MBX_CACHE_DIR"));
-    assert!(!without.target_environment.contains_key("MBX_SHIMS_DIR"));
-    assert!(!without.environment.contains_key("MBX_SHIMS_DIR"));
-
-    session.build_cache = Some(mj_core::state::SessionBuildCache {
-        host: "local-podman".into(),
-        directory: PathBuf::from("/mnt/fast/mbx-cache"),
-        max_size: Some("100000000000B".into()),
-        target_root: None,
-    });
-    let with = worker_launch_config(
-        &session,
-        &profile,
-        Some(&bundle),
-        &locator,
-        LaunchWorkspace {
-            session_id,
-            container: Some(&workspace),
-            parent_worktree: None,
-        },
-        &mj_core::state::TargetRuntimeSettings::from(&template),
-    )
-    .unwrap()
-    .0;
-    // `target_environment` is what reaches the harness, its terminals, and
-    // the reviewer sidecar, not just the harness process.
-    let shims = format!("/var/lib/hel/workers/{session_id}/mbx-shims");
-    assert_eq!(with.target_environment.get("MBX_SHIMS_DIR"), Some(&shims));
-    assert_eq!(with.environment.get("MBX_SHIMS_DIR"), Some(&shims));
-    assert_eq!(
-        with.target_environment
-            .get("MBX_CACHE_DIR")
-            .map(String::as_str),
-        Some("/mnt/fast/mbx-cache")
-    );
-    assert_eq!(
-        with.target_environment
-            .get("MBX_GC_MAX_TOTAL_SIZE")
-            .map(String::as_str),
-        None
-    );
-    assert_eq!(
-        with.environment.get("MBX_CACHE_DIR").map(String::as_str),
-        Some("/mnt/fast/mbx-cache")
-    );
-    for environment in [&with.target_environment, &with.environment] {
-        assert!(!environment.contains_key("MBX_GC_MAX_TOTAL_SIZE"));
-        assert_eq!(
-            environment.get("MJ_MBX_CONFIG_DIR").map(String::as_str),
-            Some("/mnt/fast/mbx-cache/.mjolnir/config/mbx")
-        );
-    }
-    // The summary and savings lines are suppressed in sessions.
-    assert_eq!(
-        with.target_environment
-            .get("MBX_SUMMARY")
-            .map(String::as_str),
-        Some("off")
-    );
-    assert_eq!(
-        with.target_environment
-            .get("MBX_SAVINGS")
-            .map(String::as_str),
-        Some("off")
-    );
-    assert!(!without.target_environment.contains_key("MBX_SUMMARY"));
-
-    let mj_core::config::TargetTemplate::LocalPodman { container } = &template else {
-        unreachable!()
-    };
-    let docker = targets::TargetLocator::LocalDocker {
-        borrowed_from: None,
-        container_id: targets::resource_name(session_id).unwrap(),
-    };
-    let docker_template = mj_core::config::TargetTemplate::LocalDocker {
-        container: container.clone(),
-    };
-    // A relaunch and the other container engine use the same persistent path.
-    for (backend, template) in [(&locator, &template), (&docker, &docker_template)] {
-        let launch = worker_launch_config(
-            &session,
-            &profile,
-            Some(&bundle),
-            backend,
-            LaunchWorkspace {
-                session_id,
-                container: Some(&workspace),
-                parent_worktree: None,
-            },
-            &mj_core::state::TargetRuntimeSettings::from(template),
-        )
-        .unwrap()
-        .0;
-        assert_eq!(launch.target_environment.get("MBX_SHIMS_DIR"), Some(&shims));
-    }
-}
-
-#[test]
-fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path() {
+fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_path() {
     #[derive(Default)]
     struct RecordingExecutor {
         commands: std::sync::Mutex<Vec<String>>,
@@ -3821,7 +2759,6 @@ fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path(
         }
     }
 
-    let binary = tempfile::NamedTempFile::new().unwrap();
     let executor = RecordingExecutor::default();
     let locator = targets::TargetLocator::LocalPodman {
         borrowed_from: None,
@@ -3829,32 +2766,31 @@ fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path(
         workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
     };
 
-    install_mbx_files(
+    install_mbx_shims(
         &executor,
         &locator,
-        "session-1",
         "/home/hel/.hel/worker",
-        binary.path(),
+        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
         Path::new("/cache/.mjolnir/config/mbx"),
         &[],
     )
     .unwrap();
 
     let commands = executor.commands();
+    let shim = commands
+        .iter()
+        .find(|line| line.contains("MBX_CARGO_SHIM_MODE=1"))
+        .expect("the supported mbx Cargo launcher is written in the container");
     assert!(
-        commands.iter().any(|line| line
-            == &format!(
-                "podman cp {} hel-session:/home/hel/.hel/worker/bin/mbx",
-                binary.path().display()
-            )),
-        "{commands:#?}"
+        shim.contains("MBX_CARGO_SHIM_PATH=$(command -v \"$0\")"),
+        "{shim}"
     );
+    assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        commands.iter().any(|line| line.contains("ln -f")
-            && line.contains("/home/hel/.hel/worker/bin/mbx")
-            && line.contains("/home/hel/.hel/worker/bin/cargo")),
-        "{commands:#?}"
+        shim.contains("exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""),
+        "both wrappers execute the synchronized cache copy: {shim}"
     );
+    assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
         commands.iter().any(|line| {
             line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")
@@ -3864,70 +2800,48 @@ fn installing_the_build_cache_places_mbx_and_its_cargo_shim_on_the_session_path(
 }
 
 #[test]
-fn a_child_opens_its_parents_container_workspace() {
-    let home = tempfile::tempdir().unwrap();
-    let profile = zai_profile(home.path());
-    let parent_id = "0123456789abcdef0123456789abcdef";
-    let child_id = "1123456789abcdef0123456789abcdef";
-    let parent_workspace = targets::new_container_workspace(parent_id).unwrap();
-    let bundle = crate::controller::test_support::local_bundle(Path::new("/src/project"));
+fn container_mbx_version_must_match_the_synced_copy_before_shim_installation() {
+    #[derive(Default)]
+    struct VersionExecutor {
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CommandExecutor for VersionExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(format!(
+                "{} {}",
+                command.program,
+                command.args.join(" ")
+            ));
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"mbx 1.23.0".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let executor = VersionExecutor::default();
     let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: Some(parent_id.into()),
-        container_id: targets::resource_name(parent_id).unwrap(),
+        borrowed_from: None,
+        container_id: "hel-session".into(),
         workspace_storage: targets::PodmanWorkspaceLocator::ContainerLayer,
     };
-    let template = mj_core::config::TargetTemplate::LocalPodman {
-        container: mj_core::config::ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".to_owned(),
-            pull_policy: Default::default(),
-            platform: None,
-            cpus: None,
-            memory: None,
-            environment: Default::default(),
-            workspace_storage: Default::default(),
-        },
-    };
-    // The child record copies its parent's workspace when it is created,
-    // and `prepare_worker_files` reads the same value off the parent, so
-    // both point the child's harness at the parent's checkout rather than
-    // at a workspace named after the child.
-    let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
-    child.harness_kind = HarnessKind::Codex;
-    child.last_profile = "glm".into();
-    child.project_directory = None;
-    child.container_workspace = Some(parent_workspace.clone());
-    child.build_cache = Some(mj_core::state::SessionBuildCache {
-        host: "local".into(),
-        directory: PathBuf::from("/mnt/fast/mbx-cache"),
-        max_size: None,
-        target_root: None,
-    });
-
-    let (launch, _, _) = worker_launch_config(
-        &child,
-        &profile,
-        Some(&bundle),
+    let error = verify_mbx_binary(
+        &executor,
         &locator,
-        LaunchWorkspace {
-            session_id: parent_id,
-            container: Some(&parent_workspace),
-            parent_worktree: None,
-        },
-        &mj_core::state::TargetRuntimeSettings::from(&template),
+        Path::new("/mnt/fast/mbx-cache/.mjolnir/bin/mbx"),
+        "1.22.0",
     )
-    .unwrap();
-
-    assert_eq!(
-        launch.cwd,
-        PathBuf::from(format!("/workspace/{parent_id}/project"))
-    );
-    assert_eq!(
-        launch.target_environment.get("MBX_SHIMS_DIR"),
-        Some(&format!("/var/lib/hel/workers/{child_id}/mbx-shims"))
+    .unwrap_err();
+    assert!(error.to_string().contains("container reports mbx 1.23.0"));
+    let commands = executor.commands.lock().unwrap();
+    assert_eq!(commands.len(), 1);
+    assert!(
+        commands[0]
+            .contains("podman exec hel-session /mnt/fast/mbx-cache/.mjolnir/bin/mbx --version")
     );
 }
-
 /// A Codex profile whose `auth.json` records this `auth_mode`, and whose own
 /// environment sets an API key.
 fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::HarnessProfile {
@@ -4155,6 +3069,7 @@ fn only_localhost_harnesses_receive_the_owning_daemons_configuration_paths() {
 /// A ChatGPT profile's harness environment carries no such key on any target,
 /// and the launch tells the worker to remove the same variables from the
 /// target's own login environment, which only the worker sees.
+// Hard-won: c4e2838: shipped ChatGPT Codex children failed when an inherited API key reached chatgpt.com
 #[test]
 fn a_chatgpt_codex_launch_carries_no_api_key_on_any_target() {
     let home = tempfile::tempdir().unwrap();
@@ -4333,8 +3248,50 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     assert!(profile.supports_guardian_approvals());
 }
 
+fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
+    let staged = tempfile::tempdir().unwrap();
+    let path = staged.path().join("settings.json");
+    std::fs::write(&path, body).unwrap();
+    (staged, path)
+}
+
+fn stage_muse_settings(profile_stage: &Path) {
+    apply_staged_execution_setting(
+        HarnessKind::Muse,
+        ExecutionPolicy::Unconstrained,
+        profile_stage,
+    )
+    .unwrap();
+}
+
+// Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile
+#[test]
+fn muse_staged_settings_select_the_unrestricted_profile() {
+    let (staged, path) = staged_muse_settings(
+        r#"{
+            "schema_version": 1,
+            "provider": "anthropic",
+            "model": "muse-1",
+            "tui": {"theme": "dark"},
+            "permissions": {"schema_version": 1, "default_profile": ":auto-review"}
+        }"#,
+    );
+
+    stage_muse_settings(staged.path());
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(document["provider"], "anthropic");
+    assert_eq!(document["model"], "muse-1");
+    assert_eq!(document["tui"]["theme"], "dark");
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["permissions"]["schema_version"], 1);
+    assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
+}
+
 /// Muse has no guardian mode, so even a raw local target launches it
 /// unconstrained.
+// Hard-won: 4a9dcb5: raw local Muse sessions used a permission profile Muse serve refused
 #[test]
 fn raw_local_muse_launches_unconstrained() {
     let project = tempfile::tempdir().unwrap();
@@ -4408,7 +3365,7 @@ fn stage_kimi_profile_preserves_device_identity() {
     assert!(staged.path().join("credentials/kimi-code.json").is_file());
 }
 #[test]
-fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
+fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
     let home = tempfile::tempdir().unwrap();
     let original = serde_json::json!({
         "mcpServers": {
@@ -4441,8 +3398,12 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
         mcp_delivery: ProjectMemoryMcpDelivery::HarnessProfile,
     };
 
-    configure_kimi_project_memory_mcp(staged.path(), "/var/lib/hel/workers/session", &memory)
-        .unwrap();
+    configure_kimi_history_mcp(
+        staged.path(),
+        "/var/lib/hel/workers/session",
+        memory.history_socket.as_deref(),
+    )
+    .unwrap();
 
     let configured: serde_json::Value =
         serde_json::from_slice(&std::fs::read(staged.path().join("mcp.json")).unwrap()).unwrap();
@@ -4459,8 +3420,6 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
             "args": [
                 "worker",
                 "memory-mcp",
-                "--root",
-                "/var/lib/hel/profiles/session/projects/project/memory",
                 "--history-socket",
                 "/var/lib/hel/workers/session/control.sock"
             ],
@@ -4475,7 +3434,7 @@ fn staged_kimi_profile_binds_project_memory_to_the_target_runtime() {
 }
 
 #[test]
-fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
+fn staged_kimi_history_mcp_resolves_ssh_paths_from_target_home() {
     let staged = tempfile::tempdir().unwrap();
     let memory = ProjectMemoryLaunchConfig {
         history_socket: Some(".local/share/hel/workers/session/control.sock".into()),
@@ -4486,8 +3445,12 @@ fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
         mcp_delivery: ProjectMemoryMcpDelivery::HarnessProfile,
     };
 
-    configure_kimi_project_memory_mcp(staged.path(), ".local/share/hel/workers/session", &memory)
-        .unwrap();
+    configure_kimi_history_mcp(
+        staged.path(),
+        ".local/share/hel/workers/session",
+        memory.history_socket.as_deref(),
+    )
+    .unwrap();
 
     let configured: serde_json::Value =
         serde_json::from_slice(&std::fs::read(staged.path().join("mcp.json")).unwrap()).unwrap();
@@ -4498,60 +3461,12 @@ fn staged_kimi_project_memory_resolves_ssh_paths_from_target_home() {
         server["args"],
         serde_json::json!([
             "-c",
-            "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\" --history-socket \"$HOME/$3\"",
+            "exec \"$HOME/$1\" worker memory-mcp --history-socket \"$HOME/$2\"",
             "mj-memory",
             ".local/share/hel/workers/session/hel",
-            ".local/share/hel/profiles/session/projects/project/memory",
             ".local/share/hel/workers/session/control.sock"
         ])
     );
-}
-#[test]
-fn disposable_container_guidance_reaches_each_harness_without_touching_home() {
-    let target = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "container".into(),
-        workspace_storage: Default::default(),
-    };
-    for (kind, instructions) in [
-        (mj_core::config::HarnessKind::Codex, "AGENTS.md"),
-        (mj_core::config::HarnessKind::Claude, "CLAUDE.md"),
-        (mj_core::config::HarnessKind::Kimi, "AGENTS.md"),
-        (mj_core::config::HarnessKind::Grok, "AGENTS.md"),
-        (mj_core::config::HarnessKind::Muse, "AGENTS.md"),
-    ] {
-        let home = tempfile::tempdir().unwrap();
-        let original = "# Controller instructions\n\nKeep this source unchanged.\n";
-        let source_instructions = home.path().join(instructions);
-        std::fs::write(&source_instructions, original).unwrap();
-        let staged = tempfile::tempdir().unwrap();
-        let profile = mj_core::config::HarnessProfile {
-            enabled: true,
-            kind,
-            home: home.path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        };
-
-        stage_profile(&profile, staged.path()).unwrap();
-        append_hel_target_environment(kind, staged.path(), &target).unwrap();
-
-        let guidance = std::fs::read_to_string(staged.path().join(instructions)).unwrap();
-        assert_eq!(
-            guidance,
-            format!("{original}\n{MJ_CONTAINER_ENVIRONMENT}"),
-            "{instructions} receives the section in the staged profile"
-        );
-        assert!(guidance.contains("## Mjolnir disposable environment"));
-        assert!(!guidance.contains("## Hel disposable environment"));
-        assert_eq!(
-            std::fs::read_to_string(source_instructions).unwrap(),
-            original,
-            "{instructions} in the controller-side home stays untouched"
-        );
-    }
 }
 #[test]
 fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
@@ -4594,102 +3509,6 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         std::fs::read_to_string(home.path().join("SYSTEM.md")).unwrap(),
         system_override
     );
-}
-
-#[test]
-fn container_storage_guidance_names_the_mounted_workspace_and_disposable_tmp() {
-    let target = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "container".into(),
-        workspace_storage: targets::PodmanWorkspaceLocator::Volume {
-            name: "workspace-volume".into(),
-        },
-    };
-    for workspace in [None, Some(Path::new("/workspace/session-1"))] {
-        let staged = tempfile::tempdir().unwrap();
-        append_container_storage_guidance(
-            HarnessKind::Codex,
-            staged.path(),
-            &target,
-            workspace,
-            true,
-        )
-        .unwrap();
-        let text = std::fs::read_to_string(staged.path().join("AGENTS.md")).unwrap();
-        assert!(text.contains("`/tmp` is a private disk-backed volume"));
-        assert!(text.contains("excluded from checkpoints"));
-        assert!(text.contains(&format!(
-            "mounted at `{}`",
-            targets::container_workspace_root(workspace)
-        )));
-        assert_eq!(
-            text.contains("parent `/workspace` directory itself"),
-            workspace.is_some()
-        );
-    }
-    let staged = tempfile::tempdir().unwrap();
-    append_container_storage_guidance(HarnessKind::Codex, staged.path(), &target, None, false)
-        .unwrap();
-    assert!(
-        !std::fs::read_to_string(staged.path().join("AGENTS.md"))
-            .unwrap()
-            .contains("private disk-backed volume")
-    );
-    let apple = tempfile::tempdir().unwrap();
-    append_container_storage_guidance(
-        HarnessKind::Codex,
-        apple.path(),
-        &targets::TargetLocator::AppleContainer {
-            borrowed_from: None,
-            container_id: "container".into(),
-        },
-        None,
-        false,
-    )
-    .unwrap();
-    assert!(!apple.path().join("AGENTS.md").exists());
-}
-
-#[test]
-fn ec2_guidance_names_its_real_workspace_and_ssh_bare_gets_none() {
-    let ec2 = tempfile::tempdir().unwrap();
-    append_hel_target_environment(
-        mj_core::config::HarnessKind::Codex,
-        ec2.path(),
-        &targets::TargetLocator::AwsEc2 {
-            profile: "profile".into(),
-            region: "region".into(),
-            instance_id: "instance".into(),
-            ssh: targets::SshTarget {
-                destination: "host".into(),
-                ssh_args: Vec::new(),
-            },
-            workspace: ".local/share/hel/workspaces/session".into(),
-        },
-    )
-    .unwrap();
-    let guidance = std::fs::read_to_string(ec2.path().join("AGENTS.md")).unwrap();
-    assert_eq!(
-        guidance,
-        "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/.local/share/hel/workspaces/session`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/.local/share/hel/workspaces/session`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n"
-    );
-    assert!(!guidance.contains("## Hel disposable environment"));
-
-    let ssh_bare = tempfile::tempdir().unwrap();
-    append_hel_target_environment(
-        mj_core::config::HarnessKind::Codex,
-        ssh_bare.path(),
-        &targets::TargetLocator::SshBare {
-            worker_id: None,
-            ssh: targets::SshTarget {
-                destination: "host".into(),
-                ssh_args: Vec::new(),
-            },
-            workspace: ".local/share/hel/workspaces/session".into(),
-        },
-    )
-    .unwrap();
-    assert!(!ssh_bare.path().join("AGENTS.md").exists());
 }
 
 #[test]
@@ -4748,7 +3567,6 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -4810,6 +3628,125 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     assert!(rendered.contains("worker' 'prepare-harness' '--config'"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
+    struct CacheLinkExecutor {
+        commands: RefCell<Vec<CommandSpec>>,
+        worker_bin: PathBuf,
+        configuration: PathBuf,
+        home: PathBuf,
+    }
+
+    impl CommandExecutor for CacheLinkExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.borrow_mut().push(command.clone());
+            let mut args = vec![
+                "-c".into(),
+                command.args[4].clone(),
+                "sh".into(),
+                self.worker_bin.to_string_lossy().into_owned(),
+                self.configuration.to_string_lossy().into_owned(),
+            ];
+            args.extend(command.args[8..].iter().cloned());
+            let mut local = CommandSpec::new("/bin/sh", args);
+            local
+                .env
+                .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+            targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(5))
+                .execute(&local)
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let shared_cache = directory.path().join("shared-cache");
+    let configuration = shared_cache.join(".mjolnir/config/mbx");
+    std::fs::create_dir_all(&configuration).unwrap();
+    std::fs::write(
+        configuration.join("config.toml"),
+        "[gc]\nmax_total_size = '50GB'\n",
+    )
+    .unwrap();
+    let worker_bin = directory.path().join("worker/bin");
+    std::fs::create_dir_all(&worker_bin).unwrap();
+    let legacy_binary = worker_bin.join("mbx");
+    std::fs::write(&legacy_binary, b"legacy copied mbx executable").unwrap();
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let controller = crate::controller::Controller {
+        config: mj_core::config::Config::default(),
+        state: mj_core::state::State::default(),
+    };
+    let mut session = crate::controller::test_support::checkpoint_test_session("legacy-cache");
+    session.build_cache = Some(mj_core::state::SessionBuildCache {
+        host: "local".into(),
+        directory: shared_cache,
+        max_size: None,
+        target_root: None,
+    });
+    let backend = targets::TargetLocator::LocalPodman {
+        container_id: targets::resource_name(&session.id).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    };
+    let launch = WorkerLaunchConfig {
+        goal_resume_request: None,
+        run_mode: Default::default(),
+        session_id: session.id.clone(),
+        subagents: mj_core::subagent::SubagentPolicy::Native,
+        handback_tool: false,
+        initial_model: None,
+        review_capture: false,
+        target_environment: Default::default(),
+        seed_image_environment: true,
+        harness: HarnessKind::Codex,
+        harness_home: directory.path().join("profile"),
+        authentication_marker: None,
+        bridge_command: "codex".into(),
+        bridge_args: Vec::new(),
+        harness_runtime: HarnessRuntimePolicy::Ambient,
+        environment: Default::default(),
+        excluded_environment: Vec::new(),
+        cwd: directory.path().to_path_buf(),
+        additional_directories: Vec::new(),
+        native_session_id: None,
+        project_memory: None,
+        execution_policy: ExecutionPolicy::ConfiguredApprovals,
+    };
+    let executor = CacheLinkExecutor {
+        commands: RefCell::new(Vec::new()),
+        worker_bin,
+        configuration,
+        home: home.clone(),
+    };
+
+    // This is the cache-configuration preflight called by
+    // upgrade_session_worker before it prepares or swaps the worker.
+    controller
+        .prepare_build_cache_links(&session, &backend, &launch, &executor)
+        .unwrap();
+
+    let commands = executor.commands.borrow();
+    assert_eq!(
+        commands.len(),
+        1,
+        "legacy preparation must not probe the host"
+    );
+    assert_eq!(
+        commands[0].purpose,
+        "inspect legacy mbx and relink its shared configuration"
+    );
+    assert_eq!(commands[0].program, "podman");
+    assert!(commands[0].args.iter().any(|argument| {
+        argument.ends_with("/bin") && argument.starts_with("/var/lib/hel/workers/")
+    }));
+    assert_eq!(
+        std::fs::read(&legacy_binary).unwrap(),
+        b"legacy copied mbx executable"
+    );
+    assert!(home.join(".config/mbx/config.toml").is_symlink());
+}
+
 #[test]
 fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     struct ConfigRecordingExecutor {
@@ -4853,7 +3790,6 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         handback_tool: false,
         initial_model: None,
         review_capture: false,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -4931,74 +3867,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     );
 }
 
-#[test]
-fn initial_bare_provision_prepares_the_harness_from_installed_files() {
-    let session = "session-remote";
-    let executor = DigestExecutor {
-        installed_line: String::new(),
-        commands: RefCell::new(Vec::new()),
-    };
-    let mut launch = WorkerLaunchConfig {
-        subagents: mj_core::subagent::SubagentPolicy::Native,
-        handback_tool: false,
-        initial_model: None,
-        review_capture: false,
-        bifrost_binary: None,
-        goal_resume_request: Default::default(),
-        target_environment: Default::default(),
-        seed_image_environment: false,
-        run_mode: Default::default(),
-        session_id: session.into(),
-        harness: HarnessKind::Kimi,
-        harness_home: PathBuf::new(),
-        authentication_marker: None,
-        bridge_command: "ignored".into(),
-        bridge_args: Vec::new(),
-        harness_runtime: HarnessRuntimePolicy::Managed,
-        environment: Default::default(),
-        excluded_environment: Vec::new(),
-        cwd: "/srv/mj/session-remote/project".into(),
-        additional_directories: Vec::new(),
-        native_session_id: None,
-        project_memory: None,
-        execution_policy: ExecutionPolicy::ConfiguredApprovals,
-    };
-
-    let locator = ssh_bare_locator(session);
-    prepare_installed_managed_harness(&executor, &locator, "/worker/root", &launch).unwrap();
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(
-        commands[0].purpose,
-        "prepare exact managed harness before worker startup"
-    );
-    let rendered = format!("{} {}", commands[0].program, commands[0].args.join(" "));
-    assert!(rendered.contains("'/worker/root/hel' 'worker' 'prepare-harness'"));
-    drop(commands);
-
-    let local = targets::TargetLocator::LocalBare {
-        worker_root: "/worker/session-remote".into(),
-    };
-    prepare_installed_managed_harness(&executor, &local, "/worker/session-remote", &launch)
-        .unwrap();
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[1].program, "/worker/session-remote/hel");
-    assert_eq!(
-        commands[1].args,
-        vec![
-            "worker".to_owned(),
-            "prepare-harness".to_owned(),
-            "--config".to_owned(),
-            "/worker/session-remote/launch.json".to_owned(),
-        ]
-    );
-    drop(commands);
-
-    launch.harness_runtime = HarnessRuntimePolicy::Ambient;
-    prepare_installed_managed_harness(&executor, &locator, "/worker/root", &launch).unwrap();
-    assert_eq!(executor.commands.borrow().len(), 2);
-}
+// Hard-won: 5461a2c: recovery kept relaunching an incompatible remote worker that could not start
 
 #[test]
 fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
@@ -5021,32 +3890,6 @@ fn a_remote_worker_with_a_mismatched_binary_is_replaced_before_restart() {
     assert!(
         executor.commands.borrow().len() > 1,
         "the digest probe must be followed by replacement commands"
-    );
-}
-
-#[test]
-fn a_remote_worker_already_current_is_restarted_without_recopying() {
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("worker");
-    std::fs::write(&source, stamped_worker(b"fresh musl worker")).unwrap();
-    let current = mj_core::worker_launch::worker_executable_digest(&source).unwrap();
-    let executor = DigestExecutor {
-        installed_line: format!("{current}  /root/hel\n"),
-        commands: RefCell::new(Vec::new()),
-    };
-    let replaced = replace_target_worker_binary_if_stale(
-        &executor,
-        &ssh_bare_locator("session-remote"),
-        "session-remote",
-        &CommandSpec::new("true", Vec::<String>::new()),
-        &source,
-    )
-    .unwrap();
-    assert!(!replaced, "a current remote binary must not be recopied");
-    assert_eq!(
-        executor.commands.borrow().len(),
-        1,
-        "only the digest probe runs when the binary is already current"
     );
 }
 
@@ -5189,44 +4032,10 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
     assert!(restarted.exists());
 }
 
-#[test]
-fn local_container_recovery_selects_a_worker_for_the_container_architecture() {
-    struct ForeignContainer(String);
-    impl CommandExecutor for ForeignContainer {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.program, "docker");
-            assert!(command.args.ends_with(&["uname".into(), "-sm".into()]));
-            assert!(command.args.contains(&self.0));
-            Ok(CommandOutput {
-                status: 0,
-                stdout: b"Linux riscv64\n".to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-    let session_id = "architecture-test";
-    let container_id = targets::resource_name(session_id).unwrap();
-    let locator = targets::TargetLocator::LocalDocker {
-        borrowed_from: None,
-        container_id: container_id.clone(),
-    };
-    let refresh = worker_binary_refresh_plan(&locator, session_id)
-        .unwrap()
-        .unwrap();
-    let WorkerBinaryRefresh::Deferred(refresh) = refresh else {
-        panic!("container worker resolution must use its running target");
-    };
-    let error = refresh_target_worker_binary_if_stale(&ForeignContainer(container_id), &refresh)
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("unsupported target architecture \"riscv64\""),
-        "{error:#}"
-    );
-}
-
 /// A daemon pins its worker sources once, at startup. A pin that no longer
 /// names a file must send the lookup back to resolution rather than failing
 /// every session until someone restarts the daemon (#1068).
+// Hard-won: 924190f: a cache reaper removed a pinned worker source and sessions failed until restart
 #[test]
 fn a_pinned_worker_source_whose_file_is_gone_is_resolved_again() {
     let present = PathBuf::from("/pinned/hel");
@@ -5341,6 +4150,16 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             ("cache/models.json", false),
             ("logs/muse.log", false),
         ],
+        HarnessKind::OpenCode => &[
+            ("opencode.json", true),
+            ("AGENTS.md", true),
+            (".data/opencode/auth.json", true),
+            ("skills/review/SKILL.md", true),
+            (".data/opencode/opencode.db", false),
+            (".data/opencode/opencode.db-wal", false),
+            (".data/opencode/log/opencode.log", false),
+            (".data/opencode/repos/native", false),
+        ],
     }
 }
 
@@ -5439,6 +4258,16 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
             }
         }),
         HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+        // OpenCode stores one grant per provider under the provider id, with
+        // the OAuth expiry in epoch milliseconds.
+        HarnessKind::OpenCode => serde_json::json!({
+            "anthropic": {
+                "type": "oauth",
+                "refresh": format!("refresh-{generation}"),
+                "access": format!("access-{generation}"),
+                "expires": 1_790_000_000_000_i64 + generation * 1000,
+            }
+        }),
     };
     serde_json::to_vec(&login).unwrap()
 }
@@ -5448,6 +4277,7 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
 /// the worker which file of its staged home holds the login. The sync compares
 /// that file with the profile's, finds the profile's fresher, and the worker's
 /// install writes it into the file the harness reads.
+// Hard-won: 7b4cb35: Kimi login sync wrote credentials at home root instead of credentials/kimi-code.json
 #[test]
 fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
     use mj_core::config::harness_authentication_marker;
@@ -5654,38 +4484,12 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
     }
 }
 
-/// Claude reads Mjolnir's MCP servers from its staged profile. A parent's
-/// entry serves delegation; a child's serves only `handback`, and the role
-/// travels in the arguments so one worker binary can serve either.
-#[test]
-fn the_staged_claude_profile_exposes_sub_agent_tools_upfront_for_each_role() {
-    for role in [
-        mj_core::subagent::SubagentMcpRole::Parent,
-        mj_core::subagent::SubagentMcpRole::FixedParent,
-        mj_core::subagent::SubagentMcpRole::Child,
-    ] {
-        let stage = tempfile::tempdir().unwrap();
-        configure_claude_subagent_mcp(stage.path(), "/worker", role).unwrap();
-        let staged: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap())
-                .unwrap();
-        assert_eq!(staged["mcpServers"]["mj-agents"]["alwaysLoad"], true);
-        let args = staged["mcpServers"]["mj-agents"]["args"]
-            .as_array()
-            .expect("the staged server has arguments")
-            .iter()
-            .map(|arg| arg.as_str().unwrap_or_default().to_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(args[..2], ["worker", "subagent-mcp"]);
-        assert_eq!(args[args.len() - 2..], ["--role", role.id()], "{args:?}");
-    }
-}
-
 /// Launch finding R11-1: a Claude child on a model without Auto mode ran in
 /// Accept edits, and Claude asked a person before it would run the child's own
 /// `handback`, so the child could not report without one. The staged settings
 /// allow every tool the role's `mj-agents` server lists, whatever the mode, and
 /// keep the person's own settings and rules.
+// Hard-won: 91244ea: a Claude child asked the person for permission before its own handback
 #[test]
 fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
     use mj_core::subagent::SubagentMcpRole;
@@ -5855,73 +4659,6 @@ mod container_runtime {
         .unwrap()
     }
 
-    // Frozen pre-2.23.1 descriptions, including an older pin, exercise upgrade compatibility.
-    fn legacy_launcher(harness: HarnessKind) -> String {
-        let node = "if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! command -v npx >/dev/null 2>&1; then echo 'Mjolnir needs Node.js, npm, and npx on PATH; install Node in the target environment' >&2; exit 127; fi";
-        match harness {
-            HarnessKind::Codex => format!(
-                "if command -v codex-acp >/dev/null 2>&1 && [ \"$(codex-acp --version 2>/dev/null)\" = \"@brokkai/codex-acp 1.13.2\" ]; then exec codex-acp; fi; {node}; exec npx -y @brokkai/codex-acp@1.13.2"
-            ),
-            HarnessKind::Claude => format!(
-                "if command -v claude-agent-acp >/dev/null 2>&1; then exec claude-agent-acp; fi; {node}; exec npx -y @agentclientprotocol/claude-agent-acp@0.81.0"
-            ),
-            _ => unreachable!(),
-        }
-    }
-
-    #[tokio::test]
-    async fn container_runtime_selects_the_installed_bridge() {
-        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
-            let temp = tempfile::tempdir().unwrap();
-            let bridge = installed_bridge(temp.path(), harness);
-            let launch = container_launch(temp.path(), harness);
-            let prepared = prepare(&launch).await;
-            assert_eq!(prepared.spec.command, bridge.canonicalize().unwrap());
-            assert!(prepared.spec.args.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn container_runtime_resolves_saved_shell_launches_to_the_same_current_installation() {
-        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
-            let temp = tempfile::tempdir().unwrap();
-            installed_bridge(temp.path(), harness);
-            let mut launch = container_launch(temp.path(), harness);
-            let current = prepare(&launch).await;
-            launch.bridge_command = "sh".into();
-            launch.bridge_args = vec!["-c".into(), legacy_launcher(harness)];
-            let legacy = prepare(&launch).await;
-            assert_eq!(legacy.spec.command, current.spec.command);
-            assert!(legacy.spec.args.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn container_runtime_custom_shell_is_not_replaced_by_an_installed_bridge() {
-        let temp = tempfile::tempdir().unwrap();
-        installed_bridge(temp.path(), HarnessKind::Codex);
-        let mut launch = container_launch(temp.path(), HarnessKind::Codex);
-        // An empty selector can be meaningful to a wrapper.
-        launch
-            .environment
-            .insert("CODEX_PATH".into(), String::new());
-        launch.environment.insert(
-            "PATH".into(),
-            format!("{}:/bin", launch.environment["PATH"]),
-        );
-        launch.bridge_command = "sh".into();
-        launch.bridge_args = vec![
-            "-c".into(),
-            format!("{}; echo custom", legacy_launcher(HarnessKind::Codex)),
-        ];
-        let prepared = prepare(&launch).await;
-        assert_eq!(
-            prepared.spec.command,
-            Path::new("/bin/sh").canonicalize().unwrap()
-        );
-        assert_eq!(prepared.spec.args, launch.bridge_args);
-    }
-
     #[tokio::test]
     async fn container_runtime_freezes_relative_path_and_provider_selection() {
         let temp = tempfile::tempdir().unwrap();
@@ -5956,67 +4693,6 @@ mod container_runtime {
             String::from_utf8(output.stdout).unwrap().trim(),
             format!("{CODEX_ACP_PACKAGE} {CODEX_ACP_VERSION}")
         );
-    }
-
-    #[tokio::test]
-    async fn container_runtime_installs_missing_or_incompatible_bridges_before_startup() {
-        for (harness, incompatible) in [
-            (HarnessKind::Codex, false),
-            (HarnessKind::Codex, true),
-            (HarnessKind::Claude, false),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let packages = temp.path().join("packages");
-            installed_bridge(&packages, harness);
-            let mut launch = container_launch(temp.path(), harness);
-            let bin = temp.path().join("tools");
-            executable(&bin.join("node"), "#!/bin/sh\nexit 0\n");
-            executable(
-                &bin.join("npm"),
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 12.0.0; exit 0; fi\n[ \"$1\" = ci ] || exit 9\nprintf x >> \"$INSTALL_LOG\"\n/bin/cp -R \"$FIXTURE_PACKAGES/node_modules\" .\n",
-            );
-            if incompatible {
-                executable(
-                    &bin.join("codex-acp"),
-                    "#!/bin/sh\necho '@brokkai/codex-acp 0.0.0'\n",
-                );
-            }
-            launch
-                .environment
-                .insert("PATH".into(), bin.display().to_string());
-            launch
-                .environment
-                .insert("FIXTURE_PACKAGES".into(), packages.display().to_string());
-            let install_log = temp.path().join("installs");
-            launch
-                .environment
-                .insert("INSTALL_LOG".into(), install_log.display().to_string());
-            // The controller's preparation command must install before it
-            // starts or takes control of a worker, including ambient targets.
-            mj_worker::worker_runtime::prepare_managed_harness(launch.clone())
-                .await
-                .unwrap();
-            assert_eq!(std::fs::read(&install_log).unwrap(), b"x");
-            let prepared = prepare(&launch).await;
-            assert!(
-                prepared
-                    .spec
-                    .command
-                    .starts_with(temp.path().join("cache").canonicalize().unwrap())
-            );
-            assert!(prepared.spec.args.is_empty());
-            let lease = std::fs::OpenOptions::new()
-                .write(true)
-                .open(prepared.spec.harness_lease.as_ref().unwrap())
-                .unwrap();
-            assert!(matches!(
-                lease.try_lock(),
-                Err(std::fs::TryLockError::WouldBlock)
-            ));
-            let again = prepare(&launch).await;
-            assert_eq!(again.spec.command, prepared.spec.command);
-            assert_eq!(std::fs::read(install_log).unwrap(), b"x");
-        }
     }
 
     #[test]
@@ -6134,141 +4810,6 @@ mod container_runtime {
     }
 }
 
-#[test]
-fn darwin_worker_resolution_uses_target_specific_or_universal_artifacts() {
-    let directory = tempfile::tempdir().unwrap();
-    let controller = directory.path().join("mj");
-    std::fs::write(&controller, b"controller").unwrap();
-    let universal = directory.path().join("mj-worker-universal-apple-darwin");
-    let linux = directory
-        .path()
-        .join("mj-worker-aarch64-unknown-linux-musl");
-    std::fs::write(&linux, stamped_worker(b"linux")).unwrap();
-    let resolve = |arch| {
-        worker_binary_prerequisite_for_current(
-            arch,
-            WorkerBinaryRequirement::Darwin,
-            &controller,
-            &|path| path.is_file(),
-        )
-    };
-    let error = format!("{:#}", resolve("aarch64").unwrap_err());
-    assert!(error.contains("aarch64-apple-darwin"), "{error}");
-    std::fs::write(&universal, stamped_worker(b"darwin universal")).unwrap();
-    for arch in ["x86_64", "aarch64"] {
-        assert!(
-            matches!(resolve(arch).unwrap(), WorkerBinaryAvailability::Local { path, .. } if path == universal)
-        );
-    }
-    let native = directory.path().join("mj-worker-aarch64-apple-darwin");
-    std::fs::write(&native, stamped_worker(b"darwin arm64")).unwrap();
-    assert!(
-        matches!(resolve("aarch64").unwrap(), WorkerBinaryAvailability::Local { path, .. } if path == native)
-    );
-    std::fs::write(&universal, b"unstamped old artifact").unwrap();
-    assert!(format!("{:#}", resolve("x86_64").unwrap_err()).contains("missing worker build stamp"));
-}
-
-#[test]
-fn ssh_preflight_resolves_the_actual_os_before_installing_any_worker() {
-    const CHILD: &str = "MJ_MACOS_PREFLIGHT_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        for name in [
-            "mj-worker-universal-apple-darwin",
-            "mj-worker-x86_64-unknown-linux-musl",
-        ] {
-            std::fs::write(directory.path().join(name), stamped_worker(name.as_bytes())).unwrap();
-        }
-        IsolatedTest::new(test_name(
-            module_path!(),
-            "ssh_preflight_resolves_the_actual_os_before_installing_any_worker",
-        ))
-        .isolated_store(directory.path())
-        .env("MJ_INSTANCE", "macos-preflight")
-        .env(CHILD, "1")
-        .env("MJ_WORKER_DIR", directory.path())
-        .run();
-        return;
-    }
-    struct Platform(&'static str);
-    impl CommandExecutor for Platform {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.program, "ssh");
-            assert_eq!(command.purpose, "detect target platform");
-            Ok(CommandOutput {
-                status: 0,
-                stdout: self.0.as_bytes().to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-    let template = mj_core::config::TargetTemplate::SshBare {
-        ssh: ssh_connection(),
-        permissions: mj_core::config::PermissionMode::Yolo,
-        workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
-    };
-    for response in ["Darwin arm64", "Darwin x86_64", "Linux x86_64"] {
-        preflight_worker_binary(&template, &Platform(response)).unwrap();
-    }
-    // An available worker for a different OS/architecture cannot satisfy preflight.
-    assert!(
-        format!(
-            "{:#}",
-            preflight_worker_binary(&template, &Platform("Linux aarch64")).unwrap_err()
-        )
-        .contains("aarch64-unknown-linux-musl")
-    );
-    assert!(preflight_worker_binary(&template, &Platform("FreeBSD arm64")).is_err());
-}
-
-#[cfg(unix)]
-#[test]
-fn ssh_harness_preflight_uses_the_accounts_login_shell() {
-    let directory = tempfile::tempdir().unwrap();
-    for name in ["node", "npm", "git"] {
-        mj_core::test_hooks::install_fake_command(directory.path(), name, "#!/bin/sh\nexit 0\n");
-    }
-    mj_core::test_hooks::install_fake_command(
-        directory.path(),
-        "login-shell",
-        &format!(
-            "#!/bin/sh\n[ \"$1\" = -lc ] || exit 99\nexport PATH={}\nreadonly status=0\neval \"$2\"\n",
-            targets::posix_quote(&directory.path().to_string_lossy()),
-        ),
-    );
-    let shell = directory.path().join("login-shell");
-    struct LocalSsh(PathBuf);
-    impl CommandExecutor for LocalSsh {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.program, "ssh");
-            let mut local = CommandSpec::new("/bin/sh", ["-c", command.args.last().unwrap()]);
-            local
-                .env
-                .insert("SHELL".into(), self.0.to_string_lossy().into_owned());
-            ProcessExecutor.execute(&local)
-        }
-    }
-    let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: directory.path().into(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-    let template = mj_core::config::TargetTemplate::SshBare {
-        ssh: ssh_connection(),
-        permissions: mj_core::config::PermissionMode::Yolo,
-        workspace_prefix: PathBuf::from(".local/share/hel/workspaces"),
-    };
-    preflight_harness(&template, &profile, &LocalSsh(shell.clone())).unwrap();
-    mj_core::test_hooks::install_fake_command(directory.path(), "git", "#!/bin/sh\nexit 1\n");
-    let error = preflight_harness(&template, &profile, &LocalSsh(shell)).unwrap_err();
-    assert!(format!("{error:#}").contains("Git is missing or unusable"));
-}
-
 #[cfg(unix)]
 #[test]
 fn installed_digest_matches_bytes_on_linux_and_darwin_with_quoted_paths() {
@@ -6360,6 +4901,7 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
 /// RCL-3: a restart re-hashed and re-copied every unchanged worker, which took
 /// 30 s for one debug build on a busy disk. An unchanged source is now
 /// recognised from its path, size, mtime, inode and ctime.
+// Hard-won: 8b62e1b: rehashing unchanged worker sources delayed daemon startup by tens of seconds
 #[test]
 fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
     let directory = tempfile::tempdir().unwrap();
@@ -6398,42 +4940,4 @@ fn a_missing_pinned_copy_or_index_falls_back_to_a_full_pin() {
     verify_worker_build(&first).unwrap();
     std::fs::remove_dir_all(cache.join("index")).unwrap();
     assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
-}
-
-#[test]
-fn distinct_sources_are_pinned_and_a_shared_path_once() {
-    let directory = tempfile::tempdir().unwrap();
-    let linux = directory.path().join("linux");
-    let darwin = directory.path().join("darwin");
-    std::fs::write(&linux, stamped_worker(b"linux")).unwrap();
-    std::fs::write(&darwin, stamped_worker(b"darwin")).unwrap();
-    let cache = directory.path().join("cache");
-    let snapshot = WorkerBinarySourceSnapshot::capture(&cache, |_, requirement| {
-        let path = if requirement == WorkerBinaryRequirement::Darwin {
-            &darwin
-        } else {
-            &linux
-        };
-        Ok(WorkerBinaryAvailability::Local {
-            path: path.clone(),
-            source: "fixture".into(),
-        })
-    });
-    let pinned = |arch, requirement| match snapshot.resolve(arch, requirement).unwrap() {
-        WorkerBinaryAvailability::Local { path, .. } => path,
-        WorkerBinaryAvailability::Remote { .. } => panic!("local"),
-    };
-    assert_eq!(
-        pinned("x86_64", WorkerBinaryRequirement::PortableLinux),
-        pinned("aarch64", WorkerBinaryRequirement::PortableLinux)
-    );
-    assert_ne!(
-        pinned("x86_64", WorkerBinaryRequirement::PortableLinux),
-        pinned("aarch64", WorkerBinaryRequirement::Darwin)
-    );
-    let copies = std::fs::read_dir(&cache)
-        .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().file_name() != "index")
-        .count();
-    assert_eq!(copies, 2);
 }

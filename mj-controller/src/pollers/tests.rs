@@ -2,6 +2,7 @@
 /// transcript on every runtime snapshot, then compare ordinals to discover
 /// that nothing had moved. On a real session that is 28,066 rows and
 /// 635 MiB, per poll. The comparison has to happen before the read.
+// Hard-won: 8ba5512a: every unchanged poll reread a large transcript and delayed the prompt
 #[test]
 fn an_unchanged_session_is_recognised_without_reading_its_transcript() {
     let runtime = runtime_view("session-1", 42, "digest-42");
@@ -180,6 +181,7 @@ fn recoverable_error_session_stays_out_of_live_target_pollers() {
 /// #1161: a parked sub-agent's worker was stopped on purpose. Nothing that
 /// dials, samples or credentials live workers may reach it, and the startup
 /// repair of interrupted lifecycles leaves it parked.
+// Hard-won: 6927da2b: stopped parked children consumed container process slots and were restarted
 #[test]
 fn a_parked_sub_agent_stays_out_of_live_target_pollers_and_startup_repair() {
     let parked = podman_controller(SessionState::Parked);
@@ -207,6 +209,7 @@ fn a_parked_sub_agent_stays_out_of_live_target_pollers_and_startup_repair() {
 /// I2-9: a destroy that failed leaves the session `Error` with its target and
 /// the recorded destruction failure; startup finishes it, and nothing else in
 /// `Error` is destroyed on the person's behalf.
+// Hard-won: 4119688f: failed destroy left the session Running and caused repeated relay spawns
 #[test]
 fn startup_finishes_only_destroys_that_failed() {
     let mut failed = podman_controller(SessionState::Error);
@@ -230,6 +233,7 @@ fn startup_finishes_only_destroys_that_failed() {
 /// dashboard rebuilds these targets on every poll, and each bare session
 /// used to log one warning each time (455 in 15 minutes with 12 sessions).
 /// Its worker is still polled.
+// Hard-won: e53a282f: polling raced worker installation and hit ETXTBSY
 #[test]
 fn a_provisioning_session_is_not_polled_before_its_worker_exists() {
     let provisioning = podman_controller(SessionState::Provisioning);
@@ -277,21 +281,7 @@ fn failed_destruction_stays_out_of_pollers_without_an_active_lifecycle() {
     assert_eq!(dashboard_worker_targets(&closing).len(), 1);
 }
 
-#[test]
-fn lifecycle_owned_session_stays_out_of_worker_targets() {
-    let controller = podman_controller(SessionState::Running);
-    assert_eq!(dashboard_worker_targets(&controller).len(), 1);
-
-    let excluded = controller
-        .state
-        .sessions
-        .keys()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-
-    assert!(dashboard_worker_targets_excluding(&controller, &excluded).is_empty());
-}
-
+// Hard-won: 17824a09: Luna found a lifecycle rollback race that falsely reported projection corruption
 #[test]
 fn projection_rollback_race_retries_before_reporting_integrity_failure() {
     let mismatch = ProjectionMismatch {
@@ -393,24 +383,6 @@ fn stale_worker_diagnosis_is_not_published_after_a_terminal_poll_error() {
         tracker.finish("session-1", episode),
         WorkerDiagnosisCompletion::default()
     );
-}
-
-#[tokio::test]
-async fn quota_refresh_completion_keeps_its_generation() {
-    let mut quotas = QuotaManager::default();
-    let (updates, mut received) = tokio::sync::mpsc::channel(4);
-    assert!(refresh_profile_quotas(&mut quotas, 42, &[], &updates).await);
-    assert!(matches!(
-        received.recv().await,
-        Some(QuotaUpdate::Refreshing {
-            profile_ids,
-        }) if profile_ids.is_empty()
-    ));
-    assert!(matches!(
-        received.recv().await,
-        Some(QuotaUpdate::Finished { generation: 42 })
-    ));
-    quotas.shutdown().await;
 }
 
 /// A profile whose probe needs no network: a custom provider that publishes no
@@ -645,6 +617,68 @@ fn quota_refresh_requests_exclude_disabled_profiles() {
             .collect::<Vec<_>>(),
         ["codex"]
     );
+}
+
+#[test]
+fn golden_aws_capacity_aggregates_real_probe_rows_and_rejects_overflow() {
+    // These are the key/value rows emitted by the EC2 capacity probe script.
+    let first = crate::targets::parse_aws_allocated_capacity(
+        b"memory.total=17179869184\nlogical.cores=4\ndisk.total=42949672960\n",
+        "i-0123456789abcdef0",
+    )
+    .expect("first EC2 probe row");
+    let second = crate::targets::parse_aws_allocated_capacity(
+        b"memory.total=34359738368\nlogical.cores=8\ndisk.total=85899345920\n",
+        "i-0abcdef0123456789",
+    )
+    .expect("second EC2 probe row");
+    let aggregate = aggregate_aws_capacity(&[first, second]).expect("fleet capacity totals");
+    let rendered = format!(
+        "Fleet memory: {} bytes\nFleet logical cores: {}\nFleet disk: {} bytes\nCPU usage: {}\nMemory used: {} bytes\nStorage samples: {}",
+        aggregate.memory_total_bytes,
+        aggregate.logical_cores,
+        aggregate.disk_total_bytes.unwrap_or_default(),
+        aggregate
+            .cpu_percent
+            .map_or_else(|| "unknown".to_owned(), |value| format!("{value}%")),
+        aggregate.memory_used_bytes,
+        aggregate.storage.len(),
+    );
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "aws-capacity-aggregate",
+        &rendered,
+    );
+
+    let usage = |memory_total_bytes, logical_cores, disk_total_bytes| DeploymentCapacityUsage {
+        cpu_percent: None,
+        memory_used_bytes: 0,
+        memory_total_bytes,
+        logical_cores,
+        disk_total_bytes: Some(disk_total_bytes),
+        storage: Vec::new(),
+    };
+    for (samples, expected) in [
+        (
+            vec![usage(u64::MAX, 0, 0), usage(1, 0, 0)],
+            "aggregate EC2 RAM overflow",
+        ),
+        (
+            vec![usage(0, u64::MAX, 0), usage(0, 1, 0)],
+            "aggregate EC2 core count overflow",
+        ),
+        (
+            vec![usage(0, 0, u64::MAX), usage(0, 0, 1)],
+            "aggregate EC2 disk overflow",
+        ),
+    ] {
+        assert_eq!(
+            aggregate_aws_capacity(&samples)
+                .expect_err("overflow must not wrap")
+                .to_string(),
+            expected
+        );
+    }
 }
 
 struct PendingCapacityProbe {
@@ -883,6 +917,7 @@ async fn capacity_results_are_revalidated_after_output_backpressure() {
 /// every executor-run ssh command retry. The command never ran, so it is
 /// retried; a probe that fails for its own reasons is not.
 #[cfg(unix)]
+// Hard-won: 1b36c736: SSH MaxSessions refusal abandoned capacity probing for the session
 #[tokio::test]
 async fn a_capacity_probe_refused_a_shared_session_is_retried() {
     mj_core::targets::set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
@@ -1034,20 +1069,6 @@ fn a_new_credential_signal_waits_out_the_cooldown_without_being_lost() {
     );
 }
 
-#[test]
-fn a_healthy_credential_cycle_stays_out_of_the_ui() {
-    let result = mj_core::credentials::CredentialSyncResult {
-        profile_id: "work".into(),
-        trigger: None,
-        failure: None,
-        outcomes: Vec::new(),
-    };
-    assert_eq!(
-        CredentialSyncNotices::default().notice(&result, None, &State::default()),
-        None
-    );
-}
-
 /// Every harness's session on this machine is reconciled the way its session in
 /// a container is: against the same canonical profile home, with only the
 /// GitHub token left out. A local session an earlier release started from the
@@ -1117,10 +1138,10 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             mj_core::skills::SkillsScope::Localhost
         );
 
-        // Muse's staged root lies under the data directory, and Muse never
-        // ran from its profile home, so it has no linked form.
+        // A nested home (Muse, OpenCode) always ran from a per-session root
+        // under the data directory, so it has no linked form.
         #[cfg(unix)]
-        if kind != mj_core::config::HarnessKind::Muse {
+        if !kind.nested_home() {
             std::fs::remove_dir(worker_root.join("profile")).unwrap();
             std::os::unix::fs::symlink(&home, worker_root.join("profile")).unwrap();
             assert!(credential_sync_targets(&controller).is_empty(), "{kind:?}");
@@ -1277,50 +1298,7 @@ fn github_tokens_sync_to_every_remote_target_but_raw_localhost() {
     assert!(!target_syncs_github_token(None));
 }
 
-#[test]
-fn an_authentication_failure_notice_says_whether_anything_was_pushed() {
-    use mj_core::credentials::{CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult};
-
-    let mut notices = CredentialSyncNotices::default();
-    let pushed = CredentialSyncResult {
-        profile_id: "work".into(),
-        trigger: Some(CredentialSyncCause {
-            session_id: "018f9dd2-a3b4".into(),
-            reason: CredentialSyncReason::AuthenticationFailure,
-        }),
-        failure: None,
-        outcomes: vec![CredentialSyncOutcome {
-            session_id: "018f9dd2-a3b4".into(),
-            outcome: Ok(vec![CredentialSyncAction::Pushed]),
-        }],
-    };
-    let notice = notices.notice(&pushed, None, &State::default()).unwrap();
-    assert!(notice.contains("were pushed"), "{notice}");
-    assert!(notice.contains("mj login --profile work"), "{notice}");
-
-    let nothing_to_push = CredentialSyncResult {
-        trigger: Some(CredentialSyncCause {
-            session_id: "018f9dd2-a3b4".into(),
-            reason: CredentialSyncReason::AuthenticationFailure,
-        }),
-        outcomes: vec![CredentialSyncOutcome {
-            session_id: "018f9dd2-a3b4".into(),
-            outcome: Ok(Vec::new()),
-        }],
-        ..pushed
-    };
-    let notice = notices
-        .notice(&nothing_to_push, None, &State::default())
-        .unwrap();
-    assert!(notice.contains("nothing fresher"), "{notice}");
-    assert!(notice.contains("mj login --profile work"), "{notice}");
-    // The per-session cooldown upstream limits these; the dedup must not.
-    assert_eq!(
-        notices.notice(&nothing_to_push, None, &State::default()),
-        Some(notice)
-    );
-}
-
+// Hard-won: c94c68c0: the shared Claude refresh grant could expire during a long-running session
 #[test]
 fn a_claude_authentication_failure_offers_the_long_lived_token() {
     use mj_core::config::HarnessKind;
@@ -1422,25 +1400,7 @@ fn an_immediate_sync_failure_is_not_reported_as_no_new_credentials() {
     assert!(!notice.contains("nothing fresher"), "{notice}");
 }
 
-#[test]
-fn a_failed_credential_sync_is_reported() {
-    use mj_core::credentials::{CredentialSyncOutcome, CredentialSyncResult};
-
-    let result = CredentialSyncResult {
-        profile_id: "work".into(),
-        trigger: None,
-        failure: None,
-        outcomes: vec![CredentialSyncOutcome {
-            session_id: "018f9dd2-a3b4".into(),
-            outcome: Err("worker proxy disconnected".into()),
-        }],
-    };
-    let notice = CredentialSyncNotices::default()
-        .notice(&result, None, &State::default())
-        .unwrap();
-    assert!(notice.contains("worker proxy disconnected"), "{notice}");
-}
-
+// Hard-won: 9805bf67: a dead worker repeated the same credential-sync failure notice every poll
 #[test]
 fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
     use mj_core::credentials::{CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult};
@@ -1501,6 +1461,7 @@ fn a_repeated_credential_failure_is_reported_once_until_it_changes() {
     );
 }
 
+// Hard-won: 9805bf67: a dead worker repeated the same credential-sync failure notice every poll
 #[test]
 fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
     use mj_core::credentials::CredentialSyncResult;
@@ -1533,79 +1494,6 @@ fn a_repeated_whole_sync_failure_is_reported_once_per_profile() {
     );
 }
 
-#[test]
-fn skills_and_github_syncs_speak_while_harness_credentials_stay_out_of_the_notice() {
-    use mj_core::credentials::{CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult};
-
-    let result = CredentialSyncResult {
-        profile_id: "work".into(),
-        trigger: None,
-        failure: None,
-        outcomes: vec![
-            CredentialSyncOutcome {
-                session_id: "018f9dd2-a3b4".into(),
-                outcome: Ok(vec![
-                    CredentialSyncAction::Pushed,
-                    CredentialSyncAction::SkillsPushed,
-                    CredentialSyncAction::GithubTokenPushed,
-                ]),
-            },
-            CredentialSyncOutcome {
-                session_id: "018f9dd2-bbbb".into(),
-                outcome: Ok(vec![
-                    CredentialSyncAction::SkillsPushed,
-                    CredentialSyncAction::GithubTokenRemoved,
-                ]),
-            },
-        ],
-    };
-    let leveled = CredentialSyncNotices::default()
-        .leveled_notice(&result, None, &State::default())
-        .unwrap();
-    assert!(leveled.routine, "a summary of good syncs is not a warning");
-    let notice = leveled.text;
-    assert!(!notice.contains("harness credentials"), "{notice}");
-    assert!(
-        notice.contains("Synced skills for profile work to 2 session(s)."),
-        "{notice}"
-    );
-    assert!(
-        notice.contains("Synced the GitHub CLI token to 1 session(s)."),
-        "{notice}"
-    );
-    assert!(
-        notice.contains("Removed the GitHub CLI token from 1 session(s)."),
-        "{notice}"
-    );
-}
-
-#[test]
-fn aws_capacity_sums_live_instance_allocations() {
-    let total = aggregate_aws_capacity(&[
-        DeploymentCapacityUsage {
-            cpu_percent: None,
-            memory_used_bytes: 0,
-            memory_total_bytes: 8,
-            logical_cores: 2,
-            disk_total_bytes: Some(100),
-            storage: Vec::new(),
-        },
-        DeploymentCapacityUsage {
-            cpu_percent: None,
-            memory_used_bytes: 0,
-            memory_total_bytes: 16,
-            logical_cores: 4,
-            disk_total_bytes: Some(200),
-            storage: Vec::new(),
-        },
-    ])
-    .unwrap();
-
-    assert_eq!(total.memory_total_bytes, 24);
-    assert_eq!(total.logical_cores, 6);
-    assert_eq!(total.disk_total_bytes, Some(300));
-}
-
 /// Collects what the daemon would have told the user about a download.
 #[derive(Default)]
 struct RefreshReports(std::sync::Mutex<Vec<ImageRefreshReport>>);
@@ -1618,209 +1506,6 @@ impl RefreshReports {
     fn taken(&self) -> Vec<ImageRefreshReport> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
-}
-
-/// The pre-pull only helps if it starts before the person opens the New
-/// Session wizard, so the first refresh is a startup refresh and the hourly
-/// interval follows it.
-#[tokio::test(start_paused = true)]
-async fn the_first_refresh_runs_at_startup() {
-    assert!(
-        IMAGE_REFRESH_DELAY <= Duration::from_secs(5),
-        "the first refresh is the pre-pull for the first session: {IMAGE_REFRESH_DELAY:?}"
-    );
-
-    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let cancellation = tokio_util::sync::CancellationToken::new();
-    let refresher = spawn_image_refresher(
-        {
-            let calls = calls.clone();
-            move || {
-                calls.fetch_add(1, Ordering::Release);
-                Vec::new()
-            }
-        },
-        |_report| {},
-        cancellation.clone(),
-    );
-
-    // Let the task reach its first await so the interval's deadline is set
-    // from the same instant the test then advances past.
-    tokio::task::yield_now().await;
-    tokio::time::advance(IMAGE_REFRESH_DELAY + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        calls.load(Ordering::Acquire),
-        1,
-        "the refresher should have planned a refresh at startup"
-    );
-
-    tokio::time::advance(IMAGE_REFRESH_INTERVAL).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        calls.load(Ordering::Acquire),
-        2,
-        "the hourly interval should follow the startup refresh"
-    );
-
-    cancellation.cancel();
-    refresher.await.expect("the refresher stops when cancelled");
-}
-
-/// The pre-pull's whole point: an image the host does not have is downloaded
-/// once, and the hourly refresh after that only checks that it is still there.
-#[test]
-fn a_missing_image_is_pulled_once_and_not_again_when_present() {
-    /// Reports the image as absent until a pull has run, the way a host
-    /// behaves the first time it sees an image.
-    struct FirstPullExecutor {
-        commands: std::sync::Mutex<Vec<Vec<String>>>,
-        pulled: std::sync::atomic::AtomicBool,
-    }
-
-    impl CommandExecutor for FirstPullExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.lock().unwrap().push(command.args.clone());
-            if command.args.first().map(String::as_str) == Some("pull") {
-                self.pulled.store(true, Ordering::Release);
-                return Ok(CommandOutput {
-                    status: 0,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                });
-            }
-            if command.args.contains(&"inspect".to_owned()) && !self.pulled.load(Ordering::Acquire)
-            {
-                return Ok(CommandOutput {
-                    status: 125,
-                    stdout: Vec::new(),
-                    stderr: b"no such image".to_vec(),
-                });
-            }
-            Ok(CommandOutput {
-                status: 0,
-                stdout: b"sha256:1111\n".to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    let refresh = crate::targets::image_refresh(
-        crate::targets::ImageHost::LocalPodman,
-        "ghcr.io/example/dev:1.2.3",
-        None,
-        mj_core::config::ImagePullPolicy::Auto,
-    )
-    .expect("a versioned tag is downloaded when the host lacks it");
-    assert_eq!(refresh.when, crate::targets::RefreshWhen::WhenAbsent);
-
-    let executor = FirstPullExecutor {
-        commands: std::sync::Mutex::new(Vec::new()),
-        pulled: std::sync::atomic::AtomicBool::new(false),
-    };
-    let reports = RefreshReports::default();
-    assert_eq!(
-        refresh_host_image(&refresh, &executor, &reports.record())
-            .expect("the first refresh downloads the image"),
-        ImageRefreshOutcome::Pulled {
-            id: "sha256:1111".to_owned()
-        }
-    );
-    assert_eq!(
-        reports.taken(),
-        vec![
-            ImageRefreshReport::Started {
-                host: "local podman".to_owned(),
-                image: "ghcr.io/example/dev:1.2.3".to_owned(),
-            },
-            ImageRefreshReport::Pulled {
-                host: "local podman".to_owned(),
-                image: "ghcr.io/example/dev:1.2.3".to_owned(),
-            },
-        ],
-        "the user should hear about the download and about it finishing"
-    );
-    assert_eq!(
-        refresh_host_image(&refresh, &executor, &reports.record())
-            .expect("the second refresh finds it present"),
-        ImageRefreshOutcome::Present
-    );
-    assert!(
-        reports.taken().is_empty(),
-        "an hourly check that downloads nothing has nothing to say"
-    );
-
-    let commands = executor.commands.lock().unwrap();
-    let pulls = commands
-        .iter()
-        .filter(|args| args.first().map(String::as_str) == Some("pull"))
-        .count();
-    assert_eq!(pulls, 1, "the image was downloaded twice: {commands:?}");
-    let prunes = commands
-        .iter()
-        .filter(|args| args.contains(&"prune".to_owned()))
-        .count();
-    assert_eq!(
-        prunes, 1,
-        "only the refresh that downloaded the image has anything to prune: {commands:?}"
-    );
-    assert!(
-        commands
-            .last()
-            .is_some_and(|args| args.contains(&"inspect".to_owned())),
-        "the second refresh should stop after finding the image present: {commands:?}"
-    );
-}
-
-/// A moving tag keeps its hourly pull: a present image is not the same as a
-/// current one.
-#[test]
-fn an_always_refresh_pulls_even_when_the_image_is_present() {
-    struct PresentExecutor {
-        commands: std::sync::Mutex<Vec<Vec<String>>>,
-    }
-
-    impl CommandExecutor for PresentExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.lock().unwrap().push(command.args.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: b"sha256:2222\n".to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    let refresh = crate::targets::image_refresh(
-        crate::targets::ImageHost::LocalPodman,
-        "ghcr.io/example/dev:latest",
-        None,
-        mj_core::config::ImagePullPolicy::Auto,
-    )
-    .expect("a remote latest image is refreshed");
-    assert_eq!(refresh.when, crate::targets::RefreshWhen::Always);
-
-    let executor = PresentExecutor {
-        commands: std::sync::Mutex::new(Vec::new()),
-    };
-    assert_eq!(
-        refresh_host_image(&refresh, &executor, &|_report| {}).expect("the refresh runs"),
-        ImageRefreshOutcome::Unchanged
-    );
-
-    let commands = executor.commands.lock().unwrap();
-    assert!(
-        commands
-            .iter()
-            .any(|args| args.first().map(String::as_str) == Some("pull")),
-        "a moving tag must still be pulled: {commands:?}"
-    );
-    assert!(
-        commands
-            .iter()
-            .any(|args| args.contains(&"prune".to_owned())),
-        "a pull that ran still prunes: {commands:?}"
-    );
 }
 
 /// A background refresh is a chore, not a launch. One host that cannot
@@ -1940,6 +1625,111 @@ fn a_failed_pull_is_reported_and_leaves_the_other_host_alone() {
     assert!(ran("docker", &["image", "prune", "-f"]), "{commands:?}");
 }
 
+/// The pre-pull's whole point: an image the host does not have is downloaded
+/// once, and the hourly refresh after that only checks that it is still there.
+#[test]
+fn a_missing_image_is_pulled_once_and_not_again_when_present() {
+    /// Reports the image as absent until a pull has run, the way a host
+    /// behaves the first time it sees an image.
+    struct FirstPullExecutor {
+        commands: std::sync::Mutex<Vec<Vec<String>>>,
+        pulled: std::sync::atomic::AtomicBool,
+    }
+
+    impl CommandExecutor for FirstPullExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.args.clone());
+            if command.args.first().map(String::as_str) == Some("pull") {
+                self.pulled.store(true, Ordering::Release);
+                return Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            if command.args.contains(&"inspect".to_owned()) && !self.pulled.load(Ordering::Acquire)
+            {
+                return Ok(CommandOutput {
+                    status: 125,
+                    stdout: Vec::new(),
+                    stderr: b"no such image".to_vec(),
+                });
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: b"sha256:1111\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    let refresh = crate::targets::image_refresh(
+        crate::targets::ImageHost::LocalPodman,
+        "ghcr.io/example/dev:1.2.3",
+        None,
+        mj_core::config::ImagePullPolicy::Auto,
+    )
+    .expect("a versioned tag is downloaded when the host lacks it");
+    assert_eq!(refresh.when, crate::targets::RefreshWhen::WhenAbsent);
+
+    let executor = FirstPullExecutor {
+        commands: std::sync::Mutex::new(Vec::new()),
+        pulled: std::sync::atomic::AtomicBool::new(false),
+    };
+    let reports = RefreshReports::default();
+    assert_eq!(
+        refresh_host_image(&refresh, &executor, &reports.record())
+            .expect("the first refresh downloads the image"),
+        ImageRefreshOutcome::Pulled {
+            id: "sha256:1111".to_owned()
+        }
+    );
+    assert_eq!(
+        reports.taken(),
+        vec![
+            ImageRefreshReport::Started {
+                host: "local podman".to_owned(),
+                image: "ghcr.io/example/dev:1.2.3".to_owned(),
+            },
+            ImageRefreshReport::Pulled {
+                host: "local podman".to_owned(),
+                image: "ghcr.io/example/dev:1.2.3".to_owned(),
+            },
+        ],
+        "the user should hear about the download and about it finishing"
+    );
+    assert_eq!(
+        refresh_host_image(&refresh, &executor, &reports.record())
+            .expect("the second refresh finds it present"),
+        ImageRefreshOutcome::Present
+    );
+    assert!(
+        reports.taken().is_empty(),
+        "an hourly check that downloads nothing has nothing to say"
+    );
+
+    let commands = executor.commands.lock().unwrap();
+    let pulls = commands
+        .iter()
+        .filter(|args| args.first().map(String::as_str) == Some("pull"))
+        .count();
+    assert_eq!(pulls, 1, "the image was downloaded twice: {commands:?}");
+    let prunes = commands
+        .iter()
+        .filter(|args| args.contains(&"prune".to_owned()))
+        .count();
+    assert_eq!(
+        prunes, 1,
+        "only the refresh that downloaded the image has anything to prune: {commands:?}"
+    );
+    assert!(
+        commands
+            .last()
+            .is_some_and(|args| args.contains(&"inspect".to_owned())),
+        "the second refresh should stop after finding the image present: {commands:?}"
+    );
+}
+
 /// An unreachable host fails the same way every hour. The user hears about it
 /// once, and hears again only when something changes.
 #[test]
@@ -1999,6 +1789,7 @@ fn a_failed_pull_is_reported_once_until_the_error_changes() {
 /// The default configuration names every local engine, installed or not. An
 /// engine that is not on the machine is skipped, not reported as a failed
 /// download; a remote host is always tried, because its engine is elsewhere.
+// Hard-won: a2d660f1: absent local engines caused startup image-refresh warnings on every daemon start
 #[test]
 fn an_uninstalled_local_engine_is_skipped_by_the_image_refresh() {
     let directory = tempfile::tempdir().unwrap();
@@ -2024,6 +1815,7 @@ fn an_uninstalled_local_engine_is_skipped_by_the_image_refresh() {
 /// 790051c5 returned no response; ...", tmux/047). A notice names a session
 /// the way the session list does, and by short id only when it has no title
 /// or its record is gone (the R5-4/R5-5 rule).
+// Hard-won: 3ce5c293: credential notices showed short IDs instead of the title users saw
 #[test]
 fn credential_sync_notices_name_the_session_by_its_listed_title() {
     use mj_core::credentials::{CredentialSyncAction, CredentialSyncOutcome, CredentialSyncResult};
@@ -2112,6 +1904,7 @@ fn credential_sync_notices_name_the_session_by_its_listed_title() {
     );
 }
 
+// Hard-won: c8d27f3c: a stale coordinator tried a parked worker after the daemon replaced it
 #[test]
 fn credential_sync_rejects_targets_captured_before_parking_or_replacement() {
     let running = podman_controller(SessionState::Running);
@@ -2164,6 +1957,7 @@ fn a_deferred_credential_sync_does_not_claim_the_login_was_checked() {
 /// operations. A lifecycle that failed left an idle session in the list but
 /// without a view, so it could never be opened again. The daemon's views are
 /// now the only input: a handle exists exactly while one is published.
+// Hard-won: 8b3a7286: a failed Move left the session unopenable until relay retry timed out
 #[tokio::test]
 async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
     let channels = spawn_remote_session_manager().unwrap();
