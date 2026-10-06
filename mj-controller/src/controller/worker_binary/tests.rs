@@ -2486,7 +2486,9 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
                 "skills/.system/.codex-system-skills.marker",
                 "skills/.system/imagegen/SKILL.md",
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
+                &[]
+            }
         };
         let home = tempfile::tempdir().unwrap();
         for relative in std::iter::once(&"skills/review/SKILL.md").chain(owned) {
@@ -4147,6 +4149,16 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
             ("cache/models.json", false),
             ("logs/muse.log", false),
         ],
+        HarnessKind::OpenCode => &[
+            ("opencode.json", true),
+            ("AGENTS.md", true),
+            (".data/opencode/auth.json", true),
+            ("skills/review/SKILL.md", true),
+            (".data/opencode/opencode.db", false),
+            (".data/opencode/opencode.db-wal", false),
+            (".data/opencode/log/opencode.log", false),
+            (".data/opencode/repos/native", false),
+        ],
     }
 }
 
@@ -4245,6 +4257,16 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
             }
         }),
         HarnessKind::Muse => serde_json::json!({ "token": format!("token-{generation}") }),
+        // OpenCode stores one grant per provider under the provider id, with
+        // the OAuth expiry in epoch milliseconds.
+        HarnessKind::OpenCode => serde_json::json!({
+            "anthropic": {
+                "type": "oauth",
+                "refresh": format!("refresh-{generation}"),
+                "access": format!("access-{generation}"),
+                "expires": 1_790_000_000_000_i64 + generation * 1000,
+            }
+        }),
     };
     serde_json::to_vec(&login).unwrap()
 }
