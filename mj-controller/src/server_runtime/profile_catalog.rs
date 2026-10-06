@@ -357,7 +357,13 @@ impl ProfileCatalog {
                 }
                 // A failure no retry can fix stays the entry's state until a
                 // changed definition replaces it.
-                if !matches!(&result, Err(AttemptError { retryable: true, .. })) {
+                if !matches!(
+                    &result,
+                    Err(AttemptError {
+                        retryable: true,
+                        ..
+                    })
+                ) {
                     return;
                 }
                 let delay = Duration::from_secs([1, 5, 30, 60][failures.min(3) as usize]);
@@ -924,9 +930,7 @@ mod tests {
         let probe_calls = calls.clone();
         let catalog = ProfileCatalog::with_probe(Arc::new(move |_| {
             probe_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {
-                Err(crate::controller::profile_config::DiscoveryUnsupported.into())
-            })
+            Box::pin(async { Err(crate::controller::profile_config::DiscoveryUnsupported.into()) })
         }));
         let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
         catalog.sync_now(&config).await;

@@ -470,7 +470,9 @@ impl std::error::Error for DiscoveryUnsupported {}
 
 /// Whether `error` is a discovery that no retry can make succeed.
 pub(crate) fn discovery_is_unsupported(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| cause.is::<DiscoveryUnsupported>())
+    error
+        .chain()
+        .any(|cause| cause.is::<DiscoveryUnsupported>())
 }
 
 fn probe_profile(
