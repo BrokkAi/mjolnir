@@ -785,8 +785,11 @@ impl AcceptedSessionConfig {
             self.effort = current("effort");
         } else if is_selector("effort") {
             self.effort = Some(value.to_owned());
-            if let Some(model) = current("model") {
-                self.model = Some(model);
+            // An effort response may describe the running model by its
+            // transcript ID rather than the selectable alias we accepted.
+            // Only a model selection owns replacing that accepted value.
+            if self.model.is_none() {
+                self.model = current("model");
             }
         } else {
             return false;

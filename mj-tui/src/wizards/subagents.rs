@@ -309,6 +309,13 @@ impl DashboardState {
 }
 
 impl ResumeWizard {
+    /// The draft owns the displayed choice. Send it explicitly rather than
+    /// deriving a delta from a session snapshot that can be stale or absent.
+    pub(crate) fn subagent_selection(&self, dashboard: &DashboardState) -> Option<SubagentPolicy> {
+        self.subagent_choice_applies(dashboard)
+            .then(|| self.subagents.policy.clone())
+    }
+
     /// Move offers the delegation choice when its destination profile is
     /// Claude or Codex. A plain resume keeps the session's own policy.
     pub(crate) fn subagent_choice_applies(&self, dashboard: &DashboardState) -> bool {

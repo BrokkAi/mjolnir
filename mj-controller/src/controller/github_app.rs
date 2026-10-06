@@ -647,6 +647,7 @@ fn read_private_key_file(path: &std::path::Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read GitHub App private key {}", path.display()))
 }
 
+// Unix file ownership and mode bits; only the Unix key reader has them.
 #[cfg(unix)]
 fn validate_private_key_metadata(
     path: &std::path::Path,

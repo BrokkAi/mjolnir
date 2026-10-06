@@ -56,7 +56,7 @@ struct ArchiveFile {
 #[derive(Default)]
 struct Sessions {
     records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    subagent_ids: BTreeSet<String>,
+    ownership: top_level::Snapshot,
     /// Session id to change token, for sessions indexed from the projection.
     live: BTreeMap<String, i64>,
 }
@@ -65,17 +65,7 @@ impl Sessions {
     fn of(state: &State) -> Self {
         Self {
             records: state.sessions.clone(),
-            subagent_ids: state
-                .subagents
-                .keys()
-                .chain(
-                    state
-                        .sessions
-                        .keys()
-                        .filter(|id| state.is_subagent_session(id)),
-                )
-                .cloned()
-                .collect(),
+            ownership: top_level::Snapshot::from_state(state),
             live: live_tokens(state),
         }
     }
@@ -156,7 +146,7 @@ impl MjolnirAdapter {
         sessions
             .records
             .iter()
-            .filter(|(id, _)| !sessions.subagent_ids.contains(*id))
+            .filter(|(id, _)| !sessions.ownership.owns_session(id))
             .map(|(session_id, record)| {
                 (
                     session_id.clone(),
@@ -387,7 +377,7 @@ impl Adapter for MjolnirAdapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (session_id, archive) in newest {
-            if sessions.subagent_ids.contains(&session_id) {
+            if sessions.ownership.owns_session(&session_id) {
                 continue;
             }
             tokens.insert(session_id, archive.token);
@@ -401,7 +391,7 @@ impl Adapter for MjolnirAdapter {
             sessions
                 .live
                 .iter()
-                .filter(|(id, _)| !sessions.subagent_ids.contains(*id))
+                .filter(|(id, _)| !sessions.ownership.owns_session(id))
                 .map(|(id, token)| (id.clone(), *token)),
         );
         // A rename changes the record and not the conversation, so the
@@ -451,7 +441,7 @@ impl Adapter for MjolnirAdapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         anyhow::ensure!(
-            !sessions.subagent_ids.contains(session_id),
+            !sessions.ownership.owns_session(session_id),
             "sub-agent sessions are not indexed"
         );
         let IndexedTranscript {
@@ -488,7 +478,7 @@ impl Adapter for MjolnirAdapter {
             started: record.and_then(|record| parse_time(&record.created_at)),
             ended: record.and_then(|record| parse_time(&record.updated_at)),
             title,
-            subagent: sessions.subagent_ids.contains(session_id),
+            subagent: sessions.ownership.owns_session(session_id),
             messages,
             touched: evidence.paths.into_iter().collect(),
             edits: evidence.edits,
@@ -571,7 +561,10 @@ impl WikiIndexer {
     /// Start the background sync worker. Without a Tokio runtime (some tests
     /// build a runtime state without one) the indexer stays inert.
     pub fn spawn() -> Self {
-        let inner = Arc::new(Indexer::default());
+        let inner = Arc::new(Indexer {
+            native_scan_cache: crate::import::NativeScanCache::shared(),
+            ..Indexer::default()
+        });
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let worker = Arc::clone(&inner);
             handle.spawn(async move { worker.run().await });
@@ -732,21 +725,21 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     // happens afterwards, so it cannot make this snapshot stale before use.
     let mjolnir = Arc::new(MjolnirAdapter::from_state(&controller.state));
     let owned: Vec<Box<dyn Adapter>> = vec![Box::new(SharedMjolnirAdapter(Arc::clone(&mjolnir)))];
-    let children = mjolnir
+    let ownership = mjolnir
         .sessions
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .subagent_ids
+        .ownership
         .clone();
     let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
-    top_level::prune(&mut connection, &BTreeSet::new(), &children)?;
+    top_level::prune(&mut connection, &BTreeSet::new(), &ownership)?;
     sessionwiki::index::sync_with(&mut connection, &owned, since)
         .context("sync Mjolnir sessions into SessionWiki")?;
     let (native, excluded) = top_level::prepare(native_adapters(&controller.config), cache);
-    top_level::prune(&mut connection, &excluded, &children)?;
+    top_level::prune(&mut connection, &excluded, &ownership)?;
     sessionwiki::index::sync_with(&mut connection, &native, since)
         .context("sync native sessions into SessionWiki")?;
-    top_level::prune(&mut connection, &excluded, &children)?;
+    top_level::prune(&mut connection, &excluded, &ownership)?;
     write_session_tags(&mut connection, &mjolnir.indexed_tags())
         .context("store Mjolnir's session metadata in the SessionWiki index")?;
     provenance::backfill(&mut connection, &mjolnir).context("backfill Mjolnir file provenance")?;
@@ -1400,28 +1393,54 @@ pub fn query_rows(
         return Ok(Vec::new());
     }
     let connection = open_readonly()?;
+    let ownership = top_level::current_snapshot()?;
+    let cache = crate::import::NativeScanCache::shared();
+    query_rows_from(
+        &connection,
+        query,
+        limit,
+        live,
+        include_tool_matches,
+        &ownership,
+        &cache,
+    )
+}
+
+fn query_rows_from(
+    connection: &rusqlite::Connection,
+    query: &str,
+    limit: usize,
+    live: &BTreeSet<String>,
+    include_tool_matches: bool,
+    ownership: &top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
+) -> Result<Vec<WikiRow>> {
+    let limit = limit.clamp(1, MAX_WIKI_LIMIT);
     let query = query.trim();
     if query.is_empty() {
-        let rows = sessionwiki::index::recent(&connection, limit, None, None, None, false)
+        let rows = sessionwiki::index::recent(connection, MAX_WIKI_LIMIT, None, None, None, true)
             .context("list recent SessionWiki sessions")?;
-        let mut rows: Vec<WikiRow> = rows
-            .into_iter()
-            .map(|row| wiki_row(row, None, live))
-            .collect();
-        fill_session_tags(&connection, &mut rows)?;
+        let mut visible = Vec::with_capacity(limit);
+        for row in rows {
+            if visible.len() >= limit {
+                break;
+            }
+            if top_level::is_child(&row, ownership, cache)? {
+                continue;
+            }
+            visible.push(wiki_row(row, None, live));
+        }
+        let mut rows = visible;
+        fill_session_tags(connection, &mut rows)?;
         return Ok(rows);
     }
-    // Resume filtering may discard tool-only hits. Keep enough candidates to
-    // fill its limit; agent history accepts those hits directly.
-    let search_limit = if include_tool_matches {
-        limit
-    } else {
-        MAX_WIKI_LIMIT
-    };
+    // Search and native-child filtering happen after SessionWiki applies its
+    // session limit. Over-fetch so children ranked first do not shorten a page.
+    let search_limit = MAX_WIKI_LIMIT;
     let hits = if query.chars().count() < MIN_FULLTEXT_QUERY {
-        sessionwiki::index::search_like(&connection, query, search_limit, None, None)
+        sessionwiki::index::search_like(connection, query, search_limit, None, None)
     } else {
-        sessionwiki::index::search(&connection, query, search_limit, None, None)
+        sessionwiki::index::search(connection, query, search_limit, None, None)
     }
     .context("search the SessionWiki index")?;
     // SessionWiki's full-text search has no sub-agent filter of its own.
@@ -1430,7 +1449,7 @@ pub fn query_rows(
         if rows.len() >= limit {
             break;
         }
-        if !is_main_session(&hit.row) {
+        if top_level::is_child(&hit.row, ownership, cache)? {
             continue;
         }
         // A match only in tool text is not one the preview can show: it
@@ -1441,7 +1460,7 @@ pub fn query_rows(
         // includes tool-only text, keeps tool matches.
         if !include_tool_matches
             && !matches!(hit.role.as_str(), "user" | "assistant")
-            && !conversation_matches(&connection, &hit.row, query)?
+            && !conversation_matches(connection, &hit.row, query)?
         {
             continue;
         }
@@ -1451,18 +1470,19 @@ pub fn query_rows(
     // or a project that is never said out loud would be unfindable. Those
     // matches follow the full-text ones rather than displacing them.
     if rows.len() < limit {
-        let found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
-        for row in named_like(&connection, query)? {
+        let mut found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+        for row in named_like(connection, query)? {
             if rows.len() >= limit {
                 break;
             }
-            if found.contains(&row.session_id) {
+            if found.contains(&row.session_id) || top_level::is_child(&row, ownership, cache)? {
                 continue;
             }
+            found.insert(row.session_id.clone());
             rows.push(wiki_row(row, None, live));
         }
     }
-    fill_session_tags(&connection, &mut rows)?;
+    fill_session_tags(connection, &mut rows)?;
     Ok(rows)
 }
 
@@ -1481,13 +1501,15 @@ pub fn session_text_matches(query: &str, live: &BTreeSet<String>) -> Result<Vec<
         return Ok(Vec::new());
     }
     let connection = open_readonly()?;
-    text_matches_in(&connection, query, live)
+    let ownership = top_level::current_snapshot()?;
+    text_matches_in(&connection, query, live, &ownership)
 }
 
 fn text_matches_in(
     connection: &rusqlite::Connection,
     query: &str,
     live: &BTreeSet<String>,
+    ownership: &top_level::Snapshot,
 ) -> Result<Vec<SessionTextMatch>> {
     let mut statement;
     let rows = if query.chars().count() < MIN_FULLTEXT_QUERY {
@@ -1500,40 +1522,54 @@ fn text_matches_in(
                 .replace('_', "\\_")
         );
         statement = connection.prepare(
-            "SELECT f.path, m.role
+            "SELECT f.session_id, f.path, m.role, f.kind
              FROM messages m JOIN files f ON f.session_id = m.session_id
-             WHERE f.tool = ?1 AND f.kind = 'main' AND m.role IN ('user', 'assistant')
+             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')
                AND m.text LIKE ?2 ESCAPE '\\'
              ORDER BY m.id DESC LIMIT ?3",
         )?;
         statement
             .query_map(
                 rusqlite::params![TOOL, pattern, TEXT_SEARCH_MESSAGE_LIMIT],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()
     } else {
         let phrase = format!("\"{}\"", sessionwiki::util::nfc(query).replace('"', "\"\""));
         statement = connection.prepare(
-            "SELECT f.path, m.role
+            "SELECT f.session_id, f.path, m.role, f.kind
              FROM (SELECT rowid AS mid FROM msgs WHERE msgs MATCH ?2 LIMIT ?3) x
              JOIN messages m ON m.id = x.mid
              JOIN files f ON f.session_id = m.session_id
-             WHERE f.tool = ?1 AND f.kind = 'main' AND m.role IN ('user', 'assistant')",
+             WHERE f.tool = ?1 AND m.role IN ('user', 'assistant')",
         )?;
         statement
             .query_map(
                 rusqlite::params![TOOL, phrase, TEXT_SEARCH_MESSAGE_LIMIT],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()
     }
     .context("search the indexed messages")?;
     let mut found = BTreeMap::<String, SessionTextMatchKind>::new();
-    for (path, role) in rows {
-        // The adapter writes the session id as the last path segment.
-        let session_id = path.rsplit('/').next().unwrap_or_default();
-        if !live.contains(session_id) {
+    for (session_id, path, role, kind) in rows {
+        if !live.contains(&session_id)
+            || ownership.owns_indexed_child(&session_id, &path, TOOL, &kind)
+        {
             continue;
         }
         let kind = if role == "user" {
@@ -1541,7 +1577,7 @@ fn text_matches_in(
         } else {
             SessionTextMatchKind::Agent
         };
-        let entry = found.entry(session_id.to_owned()).or_insert(kind);
+        let entry = found.entry(session_id.clone()).or_insert(kind);
         *entry = (*entry).min(kind);
     }
     Ok(found
@@ -1589,7 +1625,7 @@ fn named_like(
     let sql = format!(
         "SELECT session_id, tool, path, project, title, started, msg_count, kind,
                 archived_at IS NOT NULL
-         FROM files WHERE kind = 'main' ORDER BY started DESC LIMIT {NAME_SCAN_LIMIT}"
+         FROM files ORDER BY started DESC LIMIT {NAME_SCAN_LIMIT}"
     );
     let mut statement = connection
         .prepare(&sql)
@@ -1636,19 +1672,15 @@ fn conversation_matches(
     Ok(!hit_transcript(&session, query, 0, 1).blocks.is_empty())
 }
 
-/// Whether an indexed session is one a person started rather than a
-/// sub-agent. SessionWiki's own `recent` filter tests the same `kind`.
-fn is_main_session(row: &sessionwiki::index::SessionRow) -> bool {
-    row.kind == "main"
-}
-
 /// The briefing for one indexed session, or `None` when the id names none.
 pub fn brief(id: &str, max_chars: usize) -> Result<Option<String>> {
     if !index_is_writable() {
         return Ok(None);
     }
     let connection = open_readonly()?;
-    let Some(row) = row_by_id(&connection, id)? else {
+    let ownership = top_level::current_snapshot()?;
+    let cache = crate::import::NativeScanCache::shared();
+    let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
     let session = sessionwiki::index::session_from_index(&connection, &row)
@@ -1675,7 +1707,9 @@ pub fn transcript_hits(
         return Ok(None);
     }
     let connection = open_readonly()?;
-    let Some(row) = row_by_id(&connection, id)? else {
+    let ownership = top_level::current_snapshot()?;
+    let cache = crate::import::NativeScanCache::shared();
+    let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
     let session = sessionwiki::index::session_from_index(&connection, &row)
@@ -1754,7 +1788,9 @@ pub fn archived_session(id: &str) -> Result<Option<ArchivedSession>> {
         return Ok(None);
     }
     let connection = open_readonly()?;
-    let Some(row) = row_by_id(&connection, id)? else {
+    let ownership = top_level::current_snapshot()?;
+    let cache = crate::import::NativeScanCache::shared();
+    let Some(row) = visible_row_by_id(&connection, id, &ownership, &cache)? else {
         return Ok(None);
     };
     let session = sessionwiki::index::session_from_index(&connection, &row)
@@ -1972,6 +2008,24 @@ fn row_by_id(
         .context("look up an indexed session")?
         .into_iter()
         .find(|row| row.session_id == id))
+}
+
+/// Explicit IDs obey the same visibility rule as search results: a child
+/// found by standalone SessionWiki sync is hidden as though it were absent.
+fn visible_row_by_id(
+    connection: &rusqlite::Connection,
+    id: &str,
+    ownership: &top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
+) -> Result<Option<sessionwiki::index::SessionRow>> {
+    let Some(row) = row_by_id(connection, id)? else {
+        return Ok(None);
+    };
+    if top_level::is_child(&row, ownership, cache)? {
+        Ok(None)
+    } else {
+        Ok(Some(row))
+    }
 }
 
 fn wiki_row(
@@ -2200,7 +2254,19 @@ pub fn wiki_session(
         return Ok(None);
     }
     let connection = open_readonly()?;
-    let Some(row) = row_by_id(&connection, wiki_id)? else {
+    let ownership = top_level::current_snapshot()?;
+    let cache = crate::import::NativeScanCache::shared();
+    wiki_session_from(&connection, wiki_id, known_sessions, &ownership, &cache)
+}
+
+fn wiki_session_from(
+    connection: &rusqlite::Connection,
+    wiki_id: &str,
+    known_sessions: &BTreeSet<String>,
+    ownership: &top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
+) -> Result<Option<WikiSessionInfo>> {
+    let Some(row) = visible_row_by_id(connection, wiki_id, ownership, cache)? else {
         return Ok(None);
     };
     let is_mjolnir = row.tool == TOOL;
@@ -2214,7 +2280,7 @@ pub fn wiki_session(
         (true, false) => WikiSessionStatus::Archived,
     };
     let tags = match is_mjolnir {
-        true => tags::read(&connection, &[row.session_id.as_str()])
+        true => tags::read(connection, &[row.session_id.as_str()])
             .context("read the indexed session metadata")?
             .remove(&row.session_id)
             .unwrap_or_default(),
@@ -2224,7 +2290,7 @@ pub fn wiki_session(
     // restore needs a prompt to open the first turn.
     let nothing_to_restore = status == WikiSessionStatus::Archived
         && !has_prompt(
-            &sessionwiki::index::session_from_index(&connection, &row)
+            &sessionwiki::index::session_from_index(connection, &row)
                 .context("read an indexed session")?,
         );
     let harness = tags
@@ -2310,6 +2376,51 @@ mod tests {
     };
 
     use super::*;
+
+    fn wiki_session_for_test(
+        wiki_id: &str,
+        known_sessions: &BTreeSet<String>,
+    ) -> Result<Option<WikiSessionInfo>> {
+        let connection = open_readonly()?;
+        wiki_session_from(
+            &connection,
+            wiki_id,
+            known_sessions,
+            &top_level::Snapshot::default(),
+            &crate::import::NativeScanCache::new(),
+        )
+    }
+
+    fn query_rows_for_test(
+        query: &str,
+        limit: usize,
+        include_tool_matches: bool,
+    ) -> Result<Vec<WikiRow>> {
+        query_rows_with_snapshot_for_test(
+            query,
+            limit,
+            include_tool_matches,
+            &top_level::Snapshot::default(),
+        )
+    }
+
+    fn query_rows_with_snapshot_for_test(
+        query: &str,
+        limit: usize,
+        include_tool_matches: bool,
+        ownership: &top_level::Snapshot,
+    ) -> Result<Vec<WikiRow>> {
+        let connection = open_readonly()?;
+        query_rows_from(
+            &connection,
+            query,
+            limit,
+            &BTreeSet::new(),
+            include_tool_matches,
+            ownership,
+            &crate::import::NativeScanCache::new(),
+        )
+    }
 
     fn item(position: u64, body: CanonicalTranscriptBody) -> CanonicalTranscriptItem {
         // Only an agent message carries a content ordinal; the snapshot
@@ -2438,7 +2549,7 @@ mod tests {
             sessions_dir: directory.to_path_buf(),
             sessions: std::sync::Mutex::new(Sessions {
                 records: [(session_id.to_owned(), record)].into_iter().collect(),
-                subagent_ids: BTreeSet::new(),
+                ownership: top_level::Snapshot::default(),
                 live,
             }),
             reload: false,
@@ -2506,7 +2617,7 @@ mod tests {
         );
         {
             let mut sessions = source.sessions.lock().unwrap();
-            sessions.subagent_ids.insert(child.to_owned());
+            sessions.ownership = top_level::Snapshot::for_test(BTreeSet::from([child.to_owned()]));
             sessions.records.insert(
                 child.to_owned(),
                 SessionRecord {
@@ -3132,7 +3243,7 @@ mod tests {
         )
         .expect("write the session metadata");
 
-        let rows = query_rows("", 10, &BTreeSet::new(), false).expect("query the index");
+        let rows = query_rows_for_test("", 10, false).expect("query the index");
         let mjolnir = rows
             .iter()
             .find(|row| row.id == "mj-session")
@@ -3148,6 +3259,236 @@ mod tests {
         assert_eq!(codex.target, None);
         assert_eq!(codex.profile, None);
         assert_eq!(codex.harness, None);
+    }
+
+    #[test]
+    fn standalone_indexed_children_are_hidden_from_every_history_listing() {
+        let _held = tags::testing::lock();
+        let (_directory, mut connection) = tags::testing::isolated_index();
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("projects/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let paths = [
+            project.join("00000000-0000-4000-8000-000000000001.jsonl"),
+            project.join("00000000-0000-4000-8000-000000000002.jsonl"),
+            project.join("00000000-0000-4000-8000-000000000003.jsonl"),
+            project.join("00000000-0000-4000-8000-000000000004.jsonl"),
+        ];
+        let transcript = |timestamp: &str, content: &str, sidechain: bool| {
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"/src/project\",\"entrypoint\":\"cli\",\"timestamp\":\"{timestamp}\",\"isSidechain\":{sidechain},\"message\":{{\"role\":\"user\",\"content\":\"{content}\"}}}}\n"
+            )
+        };
+        for (index, path) in paths.iter().enumerate() {
+            let is_child = index >= 2;
+            let content = if is_child {
+                "quokka quokka quokka quokka quokka quokka"
+            } else {
+                "quokka parent conversation"
+            };
+            let timestamp = match index {
+                0 => "2026-10-04T00:00:00Z",
+                1 => "2026-10-03T00:00:00Z",
+                _ => "2026-10-05T00:00:00Z",
+            };
+            std::fs::write(path, transcript(timestamp, content, index == 3)).unwrap();
+        }
+
+        // This is a standalone SessionWiki sync: it sees no Mjolnir ownership
+        // relation and stores both child transcripts as ordinary main rows.
+        let adapter = Box::new(sessionwiki::adapters::ClaudeCode::in_home(
+            home.path().to_owned(),
+        ));
+        sessionwiki::index::sync_with(&mut connection, &[adapter], None).unwrap();
+        for path in &paths[2..] {
+            let kind: String = connection
+                .query_row(
+                    "SELECT kind FROM files WHERE path = ?1",
+                    [path.to_string_lossy()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(kind, "main", "the standalone sync misclassified {path:?}");
+        }
+
+        let mj_child_id = "mj-child-session";
+        let native_mj_child_id = "00000000-0000-4000-8000-000000000003";
+        let mut state = mj_core::state::State::default();
+        let mut child_record = crate::database::test_session(mj_child_id, "test-project");
+        child_record.native_session_id = Some(native_mj_child_id.to_owned());
+        state.sessions.insert(mj_child_id.to_owned(), child_record);
+        state.subagents.insert(
+            mj_child_id.to_owned(),
+            mj_core::subagent::SubagentRecord {
+                child_session_id: mj_child_id.to_owned(),
+                parent_session_id: "mj-parent-session".to_owned(),
+                task_name: "child".to_owned(),
+                profile_id: "codex".to_owned(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::from("/src/project"),
+                initial_prompt: "child task".to_owned(),
+                request_key: "test-child".to_owned(),
+                created_at: "2026-10-05T00:00:00Z".to_owned(),
+                noticed_turn: None,
+                handback_tool: false,
+            },
+        );
+        let ownership = top_level::Snapshot::from_state(&state);
+        let ids_for_paths: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                connection
+                    .query_row(
+                        "SELECT session_id FROM files WHERE path = ?1",
+                        [path.to_string_lossy()],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        for id in &ids_for_paths {
+            connection
+                .execute(
+                    "INSERT INTO touched(session_id, path) VALUES (?1, '/src/project/src/a.rs')",
+                    [id],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE files SET title = 'standalone-only-name' WHERE session_id = ?1",
+                [&ids_for_paths[2]],
+            )
+            .unwrap();
+
+        let child_native_ids = BTreeSet::from([
+            "00000000-0000-4000-8000-000000000003".to_owned(),
+            "00000000-0000-4000-8000-000000000004".to_owned(),
+        ]);
+        let raw_hits = sessionwiki::index::search(&connection, "quokka", 10, None, None).unwrap();
+        let first_search_ids: BTreeSet<_> = raw_hits
+            .iter()
+            .take(2)
+            .filter_map(|hit| sessionwiki::index::native_id_of(&hit.row.path))
+            .collect();
+        assert_eq!(first_search_ids, child_native_ids);
+        let raw_recent =
+            sessionwiki::index::recent(&connection, 2, None, None, None, true).unwrap();
+        let first_recent_ids: BTreeSet<_> = raw_recent
+            .iter()
+            .filter_map(|row| sessionwiki::index::native_id_of(&row.path))
+            .collect();
+        assert_eq!(first_recent_ids, child_native_ids);
+        let resume = query_rows_with_snapshot_for_test("quokka", 2, false, &ownership).unwrap();
+        let mut resume_ids: Vec<_> = resume.into_iter().map(|row| row.id).collect();
+        resume_ids.sort();
+        let mut parent_ids = ids_for_paths[..2].to_vec();
+        parent_ids.sort();
+        assert_eq!(resume_ids, parent_ids);
+
+        let recent = query_rows_with_snapshot_for_test("", 2, false, &ownership).unwrap();
+        let mut recent_ids: Vec<_> = recent.into_iter().map(|row| row.id).collect();
+        recent_ids.sort();
+        assert_eq!(recent_ids, parent_ids);
+        assert!(
+            query_rows_with_snapshot_for_test("standalone-only-name", 10, false, &ownership,)
+                .unwrap()
+                .is_empty()
+        );
+
+        let search_sessions = mj_core::history::HistoryRequest {
+            request_id: "test-search".into(),
+            query: mj_core::history::HistoryQuery::SearchSessions {
+                query: "quokka".into(),
+                limit: 2,
+            },
+            blame: None,
+        };
+        let history = history::query_in_with(
+            &connection,
+            &search_sessions,
+            &ownership,
+            &crate::import::NativeScanCache::new(),
+        )
+        .unwrap();
+        let mut history_ids: Vec<String> = history["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect();
+        history_ids.sort();
+        assert_eq!(history_ids, parent_ids);
+
+        let trace = history::query_in_with(
+            &connection,
+            &mj_core::history::HistoryRequest {
+                request_id: "test-trace".into(),
+                query: mj_core::history::HistoryQuery::TraceFile {
+                    path: "src/a.rs".into(),
+                    limit: 2,
+                },
+                blame: None,
+            },
+            &ownership,
+            &crate::import::NativeScanCache::new(),
+        )
+        .unwrap();
+        let mut trace_ids: Vec<String> = trace["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["session"]["id"].as_str().unwrap().to_owned())
+            .collect();
+        trace_ids.sort();
+        assert_eq!(trace_ids, parent_ids);
+
+        let blame_time = chrono::DateTime::parse_from_rfc3339("2026-10-05T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let blame = history::query_in_with(
+            &connection,
+            &mj_core::history::HistoryRequest {
+                request_id: "test-blame".into(),
+                query: mj_core::history::HistoryQuery::BlameFile {
+                    path: PathBuf::from("src/a.rs"),
+                    start_line: 1,
+                    end_line: 1,
+                },
+                blame: Some(mj_core::history::BlameEvidence {
+                    repository: PathBuf::from("/src/project"),
+                    relative_path: PathBuf::from("src/a.rs"),
+                    porcelain: format!(
+                        "{} 1 1 1\nauthor-time {blame_time}\n\tline\n",
+                        "a".repeat(40),
+                    ),
+                }),
+            },
+            &ownership,
+            &crate::import::NativeScanCache::new(),
+        )
+        .unwrap();
+        assert_eq!(blame["runs"][0]["status"], "confident");
+        assert_eq!(
+            blame["runs"][0]["sessions"][0]["session_id"],
+            ids_for_paths[0]
+        );
+
+        let child_brief = history::query_in_with(
+            &connection,
+            &mj_core::history::HistoryRequest {
+                request_id: "test-child-brief".into(),
+                query: mj_core::history::HistoryQuery::GetSessionBrief {
+                    session_id: ids_for_paths[2].clone(),
+                    max_chars: 200,
+                },
+                blame: None,
+            },
+            &ownership,
+            &crate::import::NativeScanCache::new(),
+        );
+        assert!(child_brief.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
@@ -3177,12 +3518,11 @@ mod tests {
                 .expect("index the message");
         }
         let ids = |query: &str, include_tool_matches: bool| {
-            let mut ids: Vec<String> =
-                query_rows(query, 10, &BTreeSet::new(), include_tool_matches)
-                    .expect("query the index")
-                    .into_iter()
-                    .map(|row| row.id)
-                    .collect();
+            let mut ids: Vec<String> = query_rows_for_test(query, 10, include_tool_matches)
+                .expect("query the index")
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
             ids.sort();
             ids
         };
@@ -3240,12 +3580,11 @@ mod tests {
         message("child", "assistant", "the journal uses a quokka checksum");
 
         let ids = |query: &str, include_tool_matches: bool| {
-            let mut ids: Vec<String> =
-                query_rows(query, 10, &BTreeSet::new(), include_tool_matches)
-                    .expect("query the index")
-                    .into_iter()
-                    .map(|row| row.id)
-                    .collect();
+            let mut ids: Vec<String> = query_rows_for_test(query, 10, include_tool_matches)
+                .expect("query the index")
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
             ids.sort();
             ids
         };
@@ -3272,7 +3611,7 @@ mod tests {
             )
             .expect("insert a message");
         assert!(
-            query_rows("qx", 10, &BTreeSet::new(), false)
+            query_rows_for_test("qx", 10, false)
                 .expect("query the index")
                 .is_empty()
         );
@@ -3307,7 +3646,7 @@ mod tests {
                 .unwrap();
         }
 
-        let rows = query_rows("restic", 1, &BTreeSet::new(), false).unwrap();
+        let rows = query_rows_for_test("restic", 1, false).unwrap();
         assert_eq!(
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["main"]
@@ -3352,7 +3691,7 @@ mod tests {
             "the destroy must not wait for the pass: {:?}",
             started.elapsed()
         );
-        let found = wiki_session(session_id, &BTreeSet::new())
+        let found = wiki_session_for_test(session_id, &BTreeSet::new())
             .unwrap()
             .expect("the session is found by its id");
         assert_eq!(found.status, WikiSessionStatus::Archived);
@@ -3394,7 +3733,7 @@ mod tests {
             .await;
             assert_eq!(outcome, IndexedBeforeDestroy::Deferred);
             assert!(
-                wiki_session(session_id, &BTreeSet::new())
+                wiki_session_for_test(session_id, &BTreeSet::new())
                     .unwrap()
                     .is_none(),
                 "nothing is written while the other writer holds the index"
@@ -3402,7 +3741,7 @@ mod tests {
 
             writer.execute_batch("COMMIT").unwrap();
             let deadline = Instant::now() + Duration::from_secs(30);
-            while wiki_session(session_id, &BTreeSet::new())
+            while wiki_session_for_test(session_id, &BTreeSet::new())
                 .unwrap()
                 .is_none()
             {
@@ -3523,7 +3862,13 @@ mod tests {
                 ("gone", &[("user", "zebra")]),
             ]);
             let live = live(&["said-by-user", "said-by-agent", "only-in-tool", "both"]);
-            let found = text_matches_in(&connection, "zebra", &live).unwrap();
+            let found = text_matches_in(
+                &connection,
+                "zebra",
+                &live,
+                &super::super::top_level::Snapshot::default(),
+            )
+            .unwrap();
             assert_eq!(
                 found,
                 matches(&[
@@ -3552,7 +3897,13 @@ mod tests {
                 ("c", &[("tool", "zoo")]),
             ]);
             assert_eq!(
-                text_matches_in(&connection, "zo", &live(&["a", "b", "c"])).unwrap(),
+                text_matches_in(
+                    &connection,
+                    "zo",
+                    &live(&["a", "b", "c"]),
+                    &super::super::top_level::Snapshot::default(),
+                )
+                .unwrap(),
                 matches(&[
                     ("a", SessionTextMatchKind::User),
                     ("b", SessionTextMatchKind::Agent),
@@ -3560,7 +3911,13 @@ mod tests {
             );
             // A percent sign is text, not a wildcard.
             assert_eq!(
-                text_matches_in(&connection, "%z", &live(&["a"])).unwrap(),
+                text_matches_in(
+                    &connection,
+                    "%z",
+                    &live(&["a"]),
+                    &super::super::top_level::Snapshot::default(),
+                )
+                .unwrap(),
                 Vec::new()
             );
         }
