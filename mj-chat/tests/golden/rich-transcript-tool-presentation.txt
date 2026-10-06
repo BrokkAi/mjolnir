@@ -700,3 +700,118 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │  for commands              │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
+
+=== inline tool calls (80x36) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ○ Thinking                                                                  ▐│
+│ │ first thought                                                             ▐│
+│                                                                             ▐│
+│ ✓ Ran cargo test -p brokk-mj-chat --lib                                     ▐│
+│   └ running 12 tests                                                        ▐│
+│     test case_1 ... ok                                                      ▐│
+│     … +9 lines                                                              ▐│
+│     test result: ok. 12 passed                                              ▐│
+│     exited 0                                                                ▐│
+│                                                                             ▐│
+│ ○ Thinking                                                                  ▐│
+│ │ second thought                                                            ▐│
+│                                                                             ▐│
+│ ✓ Read src/lib.rs                                                           ▐│
+│                                                                             ▐│
+│ ✓ Edit src/lib.rs                                                           ▐│
+│   └ src/lib.rs +3 -1                                                        ▐│
+│                                                                             ▐│
+│ × Ran cat missing.txt                                                       ▐│
+│   └ cat: missing.txt: No such file or directory xxxxxxxxxxxxxxxxxxxxxxxxxxx…▐│
+│     exited 1                                                                ▐│
+│                                                                             ▐│
+│ ● Running sleep 30 && echo done                                             ▐│
+│   └ waiting                                                                 ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== inline call expanded (80x36) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ │ running 12 tests                                                          ││
+│ │ test case_1 ... ok                                                        ││
+│ │ test case_2 ... ok                                                        ││
+│ │ test case_3 ... ok                                                        ││
+│ │ test case_4 ... ok                                                        ││
+│ │ test case_5 ... ok                                                        ▐│
+│ │ test case_6 ... ok                                                        ▐│
+│ │ test case_7 ... ok                                                        ▐│
+│ │ test case_8 ... ok                                                        ▐│
+│ │ test case_9 ... ok                                                        ▐│
+│ │ test case_10 ... ok                                                       ▐│
+│ │ test result: ok. 12 passed                                                ▐│
+│ │ exited 0                                                                  ▐│
+│                                                                             ▐│
+│ ○ Thinking                                                                  ▐│
+│ │ second thought                                                            ▐│
+│                                                                             ▐│
+│ ✓ Read src/lib.rs                                                           ▐│
+│                                                                             ▐│
+│ ✓ Edit src/lib.rs                                                           ▐│
+│   └ src/lib.rs +3 -1                                                        ▐│
+│                                                                             ▐│
+│ × Ran cat missing.txt                                                       ▐│
+│   └ cat: missing.txt: No such file or directory xxxxxxxxxxxxxxxxxxxxxxxxxxx…▐│
+│     exited 1                                                                ▐│
+│                                                                             ▐│
+│ ● Running sleep 30 && echo done                                             ▐│
+│   └ waiting                                                                 ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+expanded tools: {2}
+
+=== inline with one output line and ASCII symbols (80x36) ===
++ Conversation ----------------------------------------------------------------+
+| o Thinking                                                                  #|
+| | first thought                                                             #|
+|                                                                             #|
+| x Ran cargo test -p brokk-mj-chat --lib                                     #|
+|   `- .. +13 lines                                                           #|
+|                                                                             #|
+| o Thinking                                                                  #|
+| | second thought                                                            #|
+|                                                                             #|
+| x Read src/lib.rs                                                           #|
+|                                                                             #|
+| x Edit src/lib.rs                                                           #|
+|   `- src/lib.rs +3 -1                                                       #|
+|                                                                             #|
+| x Ran cat missing.txt                                                       #|
+|   `- .. +2 lines                                                            #|
+|                                                                             #|
+| * Running sleep 30 && echo done                                             #|
+|   `- waiting                                                                #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
++------------------------------------------------------------------------------+
++ mic -------------------------------------------------------------------------+
+|> Message the agent, or / for commands                                        |
+|                                                                              |
++--------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send | ctrl+b then : palette - ? keys
