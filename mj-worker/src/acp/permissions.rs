@@ -114,6 +114,7 @@ pub(super) async fn restore_plan_execution_mode(
         connection,
         &session_id,
         HarnessKind::Claude,
+        None,
         &desired,
         &mut state.config_options,
         &mut state.modes,

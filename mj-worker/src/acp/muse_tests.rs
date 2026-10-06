@@ -291,21 +291,25 @@ async fn a_muse_host_that_could_not_start_reports_its_own_diagnostic() {
 }
 
 #[tokio::test]
-#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.8.1"]
+#[ignore = "requires MJ_MUSE_ACP_TEST_BINARY pointing to verified muse-acp 0.10.0"]
 async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resume() {
     let adapter =
         PathBuf::from(std::env::var_os("MJ_MUSE_ACP_TEST_BINARY").expect("set adapter path"));
     let host = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/muse_host.py");
-    for (scenario, choice, resume) in [
-        ("chat", "", false),
-        ("chat", "", true),
-        ("permission", "allow", false),
-        ("permission", "deny", false),
-        ("question", "accept", false),
-        ("question", "cancel", false),
-        ("quiet", "", false),
+    use ExecutionPolicy::{ConfiguredApprovals, Unconstrained};
+    for (scenario, choice, resume, policy) in [
+        ("chat", "", false, ConfiguredApprovals),
+        ("chat", "", true, ConfiguredApprovals),
+        ("chat", "", false, Unconstrained),
+        ("permission", "allow", false, ConfiguredApprovals),
+        ("permission", "deny", false, ConfiguredApprovals),
+        ("question", "accept", false, ConfiguredApprovals),
+        ("question", "cancel", false, ConfiguredApprovals),
+        ("quiet", "", false, ConfiguredApprovals),
     ] {
-        eprintln!("Muse scenario: {scenario}, choice: {choice}, resume: {resume}");
+        eprintln!(
+            "Muse scenario: {scenario}, choice: {choice}, resume: {resume}, policy: {policy:?}"
+        );
         let temp = tempfile::tempdir().unwrap();
         let log = temp.path().join("host.jsonl");
         let environment = BTreeMap::from([
@@ -335,7 +339,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             accepted_config: Default::default(),
             initial_model: None,
             harness: HarnessKind::Muse,
-            execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            execution_policy: policy,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
@@ -477,6 +481,17 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             .unwrap();
         let trace = std::fs::read_to_string(log).unwrap();
         assert!(trace.contains("QUJDQUJD"));
+        // muse-acp 0.10 keeps the approval policy on `approval_mode`, apart
+        // from its session modes.
+        let approval_modes: Vec<serde_json::Value> = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|message| message["method"] == "session/setApprovalMode")
+            .map(|message| message["params"]["mode"].clone())
+            .collect();
+        if policy == Unconstrained {
+            assert_eq!(approval_modes, [serde_json::json!("allowAll")]);
+        }
         assert!(trace.contains("reasoningEffort"));
         if scenario == "question" {
             let method = if choice == "accept" {

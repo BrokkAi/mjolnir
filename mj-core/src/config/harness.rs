@@ -83,6 +83,9 @@ impl ExecutionPolicy {
 pub struct ExecutionEnforcement {
     label: &'static str,
     acp_mode: Option<&'static str>,
+    /// The config option that carries `acp_mode` when the harness keeps it
+    /// apart from its Mode selector.
+    acp_mode_selector: Option<&'static str>,
     launch_flag: Option<&'static str>,
     launch_environment: Option<(&'static str, &'static str)>,
     /// A word appended once to a whitespace-separated argv held in an env var.
@@ -147,6 +150,12 @@ impl ExecutionEnforcement {
     /// The ACP mode to select after the session opens, when there is one.
     pub const fn acp_mode(self) -> Option<&'static str> {
         self.acp_mode
+    }
+
+    /// The config option to select `acp_mode` on, when the bridge offers it.
+    /// Without it, the mode goes to the bridge's Mode selector.
+    pub const fn acp_mode_selector(self) -> Option<&'static str> {
+        self.acp_mode_selector
     }
 
     /// The launch flag to add to the bridge command line, when there is one.
@@ -404,6 +413,10 @@ impl HarnessKind {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "allowAll / sandbox-off / :unrestricted",
                 acp_mode: Some("allowAll"),
+                // muse-acp 0.10 puts Default, Read-only, and Plan on `mode`
+                // and the approval policy on `approval_mode`. Container images
+                // built before it keep the approval policy on `mode`.
+                acp_mode_selector: Some("approval_mode"),
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
                 launch_argument: Some(("MUSE_SERVE_ARGS", "--disable-sandbox")),
@@ -418,6 +431,7 @@ impl HarnessKind {
             (Self::Codex, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "agent / guardian",
                 acp_mode: Some("agent"),
+                acp_mode_selector: None,
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent")),
                 launch_argument: None,
@@ -427,6 +441,7 @@ impl HarnessKind {
             (Self::Codex, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "agent-full-access",
                 acp_mode: Some("agent-full-access"),
+                acp_mode_selector: None,
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent-full-access")),
                 launch_argument: None,
@@ -439,6 +454,7 @@ impl HarnessKind {
             (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "auto / guardian",
                 acp_mode: Some("auto"),
+                acp_mode_selector: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -452,6 +468,7 @@ impl HarnessKind {
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "bypassPermissions / sandbox-off",
                 acp_mode: Some("bypassPermissions"),
+                acp_mode_selector: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -461,6 +478,7 @@ impl HarnessKind {
             (Self::Kimi, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "auto",
                 acp_mode: Some("auto"),
+                acp_mode_selector: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -470,6 +488,7 @@ impl HarnessKind {
             (Self::Grok, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "always-approve / sandbox-off",
                 acp_mode: None,
+                acp_mode_selector: None,
                 launch_flag: Some("--always-approve"),
                 launch_environment: Some(("GROK_SANDBOX", "off")),
                 launch_argument: None,
