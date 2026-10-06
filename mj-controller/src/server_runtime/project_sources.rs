@@ -10,10 +10,18 @@ pub(super) struct ProjectSourceKey {
 }
 
 impl ProjectSourceKey {
-    pub(super) fn of(session: &SessionRecord, config: &Config) -> Self {
+    pub(super) fn of(
+        session: &SessionRecord,
+        checkout: &mj_core::state::Checkout<'_>,
+        config: &Config,
+    ) -> Self {
+        let worktree = match checkout.effective() {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some((*worktree).clone()),
+            _ => None,
+        };
         Self {
-            directory: session.project_directory.clone(),
-            worktree: session.managed_worktree.clone(),
+            directory: checkout.project_directory().map(|path| path.to_path_buf()),
+            worktree,
             target: config.targets.get(&session.target_template_id).cloned(),
             fallback: session.project_source(config),
         }
@@ -74,11 +82,16 @@ impl PhoneProjectSources {
             changed.extend(state.sessions.keys().cloned());
         }
         for id in changed {
-            let key = state
-                .sessions
-                .get(&id)
-                .filter(|session| own_identity(session) && session.project_directory.is_some())
-                .map(|session| ProjectSourceKey::of(session, &controller.config));
+            let key = state.sessions.get(&id).and_then(|session| {
+                if !own_identity(session) {
+                    return None;
+                }
+                let checkout = state.checkout(&id).ok()?;
+                checkout
+                    .project_directory()
+                    .is_some()
+                    .then(|| ProjectSourceKey::of(session, &checkout, &controller.config))
+            });
             if key.is_some() && self.entries.get(&id).map(|entry| &entry.key) == key.as_ref() {
                 let entry = self.entries.get_mut(&id).expect("existing project source");
                 if state.sessions[&id].state.has_live_worker() {
@@ -133,7 +146,10 @@ impl PhoneProjectSources {
             let Some(session) = state.sessions.get(&id) else {
                 continue;
             };
-            let key = ProjectSourceKey::of(session, &controller.config);
+            let checkout = state
+                .checkout(&id)
+                .expect("pending project source has a state record");
+            let key = ProjectSourceKey::of(session, &checkout, &controller.config);
             let cancelled = Arc::new(AtomicBool::new(false));
             let last_error = self
                 .entries
@@ -228,9 +244,12 @@ impl PhoneProjectSources {
         controller: &Controller,
     ) -> Option<&ProjectSourceIdentity> {
         let session = controller.state.project_identity_session(session);
+        let checkout = controller.state.checkout(&session.id).ok()?;
         self.entries
             .get(&session.id)
-            .filter(|entry| entry.key == ProjectSourceKey::of(session, &controller.config))
+            .filter(|entry| {
+                entry.key == ProjectSourceKey::of(session, &checkout, &controller.config)
+            })
             .and_then(|entry| entry.source.as_ref())
     }
 }

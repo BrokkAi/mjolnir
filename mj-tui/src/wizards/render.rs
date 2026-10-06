@@ -1625,13 +1625,21 @@ pub(crate) fn render_resume_wizard(
             .map(|session| session.bundle_id.as_str())
             .unwrap_or("unknown");
         let target_id = nth_key(&dashboard.config.targets, wizard.target);
-        let reused_project_directory = session
-            .filter(|session| {
-                mj_client::target::resume_compatibility(session, &dashboard.config, &target_id)
-                    == Ok(mj_client::target::ResumePlan::InPlace)
-            })
-            .and_then(|session| session.project_directory.as_deref())
-            .map(|directory| directory.display().to_string());
+        let reused_project_directory = session.and_then(|session| {
+            let checkout = dashboard
+                .state
+                .checkout(&session.id)
+                .unwrap_or_else(|_| session.checkout());
+            (mj_client::target::resume_compatibility_with_checkout(
+                session,
+                &checkout,
+                &dashboard.config,
+                &target_id,
+            ) == Ok(mj_client::target::ResumePlan::InPlace))
+            .then(|| checkout.project_directory())
+            .flatten()
+            .map(|directory| directory.display().to_string())
+        });
         // An archived session has no record here, so its own title is what
         // identifies it; a plain resume names the project it reopens.
         let (project_label, project, project_note) = match wizard.source {

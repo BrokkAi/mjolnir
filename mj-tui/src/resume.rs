@@ -790,10 +790,11 @@ pub(crate) fn merged_resume_rows(
         // The record names one native thread, but a `/clear` starts another
         // and the store records it only at the next checkpoint. Every thread
         // that ran in the session's own checkout is the session's (R10-3).
-        if let Some(checkout) = &session.managed_worktree
-            && checkout.target == mj_core::state::ManagedWorktreeTarget::Local
+        if let Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. }) =
+            state.checkout(&session.id)
+            && worktree.target == mj_core::state::ManagedWorktreeTarget::Local
         {
-            own_checkouts.push(checkout.worktree_root.as_path());
+            own_checkouts.push(worktree.worktree_root.as_path());
         }
     }
     let mut rows = Vec::new();
@@ -2051,7 +2052,7 @@ impl DashboardState {
         .map(|candidate| candidate.worktree_checkout)
         .or_else(|| {
             self.session_record(&session_id).map(|session| {
-                session.managed_worktree.as_ref().is_some_and(|owned| {
+                session.checkout().managed_worktree().is_some_and(|owned| {
                     owned.kind == mj_core::state::ManagedCheckoutKind::Worktree
                 })
             })

@@ -49,6 +49,15 @@ pub(crate) fn snapshot(
     Ok(project)
 }
 
+fn has_no_recorded_checkout_directory(
+    state: &mj_core::state::State,
+    session: &mj_core::state::SessionRecord,
+) -> bool {
+    state
+        .checkout(&session.id)
+        .is_ok_and(|checkout| checkout.project_directory().is_none())
+}
+
 pub(crate) fn resolve_directory(
     target: &TargetTemplate,
     path: &Path,
@@ -149,7 +158,7 @@ fn reconcile_config(
                     || !state.sessions.values().any(|session| {
                         session.bundle_id == *id
                             && session.project.is_none()
-                            && session.project_directory.is_none()
+                            && has_no_recorded_checkout_directory(&state, session)
                     })
             })
             .map(|project| Ok(project.project.clone()))
@@ -160,7 +169,7 @@ fn reconcile_config(
                     state.sessions.values().any(|session| {
                         session.bundle_id == *id
                             && session.project.is_none()
-                            && session.project_directory.is_none()
+                            && has_no_recorded_checkout_directory(&state, session)
                     }),
                 )
             });
@@ -174,7 +183,8 @@ fn reconcile_config(
                             .sessions
                             .values()
                             .filter(|session| {
-                                session.bundle_id == *id && session.project_directory.is_none()
+                                session.bundle_id == *id
+                                    && has_no_recorded_checkout_directory(&state, session)
                             })
                             .collect::<Vec<_>>(),
                     )?;
@@ -319,16 +329,23 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 !executor.cancellation_requested(),
                 "project discovery cancelled"
             );
-            let path = change
-                .managed_worktree
-                .as_ref()
-                .map(|worktree| worktree.source_project_directory.as_path())
-                .unwrap_or(&change.directory);
+            let mut discovered_directory = change.directory.clone();
             let result = (|| {
-                let known = database::load_state()?
-                    .sessions
-                    .get(&change.session_id)
-                    .cloned();
+                let stored_state = database::load_state()?;
+                let known = stored_state.sessions.get(&change.session_id).cloned();
+                let path = stored_state
+                    .checkout(&change.session_id)
+                    .ok()
+                    .map(|checkout| match checkout {
+                        mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                            worktree.source_project_directory.clone()
+                        }
+                        mj_core::state::Checkout::Attached { path } => path.to_path_buf(),
+                        mj_core::state::Checkout::ManagedWorkspace
+                        | mj_core::state::Checkout::Borrowed { .. } => change.directory.clone(),
+                    })
+                    .unwrap_or_else(|| change.directory.clone());
+                discovered_directory.clone_from(&path);
                 let recorded = known
                     .as_ref()
                     .and_then(|session| session.target_runtime.as_ref())
@@ -352,14 +369,14 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 {
                     (session.bundle_id.clone(), project.clone())
                 } else {
-                    accept_directory(target, path, executor)?
+                    accept_directory(target, &path, executor)?
                 };
                 if let Some(session) = known.as_ref().filter(|session| session.project.is_none()) {
                     migrate_memory(&project, None, &[session])?;
                 }
                 database::bind_session_project(&change.session_id, &id, &project)?;
                 if matches!(target, TargetTemplate::LocalBare) {
-                    discover_local(path, executor)?;
+                    discover_local(&path, executor)?;
                 }
                 Ok::<_, anyhow::Error>(())
             })();
@@ -367,7 +384,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 !executor.cancellation_requested(),
                 "project discovery cancelled"
             );
-            let error = historical_discovery_error(result, path);
+            let error = historical_discovery_error(result, &discovered_directory);
             if let Some(error) = &error {
                 errors.push(error.clone());
             }

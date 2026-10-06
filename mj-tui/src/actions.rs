@@ -1814,12 +1814,13 @@ impl DashboardState {
                 }) else {
                     return DashboardAction::None;
                 };
-                let delete_branch_available = self
-                    .selected_session()
-                    .and_then(|session| session.managed_worktree.as_ref())
-                    .is_some_and(|owned| {
-                        owned.kind == mj_core::state::ManagedCheckoutKind::Worktree
-                    });
+                let delete_branch_available = self.selected_session().is_some_and(|session| {
+                    matches!(
+                        self.state.checkout(&session.id),
+                        Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. })
+                            if worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                    )
+                });
                 self.mode = crate::Mode::Confirm(
                     ConfirmDialog::new(Confirmation::ForceDestroy {
                         session_id,

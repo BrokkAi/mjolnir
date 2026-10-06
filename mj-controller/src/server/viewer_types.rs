@@ -156,13 +156,18 @@ impl ViewerSnapshot {
             .map(|session| {
                 #[cfg(test)]
                 VIEWER_ROW_VISITS.with(|visits| visits.set(visits.get() + 1));
+                let checkout = state
+                    .checkout(&session.id)
+                    .expect("viewer session has a valid checkout owner");
                 let resume_refusals = config
                     .targets
                     .keys()
                     .filter_map(|target_id| {
-                        crate::controller::resume_compatibility(session, config, target_id)
-                            .err()
-                            .map(|reason| (target_id.clone(), reason))
+                        crate::controller::resume_compatibility_with_checkout(
+                            session, &checkout, config, target_id,
+                        )
+                        .err()
+                        .map(|reason| (target_id.clone(), reason))
                     })
                     .collect::<BTreeMap<_, _>>();
                 let incompatible = resume_refusals.keys().cloned().collect::<Vec<_>>();
@@ -193,10 +198,7 @@ impl ViewerSnapshot {
                     quota_recovery: None,
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
-                    managed_checkout_kind: session
-                        .managed_worktree
-                        .as_ref()
-                        .map(|owned| owned.kind),
+                    managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
                     workspace_id: session.workspace_id.clone(),
                     title: public_title(session),
                     subagent_parent_id: subagent.map(|child| child.parent_session_id.clone()),

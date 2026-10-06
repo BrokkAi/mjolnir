@@ -224,15 +224,17 @@ impl RuntimeState {
             let session_id = session_id.clone();
             move || {
                 let controller = Controller::load()?;
-                let Some(checkout) = controller
-                    .state
-                    .sessions
-                    .get(&session_id)
-                    .and_then(|session| session.managed_worktree.as_ref())
-                    .filter(|checkout| checkout.kind == mj_core::state::ManagedCheckoutKind::Clone)
-                else {
-                    return Ok(None);
+                let checkout = match controller.state.checkout(&session_id)? {
+                    mj_core::state::Checkout::ManagedWorktree { worktree, .. }
+                        if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone =>
+                    {
+                        worktree
+                    }
+                    _ => return Ok(None),
                 };
+                if !controller.state.sessions.contains_key(&session_id) {
+                    return Ok(None);
+                }
                 if crate::controller::path_exists_on_managed_target(
                     &crate::targets::ProcessExecutor,
                     &checkout.target,
@@ -333,20 +335,23 @@ impl RuntimeState {
                         .is_ok_and(|time| time.with_timezone(&chrono::Utc) <= cutoff)
                 })
                 .filter(|session| {
-                    session.managed_worktree.as_ref().is_some_and(|owned| {
-                        owned.kind == mj_core::state::ManagedCheckoutKind::Clone
-                    })
-                })
-                .filter(|session| {
                     session.publication.as_ref().is_none_or(|evidence| {
                         evidence.state != mj_core::state::PublicationState::Published
                             && !evidence.dirty
                             && !evidence.stashed
                     })
                 })
-                .cloned()
+                .filter_map(|session| {
+                    let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
+                        controller.state.checkout(&session.id).ok()?
+                    else {
+                        return None;
+                    };
+                    (worktree.kind == mj_core::state::ManagedCheckoutKind::Clone)
+                        .then(|| (session.clone(), worktree.clone()))
+                })
                 .collect::<Vec<_>>();
-            sessions.sort_by(|a, b| {
+            sessions.sort_by(|(a, _), (b, _)| {
                 a.publication
                     .as_ref()
                     .map(|e| &e.checked_at)
@@ -357,10 +362,12 @@ impl RuntimeState {
         })
         .await?;
         let mut checks = tokio::task::JoinSet::new();
-        for session in refreshable {
+        for (session, checkout) in refreshable {
             checks.spawn_blocking(move || {
                 let assessment =
-                    crate::controller::publication::refresh_stopped_clone_publication(&session);
+                    crate::controller::publication::refresh_stopped_clone_publication_for_worktree(
+                        &session, &checkout,
+                    );
                 (session.id, assessment)
             });
         }
@@ -380,9 +387,8 @@ impl RuntimeState {
         }
         let (candidates, children) = blocking(move || {
             let controller = Controller::load()?;
-            let candidates = crate::sessionwiki::sessions_ready_to_archive(
-                &controller.state.sessions,
-                &controller.state.subagents,
+            let candidates = crate::sessionwiki::sessions_ready_to_archive_from_state(
+                &controller.state,
                 chrono::Utc::now(),
                 older_than_days,
             );

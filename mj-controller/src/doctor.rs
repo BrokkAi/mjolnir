@@ -2981,23 +2981,35 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
 /// a repository a live session is working in, because its refs are in use; a
 /// linked worktree shares its refs with the repository it came from, so a live
 /// worktree session keeps that repository out too.
-pub(crate) fn review_residue_repositories(
+fn review_residue_repositories_for_state(
     configured: impl IntoIterator<Item = PathBuf>,
-    sessions: &[&mj_core::state::SessionRecord],
+    state: &mj_core::state::State,
 ) -> Vec<PathBuf> {
     use mj_core::state::ManagedCheckoutKind;
 
-    let managed_roots = sessions
-        .iter()
-        .filter_map(|session| session.managed_worktree.as_ref())
-        .map(|worktree| worktree.worktree_root.as_path())
+    let managed_roots = state
+        .sessions
+        .keys()
+        .filter_map(|session_id| match state.checkout(session_id).ok()? {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                Some(worktree.worktree_root.as_path())
+            }
+            _ => None,
+        })
         .collect::<Vec<_>>();
     let mut in_use = Vec::new();
-    for session in sessions.iter().filter(|session| session.state.is_active()) {
-        if let Some(directory) = &session.project_directory {
-            in_use.push(directory.as_path());
+    for session in state
+        .sessions
+        .values()
+        .filter(|session| session.state.is_active())
+    {
+        let Ok(checkout) = state.checkout(&session.id) else {
+            continue;
+        };
+        if let Some(directory) = checkout.project_directory() {
+            in_use.push(directory);
         }
-        if let Some(worktree) = &session.managed_worktree
+        if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } = checkout.effective()
             && worktree.kind == ManagedCheckoutKind::Worktree
         {
             in_use.push(worktree.source_repository.as_path());
@@ -3005,11 +3017,13 @@ pub(crate) fn review_residue_repositories(
     }
     let mut repositories = configured
         .into_iter()
-        .chain(
-            sessions
-                .iter()
-                .filter_map(|session| session.project_directory.clone()),
-        )
+        .chain(state.sessions.keys().filter_map(|session_id| {
+            state
+                .checkout(session_id)
+                .ok()?
+                .project_directory()
+                .map(Path::to_path_buf)
+        }))
         .filter(|repository| {
             !is_inside_managed_checkout(repository)
                 && !managed_roots
@@ -3021,6 +3035,20 @@ pub(crate) fn review_residue_repositories(
     repositories.sort();
     repositories.dedup();
     repositories
+}
+
+#[cfg(test)]
+pub(crate) fn review_residue_repositories(
+    configured: impl IntoIterator<Item = PathBuf>,
+    sessions: &[&mj_core::state::SessionRecord],
+) -> Vec<PathBuf> {
+    let mut state = mj_core::state::State::default();
+    for session in sessions {
+        state
+            .sessions
+            .insert(session.id.clone(), (**session).clone());
+    }
+    review_residue_repositories_for_state(configured, &state)
 }
 
 /// Whether `path` is at or under `<repository>/.mj/clones/<id>` or
@@ -3052,11 +3080,9 @@ fn review_residue_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
     // A daemon-less machine has no session database, which is not a reason to
     // skip the configured repositories.
     let state = crate::database::load_state().ok();
-    let sessions = state
-        .as_ref()
-        .map(|state| state.sessions.values().collect::<Vec<_>>())
-        .unwrap_or_default();
-    let repositories = review_residue_repositories(configured, &sessions);
+    let empty_state = mj_core::state::State::default();
+    let state = state.as_ref().unwrap_or(&empty_state);
+    let repositories = review_residue_repositories_for_state(configured, state);
     if repositories.is_empty() {
         return Vec::new();
     }

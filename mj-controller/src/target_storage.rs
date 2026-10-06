@@ -355,10 +355,11 @@ pub fn worker_root_problem(
 /// own filesystems is full: its worker root, workspace, profile home or
 /// `/tmp`.
 pub fn session_problem(session: &mj_core::state::SessionRecord) -> Option<String> {
+    let checkout = session.checkout();
     located_session_problem(
         session.target.as_ref()?,
         &session.id,
-        session.project_directory.as_deref(),
+        checkout.project_directory(),
     )
 }
 

@@ -379,6 +379,269 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     assert!(!state.is_subagent_session(&parent.id), "the owner");
 }
 
+fn checkout_session(id: &str) -> SessionRecord {
+    let mut session = sample_session();
+    session.id = id.to_owned();
+    session
+}
+
+fn managed_checkout_record(
+    id: &str,
+    kind: ManagedCheckoutKind,
+    project_directory: Option<PathBuf>,
+    target: ManagedWorktreeTarget,
+) -> SessionRecord {
+    let mut session = checkout_session(id);
+    let repository = PathBuf::from("/srv/project");
+    let worktree_root = repository
+        .join(".mj")
+        .join(match kind {
+            ManagedCheckoutKind::Worktree => "worktrees",
+            ManagedCheckoutKind::Clone => "clones",
+        })
+        .join(id);
+    session.project_directory = project_directory;
+    session.managed_worktree = Some(ManagedWorktree {
+        kind,
+        source_project_directory: repository.join("packages/app"),
+        source_repository: repository,
+        worktree_root,
+        branch: match kind {
+            ManagedCheckoutKind::Worktree => format!("mj/{id}"),
+            ManagedCheckoutKind::Clone => "main".into(),
+        },
+        target,
+        base_commit: None,
+    });
+    session
+}
+
+#[test]
+fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
+    let mut state = State::default();
+
+    let mut local_non_git = checkout_session("local-non-git");
+    local_non_git.project_directory = Some(PathBuf::from("/work/plain-directory"));
+    local_non_git.create_managed_worktree = Some(true);
+    local_non_git.target = Some(TargetLocator::LocalBare {
+        worker_root: PathBuf::from("/var/lib/mj/workers/local-non-git"),
+    });
+    state
+        .sessions
+        .insert(local_non_git.id.clone(), local_non_git.clone());
+
+    let mut ssh_raw = checkout_session("ssh-raw");
+    ssh_raw.project_directory = Some(PathBuf::from("/home/dev/project"));
+    ssh_raw.target = Some(TargetLocator::SshBare {
+        host: "dev.example.test".into(),
+        workspace: PathBuf::from("/home/dev"),
+        worker_id: None,
+    });
+    state.sessions.insert(ssh_raw.id.clone(), ssh_raw.clone());
+
+    let raw_worktree_path =
+        PathBuf::from("/srv/project/.mj/worktrees/managed-worktree/packages/app");
+    let managed_worktree = managed_checkout_record(
+        "managed-worktree",
+        ManagedCheckoutKind::Worktree,
+        Some(raw_worktree_path.clone()),
+        ManagedWorktreeTarget::Local,
+    );
+    state
+        .sessions
+        .insert(managed_worktree.id.clone(), managed_worktree.clone());
+
+    let raw_clone_path = PathBuf::from("/srv/project/.mj/clones/managed-clone/packages/app");
+    let managed_clone = managed_checkout_record(
+        "managed-clone",
+        ManagedCheckoutKind::Clone,
+        Some(raw_clone_path.clone()),
+        ManagedWorktreeTarget::Ssh {
+            destination: "dev@example.test".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        },
+    );
+    state
+        .sessions
+        .insert(managed_clone.id.clone(), managed_clone.clone());
+
+    let bundle_workspace = checkout_session("bundle-workspace");
+    state
+        .sessions
+        .insert(bundle_workspace.id.clone(), bundle_workspace.clone());
+    let mut saved_project_workspace = checkout_session("saved-project-workspace");
+    let bundle = sample_config().bundles["hel"].clone();
+    saved_project_workspace.project = Some(crate::repository::ProjectBundleSnapshot {
+        identities: BTreeMap::from([(
+            "hel".into(),
+            crate::repository::RepositoryIdentity::from_remote(
+                "https://github.com/BrokkAi/hel.git",
+            )
+            .expect("valid repository identity"),
+        )]),
+        bundle,
+        network_sources: Default::default(),
+    });
+    state.sessions.insert(
+        saved_project_workspace.id.clone(),
+        saved_project_workspace.clone(),
+    );
+
+    // A legacy record with neither checkout field is still a managed bundle
+    // workspace, even when its accepted project snapshot was not persisted.
+    let mut legacy_workspace = checkout_session("legacy-workspace");
+    legacy_workspace.project = None;
+    state
+        .sessions
+        .insert(legacy_workspace.id.clone(), legacy_workspace.clone());
+
+    // Incomplete managed legacy data keeps managed ownership; its actual
+    // project directory is unknown instead of being silently treated as user-owned.
+    let incomplete_managed = managed_checkout_record(
+        "incomplete-managed",
+        ManagedCheckoutKind::Worktree,
+        None,
+        ManagedWorktreeTarget::Local,
+    );
+    state
+        .sessions
+        .insert(incomplete_managed.id.clone(), incomplete_managed.clone());
+
+    // Invalid legacy data with a managed descriptor and unrelated raw path
+    // still gets one deterministic result: cleanup follows the descriptor,
+    // while location readers retain the recorded project path. State
+    // validation rejects this shape before it can be persisted again.
+    let inconsistent_managed = managed_checkout_record(
+        "inconsistent-managed",
+        ManagedCheckoutKind::Worktree,
+        Some(PathBuf::from("/home/dev/other-project")),
+        ManagedWorktreeTarget::Local,
+    );
+    state
+        .sessions
+        .insert(inconsistent_managed.id.clone(), inconsistent_managed);
+
+    let add_child = |state: &mut State, id: &str, parent: &SessionRecord| {
+        let mut child = checkout_session(id);
+        child.project_directory = parent.project_directory.clone();
+        child.managed_worktree = None;
+        state.sessions.insert(child.id.clone(), child.clone());
+        state.subagents.insert(
+            child.id.clone(),
+            crate::subagent::SubagentRecord {
+                child_session_id: child.id.clone(),
+                parent_session_id: parent.id.clone(),
+                task_name: "Borrow checkout".into(),
+                profile_id: child.last_profile.clone(),
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                initial_prompt: "Borrow checkout".into(),
+                request_key: format!("request-{id}"),
+                created_at: child.created_at.clone(),
+                noticed_turn: None,
+                handback_tool: false,
+            },
+        );
+    };
+    add_child(&mut state, "child-attached", &local_non_git);
+    add_child(&mut state, "child-managed-worktree", &managed_worktree);
+    add_child(&mut state, "child-managed-clone", &managed_clone);
+    add_child(&mut state, "child-bundle-workspace", &bundle_workspace);
+    add_child(
+        &mut state,
+        "child-saved-project-workspace",
+        &saved_project_workspace,
+    );
+
+    assert!(matches!(
+        state.checkout("local-non-git").unwrap(),
+        Checkout::Attached { path } if path == Path::new("/work/plain-directory")
+    ));
+    assert!(matches!(
+        state.checkout("ssh-raw").unwrap(),
+        Checkout::Attached { path } if path == Path::new("/home/dev/project")
+    ));
+    assert!(matches!(
+        state.checkout("managed-worktree").unwrap(),
+        Checkout::ManagedWorktree { worktree, project_directory: Some(path) }
+            if worktree.kind == ManagedCheckoutKind::Worktree && path == raw_worktree_path
+    ));
+    assert!(matches!(
+        state.checkout("managed-clone").unwrap(),
+        Checkout::ManagedWorktree { worktree, project_directory: Some(path) }
+            if worktree.kind == ManagedCheckoutKind::Clone && path == raw_clone_path
+    ));
+    assert!(matches!(
+        state.checkout("bundle-workspace").unwrap(),
+        Checkout::ManagedWorkspace
+    ));
+    assert!(matches!(
+        state.checkout("saved-project-workspace").unwrap(),
+        Checkout::ManagedWorkspace
+    ));
+    assert!(matches!(
+        state.checkout("legacy-workspace").unwrap(),
+        Checkout::ManagedWorkspace
+    ));
+    assert!(matches!(
+        state.checkout("incomplete-managed").unwrap(),
+        Checkout::ManagedWorktree {
+            project_directory: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        state.checkout("inconsistent-managed").unwrap(),
+        Checkout::ManagedWorktree {
+            project_directory: Some(path),
+            ..
+        } if path == Path::new("/home/dev/other-project")
+    ));
+
+    for (child_id, parent_id, expected_kind) in [
+        ("child-attached", "local-non-git", "attached"),
+        (
+            "child-managed-worktree",
+            "managed-worktree",
+            "managed-worktree",
+        ),
+        ("child-managed-clone", "managed-clone", "managed-worktree"),
+        (
+            "child-bundle-workspace",
+            "bundle-workspace",
+            "managed-workspace",
+        ),
+        (
+            "child-saved-project-workspace",
+            "saved-project-workspace",
+            "managed-workspace",
+        ),
+    ] {
+        let checkout = state.checkout(child_id).unwrap();
+        let Checkout::Borrowed { owner, .. } = &checkout else {
+            panic!("{child_id} must borrow its parent's checkout");
+        };
+        assert_eq!(owner.id, parent_id);
+        assert!(matches!(
+            (expected_kind, checkout.effective()),
+            ("attached", Checkout::Attached { .. })
+                | ("managed-worktree", Checkout::ManagedWorktree { .. })
+                | ("managed-workspace", Checkout::ManagedWorkspace)
+        ));
+    }
+
+    let mut projected_child = state.sessions["child-managed-worktree"].clone();
+    projected_child.project_directory = Some(PathBuf::from("/wrong/copied/path"));
+    assert!(matches!(
+        state
+            .checkout_for_record("child-managed-worktree", &projected_child)
+            .unwrap(),
+        Checkout::Borrowed { checkout, .. }
+            if checkout.project_directory() == Some(raw_worktree_path.as_path())
+    ));
+}
+
 #[test]
 fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinations() {
     let config = sample_config();

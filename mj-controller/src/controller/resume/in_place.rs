@@ -156,6 +156,11 @@ impl Controller {
                 .get(session_id)
                 .with_context(|| format!("unknown session {session_id}"))?
                 .clone();
+            let previous_project_directory = self
+                .state
+                .checkout(session_id)?
+                .project_directory()
+                .map(|path| path.to_path_buf());
             let move_operation = if mode == InPlaceRestoreMode::Move {
                 crate::database::load_move_operation(session_id)?
             } else {
@@ -308,7 +313,7 @@ impl Controller {
                         profile: &profile,
                         archive: &verified_archive,
                         restored_archive: &verified_archive.archive_path,
-                        resumed_project_directory: previous.project_directory.clone(),
+                        resumed_project_directory: previous_project_directory,
                         resumed_container_workspace: previous.container_workspace.clone(),
                         // The repositories are already in the workspace, untouched
                         // by the swap; only the harness state is restored.
@@ -413,13 +418,22 @@ impl Controller {
                 "verify retained worker root",
             )?,
         )?;
-        if let Some(checkout) = &previous.managed_worktree {
-            ensure!(
-                super::managed_worktree_checkout_exists(executor, checkout)?,
-                "retained checkout is missing; refusing to recreate it"
-            );
-        } else if let Some(path) = &previous.project_directory {
-            self.validate_project_directory(target_template_id, path, executor)?;
+        match self.state.checkout(session_id)? {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                ensure!(
+                    super::managed_worktree_checkout_exists(executor, worktree)?,
+                    "retained checkout is missing; refusing to recreate it"
+                );
+            }
+            mj_core::state::Checkout::Attached { path } => {
+                self.validate_project_directory(target_template_id, path, executor)?;
+            }
+            checkout @ mj_core::state::Checkout::Borrowed { .. } => {
+                if let Some(path) = checkout.project_directory() {
+                    self.validate_project_directory(target_template_id, path, executor)?;
+                }
+            }
+            mj_core::state::Checkout::ManagedWorkspace => {}
         }
         let source_profile = self
             .config

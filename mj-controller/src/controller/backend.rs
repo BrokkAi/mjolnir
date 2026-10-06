@@ -277,10 +277,11 @@ impl Controller {
             .values()
             .filter(|session| session.target_template_id == target_id && session.state.is_active())
             .filter_map(|session| {
+                let checkout = self.state.checkout(&session.id).ok()?;
                 let paths = mj_core::targets::storage::session_storage_paths(
                     session.target.as_ref()?,
                     &session.id,
-                    session.project_directory.as_deref(),
+                    checkout.project_directory(),
                 );
                 Some(paths.all().map(str::to_owned).collect::<Vec<_>>())
             })

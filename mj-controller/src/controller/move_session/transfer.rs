@@ -317,13 +317,20 @@ impl Controller {
                         executor,
                     );
                 }
-                if let Some(checkout) = &source.managed_worktree {
+                if let mj_core::state::Checkout::ManagedWorktree {
+                    worktree: checkout, ..
+                } = source.checkout()
+                {
                     ensure!(
-                        !self
-                            .state
-                            .sessions
-                            .values()
-                            .any(|session| session.managed_worktree.as_ref() == Some(checkout)),
+                        !self.state.sessions.keys().any(|session_id| {
+                            matches!(
+                                self.state.checkout(session_id),
+                                Ok(mj_core::state::Checkout::ManagedWorktree {
+                                    worktree: other,
+                                    ..
+                                }) if other == checkout
+                            )
+                        }),
                         "retained checkout is still referenced by a session"
                     );
                     super::super::worktree::retire_managed_worktree(executor, checkout)?;
@@ -918,7 +925,10 @@ impl Controller {
                     executor,
                 );
             }
-            if let Some(checkout) = &source.managed_worktree {
+            if let mj_core::state::Checkout::ManagedWorktree {
+                worktree: checkout, ..
+            } = source.checkout()
+            {
                 super::super::worktree::retire_managed_worktree(executor, checkout)?;
             }
         }
@@ -975,10 +985,16 @@ impl Controller {
                         executor,
                     );
                 }
-                if let Some(checkout) = &current.managed_worktree
-                    && Some(checkout) != transfer.source.managed_worktree.as_ref()
+                let source_checkout = transfer.source.checkout();
+                let source_worktree = match source_checkout {
+                    mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
+                    _ => None,
+                };
+                if let Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. }) =
+                    self.state.checkout(id)
+                    && Some(worktree) != source_worktree
                 {
-                    super::super::worktree::retire_managed_worktree(executor, checkout)?;
+                    super::super::worktree::retire_managed_worktree(executor, worktree)?;
                 }
                 let mut source = (*transfer.source).clone();
                 source.state = SessionState::Error;

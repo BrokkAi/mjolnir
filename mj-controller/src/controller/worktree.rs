@@ -13,7 +13,7 @@ use mj_core::state::{
 
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, SshTarget};
 pub(crate) use mj_client::target::managed_worktree_target;
-pub use mj_client::target::{ResumePlan, resume_compatibility};
+pub use mj_client::target::{ResumePlan, resume_compatibility, resume_compatibility_with_checkout};
 
 use super::{BranchDisposition, Controller, execute_checked, now};
 
@@ -136,18 +136,19 @@ impl Controller {
         if session.project.is_some() {
             return Ok(session.project_source(&self.config));
         }
-        let Some(directory) = session.project_directory.as_deref() else {
+        let checkout = self.state.checkout(session_id)?;
+        let Some(directory) = checkout.project_directory() else {
             return Ok(session.project_source(&self.config));
         };
-        let (target, origin_directory) = match &session.managed_worktree {
+        let (target, origin_directory) = match checkout.effective() {
             // The source repository is the durable owner of a linked
             // worktree's shared Git configuration and remains available while
             // a stopped session's checkout is retired.
-            Some(worktree) => (
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => (
                 worktree.target.clone(),
                 worktree.source_repository.as_path(),
             ),
-            None => (
+            mj_core::state::Checkout::Attached { .. } => (
                 managed_worktree_target(
                     self.config
                         .targets
@@ -161,6 +162,12 @@ impl Controller {
                 )?,
                 directory,
             ),
+            mj_core::state::Checkout::ManagedWorkspace => {
+                return Ok(session.project_source(&self.config));
+            }
+            mj_core::state::Checkout::Borrowed { .. } => {
+                unreachable!("effective checkout resolves borrowing")
+            }
         };
         let output = executor.execute(&managed_git_command(
             &target,
@@ -277,12 +284,17 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
-        let Some(selected) = session.project_directory.as_deref() else {
+        let checkout = self.state.checkout(session_id)?;
+        let selected = match checkout {
+            mj_core::state::Checkout::Attached { path } => Some(path.to_path_buf()),
+            mj_core::state::Checkout::ManagedWorktree { .. }
+            | mj_core::state::Checkout::ManagedWorkspace
+            | mj_core::state::Checkout::Borrowed { .. } => None,
+        };
+        drop(checkout);
+        let Some(selected) = selected else {
             return Ok(false);
         };
-        if session.managed_worktree.is_some() {
-            return Ok(false);
-        }
         if session.create_managed_worktree == Some(false) {
             return Ok(false);
         }
@@ -292,11 +304,11 @@ impl Controller {
             .get(&session.target_template_id)
             .context("raw session target template disappeared during provisioning")?;
         if matches!(template, TargetTemplate::SshBare { .. }) {
-            self.validate_project_directory(&session.target_template_id, selected, executor)?;
+            self.validate_project_directory(&session.target_template_id, &selected, executor)?;
         }
         let target = managed_worktree_target(template)?;
         if matches!(target, ManagedWorktreeTarget::Local)
-            && local_project_repository(selected, executor)?.is_none()
+            && local_project_repository(&selected, executor)?.is_none()
         {
             // A requested launch base asks for the same worktree an explicit
             // request does, so it must fail here rather than launch without
@@ -307,7 +319,7 @@ impl Controller {
             );
             return Ok(false);
         }
-        let inspection = inspect_raw_project(executor, &target, selected)?;
+        let inspection = inspect_raw_project(executor, &target, &selected)?;
         if !inspection.primary_checkout
             && session.create_managed_worktree != Some(true)
             && session.launch_base.is_none()
@@ -396,11 +408,11 @@ impl Controller {
         session_id: &str,
         executor: &impl CommandExecutor,
     ) -> Result<()> {
-        let Some(worktree) = self
-            .state
-            .sessions
-            .get(session_id)
-            .and_then(|session| session.managed_worktree.as_ref())
+        if !self.state.sessions.contains_key(session_id) {
+            return Ok(());
+        }
+        let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
+            self.state.checkout(session_id)?
         else {
             return Ok(());
         };
@@ -875,21 +887,29 @@ impl RawToWorkspaceConversion {
 
 /// Resolve where a raw session's checkout lives and the bundle definition that
 /// will stand in for it. Reads Git; changes nothing.
+#[cfg(test)]
 pub(super) fn plan_raw_to_workspace(
     session: &SessionRecord,
     executor: &impl CommandExecutor,
 ) -> Result<RawToWorkspaceConversion> {
-    let project_directory = session
-        .project_directory
-        .as_deref()
+    let checkout = session.checkout();
+    plan_raw_to_workspace_with_checkout(&checkout, executor)
+}
+
+pub(super) fn plan_raw_to_workspace_with_checkout(
+    checkout: &mj_core::state::Checkout<'_>,
+    executor: &impl CommandExecutor,
+) -> Result<RawToWorkspaceConversion> {
+    let project_directory = checkout
+        .project_directory()
         .context("a raw session has no project directory")?;
     // The checkpoint describes the session's directory as if it were the
     // repository root, so only a whole checkout can move. Each branch checks
     // this against paths from one domain: the record's own paths for a managed
     // worktree, Git's canonical paths for an inspected checkout — the record
     // may reach the same checkout through a symlink (macOS temp directories).
-    let (checkout, repository, retire) = match &session.managed_worktree {
-        Some(worktree) => {
+    let (checkout, repository, retire) = match checkout {
+        mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
             ensure!(
                 worktree.worktree_root == project_directory,
                 "{} is a subdirectory of its checkout; only a whole checkout can move into a target",
@@ -898,10 +918,10 @@ pub(super) fn plan_raw_to_workspace(
             (
                 worktree.worktree_root.clone(),
                 worktree.source_repository.clone(),
-                Some(worktree.clone()),
+                Some((**worktree).clone()),
             )
         }
-        None => {
+        mj_core::state::Checkout::Attached { .. } | mj_core::state::Checkout::Borrowed { .. } => {
             let inspection =
                 inspect_raw_project(executor, &ManagedWorktreeTarget::Local, project_directory)?;
             ensure!(
@@ -911,6 +931,9 @@ pub(super) fn plan_raw_to_workspace(
             );
             let repository = canonical_repository(&inspection.source_repository)?;
             (inspection.source_repository, repository, None)
+        }
+        mj_core::state::Checkout::ManagedWorkspace => {
+            bail!("a bundle workspace cannot be converted as a raw checkout")
         }
     };
     // The archive names the session's directory as the repository destination,
@@ -1058,8 +1081,18 @@ fn git_runner_stdout(
 
 /// Describe a raw-to-workspace conversion for a person to confirm. Reads Git
 /// and asks the remote for its default branch; changes nothing.
+#[cfg(test)]
 pub(super) fn raw_conversion_preview(
     session: &SessionRecord,
+    conversion: &RawToWorkspaceConversion,
+    executor: &(impl CommandExecutor + Sync),
+) -> Result<mj_core::state::RawConversionPreview> {
+    raw_conversion_preview_with_checkout(session, &session.checkout(), conversion, executor)
+}
+
+pub(super) fn raw_conversion_preview_with_checkout(
+    session: &SessionRecord,
+    session_checkout: &mj_core::state::Checkout<'_>,
     conversion: &RawToWorkspaceConversion,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::RawConversionPreview> {
@@ -1073,9 +1106,8 @@ pub(super) fn raw_conversion_preview(
     let dirty = dirty_file_counts(executor, checkout)?;
     // The archive names the session's own directory, which is where the
     // restored harness session looks for its files inside the target.
-    let directory = session
-        .project_directory
-        .as_deref()
+    let directory = session_checkout
+        .project_directory()
         .context("a raw session has no project directory")?
         .file_name()
         .context("a raw project directory cannot be the filesystem root")?;
@@ -1385,15 +1417,32 @@ pub(super) fn managed_worktree_base_commit(
 
 /// Read where a raw session's checkout stands right now, on whichever host
 /// owns it.
+#[cfg(test)]
 pub(super) fn raw_checkout_position(
     session: &SessionRecord,
     config: &Config,
     project_directory: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<CheckoutPosition> {
-    let target = match &session.managed_worktree {
-        Some(worktree) => worktree.target.clone(),
-        None => {
+    let checkout = match session.checkout() {
+        checkout @ mj_core::state::Checkout::ManagedWorktree { .. } => checkout,
+        _ => mj_core::state::Checkout::Attached {
+            path: project_directory,
+        },
+    };
+    raw_checkout_position_with_checkout(session, &checkout, config, project_directory, executor)
+}
+
+pub(super) fn raw_checkout_position_with_checkout(
+    session: &SessionRecord,
+    checkout: &mj_core::state::Checkout<'_>,
+    config: &Config,
+    project_directory: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<CheckoutPosition> {
+    let target = match checkout.effective() {
+        mj_core::state::Checkout::ManagedWorktree { worktree, .. } => worktree.target.clone(),
+        mj_core::state::Checkout::Attached { .. } => {
             let runtime = session.target_runtime_settings(config)?;
             match (&*runtime.kind, &runtime.connection) {
                 ("local-bare", mj_core::state::TargetConnection::Local) => {
@@ -1408,6 +1457,9 @@ pub(super) fn raw_checkout_position(
                 }
                 _ => bail!("the session's recorded target is not a bare checkout"),
             }
+        }
+        mj_core::state::Checkout::ManagedWorkspace | mj_core::state::Checkout::Borrowed { .. } => {
+            bail!("the session's recorded target is not a bare checkout")
         }
     };
     read_checkout_position(executor, &target, project_directory)

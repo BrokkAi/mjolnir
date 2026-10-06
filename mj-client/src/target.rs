@@ -2,7 +2,7 @@
 
 use anyhow::{Result, bail};
 use mj_core::config::{Config, TargetTemplate, is_bare_project_target};
-use mj_core::state::{ManagedWorktreeTarget, SessionRecord};
+use mj_core::state::{Checkout, ManagedWorktreeTarget, SessionRecord};
 
 // Published from containers/Containerfile.agent-dev by
 // .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
@@ -61,17 +61,35 @@ pub fn resume_compatibility(
     config: &Config,
     target_id: &str,
 ) -> Result<ResumePlan, String> {
+    let checkout = session.checkout();
+    resume_compatibility_with_checkout(session, &checkout, config, target_id)
+}
+
+/// The same compatibility decision using a checkout resolved by State when
+/// the caller has the session's sub-agent relationship available.
+pub fn resume_compatibility_with_checkout(
+    session: &SessionRecord,
+    checkout: &Checkout<'_>,
+    config: &Config,
+    target_id: &str,
+) -> Result<ResumePlan, String> {
     let Some(target) = config.targets.get(target_id) else {
         return Err(format!("target {target_id} is no longer configured"));
     };
-    let Some(project_directory) = &session.project_directory else {
+    let project_directory = checkout.project_directory();
+    let Some(project_directory) = project_directory else {
         if matches!(target, TargetTemplate::LocalBare) {
             return workspace_to_raw_compatibility(session, config);
         }
         return Ok(ResumePlan::InPlace);
     };
     let directory = project_directory.display();
-    let Some(worktree) = &session.managed_worktree else {
+    let worktree = match checkout {
+        Checkout::ManagedWorktree { worktree, .. } => Some(*worktree),
+        Checkout::Attached { .. } | Checkout::Borrowed { .. } => None,
+        Checkout::ManagedWorkspace => None,
+    };
+    let Some(worktree) = worktree else {
         let Some(previous) = config.targets.get(&session.target_template_id) else {
             return Err(
                 "the bare target this session last used is no longer configured".to_owned(),
@@ -112,9 +130,7 @@ pub fn resume_compatibility(
         )),
         // A whole managed worktree on this machine converts: the resume
         // re-snapshots it against the owning checkout's network remote.
-        Err(_) if Some(&worktree.worktree_root) == session.project_directory.as_ref() => {
-            Ok(ResumePlan::RawToWorkspace)
-        }
+        Err(_) if worktree.worktree_root == project_directory => Ok(ResumePlan::RawToWorkspace),
         Err(_) => Err(format!(
             "this session opens {directory}, a subdirectory of its checkout; resume it on a bare target"
         )),

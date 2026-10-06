@@ -5,12 +5,12 @@ impl Controller {
         &self,
         id: &str,
     ) -> Option<&mj_core::state::ManagedWorktree> {
-        let relation = self.state.subagents.get(id)?;
-        self.state
-            .sessions
-            .get(&relation.parent_session_id)?
-            .managed_worktree
-            .as_ref()
+        match self.state.checkout(id).ok()?.effective() {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
+            mj_core::state::Checkout::Attached { .. }
+            | mj_core::state::Checkout::ManagedWorkspace
+            | mj_core::state::Checkout::Borrowed { .. } => None,
+        }
     }
 }
 

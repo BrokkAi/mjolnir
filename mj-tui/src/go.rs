@@ -213,12 +213,11 @@ impl DashboardState {
                 "{} · {} · {}",
                 lines[0], session.last_profile, session.target_template_id
             );
-            let sharing = if session.managed_worktree.is_some() {
-                "separate checkout"
-            } else if session.project_directory.is_some() {
-                "shared folder"
-            } else {
-                "isolated checkout"
+            let sharing = match self.state.checkout(&session.id) {
+                Ok(mj_core::state::Checkout::ManagedWorktree { .. }) => "separate checkout",
+                Ok(mj_core::state::Checkout::Attached { .. })
+                | Ok(mj_core::state::Checkout::Borrowed { .. }) => "shared folder",
+                Ok(mj_core::state::Checkout::ManagedWorkspace) | Err(_) => "isolated checkout",
             };
             match self.go_contexts.get(&session.id) {
                 Some(Ok((directory, branch))) => lines.push(format!(

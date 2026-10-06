@@ -275,19 +275,35 @@ impl Controller {
         let publication = if disposition == SourceTargetDisposition::RetainForInPlaceSwap {
             None
         } else {
-            match previous.managed_worktree.as_ref().map(|owned| owned.kind) {
-                Some(ManagedCheckoutKind::Clone) => Some(
-                    super::publication::assess_clone_checkpoint(&previous, &artifact.metadata),
-                ),
-                Some(ManagedCheckoutKind::Worktree) => None,
-                None if previous.project_directory.is_none() => {
+            let checkout = self.state.checkout(session_id)?;
+            match &checkout {
+                mj_core::state::Checkout::ManagedWorktree { worktree, .. }
+                    if worktree.kind == ManagedCheckoutKind::Clone =>
+                {
+                    Some(super::publication::assess_clone_checkpoint_for_worktree(
+                        worktree,
+                        &artifact.metadata,
+                    ))
+                }
+                mj_core::state::Checkout::ManagedWorkspace => {
                     Some(super::publication::assess_network_checkpoint(
                         &previous,
                         &artifact.metadata,
                         &self.config,
                     ))
                 }
-                None => None,
+                mj_core::state::Checkout::Borrowed { .. }
+                    if checkout.project_directory().is_none() =>
+                {
+                    Some(super::publication::assess_network_checkpoint(
+                        &previous,
+                        &artifact.metadata,
+                        &self.config,
+                    ))
+                }
+                mj_core::state::Checkout::Attached { .. }
+                | mj_core::state::Checkout::ManagedWorktree { .. }
+                | mj_core::state::Checkout::Borrowed { .. } => None,
             }
         };
         if !acknowledge_unpublished_work
@@ -931,7 +947,9 @@ impl Controller {
                     execute_target_cleanup(&backend, &destroying, &self.config, executor)?;
                     false
                 };
-                if let Some(worktree) = &destroying.managed_worktree {
+                if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
+                    self.state.checkout(session_id)?
+                {
                     retire_managed_worktree(executor, worktree)
                         .context("retire managed raw-session worktree after verified close")?;
                 }
@@ -1094,6 +1112,7 @@ impl Controller {
             executor,
             || {
                 let mut deferred = false;
+                let checkout = self.state.checkout(session_id)?;
                 if let Some(locator) = &session.target {
                     let backend = backend_locator(locator, session, &self.config)?;
                     // A sub-agent borrows its parent's target: only its own worker and
@@ -1109,7 +1128,7 @@ impl Controller {
                         execute_target_cleanup(&backend, session, &self.config, executor)?;
                     }
                 }
-                if let Some(worktree) = &session.managed_worktree {
+                if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } = checkout {
                     retire_managed_worktree(executor, worktree)
                         .context("retire managed raw-session worktree after stopping the target")?;
                 }
@@ -1191,7 +1210,9 @@ impl Controller {
             self.cleanup_prepared_move_destination(&mut operation, executor)?;
         }
         let mut retained_checkout = None;
-        if let Some(worktree) = &session.managed_worktree {
+        if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
+            self.state.checkout(session_id)?
+        {
             let keep = checkout == CheckoutDisposition::KeepWhenDirty
                 && (worktree.kind == mj_core::state::ManagedCheckoutKind::Clone
                     || managed_worktree_checkout_is_dirty(executor, worktree).context(
@@ -1332,7 +1353,9 @@ impl Controller {
                         execute_target_cleanup(&backend, &session, &self.config, executor)?;
                     }
                 }
-                if let Some(worktree) = &session.managed_worktree {
+                if let mj_core::state::Checkout::ManagedWorktree { worktree, .. } =
+                    self.state.checkout(session_id)?
+                {
                     cleanup_managed_worktree(executor, worktree, branch)
                         .context("remove managed raw-session worktree")?;
                 }

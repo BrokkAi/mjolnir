@@ -373,13 +373,15 @@ impl DashboardState {
     /// profile, target, or branch.
     pub(crate) fn session_matches_metadata(&self, session: &SessionRecord, query: &str) -> bool {
         let source = self.project_source(session);
-        let branch = session
-            .managed_worktree
-            .as_ref()
-            .map(|worktree| worktree.branch.as_str())
-            .or(session.launch_branch.as_deref())
-            .unwrap_or_default()
-            .to_lowercase();
+        let branch = match self.state.checkout(&session.id) {
+            Ok(mj_core::state::Checkout::ManagedWorktree { worktree, .. }) => {
+                Some(worktree.branch.as_str())
+            }
+            _ => None,
+        }
+        .or(session.launch_branch.as_deref())
+        .unwrap_or_default()
+        .to_lowercase();
         [
             session.display_title().to_lowercase(),
             session.listed_title().to_lowercase(),

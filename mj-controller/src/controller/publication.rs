@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result, ensure};
 use mj_core::archive::ArchiveManifest;
 use mj_core::state::{
-    CheckpointMetadata, ManagedCheckoutKind, PublicationAssessment, PublicationState, SessionRecord,
+    CheckpointMetadata, ManagedCheckoutKind, ManagedWorktree, PublicationAssessment,
+    PublicationState, SessionRecord,
 };
 
 use crate::targets::{CancellableProcessExecutor, CommandExecutor};
@@ -14,8 +15,28 @@ use super::worktree::managed_git_command;
 
 /// A failed remote check is evidence of uncertainty, never permission to age
 /// away the only checkpoint. The checkpoint itself has already been verified.
+#[cfg(test)]
 pub(super) fn assess_clone_checkpoint(
     session: &SessionRecord,
+    checkpoint: &CheckpointMetadata,
+) -> PublicationAssessment {
+    let Some(checkout) = session.checkout().managed_worktree() else {
+        return PublicationAssessment {
+            checkpoint_sha256: checkpoint.sha256.clone(),
+            state: PublicationState::Unknown,
+            dirty: false,
+            stashed: false,
+            saved_commits: Vec::new(),
+            destinations: Vec::new(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            reason: Some("session has no owned checkout".into()),
+        };
+    };
+    assess_clone_checkpoint_for_worktree(checkout, checkpoint)
+}
+
+pub(super) fn assess_clone_checkpoint_for_worktree(
+    checkout: &ManagedWorktree,
     checkpoint: &CheckpointMetadata,
 ) -> PublicationAssessment {
     let mut result = PublicationAssessment {
@@ -28,7 +49,7 @@ pub(super) fn assess_clone_checkpoint(
         checked_at: chrono::Utc::now().to_rfc3339(),
         reason: None,
     };
-    if let Err(error) = assess_clone_checkpoint_inner(session, checkpoint, &mut result) {
+    if let Err(error) = assess_clone_checkpoint_inner(checkout, checkpoint, &mut result) {
         result.state = PublicationState::Unknown;
         result.reason = Some(format!("{error:#}"));
     }
@@ -222,13 +243,10 @@ fn assess_network_checkpoint_inner(
     Ok(())
 }
 
-/// Recheck an aged, stopped checkpoint without recreating its execution
-/// checkout. Exact remote refs prove publication; a changed remote tip stays
-/// Unknown because it might still contain the saved commit.
-pub(crate) fn refresh_stopped_clone_publication(
+pub(crate) fn refresh_stopped_clone_publication_for_worktree(
     session: &SessionRecord,
+    checkout: &ManagedWorktree,
 ) -> Option<PublicationAssessment> {
-    let checkout = session.managed_worktree.as_ref()?;
     if checkout.kind != ManagedCheckoutKind::Clone
         || session.state != mj_core::state::SessionState::Stopped
     {
@@ -251,7 +269,7 @@ pub(crate) fn refresh_stopped_clone_publication(
         checked_at: chrono::Utc::now().to_rfc3339(),
         reason: None,
     };
-    if let Err(error) = refresh_stopped_clone_publication_inner(session, checkpoint, &mut result) {
+    if let Err(error) = refresh_stopped_clone_publication_inner(checkout, checkpoint, &mut result) {
         result.state = PublicationState::Unknown;
         result.reason = Some(format!("{error:#}"));
     }
@@ -259,14 +277,10 @@ pub(crate) fn refresh_stopped_clone_publication(
 }
 
 fn refresh_stopped_clone_publication_inner(
-    session: &SessionRecord,
+    checkout: &ManagedWorktree,
     checkpoint: &CheckpointMetadata,
     result: &mut PublicationAssessment,
 ) -> Result<()> {
-    let checkout = session
-        .managed_worktree
-        .as_ref()
-        .context("session has no clone")?;
     let verified = mj_checkpoint::archive::verify_archive_streaming(&checkpoint.archive_path)
         .context("verify retained recovery archive")?;
     ensure!(
@@ -365,14 +379,10 @@ fn refresh_stopped_clone_publication_inner(
 }
 
 fn assess_clone_checkpoint_inner(
-    session: &SessionRecord,
+    clone: &ManagedWorktree,
     checkpoint: &CheckpointMetadata,
     result: &mut PublicationAssessment,
 ) -> Result<()> {
-    let clone = session
-        .managed_worktree
-        .as_ref()
-        .context("session has no owned checkout")?;
     ensure!(
         clone.kind == ManagedCheckoutKind::Clone,
         "session is not an independent clone"

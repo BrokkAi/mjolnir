@@ -387,8 +387,9 @@ impl Controller {
             .profiles
             .get(&session.last_profile)
             .context("session profile is missing")?;
-        let bundle = session
-            .project_directory
+        let checkout = self.state.checkout(session_id)?;
+        let bundle = checkout
+            .project_directory()
             .is_none()
             .then(|| session.project_bundle(&self.config))
             .flatten();
@@ -407,8 +408,9 @@ impl Controller {
             }
             None => (session_id.to_owned(), session.container_workspace.clone()),
         };
-        let (mut launch, project_memory, target_profile_home) = worker_launch_config(
+        let (mut launch, project_memory, target_profile_home) = worker_launch_config_with_checkout(
             session,
+            &checkout,
             profile,
             bundle,
             backend,
@@ -455,13 +457,15 @@ impl Controller {
                 .as_ref()
                 .context("sub-agent parent has no live target")?;
             let parent_backend = backend_locator(parent_locator, parent, &self.config)?;
-            let parent_bundle = parent
-                .project_directory
+            let parent_checkout = self.state.checkout(&parent.id)?;
+            let parent_bundle = parent_checkout
+                .project_directory()
                 .is_none()
                 .then(|| parent.project_bundle(&self.config))
                 .flatten();
-            let (parent_launch, _, _) = worker_launch_config(
+            let (parent_launch, _, _) = worker_launch_config_with_checkout(
                 parent,
+                &parent_checkout,
                 parent_profile,
                 parent_bundle,
                 &parent_backend,
@@ -544,12 +548,13 @@ impl Controller {
             .profiles
             .get(&session.last_profile)
             .context("session profile is missing")?;
-        let bundle = session
-            .project_directory
+        let checkout = self.state.checkout(session_id)?;
+        let bundle = checkout
+            .project_directory()
             .is_none()
             .then(|| session.project_bundle(&self.config))
             .flatten();
-        let workspace = if let Some(project_directory) = &session.project_directory {
+        let workspace = if let Some(project_directory) = checkout.project_directory() {
             (project_directory.to_string_lossy().into_owned(), Vec::new())
         } else {
             workspace_paths(
@@ -651,8 +656,29 @@ pub(super) struct LaunchWorkspace<'a> {
     pub parent_worktree: Option<&'a mj_core::state::ManagedWorktree>,
 }
 
+#[cfg(test)]
 pub(super) fn worker_launch_config(
     session: &mj_core::state::SessionRecord,
+    profile: &mj_core::config::HarnessProfile,
+    bundle: Option<&ProjectBundle>,
+    backend: &targets::TargetLocator,
+    worker_workspace: LaunchWorkspace<'_>,
+    target: &mj_core::state::TargetRuntimeSettings,
+) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+    worker_launch_config_with_checkout(
+        session,
+        &session.checkout(),
+        profile,
+        bundle,
+        backend,
+        worker_workspace,
+        target,
+    )
+}
+
+pub(super) fn worker_launch_config_with_checkout(
+    session: &mj_core::state::SessionRecord,
+    checkout: &mj_core::state::Checkout<'_>,
     profile: &mj_core::config::HarnessProfile,
     bundle: Option<&ProjectBundle>,
     backend: &targets::TargetLocator,
@@ -662,7 +688,7 @@ pub(super) fn worker_launch_config(
     let session_id = session.id.as_str();
     let execution_policy = target.execution_policy;
     let target_profile_home = target_profile_home(backend, session_id, profile);
-    let workspace = if let Some(project_directory) = &session.project_directory {
+    let workspace = if let Some(project_directory) = checkout.project_directory() {
         (project_directory.to_string_lossy().into_owned(), Vec::new())
     } else {
         workspace_paths(

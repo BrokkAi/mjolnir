@@ -1616,6 +1616,14 @@ pub struct StartSelection {
 }
 
 impl SessionRecord {
+    /// Checkout shape recorded by this session, before State applies any
+    /// sub-agent borrowing relationship. Call [`State::checkout`] whenever
+    /// State is available so a child resolves to its parent's owner.
+    #[must_use]
+    pub fn checkout(&self) -> Checkout<'_> {
+        derive_record_checkout(self)
+    }
+
     /// The starting selection this record stores, as `at`, `branch` and
     /// `base`. The record keeps the older field layout, so this is the one
     /// place that maps it to the public names.
@@ -1638,11 +1646,13 @@ impl SessionRecord {
     /// Cached verdict for an independent clone. Active checkouts are unknown
     /// until a new checkpoint binds an assessment to their exact contents.
     pub fn publication_state(&self) -> Option<PublicationState> {
-        let independent_clone = self
-            .managed_worktree
-            .as_ref()
-            .is_some_and(|owned| owned.kind == ManagedCheckoutKind::Clone)
-            || (self.managed_worktree.is_none() && self.project_directory.is_none());
+        let independent_clone = match self.checkout().effective() {
+            Checkout::ManagedWorktree { worktree, .. } => {
+                worktree.kind == ManagedCheckoutKind::Clone
+            }
+            Checkout::ManagedWorkspace => true,
+            Checkout::Attached { .. } | Checkout::Borrowed { .. } => false,
+        };
         if !independent_clone {
             return None;
         }
@@ -1729,7 +1739,7 @@ impl SessionRecord {
             )),
             Some(_) => {}
         }
-        if self.project_directory.is_none() && self.project_bundle(config).is_none() {
+        if self.checkout().project_directory().is_none() && self.project_bundle(config).is_none() {
             issues.push(format!("missing bundle {:?}", self.bundle_id));
         }
         if self.target_runtime.is_none() && !config.targets.contains_key(&self.target_template_id) {
@@ -1779,25 +1789,28 @@ impl SessionRecord {
         if let Some(project) = &self.project {
             return project.name();
         }
-        if let Some(worktree) = &self.managed_worktree {
-            return path_leaf(&worktree.source_repository);
+        match self.checkout().effective() {
+            Checkout::ManagedWorktree { worktree, .. } => path_leaf(&worktree.source_repository),
+            Checkout::Attached { path } => path_leaf(path),
+            Checkout::ManagedWorkspace => self.bundle_source_name(config),
+            Checkout::Borrowed { .. } => unreachable!("effective checkout resolves borrowing"),
         }
-        if let Some(project_directory) = &self.project_directory {
-            return path_leaf(project_directory);
-        }
-        self.bundle_source_name(config)
     }
 
     /// Target label used by the live session summary. Bare targets identify
     /// the project directory they open directly; workspace targets already
     /// identify the provisioned environment on their own.
     pub fn project_target(&self, config: &Config, target_id: &str) -> String {
-        let project = self
-            .managed_worktree
-            .as_ref()
-            .map(|worktree| &worktree.source_project_directory)
-            .or(self.project_directory.as_ref());
-        target_label(config, target_id, project.map(PathBuf::as_path))
+        let checkout = self.checkout();
+        let project = match checkout.effective() {
+            Checkout::ManagedWorktree { worktree, .. } => {
+                Some(worktree.source_project_directory.as_path())
+            }
+            Checkout::Attached { path } => Some(path),
+            Checkout::ManagedWorkspace => None,
+            Checkout::Borrowed { .. } => unreachable!("effective checkout resolves borrowing"),
+        };
+        target_label(config, target_id, project)
     }
 
     /// Stable source identity used to group sessions. Managed worktrees point
@@ -1819,22 +1832,27 @@ impl SessionRecord {
                     .join(" + "),
             };
         }
-        if let Some(worktree) = &self.managed_worktree {
-            return ProjectSourceIdentity::path(&worktree.source_repository, None);
+        match self.checkout().effective() {
+            Checkout::ManagedWorktree { worktree, .. } => {
+                ProjectSourceIdentity::path(&worktree.source_repository, None)
+            }
+            Checkout::Attached { path } => {
+                let remote = match &self.target {
+                    Some(TargetLocator::SshBare { host, .. }) => Some(host.as_str()),
+                    _ => None,
+                };
+                ProjectSourceIdentity::path(path, remote)
+            }
+            Checkout::ManagedWorkspace => {
+                self.bundle_source_identity(config)
+                    .unwrap_or_else(|| ProjectSourceIdentity {
+                        key: format!("bundle:{}", self.bundle_id),
+                        short: path_leaf(Path::new(&self.bundle_id)),
+                        full: self.bundle_id.clone(),
+                    })
+            }
+            Checkout::Borrowed { .. } => unreachable!("effective checkout resolves borrowing"),
         }
-        if let Some(project_directory) = &self.project_directory {
-            let remote = match &self.target {
-                Some(TargetLocator::SshBare { host, .. }) => Some(host.as_str()),
-                _ => None,
-            };
-            return ProjectSourceIdentity::path(project_directory, remote);
-        }
-        self.bundle_source_identity(config)
-            .unwrap_or_else(|| ProjectSourceIdentity {
-                key: format!("bundle:{}", self.bundle_id),
-                short: path_leaf(Path::new(&self.bundle_id)),
-                full: self.bundle_id.clone(),
-            })
     }
 
     /// Resolve the display name shared by session headings, chat headers, and
@@ -2070,6 +2088,87 @@ impl Default for State {
     }
 }
 
+/// The effective code checkout for one session, including who owns it.
+///
+/// These variants are derived from the durable session record and the
+/// `State::subagents` relationship. They are not serialized. In particular,
+/// the creation-time `create_managed_worktree` choice is not evidence of
+/// current checkout ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checkout<'a> {
+    /// A user-selected raw directory. Mjolnir never creates or removes it.
+    Attached { path: &'a Path },
+    /// A raw project worktree or clone created and retired by Mjolnir.
+    ///
+    /// `project_directory` can be absent only on an incomplete legacy record;
+    /// ownership still follows the managed-worktree descriptor. For valid
+    /// records it can be below `worktree_root` when the project is a
+    /// subdirectory of its repository.
+    ManagedWorktree {
+        worktree: &'a ManagedWorktree,
+        project_directory: Option<&'a Path>,
+    },
+    /// A bundle workspace cloned on the target and retired with its target.
+    /// Its target path is platform-specific and is derived by provisioning.
+    ManagedWorkspace,
+    /// A child session uses the parent's checkout and never owns its lifetime.
+    Borrowed {
+        owner: &'a SessionRecord,
+        checkout: Box<Checkout<'a>>,
+    },
+}
+
+/// The only conversion from persisted checkout fields to an ownership kind.
+fn derive_record_checkout(session: &SessionRecord) -> Checkout<'_> {
+    if let Some(worktree) = &session.managed_worktree {
+        return Checkout::ManagedWorktree {
+            worktree,
+            project_directory: session.project_directory.as_deref(),
+        };
+    }
+    if let Some(path) = session.project_directory.as_deref() {
+        return Checkout::Attached { path };
+    }
+    Checkout::ManagedWorkspace
+}
+
+impl<'a> Checkout<'a> {
+    /// The managed worktree owned by this session, if any. A borrowed child
+    /// intentionally gets `None` even when its owner uses a managed checkout.
+    #[must_use]
+    pub fn managed_worktree(&self) -> Option<&'a ManagedWorktree> {
+        match self {
+            Self::ManagedWorktree { worktree, .. } => Some(*worktree),
+            Self::Attached { .. } | Self::ManagedWorkspace | Self::Borrowed { .. } => None,
+        }
+    }
+
+    /// Resolve a borrowed checkout to the value that describes its location.
+    /// The outer [`Checkout::Borrowed`] variant still controls cleanup: a
+    /// child must never retire the managed checkout it borrows.
+    #[must_use]
+    pub fn effective(&self) -> Checkout<'a> {
+        match self {
+            Self::Borrowed { checkout, .. } => checkout.effective(),
+            checkout => checkout.clone(),
+        }
+    }
+
+    /// The concrete repository directory when the record stores one.
+    /// Bundle workspace paths are target-specific and are not in the record.
+    #[must_use]
+    pub fn project_directory(&self) -> Option<&'a Path> {
+        match self {
+            Self::Attached { path } => Some(*path),
+            Self::ManagedWorktree {
+                project_directory, ..
+            } => *project_directory,
+            Self::ManagedWorkspace => None,
+            Self::Borrowed { checkout, .. } => checkout.project_directory(),
+        }
+    }
+}
+
 /// Whether a terminal dashboard follows `record` live through the runtime
 /// feed. Stopped is the one settled state that accumulates, so a stopped
 /// session is left to the resume dialog unless something still holds it:
@@ -2112,6 +2211,60 @@ pub fn live_session_ids(
 }
 
 impl State {
+    /// Derive the checkout location and its owner for a session.
+    ///
+    /// Raw directory sessions with no managed-worktree descriptor are
+    /// attached even when they have no Git project snapshot (the supported
+    /// non-Git bare-target case). A descriptor takes precedence if both raw
+    /// fields are present, because it is the cleanup authority; the stored
+    /// project path is retained as the checkout directory, even if an invalid
+    /// legacy record disagrees with the descriptor's root. Record validation
+    /// rejects that mismatch. With neither field present, old bundle-backed
+    /// records map to a managed workspace whether their bundle came from config
+    /// or a saved project snapshot. A managed sub-agent is resolved through its
+    /// durable parent relation first, so its copied `project_directory` never
+    /// changes ownership. Nested children keep the chain of borrowed owners.
+    /// An orphan child whose parent record has already been removed falls
+    /// back to its stored checkout fields, preserving the older cleanup path.
+    pub fn checkout(&self, session_id: &str) -> Result<Checkout<'_>> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?;
+        self.checkout_for_record(session_id, session)
+    }
+
+    /// Derive checkout ownership for a projected record while retaining the
+    /// durable sub-agent relationship from this state snapshot.
+    pub fn checkout_for_record<'a>(
+        &'a self,
+        session_id: &str,
+        session: &'a SessionRecord,
+    ) -> Result<Checkout<'a>> {
+        self.checkout_for_record_inner(session_id, session, &mut BTreeSet::new())
+    }
+
+    fn checkout_for_record_inner<'a>(
+        &'a self,
+        session_id: &str,
+        session: &'a SessionRecord,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<Checkout<'a>> {
+        if !visited.insert(session_id.to_owned()) {
+            bail!("sub-agent checkout ownership contains a cycle at {session_id}");
+        }
+        if let Some(relation) = self.subagents.get(session_id) {
+            let Some(owner) = self.sessions.get(&relation.parent_session_id) else {
+                return Ok(session.checkout());
+            };
+            return Ok(Checkout::Borrowed {
+                owner,
+                checkout: Box::new(self.checkout_for_record_inner(&owner.id, owner, visited)?),
+            });
+        }
+        Ok(session.checkout())
+    }
+
     /// How a notice names a session: the title the session list shows
     /// (`listed_title`, which includes the title it was created with), or its
     /// short id when it has no title or its record is gone (launch findings
@@ -2292,7 +2445,9 @@ impl State {
             .values()
             .filter(|session| {
                 session.bundle_id == bundle_id
-                    && session.project_directory.is_none()
+                    && self
+                        .checkout(&session.id)
+                        .is_ok_and(|checkout| checkout.project_directory().is_none())
                     && session.state != SessionState::DestroyedWithDataLoss
             })
             .collect()
@@ -2344,7 +2499,9 @@ impl State {
             } else {
                 false
             };
-            let bundle_changed = session.project_directory.is_none()
+            let bundle_changed = self
+                .checkout(&session.id)
+                .is_ok_and(|checkout| checkout.project_directory().is_none())
                 && before
                     .bundles
                     .get(&session.bundle_id)

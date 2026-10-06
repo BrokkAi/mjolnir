@@ -121,7 +121,8 @@ impl Controller {
             .as_ref()
             .context("parent session has no live target")?;
         let backend = super::backend::backend_locator(locator, parent, &self.config)?;
-        let (root, exclude_in) = subagent_report_root(parent, &backend);
+        let checkout = self.state.checkout(parent_session_id)?;
+        let (root, exclude_in) = subagent_report_root(parent, &backend, &checkout);
         prepare_report_dir(
             executor,
             &backend,
@@ -220,7 +221,11 @@ impl Controller {
         profile.ensure_ready(&request.profile_id)?;
         if profile.kind == HarnessKind::Muse {
             let multiple_roots = !parent.additional_mounts.is_empty()
-                || (parent.project_directory.is_none()
+                || (self
+                    .state
+                    .checkout(&parent.id)?
+                    .project_directory()
+                    .is_none()
                     && parent
                         .project_bundle(&self.config)
                         .is_some_and(|bundle| bundle.repositories.len() > 1));
@@ -567,8 +572,9 @@ fn ensure_parent_may_delegate(parent: &SessionRecord) -> Result<()> {
 fn subagent_report_root(
     parent: &SessionRecord,
     backend: &mj_core::targets::TargetLocator,
+    checkout: &mj_core::state::Checkout<'_>,
 ) -> (String, Option<String>) {
-    match &parent.project_directory {
+    match checkout.project_directory() {
         Some(project) => {
             let project = project.to_string_lossy().trim_end_matches('/').to_owned();
             (
@@ -667,13 +673,15 @@ mod tests {
             worker_root: "/var/lib/hel/workers/parent-1".into(),
         };
         parent.project_directory = None;
+        let checkout = parent.checkout();
         assert_eq!(
-            subagent_report_root(&parent, &backend),
+            subagent_report_root(&parent, &backend, &checkout),
             ("/var/lib/hel/workers/parent-1/.mj-agents".to_owned(), None)
         );
         parent.project_directory = Some("/home/dev/project/".into());
+        let checkout = parent.checkout();
         assert_eq!(
-            subagent_report_root(&parent, &backend),
+            subagent_report_root(&parent, &backend, &checkout),
             (
                 "/home/dev/project/.mj/agents".to_owned(),
                 Some("/home/dev/project".to_owned())

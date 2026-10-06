@@ -19,7 +19,12 @@ impl Controller {
             .sessions
             .get(session_id)
             .context("session is missing")?;
-        if session.project_directory.is_some() {
+        if self
+            .state
+            .checkout(session_id)?
+            .project_directory()
+            .is_some()
+        {
             return Ok(());
         }
         let bundle = session

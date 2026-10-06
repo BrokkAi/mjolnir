@@ -472,7 +472,7 @@ impl Adapter for MjolnirAdapter {
             tool: TOOL,
             path: PathBuf::from(key),
             project: record
-                .and_then(|record| record.project_directory.as_ref())
+                .and_then(|record| record.checkout().project_directory())
                 .map(|directory| directory.display().to_string())
                 .unwrap_or_default(),
             started: record.and_then(|record| parse_time(&record.created_at)),
@@ -1824,14 +1824,46 @@ pub fn sessions_ready_to_archive(
     now: DateTime<Utc>,
     older_than_days: u32,
 ) -> Vec<String> {
+    let state = mj_core::state::State {
+        sessions: sessions.clone(),
+        subagents: subagents.clone(),
+        ..mj_core::state::State::default()
+    };
+    sessions_ready_to_archive_from_state(&state, now, older_than_days)
+}
+
+pub(crate) fn sessions_ready_to_archive_from_state(
+    state: &mj_core::state::State,
+    now: DateTime<Utc>,
+    older_than_days: u32,
+) -> Vec<String> {
+    let sessions = &state.sessions;
+    let subagents = &state.subagents;
     let cutoff = now - chrono::Duration::days(i64::from(older_than_days));
     let aged = |session_id: &String| {
         sessions.get(session_id).is_some_and(|record| {
+            let checkout = state.checkout(session_id).ok();
+            let is_managed_worktree = checkout.as_ref().is_some_and(|checkout| {
+                matches!(
+                    checkout.effective(),
+                    mj_core::state::Checkout::ManagedWorktree { worktree, .. }
+                        if worktree.kind == mj_core::state::ManagedCheckoutKind::Worktree
+                )
+            });
+            // Preserve the historical child rule: its copied raw path counted
+            // as a raw checkout, even when the parent owns a managed clone.
+            let has_raw_path = checkout.as_ref().is_some_and(|checkout| {
+                checkout.project_directory().is_some()
+                    && matches!(
+                        checkout,
+                        mj_core::state::Checkout::Attached { .. }
+                            | mj_core::state::Checkout::Borrowed { .. }
+                    )
+            });
             record.state == mj_core::state::SessionState::Stopped
                 && parse_time(&record.updated_at).is_some_and(|updated| updated <= cutoff)
-                && (record.managed_worktree.as_ref().is_some_and(|checkout| {
-                    checkout.kind == mj_core::state::ManagedCheckoutKind::Worktree
-                }) || (record.managed_worktree.is_none() && record.project_directory.is_some())
+                && (is_managed_worktree
+                    || has_raw_path
                     || record
                         .checkpoint
                         .as_ref()
@@ -1906,24 +1938,22 @@ pub use mj_core::state::ArchiveSpacePreview;
 pub fn archive_space_preview(older_than_days: Option<u32>) -> Result<ArchiveSpacePreview> {
     let controller =
         Controller::load().context("load the session records to size their storage")?;
-    Ok(archive_space_over(
+    Ok(archive_space_over_state(
         &mj_core::config::sessions_dir(),
-        &controller.state.sessions,
-        &controller.state.subagents,
+        &controller.state,
         Utc::now(),
         older_than_days,
     ))
 }
 
-/// The sizing itself, over given records and a given sessions directory, so it
-/// can be tested without the live data directory.
-fn archive_space_over(
+/// Size archives using a State view so borrowed checkout owners remain visible.
+fn archive_space_over_state(
     sessions_root: &Path,
-    sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
-    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    state: &mj_core::state::State,
     now: DateTime<Utc>,
     older_than_days: Option<u32>,
 ) -> ArchiveSpacePreview {
+    let sessions = &state.sessions;
     let mut preview = ArchiveSpacePreview {
         sessions: sessions.len(),
         bytes: sessions
@@ -1934,7 +1964,7 @@ fn archive_space_over(
         reclaimable_bytes: 0,
     };
     if let Some(days) = older_than_days {
-        let aged = sessions_ready_to_archive(sessions, subagents, now, days);
+        let aged = sessions_ready_to_archive_from_state(state, now, days);
         preview.reclaimable_sessions = aged.len();
         preview.reclaimable_bytes = aged
             .iter()
@@ -1946,6 +1976,23 @@ fn archive_space_over(
             .sum();
     }
     preview
+}
+
+/// The sizing itself, over given records and a sessions directory.
+#[cfg(test)]
+fn archive_space_over(
+    sessions_root: &Path,
+    sessions: &mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
+    subagents: &mj_core::snapshot_map::SnapshotMap<String, mj_core::subagent::SubagentRecord>,
+    now: DateTime<Utc>,
+    older_than_days: Option<u32>,
+) -> ArchiveSpacePreview {
+    let state = mj_core::state::State {
+        sessions: sessions.clone(),
+        subagents: subagents.clone(),
+        ..mj_core::state::State::default()
+    };
+    archive_space_over_state(sessions_root, &state, now, older_than_days)
 }
 
 /// What archiving one session would free: its checkpoint archive and its

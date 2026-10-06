@@ -343,12 +343,13 @@ fn workspace_root(
     session: &SessionRecord,
     backend: &targets::TargetLocator,
 ) -> Option<(CacheHost, PathBuf)> {
+    let checkout = session.checkout();
     if targets::is_borrowed(backend) {
         return None;
     }
     match backend {
         targets::TargetLocator::SshBare { ssh, workspace, .. }
-            if session.project_directory.is_none() =>
+            if checkout.project_directory().is_none() =>
         {
             Some((CacheHost::Ssh(ssh.clone()), PathBuf::from(workspace)))
         }

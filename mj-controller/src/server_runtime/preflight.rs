@@ -48,13 +48,13 @@ pub(super) fn spawn_resume_preflight(
         mut reply,
     } = request;
     let config = controller.config.clone();
-    let session = controller.state.sessions.get(&session_id).cloned();
+    let state = controller.state.clone();
     let termination = termination.clone();
     jobs.spawn(async move {
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
         let mut blocking = tokio::task::spawn_blocking(move || {
-            run_resume_preflight(config, session, &target_id, cancelled)
+            run_resume_preflight(config, state, &session_id, &target_id, cancelled)
         });
         let answer = tokio::select! {
             biased;
@@ -142,16 +142,27 @@ pub(super) fn spawn_path_completion(
 /// commit a submodule.
 pub(super) fn run_resume_preflight(
     config: Config,
-    session: Option<mj_core::state::SessionRecord>,
+    state: mj_core::state::State,
+    session_id: &str,
     target_id: &str,
     cancelled: Arc<AtomicBool>,
 ) -> crate::server::PreflightResume {
-    let Some(session) = session else {
+    let Some(session) = state.sessions.get(session_id) else {
         return crate::server::PreflightResume::Unavailable {
             detail: "this session is no longer available".to_owned(),
         };
     };
-    match crate::controller::resume_compatibility(&session, &config, target_id) {
+    let checkout = match state.checkout(session_id) {
+        Ok(checkout) => checkout,
+        Err(error) => {
+            return crate::server::PreflightResume::Unavailable {
+                detail: format!("{error:#}"),
+            };
+        }
+    };
+    match crate::controller::resume_compatibility_with_checkout(
+        session, &checkout, &config, target_id,
+    ) {
         Err(reason) => crate::server::PreflightResume::Unavailable { detail: reason },
         Ok(plan) if plan != crate::controller::ResumePlan::RawToWorkspace => {
             crate::server::PreflightResume::Ready
@@ -159,7 +170,7 @@ pub(super) fn run_resume_preflight(
         Ok(_) => {
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            match crate::controller::raw_conversion_preview_for(&session, &executor) {
+            match crate::controller::raw_conversion_preview_for(session, &checkout, &executor) {
                 Err(error) => crate::server::PreflightResume::Unavailable {
                     detail: format!("{error:#}"),
                 },

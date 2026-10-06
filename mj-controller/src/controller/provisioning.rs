@@ -572,6 +572,8 @@ impl Controller {
             .get(session_id)
             .expect("session retained after managed worktree preparation")
             .clone();
+        let checkout = self.state.checkout(session_id)?;
+        let project_directory = checkout.project_directory();
         // Keep planning, preflight, creation, and locator discovery in one
         // result so the caller's failure disposition applies to every error.
         let result = (|| {
@@ -606,7 +608,7 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
-            let mut bundle = if session.project_directory.is_some() {
+            let mut bundle = if project_directory.is_some() {
                 None
             } else if let Some(bundle) = self.move_destination_bundle(session_id)? {
                 Some(bundle)
@@ -654,7 +656,7 @@ impl Controller {
                 &mut runtime_mounts,
                 executor,
             );
-            let provision = if let Some(project_directory) = &session.project_directory {
+            let provision = if let Some(project_directory) = project_directory {
                 targets::provision_bare_project_plan(
                     &target,
                     session_id,
@@ -732,6 +734,7 @@ impl Controller {
             );
             result
         })();
+        drop(checkout);
         let result = match result {
             Err(error)
                 if created_worktree
@@ -796,23 +799,33 @@ impl Controller {
             }
             result => result,
         };
-        if result.is_ok()
-            && let Some(session) = self.state.sessions.get(session_id)
-            && let Some(directory) = session
-                .managed_worktree
-                .as_ref()
-                .map(|worktree| worktree.source_project_directory.clone())
-                .or_else(|| session.project_directory.clone())
-            && let Some(template) = self.config.targets.get(&session.target_template_id)
-        {
-            let host = match template {
-                TargetTemplate::LocalBare => Some("local"),
-                TargetTemplate::SshBare { ssh, .. } => Some(ssh.host.as_str()),
-                _ => None,
+        if result.is_ok() {
+            let target_template_id = self
+                .state
+                .sessions
+                .get(session_id)
+                .map(|session| session.target_template_id.clone());
+            let directory = match self.state.checkout(session_id)?.effective() {
+                mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                    Some(worktree.source_project_directory.clone())
+                }
+                mj_core::state::Checkout::Attached { path } => Some(path.to_path_buf()),
+                mj_core::state::Checkout::ManagedWorkspace => None,
+                mj_core::state::Checkout::Borrowed { .. } => {
+                    unreachable!("effective checkout resolves borrowing")
+                }
             };
-            if let Some(host) = host {
-                self.state.remember_project_directory(host, &directory);
-                crate::database::remember_project_directory(host, &directory)?;
+            let host = target_template_id
+                .as_deref()
+                .and_then(|id| self.config.targets.get(id))
+                .and_then(|template| match template {
+                    TargetTemplate::LocalBare => Some("local".to_owned()),
+                    TargetTemplate::SshBare { ssh, .. } => Some(ssh.host.clone()),
+                    _ => None,
+                });
+            if let (Some(directory), Some(host)) = (directory, host) {
+                self.state.remember_project_directory(&host, &directory);
+                crate::database::remember_project_directory(&host, &directory)?;
             }
         }
         self.persist_session_state(session_id)?;

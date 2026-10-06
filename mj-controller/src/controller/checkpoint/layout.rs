@@ -19,13 +19,14 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        let checkout = self.state.checkout(session_id)?;
         let locator = session
             .target
             .as_ref()
             .context("session has no live target")?;
         let backend = backend_locator(locator, &session, &self.config)?;
         let (workspace_root, primary_repository, repositories) =
-            if let Some(project_directory) = &session.project_directory {
+            if let Some(project_directory) = checkout.project_directory() {
                 let parent = project_directory
                     .parent()
                     .context("bare project directory has no parent")?;
@@ -45,8 +46,8 @@ impl Controller {
                         // branch and objects remain in the owning Git
                         // repository as well; no remote origin is required.
                         // Unmanaged raw checkouts remain in place.
-                        capture: match &session.managed_worktree {
-                            Some(worktree) => {
+                        capture: match &checkout {
+                            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
                                 let base_commit =
                                     crate::controller::worktree::managed_worktree_base_commit(
                                         worktree, executor,
@@ -57,7 +58,7 @@ impl Controller {
                                     CheckpointRepositoryCapture::DeltaFrom { base_commit }
                                 }
                             }
-                            None => CheckpointRepositoryCapture::MetadataOnly,
+                            _ => CheckpointRepositoryCapture::MetadataOnly,
                         },
                         origin_override: None,
                     }],
@@ -87,7 +88,12 @@ impl Controller {
             workspace_root,
             primary_repository,
             repositories,
-            managed_worktree: session.managed_worktree,
+            managed_worktree: match checkout {
+                mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                    Some(worktree.clone())
+                }
+                _ => None,
+            },
         })
     }
 }

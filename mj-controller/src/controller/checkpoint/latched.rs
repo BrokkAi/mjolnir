@@ -94,6 +94,11 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        let session_owns_managed_checkout = self
+            .state
+            .checkout(session_id)?
+            .managed_worktree()
+            .is_some();
         session.validate_configuration(&self.config)?;
         if let Some(target) = session.target.as_ref() {
             crate::worker_lifecycle::require(session_id)?.verify_target(target)?;
@@ -491,7 +496,7 @@ impl Controller {
             // Host worktree edits do not advance the relay frontier. Always
             // recapture before retiring one, including archives written by
             // older workers that only recorded its Git metadata.
-            && session.managed_worktree.is_none()
+            && !session_owns_managed_checkout
             && let Some(artifact) = reusable_installed_checkpoint(
                 session_id,
                 session.checkpoint.as_ref(),

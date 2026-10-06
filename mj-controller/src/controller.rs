@@ -118,7 +118,9 @@ pub use worker_binary::{
     worker_binary_prerequisite_for_arch,
 };
 pub use worker_restart::WorkerUpgradeOutcome;
-pub use worktree::{ResumePlan, local_project_repository, resume_compatibility};
+pub use worktree::{
+    ResumePlan, local_project_repository, resume_compatibility, resume_compatibility_with_checkout,
+};
 
 pub struct Controller {
     pub config: Config,

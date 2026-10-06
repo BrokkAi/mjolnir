@@ -301,7 +301,17 @@ impl DashboardState {
         target_id: &str,
     ) -> Option<String> {
         let session = self.session_record(session_id)?;
-        mj_client::target::resume_compatibility(session, &self.config, target_id).err()
+        let checkout = self
+            .state
+            .checkout(session_id)
+            .unwrap_or_else(|_| session.checkout());
+        mj_client::target::resume_compatibility_with_checkout(
+            session,
+            &checkout,
+            &self.config,
+            target_id,
+        )
+        .err()
     }
 
     /// The index of the only target the target step would offer `wizard`,

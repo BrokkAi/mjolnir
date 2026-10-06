@@ -303,31 +303,41 @@ impl RuntimeState {
     /// sub-agent, with the import de-duplication data from every record.
     /// Only shared map handles cross the owner lock; the copies are made after.
     pub(super) fn resume_candidates(&self) -> mj_client::daemon::ResumeCandidates {
-        let (records, subagents, moves, config) = {
+        let (records, subagents, moves, config, local_checkout_roots) = {
             let owner = self.owner();
+            let controller = owner.controller();
+            let records = owner.projected_records();
+            let local_checkout_roots = records
+                .iter()
+                .filter_map(|(id, _)| match controller.state.checkout(id).ok()? {
+                    mj_core::state::Checkout::ManagedWorktree { worktree, .. }
+                        if worktree.target == mj_core::state::ManagedWorktreeTarget::Local =>
+                    {
+                        Some(worktree.worktree_root.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
             (
-                owner.projected_records(),
-                owner.controller().state.subagents.clone(),
+                records,
+                controller.state.subagents.clone(),
                 owner
                     .committed()
                     .map(|committed| committed.moves.clone())
                     .unwrap_or_default(),
-                owner.controller().config.clone(),
+                controller.config.clone(),
+                local_checkout_roots,
             )
         };
-        let mut candidates = mj_client::daemon::ResumeCandidates::default();
+        let mut candidates = mj_client::daemon::ResumeCandidates {
+            local_checkout_roots,
+            ..mj_client::daemon::ResumeCandidates::default()
+        };
         for (id, record) in &records {
             if let Some(native_session_id) = &record.native_session_id {
                 candidates
                     .adopted_native_sessions
                     .push((record.harness_kind, native_session_id.clone()));
-            }
-            if let Some(checkout) = &record.managed_worktree
-                && checkout.target == mj_core::state::ManagedWorktreeTarget::Local
-            {
-                candidates
-                    .local_checkout_roots
-                    .push(checkout.worktree_root.clone());
             }
             if record.state.is_active()
                 || subagents.contains_key(id)

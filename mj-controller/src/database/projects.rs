@@ -9,7 +9,6 @@ pub(crate) struct ProjectDiscoveryChange {
     pub sequence: i64,
     pub session_id: String,
     pub directory: PathBuf,
-    pub managed_worktree: Option<ManagedWorktree>,
     pub target_id: String,
 }
 
@@ -295,7 +294,7 @@ pub(crate) fn finish_project_seed(harness: &str, home: &Path) -> Result<()> {
 
 pub(crate) fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscoveryChange>> {
     let connection = open_reader(&database_path())?;
-    let mut statement=connection.prepare("SELECT sequence,session_id,directory,managed_worktree,target_template_id
+    let mut statement=connection.prepare("SELECT sequence,session_id,directory,target_template_id
         FROM project_discovery_changes WHERE sequence>(SELECT sequence FROM project_discovery_progress WHERE singleton=1)
         OR (?1 AND sequence IN (SELECT sequence FROM project_discovery_failures)) ORDER BY sequence LIMIT CASE WHEN ?1 THEN -1 ELSE 128 END")?;
     statement
@@ -304,19 +303,15 @@ pub(crate) fn project_discovery_changes(retry: bool) -> Result<Vec<ProjectDiscov
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, String>(3)?,
             ))
         })?
         .map(|row| {
-            let (sequence, session_id, directory, managed, target_id) = row?;
+            let (sequence, session_id, directory, target_id) = row?;
             Ok(ProjectDiscoveryChange {
                 sequence,
                 session_id,
                 directory: blob_to_path(&directory),
-                managed_worktree: managed
-                    .map(|json| serde_json::from_str(&json))
-                    .transpose()?,
                 target_id,
             })
         })

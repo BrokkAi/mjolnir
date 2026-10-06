@@ -135,10 +135,8 @@ fn stopped_source_recovery(
 /// [`MoveOperation::holds_source_environment`]), the same facts the API's
 /// `move_recovery` and the web page read, so the text never promises a retry
 /// the record cannot support.
-fn failed_move_recovery(
-    operation: &MoveOperation,
-    record: Option<&mj_core::state::SessionRecord>,
-) -> String {
+fn failed_move_recovery(operation: &MoveOperation, state: &mj_core::state::State) -> String {
+    let record = state.sessions.get(&operation.selection.session_id);
     if let Some(destination) = &operation.prepared_destination
         && matches!(
             destination.state,
@@ -174,7 +172,7 @@ fn failed_move_recovery(
             && !source_live
             && record.is_some_and(|record| record.target.is_some()));
     if environment_held && !operation.checkpoint_retained() {
-        return missing_move_checkpoint_recovery(record);
+        return missing_move_checkpoint_recovery(state, &operation.selection.session_id);
     }
     if operation.in_place && record.is_some_and(|record| record.target.is_some()) {
         return if source_live {
@@ -199,15 +197,21 @@ fn failed_move_recovery(
 /// checkpoint a retry would restore. Neither a retry nor Resume can bring the
 /// conversation back, and Destroy removes the checkout, so the text says where
 /// the files are first.
-fn missing_move_checkpoint_recovery(record: Option<&mj_core::state::SessionRecord>) -> String {
-    let checkout = record
-        .and_then(|record| {
-            record
-                .managed_worktree
-                .as_ref()
-                .map(|checkout| checkout.worktree_root.clone())
-                .or_else(|| record.project_directory.clone())
-        })
+fn missing_move_checkpoint_recovery(state: &mj_core::state::State, session_id: &str) -> String {
+    let checkout_path = state
+        .checkout(session_id)
+        .ok()
+        .and_then(|checkout| match &checkout {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                Some(worktree.worktree_root.clone())
+            }
+            mj_core::state::Checkout::Attached { path } => Some((*path).to_path_buf()),
+            mj_core::state::Checkout::Borrowed { .. } => {
+                checkout.project_directory().map(|path| path.to_path_buf())
+            }
+            mj_core::state::Checkout::ManagedWorkspace => None,
+        });
+    let checkout = checkout_path
         .map(|path| format!(" in {}", path.display()))
         .unwrap_or_default();
     format!(
@@ -308,7 +312,7 @@ pub(crate) fn record_finished_move_recovery(
         let message = failed_move_message(
             None,
             operation.phase == MovePhase::Cancelled,
-            &failed_move_recovery(operation, record),
+            &failed_move_recovery(operation, state),
             &operation.operation_id,
         );
         crate::database::save_move_outcome(operation, Some(&message))
@@ -812,19 +816,27 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<Option<super::worktree::RawToWorkspaceConversion>> {
         use super::worktree::ResumePlan;
-        match super::worktree::resume_compatibility(source, &self.config, target_id)
-            .map_err(anyhow::Error::msg)?
+        let checkout = self.state.checkout(&source.id)?;
+        match super::worktree::resume_compatibility_with_checkout(
+            source,
+            &checkout,
+            &self.config,
+            target_id,
+        )
+        .map_err(anyhow::Error::msg)?
         {
             ResumePlan::RawToWorkspace => {
-                return Ok(Some(super::worktree::plan_raw_to_workspace(
-                    source, executor,
+                return Ok(Some(super::worktree::plan_raw_to_workspace_with_checkout(
+                    &checkout, executor,
                 )?));
             }
             ResumePlan::WorkspaceToRaw => {
                 self.plan_workspace_to_raw(source, target_id, executor)?;
             }
-            ResumePlan::InPlace if source.managed_worktree.is_none() => {
-                if let Some(path) = &source.project_directory {
+            ResumePlan::InPlace
+                if matches!(checkout, mj_core::state::Checkout::Attached { .. }) =>
+            {
+                if let Some(path) = checkout.project_directory() {
                     self.validate_project_directory(target_id, path, executor)?;
                 }
             }
@@ -1012,6 +1024,7 @@ impl Controller {
             .sessions
             .get(&selection.session_id)
             .context("unknown session")?;
+        let source_checkout = self.state.checkout(&source.id)?;
         ensure!(
             !self.state.subagents.contains_key(&source.id),
             "sub-agent sessions cannot move independently of their parent"
@@ -1057,7 +1070,7 @@ impl Controller {
         {
             bail!(
                 "this Move cannot be retried. {}",
-                missing_move_checkpoint_recovery(Some(source))
+                missing_move_checkpoint_recovery(&self.state, &source.id)
             );
         }
         let retry = previous.as_ref().is_some_and(|op| {
@@ -1158,8 +1171,14 @@ impl Controller {
             .get(target_id)
             .context("unknown destination target")?;
         self.validate_muse_resume_destination(source, profile.kind, target_id)?;
-        super::worktree::resume_compatibility(source, &self.config, target_id)
-            .map_err(anyhow::Error::msg)?;
+        let checkout = self.state.checkout(&source.id)?;
+        super::worktree::resume_compatibility_with_checkout(
+            source,
+            &checkout,
+            &self.config,
+            target_id,
+        )
+        .map_err(anyhow::Error::msg)?;
         super::backend::validate_resource_allocation(
             target,
             selection.resource_allocation.as_ref(),
@@ -1211,8 +1230,13 @@ impl Controller {
         // before anything is stopped so a person can confirm it.
         let conversion = planned_conversion
             .map(|conversion| {
-                super::worktree::raw_conversion_preview(source, &conversion, executor)
-                    .context("describe the move of this checkout into the target")
+                super::worktree::raw_conversion_preview_with_checkout(
+                    source,
+                    &source_checkout,
+                    &conversion,
+                    executor,
+                )
+                .context("describe the move of this checkout into the target")
             })
             .transpose()?
             .map(Box::new);
@@ -1575,10 +1599,7 @@ impl Controller {
                     MovePhase::Failed
                 };
                 operation.cancellation_requested = cancelled;
-                let recovery = failed_move_recovery(
-                    operation,
-                    self.state.sessions.get(&operation.selection.session_id),
-                );
+                let recovery = failed_move_recovery(operation, &self.state);
                 let error = format!("{error:#}");
                 tracing::warn!(
                     %session_id,

@@ -432,7 +432,14 @@ impl DashboardContext {
             .state
             .sessions
             .values()
-            .filter(|session| session.state.is_active() && session.project_directory.is_some())
+            .filter(|session| {
+                session.state.is_active()
+                    && self
+                        .controller
+                        .state
+                        .checkout(&session.id)
+                        .is_ok_and(|checkout| checkout.project_directory().is_some())
+            })
             .filter(|session| {
                 !self.dashboard.has_resolved_project_source(&session.id)
                     && !self.project_sources_in_flight.contains(&session.id)

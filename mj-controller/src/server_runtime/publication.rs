@@ -97,12 +97,15 @@ impl ViewerPublication {
         }
         for (id, next) in self.records.changes(&controller.state.sessions) {
             self.dirty.insert(id.clone());
-            if self
-                .records
-                .get(id)
-                .map(|record| ProjectSourceKey::of(record, &controller.config))
-                != next.map(|record| ProjectSourceKey::of(record, &controller.config))
-            {
+            let previous_key = self.records.get(id).map(|record| {
+                let checkout = record.checkout();
+                ProjectSourceKey::of(record, &checkout, &controller.config)
+            });
+            let next_key = next.and_then(|record| {
+                let checkout = controller.state.checkout(id).ok()?;
+                Some(ProjectSourceKey::of(record, &checkout, &controller.config))
+            });
+            if previous_key != next_key {
                 self.project_dirty.insert(id.clone());
             }
         }

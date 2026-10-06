@@ -625,7 +625,12 @@ impl ProjectMemoryIdentity {
         bundle: Option<&crate::config::ProjectBundle>,
         parent_worktree: Option<&crate::state::ManagedWorktree>,
     ) -> Result<Self> {
-        if let Some(worktree) = session.managed_worktree.as_ref().or(parent_worktree) {
+        let checkout = session.checkout();
+        let worktree = match checkout.effective() {
+            crate::state::Checkout::ManagedWorktree { worktree, .. } => Some(worktree),
+            _ => parent_worktree,
+        };
+        if let Some(worktree) = worktree {
             return Ok(Self::Repository {
                 repository: RepositoryMemoryIdentity::Local {
                     canonical_root: std::fs::canonicalize(&worktree.source_repository)
@@ -633,7 +638,7 @@ impl ProjectMemoryIdentity {
                 },
             });
         }
-        if let Some(bundle) = bundle.filter(|_| session.project_directory.is_none()) {
+        if let Some(bundle) = bundle.filter(|_| checkout.project_directory().is_none()) {
             let primary = RepositoryMemoryIdentity::from_configured(
                 bundle.primary().context("bundle primary is missing")?,
             )?;
@@ -644,20 +649,19 @@ impl ProjectMemoryIdentity {
                 .collect::<Result<Vec<_>>>()?;
             return Ok(Self::bundle(primary, members));
         }
-        let project = session
-            .project_directory
-            .as_ref()
+        let project = checkout
+            .project_directory()
             .context("raw session project directory is missing")?;
         let repository = match session.target.as_ref() {
             Some(crate::state::TargetLocator::LocalBare { .. }) => {
                 RepositoryMemoryIdentity::Local {
                     canonical_root: std::fs::canonicalize(project)
-                        .unwrap_or_else(|_| project.clone()),
+                        .unwrap_or_else(|_| project.to_path_buf()),
                 }
             }
             _ => RepositoryMemoryIdentity::Remote {
                 target: session.target_template_id.clone(),
-                canonical_root: project.clone(),
+                canonical_root: project.to_path_buf(),
             },
         };
         Ok(Self::Repository { repository })

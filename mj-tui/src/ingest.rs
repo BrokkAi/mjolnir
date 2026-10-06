@@ -982,7 +982,11 @@ impl DashboardState {
         let paths = mj_core::targets::storage::session_storage_paths(
             locator,
             session_id,
-            record.project_directory.as_deref(),
+            self.state
+                .checkout(session_id)
+                .ok()
+                .and_then(|checkout| checkout.project_directory().map(|path| path.to_path_buf()))
+                .as_deref(),
         );
         let Some(view) = self
             .target_storage
@@ -1010,7 +1014,12 @@ impl DashboardState {
         let paths = mj_core::targets::storage::session_storage_paths(
             record.target.as_ref()?,
             session_id,
-            record.project_directory.as_deref(),
+            self.state
+                .checkout(session_id)
+                .ok()?
+                .project_directory()
+                .map(|path| path.to_path_buf())
+                .as_deref(),
         );
         self.target_storage
             .iter()

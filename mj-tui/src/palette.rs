@@ -205,7 +205,8 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
         ));
     }
 
-    if let Some(worktree) = &session.managed_worktree {
+    let checkout = session.checkout();
+    if let Some(worktree) = checkout.managed_worktree() {
         let kind = match worktree.kind {
             ManagedCheckoutKind::Worktree => "Worktree",
             ManagedCheckoutKind::Clone => "Clone",
@@ -221,7 +222,7 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
                 None => worktree.branch.clone(),
             },
         ));
-    } else if let Some(directory) = &session.project_directory {
+    } else if let Some(directory) = checkout.project_directory() {
         facts.push(fact(
             "Checkout",
             format!("{} (in place)", directory.display()),

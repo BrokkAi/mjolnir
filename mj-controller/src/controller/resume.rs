@@ -38,10 +38,11 @@ use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
-    managed_worktree_checkout_exists, managed_worktree_target, plan_raw_to_workspace,
+    managed_worktree_checkout_exists, managed_worktree_target, plan_raw_to_workspace_with_checkout,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
-    raw_checkout_position, raw_checkout_snapshot, raw_conversion_preview, restore_managed_worktree,
-    resume_compatibility, retire_managed_worktree,
+    raw_checkout_position_with_checkout, raw_checkout_snapshot,
+    raw_conversion_preview_with_checkout, restore_managed_worktree,
+    resume_compatibility_with_checkout, retire_managed_worktree,
 };
 use super::{
     Controller, SessionResumeOptions, execute_checked, now, selected_host_container_size,
@@ -120,8 +121,9 @@ impl Controller {
         if destination_harness != HarnessKind::Muse {
             return Ok(());
         }
+        let checkout = self.state.checkout(&source.id)?;
         ensure!(
-            source.project_directory.is_some()
+            checkout.project_directory().is_some()
                 || source
                     .project_bundle(&self.config)
                     .is_none_or(|bundle| bundle.repositories.len() == 1),
@@ -183,9 +185,10 @@ impl Controller {
             .checkpoint
             .as_ref()
             .context("session has no checkpoint")?;
-        let plan = resume_compatibility(session, &self.config, target_id)
+        let checkout = self.state.checkout(session_id)?;
+        let plan = resume_compatibility_with_checkout(session, &checkout, &self.config, target_id)
             .map_err(|reason| anyhow::anyhow!(reason))?;
-        if session.project_directory.is_some() {
+        if checkout.project_directory().is_some() {
             debug_assert!(matches!(
                 plan,
                 ResumePlan::InPlace | ResumePlan::RawToWorkspace
@@ -205,7 +208,7 @@ impl Controller {
             // unreachable remote, a dirty submodule) are this preflight's
             // error, which every surface already reports.
             if describe_conversion && plan == ResumePlan::RawToWorkspace {
-                let preview = raw_conversion_preview_for(session, executor)?;
+                let preview = raw_conversion_preview_for(session, &checkout, executor)?;
                 return Ok(ResumeRepositorySourcePreflight::ConvertingRawCheckout {
                     receipt,
                     preview: Box::new(preview),
@@ -1135,10 +1138,11 @@ pub(super) fn verify_resume_checkpoint(
 
 pub fn raw_conversion_preview_for(
     session: &SessionRecord,
+    checkout: &mj_core::state::Checkout<'_>,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::RawConversionPreview> {
-    let conversion = plan_raw_to_workspace(session, executor)?;
-    raw_conversion_preview(session, &conversion, executor)
+    let conversion = plan_raw_to_workspace_with_checkout(checkout, executor)?;
+    raw_conversion_preview_with_checkout(session, checkout, &conversion, executor)
 }
 
 fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectRepository> {
@@ -1502,6 +1506,15 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        let previous_checkout = self.state.checkout(session_id)?;
+        let previous_project_directory = previous_checkout
+            .project_directory()
+            .map(|path| path.to_path_buf());
+        let mut previous_managed_worktree = match &previous_checkout {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => Some((*worktree).clone()),
+            _ => None,
+        };
+        drop(previous_checkout);
         if !(matches!(
             previous.state,
             SessionState::Stopped | SessionState::Lost | SessionState::Error
@@ -1515,7 +1528,7 @@ impl Controller {
             .context("session has no checkpoint")?;
         // A receipt for an isolated destination says nothing about a host
         // checkout. Explicit moves to raw execution must check that source.
-        let moving_to_raw = previous.project_directory.is_none()
+        let moving_to_raw = previous_project_directory.is_none()
             && self
                 .config
                 .targets
@@ -1572,15 +1585,24 @@ impl Controller {
             profile.kind != HarnessKind::Muse || previous.additional_mounts.is_empty(),
             "Muse Code ACP supports one workspace root; attached directories are unsupported"
         );
-        let plan = resume_compatibility(&previous, &self.config, target_id)
+        let checkout = self.state.checkout(session_id)?;
+        let plan = resume_compatibility_with_checkout(
+            &previous,
+            &checkout,
+            &self.config,
+            target_id,
+        )
             .map_err(|reason| anyhow::anyhow!("{reason}"))?;
         // A worktree that stays put is reached with the machine's current ssh
         // options; only its location had to match (J-21).
         if plan == ResumePlan::InPlace
+            && previous_managed_worktree.is_some()
             && let Some(worktree) = previous.managed_worktree.as_mut()
             && let Ok(current) = managed_worktree_target(&target_template)
         {
             worktree.target = current;
+            let refreshed_checkout = self.state.checkout_for_record(session_id, &previous)?;
+            previous_managed_worktree = refreshed_checkout.effective().managed_worktree().cloned();
         }
         // A converting resume writes its own archive below, from the host
         // checkout's own network remote, and provisioning reads that one. Every
@@ -1592,8 +1614,8 @@ impl Controller {
             super::network_git::bundle_from_manifest(archive_manifest)?;
         }
         if plan == ResumePlan::InPlace
-            && previous.managed_worktree.is_none()
-            && let Some(project_directory) = &previous.project_directory
+            && matches!(checkout.effective(), mj_core::state::Checkout::Attached { .. })
+            && let Some(project_directory) = checkout.project_directory()
         {
             self.validate_project_directory(target_id, project_directory, executor)
                 .context("raw project is unavailable for resume")?;
@@ -1601,7 +1623,7 @@ impl Controller {
         let mut conversion = match plan {
             ResumePlan::InPlace => None,
             ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(
-                plan_raw_to_workspace(&previous, executor)
+                plan_raw_to_workspace_with_checkout(&checkout, executor)
                     .context("prepare the raw checkout for its new target")?,
             )),
             ResumePlan::WorkspaceToRaw => Some(ResumeConversion::WorkspaceToRaw(
@@ -1650,16 +1672,24 @@ impl Controller {
                 conversion.worktree.branch,
             ));
         }
-        let managed_checkout_present = previous
-            .managed_worktree
+        let managed_checkout_present = previous_managed_worktree
             .as_ref()
             .map(|worktree| managed_worktree_checkout_exists(executor, worktree))
             .transpose()?
             .unwrap_or(true);
         // A checkout Mjolnir did not retire remains the truth for a raw session.
         // A retired checkout is recreated from the branch and archive below.
-        if managed_checkout_present && let Some(project_directory) = &previous.project_directory {
-            match raw_checkout_position(&previous, &self.config, project_directory, executor) {
+        if managed_checkout_present
+            && let Some(project_directory) = previous_project_directory.as_deref()
+        {
+            let checkout = self.state.checkout(session_id)?;
+            match raw_checkout_position_with_checkout(
+                &previous,
+                &checkout,
+                &self.config,
+                project_directory,
+                executor,
+            ) {
                 Ok(live) => resume_notices.extend(raw_checkout_divergence_notice(
                     project_directory,
                     archive_manifest
@@ -1805,13 +1835,16 @@ impl Controller {
             None => {
                 if let (Some(worktree), Some(refreshed)) = (
                     record.managed_worktree.as_mut(),
-                    previous.managed_worktree.as_ref(),
+                    previous_managed_worktree.as_ref(),
                 ) {
                     worktree.target = refreshed.target.clone();
                 }
             }
         }
-        let resumed_project_directory = record.project_directory.clone();
+        let resumed_project_directory = record
+            .checkout()
+            .project_directory()
+            .map(|path| path.to_path_buf());
         let resumed_container_workspace = record.container_workspace.clone();
         if let Some(host) = history_host {
             self.state.remember_mount_sources(host, &history_mounts);
@@ -1854,7 +1887,7 @@ impl Controller {
         // retire the archive it replaced and the failure path can remove it.
         let mut conversion_checkpoint_written: Option<mj_core::state::CheckpointMetadata> = None;
         let result = async {
-            if let Some(worktree) = previous.managed_worktree.as_ref() {
+            if let Some(worktree) = previous_managed_worktree.as_ref() {
                 recreated_managed_worktree = restore_managed_worktree(executor, worktree)?;
                 if !transferring_workspace && recreated_managed_worktree && plan == ResumePlan::RawToWorkspace {
                     if worktree.kind == mj_core::state::ManagedCheckoutKind::Clone {
@@ -1914,8 +1947,7 @@ impl Controller {
                 && !transferring_workspace
             {
                 let destination = PathBuf::from(
-                    previous
-                        .project_directory
+                    previous_project_directory
                         .as_deref()
                         .context("a raw session has no project directory")?
                         .file_name()
@@ -1933,8 +1965,7 @@ impl Controller {
                 .context("snapshot the host checkout for its new target")?;
                 resume_notices.push(conversion_notice(
                     target_id,
-                    previous
-                        .project_directory
+                    previous_project_directory
                         .as_deref()
                         .unwrap_or(&conversion.checkout),
                     snapshot.metadata.branch.as_deref(),
@@ -2116,10 +2147,10 @@ impl Controller {
         let worktree_cleanup = if cleanup.is_err() {
             Ok(())
         } else {
-            match (
-                current.managed_worktree.as_ref(),
-                previous.managed_worktree.as_ref(),
-            ) {
+            let current_worktree = self.state.checkout(session_id)?.managed_worktree().cloned();
+            let previous_checkout = self.state.checkout_for_record(session_id, previous)?;
+            let previous_worktree = previous_checkout.managed_worktree().cloned();
+            match (current_worktree.as_ref(), previous_worktree.as_ref()) {
                 (_, Some(previous)) if recreated_managed_worktree => retire_managed_worktree(
                     &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
                     previous,
@@ -2155,10 +2186,16 @@ impl Controller {
         if detail != original {
             tracing::warn!(session_id, error = %detail, "resume failed");
         }
+        let current_owns_managed_checkout = self
+            .state
+            .checkout(session_id)?
+            .managed_worktree()
+            .is_some();
         let record = self.state.sessions.get_mut(session_id).unwrap();
-        let failure = apply_failed_resume_rollback(
+        let failure = apply_failed_resume_rollback_with_ownership(
             record,
             previous,
+            current_owns_managed_checkout,
             &original,
             (!cleanup_error.is_empty()).then_some(cleanup_error),
         );
@@ -2183,9 +2220,27 @@ fn worktree_cleanup_notice(worktree_root: &Path, error: &anyhow::Error) -> Strin
     )
 }
 
+#[cfg(test)]
 pub(super) fn apply_failed_resume_rollback(
     current: &mut SessionRecord,
     previous: &SessionRecord,
+    original_error: &str,
+    cleanup_error: Option<String>,
+) -> anyhow::Error {
+    let current_owns_managed_checkout = current.checkout().managed_worktree().is_some();
+    apply_failed_resume_rollback_with_ownership(
+        current,
+        previous,
+        current_owns_managed_checkout,
+        original_error,
+        cleanup_error,
+    )
+}
+
+fn apply_failed_resume_rollback_with_ownership(
+    current: &mut SessionRecord,
+    previous: &SessionRecord,
+    current_owns_managed_checkout: bool,
     original_error: &str,
     cleanup_error: Option<String>,
 ) -> anyhow::Error {
@@ -2206,7 +2261,9 @@ pub(super) fn apply_failed_resume_rollback(
             // cleanup succeeds; the harness may still be writing there.
             // A container conversion has no new managed host checkout, so
             // retain the original host checkout that it has not retired yet.
-            if current.managed_worktree.is_none() {
+            if !current_owns_managed_checkout {
+                // Restore the persisted fields as a snapshot. The State-level
+                // checkout derivation decides whether this record owns them.
                 current
                     .project_directory
                     .clone_from(&previous.project_directory);

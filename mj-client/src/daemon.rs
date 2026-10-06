@@ -901,8 +901,8 @@ impl ResumeCandidate {
                 .filter(|_| record.state == SessionState::Stopped)
                 .map(|checkpoint| checkpoint.archive_path.clone()),
             worktree_checkout: record
-                .managed_worktree
-                .as_ref()
+                .checkout()
+                .managed_worktree()
                 .is_some_and(|owned| owned.kind == ManagedCheckoutKind::Worktree),
         }
     }
