@@ -95,6 +95,8 @@ toml_edit = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+# Windows-only crates add the API features they call.
+windows-sys = "0.61"
 zip = { version = "2", default-features = false, features = ["deflate", "zstd"] }
 
 [workspace.lints.clippy]

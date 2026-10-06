@@ -66,7 +66,7 @@ url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Measures local free space where there is no POSIX `df`.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [build-dependencies]
 serde_json.workspace = true
