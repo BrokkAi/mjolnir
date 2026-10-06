@@ -506,6 +506,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
@@ -741,6 +742,140 @@ fn bundle_rejects_traversal_and_duplicate_destinations() {
             .unwrap_err()
             .to_string()
             .contains("overlapping destinations")
+    );
+}
+
+#[test]
+fn bundle_requires_existing_primary_repository() {
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().primary_repo = "missing".into();
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("does not exist")
+    );
+}
+
+#[test]
+fn bundle_rejects_non_github_sources() {
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().repositories[0].github =
+        Some("https://example.com/owner/repo".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not a supported GitHub source")
+    );
+}
+
+#[test]
+fn bundle_accepts_one_absolute_local_source() {
+    let mut config = sample_config();
+    {
+        let repository = &mut config.bundles.get_mut("hel").unwrap().repositories[0];
+        repository.github = None;
+        repository.local = Some(PathBuf::from("/home/test/src/app"));
+    }
+    config.validate().unwrap();
+
+    config.bundles.get_mut("hel").unwrap().repositories[0].local =
+        Some(PathBuf::from("relative/app"));
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("absolute")
+    );
+}
+
+#[test]
+fn bundle_requires_exactly_one_repository_source() {
+    let mut config = sample_config();
+    config.bundles.get_mut("hel").unwrap().repositories[0].local =
+        Some(PathBuf::from("/home/test/src/app"));
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one")
+    );
+}
+
+#[test]
+fn config_toml_round_trip_is_atomic() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("nested/config.toml");
+    let config = sample_config();
+    config.save_to(&path).unwrap();
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+    assert!(!fs::read_to_string(&path).unwrap().contains("pull_policy"));
+    assert_eq!(
+        fs::read_to_string(path)
+            .unwrap()
+            .matches("kind = \"podman\"")
+            .count(),
+        1
+    );
+    assert!(
+        fs::read_dir(directory.path().join("nested"))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+    );
+}
+
+#[test]
+fn github_app_configuration_is_optional_and_round_trips() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "version = 1\n").unwrap();
+    let legacy = Config::load_from(&path).unwrap();
+    assert_eq!(legacy.github, GithubConfig::default());
+    legacy.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("[github"));
+
+    let mut configured = Config::default();
+    configured.github.app = Some(GithubAppConfig {
+        app_id: 1234,
+        private_key_path: PathBuf::from("/controller/keys/app.pem"),
+        installations: BTreeMap::from([("Acme".into(), 5678)]),
+        session_permissions: Some(BTreeMap::from([(
+            "contents".into(),
+            GithubPermissionLevel::Write,
+        )])),
+        token_permissions: Some(BTreeMap::from([(
+            "statuses".into(),
+            GithubPermissionLevel::Read,
+        )])),
+    });
+    configured.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("[github.app.installations]"), "{body}");
+    assert!(body.contains("[github.app.session_permissions]"), "{body}");
+    assert!(body.contains("[github.app.token_permissions]"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), configured);
+
+    fs::write(
+        &path,
+        "version = 14\n[github.app]\napp_id = 0\nprivate_key_path = 'app.pem'\n",
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.contains("app_id must be a positive integer"),
+        "{error}"
     );
 }
 

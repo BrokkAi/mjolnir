@@ -8,8 +8,8 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use clap::{Args, ValueEnum};
+use anyhow::{Context, Result, bail, ensure};
+use clap::{ArgGroup, Args, ValueEnum};
 use mj_controller::server::api::{
     ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
     WaitOutcome, WaitRequest, WaitResponse,
@@ -794,6 +794,23 @@ pub(crate) struct ApiInfoArgs {
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("github_token_target")
+        .args(["owner", "repo"])
+        .required(true)
+        .multiple(false)
+))]
+pub(crate) struct GithubTokenArgs {
+    /// GitHub owner login whose installation should receive a token.
+    #[arg(long)]
+    owner: Option<String>,
+    /// Repository in OWNER/NAME form. May be repeated to limit the token to
+    /// several repositories from one installation.
+    #[arg(long, action = clap::ArgAction::Append)]
+    repo: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1868,6 +1885,31 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
     Ok(())
 }
 
+/// Print a valid GitHub App installation token for a selected owner or repo.
+pub(crate) async fn github_token(args: GithubTokenArgs) -> Result<()> {
+    let (owner, repositories) = match (args.owner, args.repo) {
+        (Some(owner), repositories) if repositories.is_empty() => (Some(owner), Vec::new()),
+        (None, repositories) if !repositories.is_empty() => {
+            for repository in &repositories {
+                let parsed = mj_core::remote_git::github_owner_repo(repository)
+                    .context("--repo values must use OWNER/NAME form")?;
+                ensure!(
+                    format!("{}/{}", parsed.0, parsed.1) == repository.as_str(),
+                    "--repo values must use OWNER/NAME form"
+                );
+            }
+            (None, repositories)
+        }
+        _ => bail!("supply exactly one of --owner or one or more --repo values"),
+    };
+    let token = ApiClient::connect()
+        .await?
+        .github_token(owner.as_deref(), &repositories)
+        .await?;
+    println!("{token}");
+    Ok(())
+}
+
 /// Read prompt text from an argument, a file, or standard input.
 fn read_prompt(text: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
     match (text, file) {
@@ -2065,7 +2107,55 @@ mod tests {
     use clap::Parser as _;
 
     #[test]
+    fn github_token_requires_one_owner_or_repository_selector() {
+        let Some(Command::GithubToken(owner)) =
+            Cli::try_parse_from(["mj", "github-token", "--owner", "acme"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(owner.owner.as_deref(), Some("acme"));
+        assert!(owner.repo.is_empty());
 
+        let Some(Command::GithubToken(repo)) =
+            Cli::try_parse_from(["mj", "github-token", "--repo", "acme/project"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(repo.owner, None);
+        assert_eq!(repo.repo, ["acme/project"]);
+        let Some(Command::GithubToken(repositories)) = Cli::try_parse_from([
+            "mj",
+            "github-token",
+            "--repo",
+            "acme/project",
+            "--repo",
+            "acme/tools",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(repositories.repo, ["acme/project", "acme/tools"]);
+        assert!(Cli::try_parse_from(["mj", "github-token"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "mj",
+                "github-token",
+                "--owner",
+                "acme",
+                "--repo",
+                "acme/project",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn review_parses_start_and_status_with_a_session() {
         for (verb, json) in [("start", false), ("status", true)] {
             let mut argv = vec!["mj", "review", verb, "--session", "s1"];

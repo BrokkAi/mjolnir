@@ -329,7 +329,19 @@ impl Controller {
         if let Some((operation, preparation)) = move_intent {
             // The source is still behind an unsealed barrier. A destination
             // preflight error must release it and leave its processes alive.
-            if let Err(error) = self.validate_move_checkpoint(operation, preparation, executor) {
+            let validation = match self
+                .github_token_for_repository_preflight(session_id)
+                .await
+            {
+                Ok(token) => self.validate_move_checkpoint(
+                    operation,
+                    preparation,
+                    token.as_deref(),
+                    executor,
+                ),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = validation {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 record.state = previous.state;
                 record.last_error = Some(format!("{error:#}"));

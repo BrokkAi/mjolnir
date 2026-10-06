@@ -88,6 +88,7 @@ The only accepted top-level keys are:
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
 | `profiles` | table of named tables | no | empty | Named harness accounts and homes. |
 | `bundles` | table of named tables | no | empty | Named repository sets for managed targets. |
+| `github` | table | no | empty | Optional GitHub App credentials shared by the controller. |
 | `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
 | `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
 | `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
@@ -604,6 +605,40 @@ credential, such as `*_API_KEY` or `*_TOKEN`.
 A configuration that uses a reference needs a Mjolnir that understands it;
 an older build reports the entry as an invalid type. Plain strings keep
 working everywhere.
+
+## GitHub App `[github.app]`
+
+An optional GitHub App can provide installation tokens for private bundle
+repositories without putting a long-lived user token in the daemon environment.
+The daemon reads the App's private PEM key from the controller host. The key
+and installation tokens are not stored in the database or session checkpoints.
+Without this section, Mjolnir keeps using `GH_TOKEN`, `GITHUB_TOKEN`, or
+`gh auth token` as before.
+
+```toml
+[github.app]
+app_id = 1234
+private_key_path = "/home/me/.config/mjolnir/github-app.pem"
+
+[github.app.installations]
+acme = 987654
+```
+
+`app_id` is the GitHub App ID, and `private_key_path` names its RSA PEM private
+key on the controller host. The optional `installations` table maps GitHub
+owner logins (organizations or users) to installation IDs. Owners not listed
+there are discovered through GitHub's API and cached by the daemon. Find the
+installation ID on the installed App's settings page.
+
+Each managed session may use repositories from only one App installation. A
+bundle that resolves to multiple installations is rejected when the session is
+created. App tokens are refreshed before they approach expiry and are delivered
+to running remote/container sessions during credential sync. Local bare
+sessions do not receive periodic refresh; an App token used there expires
+within at most one hour.
+
+See [GitHub App credentials](/github-app/) for creating an App and setting up
+its repository permissions.
 
 ## Bundles `[bundles.<id>]`
 

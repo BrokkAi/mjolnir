@@ -187,6 +187,22 @@ pub(super) async fn start_session(
             ));
         }
     };
+    if !bundle_id.is_empty() {
+        match backend.validate_github_bundle(bundle_id.clone()).await {
+            Ok(()) => {}
+            Err(crate::controller::GithubBundleSelectionError::UnknownBundle(message)) => {
+                return Err(ApiFailure::bad_request(message));
+            }
+            Err(crate::controller::GithubBundleSelectionError::MultipleInstallations(message)) => {
+                return Err(ApiFailure::conflict(message));
+            }
+            Err(crate::controller::GithubBundleSelectionError::Provider(error)) => {
+                return Err(ApiFailure::unavailable(format!(
+                    "could not resolve GitHub App installation for bundle {bundle_id:?}: {error:#}"
+                )));
+            }
+        }
+    }
     let mut action = ControllerAction::New {
         create_managed_worktree: request.create_managed_worktree,
         at: request.at.clone(),

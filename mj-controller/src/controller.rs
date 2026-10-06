@@ -4,6 +4,7 @@ mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod git_cache;
+mod github_app;
 mod lifecycle;
 pub mod local_profile_homes;
 pub(crate) mod mbx;
@@ -78,6 +79,10 @@ pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
 pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
+pub use github_app::GithubBundleSelectionError;
+pub(crate) use github_app::{
+    GithubAppTokenProvider, github_app_token_for_session, github_token_for_session,
+};
 pub use mbx::install::{
     MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };

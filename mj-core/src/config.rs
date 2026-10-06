@@ -17,6 +17,7 @@
 //! * `secrets` -- environment entries that name a secret held elsewhere.
 
 mod document;
+mod github;
 mod harness;
 mod keys;
 mod loading;
@@ -25,6 +26,7 @@ mod secrets;
 mod targets;
 mod ui;
 
+pub use github::*;
 pub use harness::*;
 pub use keys::*;
 pub use loading::*;
@@ -475,6 +477,7 @@ pub struct Config {
     pub spinner: SpinnerStyle,
     pub theme: UiTheme,
     pub phone: PhoneConfig,
+    pub github: GithubConfig,
     pub review: ReviewConfig,
     pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
@@ -517,6 +520,8 @@ struct StoredConfig {
     theme: UiTheme,
     #[serde(default, skip_serializing_if = "PhoneConfig::is_default")]
     phone: PhoneConfig,
+    #[serde(default, skip_serializing_if = "GithubConfig::is_default")]
+    github: GithubConfig,
     #[serde(default, skip_serializing_if = "ReviewConfig::is_default")]
     review: ReviewConfig,
     #[serde(
@@ -680,6 +685,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            github,
             review,
             continuation,
             sessionwiki,
@@ -693,6 +699,9 @@ impl TryFrom<StoredConfig> for Config {
             mut machines,
             targets,
         } = stored;
+        if let Some(app) = &github.app {
+            app.validate()?;
+        }
         for profile in profiles.values_mut() {
             profile.inherit_provider_key();
         }
@@ -744,6 +753,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
+            github,
             review,
             continuation,
             sessionwiki,
@@ -782,6 +792,7 @@ impl From<Config> for StoredConfig {
             spinner: config.spinner,
             theme: config.theme,
             phone: config.phone,
+            github: config.github,
             review: config.review,
             continuation: config.continuation,
             sessionwiki: config.sessionwiki,
@@ -808,6 +819,7 @@ impl Default for Config {
             spinner: SpinnerStyle::default(),
             theme: Default::default(),
             phone: PhoneConfig::default(),
+            github: GithubConfig::default(),
             review: ReviewConfig::default(),
             continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),

@@ -17,8 +17,7 @@ use crate::targets::{
 
 use super::backend::{
     ContainerOverrides, TargetCheck, backend_locator, backend_session_bundle, backend_target,
-    configure_github_token_environment, controller_github_token, preflight_target,
-    use_github_https_urls,
+    configure_github_token_environment, preflight_target, use_github_https_urls,
 };
 use super::git_cache;
 use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
@@ -122,7 +121,10 @@ impl Controller {
             executor,
             async {
                 crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
-                let github_token = controller_github_token();
+                let github_token = self
+                    .github_token_for_session(session_id)
+                    .await
+                    .context("resolve GitHub credentials for session")?;
                 let repositories = self
                     .provision_session_target_with_failure_disposition(
                         session_id,

@@ -264,6 +264,7 @@ fn sample_config() -> Config {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),

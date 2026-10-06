@@ -1,5 +1,6 @@
 use super::*;
 use crate::chat::test_support::{drawn_transcript, key, snapshot};
+use crate::chat::transcript::row_text;
 use crate::chat::{ChatAction, ChatState};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mj_core::transcript::ChatRole;
@@ -500,4 +501,24 @@ fn preparation_explains_shared_settings_and_retries_without_a_selector() {
         chat.elicitation.as_ref().unwrap().request(),
         &captured().request
     );
+}
+
+#[test]
+fn the_reviewer_pane_copies_a_wrapped_url_whole() {
+    let url = "https://example.com/a/rather/long/path/that/cannot/fit/on/one/row";
+    let mut pane = pane_from_entries(vec![ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        format!("See {url} for details."),
+    )]);
+    pane.ensure_rows(30);
+    let last = pane.rows.len() - 2;
+
+    let text = pane
+        .selection_text(&SelectionRange {
+            start: crate::selection::ContentPos::new(1, 0),
+            end: crate::selection::ContentPos::new(last, 29),
+        })
+        .expect("a selection over this pane's rows resolves here");
+    assert_eq!(text, format!("See {url} for details."));
 }

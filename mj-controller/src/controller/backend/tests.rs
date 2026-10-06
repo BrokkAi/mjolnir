@@ -535,6 +535,203 @@ fn the_image_refresh_plan_covers_every_configured_container_image_except_never()
         Some("'podman' 'image' 'prune' '-f'")
     );
 }
+#[test]
+fn ssh_docker_image_refresh_runs_docker_on_the_configured_host() {
+    use mj_core::config::ImagePullPolicy;
+
+    let mut config = Config::default();
+    config.targets.insert(
+        "docker".into(),
+        TargetTemplate::SshDocker {
+            ssh: SshConnection {
+                host: "builder.example.test".into(),
+                user: Some("dev".into()),
+                identity_file: None,
+                extra_args: Vec::new(),
+            },
+            container: ConfigContainer {
+                build_cache: None,
+                image: "ghcr.io/example/dev:latest".into(),
+                pull_policy: ImagePullPolicy::Auto,
+                platform: Some("linux/amd64".into()),
+                cpus: None,
+                memory: None,
+                environment: Default::default(),
+                workspace_storage: Default::default(),
+            },
+        },
+    );
+
+    let refresh = image_refresh_plan(&config).pop().expect("refresh plan");
+    assert_eq!(
+        refresh.host,
+        ImageHost::SshDocker(SshTarget::from(
+            match config.targets.get("docker").unwrap() {
+                TargetTemplate::SshDocker { ssh, .. } => ssh,
+                _ => unreachable!(),
+            }
+        ))
+    );
+    assert_eq!(refresh.pull.program, "ssh");
+    assert_eq!(
+        refresh.pull.args.last().map(String::as_str),
+        Some("'docker' 'pull' '--platform=linux/amd64' 'ghcr.io/example/dev:latest'")
+    );
+    assert_eq!(
+        refresh
+            .prune
+            .as_ref()
+            .expect("docker prunes")
+            .args
+            .last()
+            .map(String::as_str),
+        Some("'docker' 'image' 'prune' '-f'")
+    );
+    assert_eq!(refresh.when, RefreshWhen::Always);
+}
+
+#[test]
+fn aws_resource_options_follow_the_launch_template_family() {
+    let mut config = Config::default();
+    config.targets.insert(
+        "aws".into(),
+        TargetTemplate::AwsEc2 {
+            aws_profile: None,
+            region: "us-east-1".into(),
+            launch_template: "hel-runson".into(),
+            launch_template_version: None,
+            ssh_user: "ubuntu".into(),
+            address_source: AwsAddressSource::PublicIp,
+            identity_file: None,
+            ssh_args: Vec::new(),
+        },
+    );
+    let executor = PreflightExecutor {
+        outputs: RefCell::new(vec![
+            CommandOutput {
+                status: 0,
+                stdout: br#"{"LaunchTemplateVersions":[{"LaunchTemplateData":{"InstanceType":"m8i-flex.large"}}]}"#.to_vec(),
+                stderr: Vec::new(),
+            },
+            CommandOutput {
+                status: 0,
+                stdout: br#"{"InstanceTypes":[{"InstanceType":"m8i-flex.4xlarge","VCpuInfo":{"DefaultVCpus":16},"MemoryInfo":{"SizeInMiB":65536}},{"InstanceType":"m8i-flex.2xlarge","VCpuInfo":{"DefaultVCpus":8},"MemoryInfo":{"SizeInMiB":32768}}]}"#.to_vec(),
+                stderr: Vec::new(),
+            },
+        ]),
+        notices: RefCell::new(vec![]),
+    };
+    let controller = Controller {
+        config,
+        state: State::default(),
+    };
+
+    let options = controller
+        .resolve_aws_resource_options("aws", &executor)
+        .unwrap();
+    assert_eq!(
+        options.iter().map(allocation_cpus).collect::<Vec<_>>(),
+        [8, 16]
+    );
+}
+#[test]
+fn deployment_capacity_groups_local_and_same_host_targets() {
+    let container = || ConfigContainer {
+        build_cache: None,
+        image: "dev:1".into(),
+        pull_policy: Default::default(),
+        platform: None,
+        cpus: None,
+        memory: None,
+        environment: Default::default(),
+        workspace_storage: Default::default(),
+    };
+    let ssh = |host: &str| SshConnection {
+        host: host.into(),
+        user: Some("builder".into()),
+        identity_file: None,
+        extra_args: Vec::new(),
+    };
+    let config = Config {
+        keys: Default::default(),
+        jev: Default::default(),
+        subagents: Default::default(),
+        version: mj_core::config::CONFIG_VERSION,
+        sessions_side: Default::default(),
+        advanced: Default::default(),
+        notify: Default::default(),
+        spinner: Default::default(),
+        theme: Default::default(),
+        phone: Default::default(),
+        github: Default::default(),
+        continuation: Default::default(),
+        review: Default::default(),
+        sessionwiki: Default::default(),
+        legacy_startup: (),
+        default_targets: Default::default(),
+        machines: Default::default(),
+        profiles: BTreeMap::new(),
+        bundles: BTreeMap::new(),
+        targets: BTreeMap::from([
+            (
+                "apple".into(),
+                TargetTemplate::AppleContainer {
+                    container: container(),
+                },
+            ),
+            (
+                "local".into(),
+                TargetTemplate::LocalPodman {
+                    container: container(),
+                },
+            ),
+            (
+                "bare".into(),
+                TargetTemplate::SshBare {
+                    ssh: ssh("builder"),
+                    permissions: mj_core::config::PermissionMode::Yolo,
+                    workspace_prefix: ".local/share/hel/workspaces".into(),
+                },
+            ),
+            (
+                "remote-container".into(),
+                TargetTemplate::SshPodman {
+                    ssh: ssh("builder"),
+                    container: container(),
+                },
+            ),
+            (
+                "alias".into(),
+                TargetTemplate::SshBare {
+                    ssh: ssh("builder-alias"),
+                    permissions: mj_core::config::PermissionMode::Yolo,
+                    workspace_prefix: ".local/share/hel/workspaces".into(),
+                },
+            ),
+        ]),
+    };
+    let controller = Controller {
+        config,
+        state: State::default(),
+    };
+
+    let targets = controller.deployment_capacity_targets();
+
+    assert_eq!(targets.len(), 3);
+    let local = targets.iter().find(|target| target.id == "local").unwrap();
+    assert_eq!(local.target_ids, ["apple", "local"]);
+    let builder = targets
+        .iter()
+        .find(|target| target.id == "ssh:builder")
+        .unwrap();
+    assert_eq!(builder.target_ids, ["bare", "remote-container"]);
+    assert_eq!(builder.probes.len(), 1);
+    assert!(
+        targets
+            .iter()
+            .any(|target| target.id == "ssh:builder-alias")
+    );
+}
 struct PreflightExecutor {
     outputs: RefCell<Vec<CommandOutput>>,
     notices: RefCell<Vec<String>>,
