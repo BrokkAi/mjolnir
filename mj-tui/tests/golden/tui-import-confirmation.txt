@@ -1,6 +1,6 @@
 === scratch repository excluded from workspace (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │

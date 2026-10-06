@@ -1,6 +1,6 @@
 === new_session_profile_step_aligns_its_columns (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -31,7 +31,7 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === new_session_profile_step_shows_weekly_and_five_hour_percentages (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -62,7 +62,7 @@
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === resume_profile_step_aligns_its_columns_and_explains_the_marker (120x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                               ✦  M J O L N I R                               │
 ╭ Sessions ──────                                                                                                      │
 │ Create   Open                                                                                                        │

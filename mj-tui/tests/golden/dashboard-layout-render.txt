@@ -1,7 +1,7 @@
 open Rename action: None
 === Rename modal over dashboard (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -32,7 +32,7 @@ open Rename action: None
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 === standard panes at height 32 (120x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________▐│                                                                              │
@@ -67,7 +67,7 @@ standard transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 18
 compact pane preset action: None
 === compact panes at height 32 (120x32) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ☰ ││                                                                                                  │
+│ default        ≡ ││                                                                                                  │
 ╰──────────────────╯│                                                                                                  │
 ╭Sessi…─ ▁   ▪   □ ╮│                                                                                                  │
 │ Create   Open    ││                                                                                                  │
@@ -102,7 +102,7 @@ compact transcript area at height 32: Rect { x: 20, y: 0, width: 100, height: 25
 restore pane preset action: None
 === restored panes at height 32 (120x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________▐│                                                                              │
@@ -136,7 +136,7 @@ restore pane preset action: None
 restored transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 18 }
 === standard panes at height 44 (120x44) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -183,7 +183,7 @@ standard transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 30
 compact pane preset action: None
 === compact panes at height 44 (120x44) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default        ☰ ││                                                                                                  │
+│ default        ≡ ││                                                                                                  │
 ╰──────────────────╯│                                                                                                  │
 ╭Sessi…─ ▁   ▪   □ ╮│                                                                                                  │
 │ Create   Open    ││                                                                                                  │
@@ -230,7 +230,7 @@ compact transcript area at height 44: Rect { x: 20, y: 0, width: 100, height: 37
 restore pane preset action: None
 === restored panes at height 44 (120x44) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -308,7 +308,7 @@ restored transcript area at height 44: Rect { x: 40, y: 0, width: 80, height: 30
 dashboard geometry at 59 columns: (None, None, false)
 === dashboard at 70 columns (70x30) ===
 ╭ Workspaces ───────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮
-│ default                                                          ☰ │
+│ default                                                          ≡ │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Sessions ─────────────────────────────────────────────────── ▁   ▪ ╮
 │ Create   Open                                                      │
@@ -340,7 +340,7 @@ Enter open │ ctrl+b then : palette · ? keys
 dashboard geometry at 70 columns: (Some([Rect { x: 0, y: 3, width: 70, height: 6 }, Rect { x: 0, y: 19, width: 70, height: 4 }, Rect { x: 0, y: 23, width: 70, height: 6 }]), Some(Rect { x: 0, y: 9, width: 70, height: 10 }), true)
 === dashboard at 80 columns (80x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
 │ Create   Open   Filter: _____________││                                      │

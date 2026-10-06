@@ -1,6 +1,6 @@
 === focused replacement source (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions                                                                                         │
 │ Create                                                                                  .        │
@@ -30,7 +30,7 @@ Cancel action focused: false
 
 === focus moves to origin actions (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions                                                                                         │
 │ Create                                                                                  .        │

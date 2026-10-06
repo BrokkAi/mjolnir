@@ -2,7 +2,7 @@ action: None
 
 === target actions (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -39,7 +39,7 @@ action: TestTarget { target_id: "podman" }
 
 === target test result (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -75,7 +75,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 
 === target ID editor (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -111,7 +111,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 
 === edited target ID (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -150,7 +150,7 @@ action: None
 
 === cancelled target ID editor returns to actions (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -187,7 +187,7 @@ action: ProbeGitStatus { session_id: "session-1" }
 
 === changed files while the checkout probe is pending (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
@@ -267,7 +267,7 @@ action: None
 
 === dashboard after closing changed files (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
@@ -293,7 +293,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 === command palette search for recent messages (100x28) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
@@ -324,7 +324,7 @@ action: None
 
 === recent messages (100x28) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
@@ -354,7 +354,7 @@ action: None
 
 === recent messages after paging down (100x28) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
@@ -385,7 +385,7 @@ action: None
 
 === command palette search for CPU by session (120x36) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │

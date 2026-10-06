@@ -1,6 +1,6 @@
 === Create and Open remain clickable (80x20) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
 │ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
@@ -22,7 +22,7 @@ Background work finished
 
 === Create opens the session wizard (80x20) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions                                                                     │
 │ Create                                                                       │
@@ -45,7 +45,7 @@ action: None; mode: New=true
 
 === Open launches the session picker (80x20) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
+│ default                            ≡ ││                                      │
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
 │ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
@@ -68,7 +68,7 @@ action: OpenResumeDialog
 
 === Create and Open remain clickable (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
@@ -94,7 +94,7 @@ Background work finished
 
 === Create opens the session wizard (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
@@ -121,7 +121,7 @@ action: None; mode: New=true
 
 === Open launches the session picker (100x24) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
@@ -148,7 +148,7 @@ action: OpenResumeDialog
 
 === Create and Open remain clickable (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -180,7 +180,7 @@ Background work finished
 
 === Create opens the session wizard (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -213,7 +213,7 @@ action: None; mode: New=true
 
 === Open launches the session picker (120x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -246,7 +246,7 @@ action: OpenResumeDialog
 
 === Create and Open remain clickable (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -288,7 +288,7 @@ Background work finished
 
 === Create opens the session wizard (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -331,7 +331,7 @@ action: None; mode: New=true
 
 === Open launches the session picker (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -374,7 +374,7 @@ action: OpenResumeDialog
 
 === Create and Open remain clickable (200x60) ===
 ╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
@@ -436,7 +436,7 @@ Background work finished
 
 === Create opens the session wizard (200x60) ===
 ╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
@@ -499,7 +499,7 @@ action: None; mode: New=true
 
 === Open launches the session picker (200x60) ===
 ╭ Workspaces ───────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                                      ☰ ││                                                                                                                                    │
+│ default                                                      ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
@@ -562,7 +562,7 @@ action: OpenResumeDialog
 
 === action row in the Sessions pane (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -607,7 +607,7 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 
 === keyboard focus on Create (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -652,7 +652,7 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 
 === keyboard focus moves to Open (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -697,7 +697,7 @@ button Open: fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD
 
 === Enter activates the focused Open button (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -740,7 +740,7 @@ action: OpenResumeDialog
 
 === monochrome action emphasis at rest (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -784,7 +784,7 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 
 === monochrome emphasis on Create (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -828,7 +828,7 @@ button Open: fg=Reset bg=Reset modifiers=REVERSED
 
 === monochrome emphasis on Open (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -873,7 +873,7 @@ monochrome Enter action: OpenResumeDialog
 
 === navigation starts at first session (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -915,7 +915,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 
 === Down selects second session (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -958,7 +958,7 @@ action focus: None; Create enabled: true; Open enabled: true
 
 === Up returns to first session (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1001,7 +1001,7 @@ action focus: None; Create enabled: true; Open enabled: true
 
 === Up reaches Create (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1044,7 +1044,7 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === Right reaches Open (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1087,7 +1087,7 @@ action focus: Some(ResumeDialog); Create enabled: true; Open enabled: true
 
 === Left returns to Create (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1130,7 +1130,7 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === Down returns to first session (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1173,7 +1173,7 @@ action focus: None; Create enabled: true; Open enabled: true
 
 === Enter opens the first session (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1216,7 +1216,7 @@ action: Open { session_id: "another-session" }
 
 === empty list selects Create (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1259,7 +1259,7 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === empty list can select Open (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1301,7 +1301,7 @@ action focus: Some(NewSessionWizard); Create enabled: true; Open enabled: true
 
 === empty list opens the picker (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1344,7 +1344,7 @@ action: OpenResumeDialog
 
 === Create disabled without profiles (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1388,7 +1388,7 @@ button Open: fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43) modifiers=NONE
 
 === keyboard skips disabled Create (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1431,7 +1431,7 @@ action focus: Some(ResumeDialog); Create enabled: false; Open enabled: true
 
 === Left stays on enabled Open (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -1474,7 +1474,7 @@ action focus: Some(ResumeDialog); Create enabled: false; Open enabled: true
 
 === mouse still activates Open (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │

@@ -1,6 +1,6 @@
 === Hel records with project targets (140x34) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Session                                                                                                                                  │
 │ Create                                                                                                                                   │
@@ -35,7 +35,7 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === native import target (140x34) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Session                                                                                                                                  │
 │ Create                                                                                                                                   │
@@ -70,7 +70,7 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === stored target after config removal (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -106,7 +106,7 @@
 ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pretty name"]
 === cross-source activity order (140x34) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Session                                                                                                                                  │
 │ Create                                                                                                                                   │
@@ -141,7 +141,7 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === history including older archived records (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -177,7 +177,7 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 native archive metadata: true
 === native archived conversation (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -213,7 +213,7 @@ native archive metadata: true
 archive shortcut action: None
 === native archived conversation remains listed (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -249,7 +249,7 @@ archive shortcut action: None
 d key action: None
 === resume dialog before destroy button (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -285,7 +285,7 @@ d key action: None
 Destroy button action: None
 === destroy confirmation (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -326,7 +326,7 @@ archived row archived untagged profile/origin: ("mjolnir", "local/project")
 archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 === archived rows with indexed profile and target (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -367,7 +367,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === Hel tab (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -402,7 +402,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === Import tab (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -437,7 +437,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === Left returns to Hel (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -472,7 +472,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === select resumable Hel row (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -509,7 +509,7 @@ resume selection action: None
 mode after selecting Hel row: "Resume wizard"
 === resume wizard (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -544,7 +544,7 @@ mode after selecting Hel row: "Resume wizard"
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === select importable native row (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessio                                                                                                               │
 │ Create                                                                                                               │
@@ -580,7 +580,7 @@ mode after selecting Hel row: "Resume wizard"
 native import action: ImportSession { profile_id: "codex-1", native_session_id: "native-2", display_title: "Native" }
 === dashboard after importing native row (120x34) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -615,7 +615,7 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === Live tab across workspaces (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default  Other                     ☰ ││                                                                              │
+│ Default  Other                     ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -656,7 +656,7 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === left wraps to Archived tab (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default  Other                     ☰ ││                                                                              │
+│ Default  Other                     ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
@@ -702,7 +702,7 @@ search key s action: SearchArchivedSessions { request_id: 4, query: "mas" }
 search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 === Live search result (120x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default  Other                     ☰ ││                                                                              │
+│ Default  Other                     ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │

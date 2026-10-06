@@ -3,7 +3,7 @@ action: SelectWorkspace { workspace_id: "alpha" }
 
 === dashboard after selecting the next workspace (110x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Alpha  Beta               ☰ ││                                                                    │
+│ Default  Alpha  Beta               ≡ ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                    │
 │ Create   Open   Filter: _____________││                                                                    │
@@ -38,7 +38,7 @@ action: SelectWorkspace { workspace_id: "beta" }
 
 === dashboard after selecting a numbered workspace (110x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Alpha  Beta               ☰ ││                                                                    │
+│ Default  Alpha  Beta               ≡ ││                                                                    │
 ╰──────────────────────────────────────╯│                                                                    │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                    │
 │ Create   Open   Filter: _____________││                                                                    │
@@ -73,7 +73,7 @@ action: LoadWorkspaceManagement { generation: 1 }
 
 === workspace manager list (110x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Alpha  Beta               ☰ ││                                                                    │
+│ Default  Alpha  Beta               ≡ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces ───────────────────────────────────────────────────────────────╮               │
@@ -108,7 +108,7 @@ action: None
 
 === drafts for the selected workspace (110x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Alpha  Beta               ☰ ││                                                                    │
+│ Default  Alpha  Beta               ≡ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
@@ -143,7 +143,7 @@ action: None
 
 === second draft selected (110x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Alpha  Beta               ☰ ││                                                                    │
+│ Default  Alpha  Beta               ≡ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
@@ -178,7 +178,7 @@ action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 
 === draft recovery completed (110x32) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
-│ Default  Alpha  Beta               ☰ ││                                                                    │
+│ Default  Alpha  Beta               ≡ ││                                                                    │
 ╰────────────                                                                                                │
 ╭ Sessions ──                                                                                                │
 │ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │

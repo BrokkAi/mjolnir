@@ -1,6 +1,6 @@
 === grouped Settings root (140x42) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi                                                                                                                       │
@@ -751,7 +751,7 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 
 === Light theme after save acknowledgement (100x30) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
+│ default                            ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │

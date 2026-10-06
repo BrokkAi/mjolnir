@@ -3,7 +3,7 @@ focus after title click: Prompt
 menu anchor: (47, 31, 47, 31)
 === Targets title menu (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -47,7 +47,7 @@ focus after title click: Prompt
 menu anchor: (47, 34, 47, 34)
 === Profiles title menu (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -89,7 +89,7 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 Targets Refresh action: RefreshAll
 === Targets after Refresh (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -131,7 +131,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Targets Runtimes… action: None
 === Targets targets setup page (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -173,7 +173,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Targets Machines… action: None
 === Targets machines setup page (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -215,7 +215,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Profiles Refresh action: RefreshAll
 === Profiles after Refresh (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -257,7 +257,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Profiles Settings… action: None
 === Profiles profiles setup page (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -299,7 +299,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Targets dot action: None
 === Targets opened by dot (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -341,7 +341,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Targets number 2 action: None
 === Targets number 2: Runtimes…, targets (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -383,7 +383,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Targets number 3 action: None
 === Targets number 3: Machines…, machines (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -424,7 +424,7 @@ Targets number 3 action: None
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 === Targets keyboard menu (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -468,7 +468,7 @@ Targets focus after Escape: Targets
 Targets menu after Escape: false
 === Targets after Escape (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -510,7 +510,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Targets Enter Refresh action: RefreshAll
 === Targets after Enter Refresh (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -552,7 +552,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Targets Enter setup action: None
 === Targets setup from keyboard (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -594,7 +594,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Profiles dot action: None
 === Profiles opened by dot (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -636,7 +636,7 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 Profiles number 2 action: None
 === Profiles number 2: Settings…, profiles (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -677,7 +677,7 @@ Profiles number 2 action: None
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 === Profiles keyboard menu (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -721,7 +721,7 @@ Profiles focus after Escape: Quota
 Profiles menu after Escape: false
 === Profiles after Escape (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -763,7 +763,7 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 Profiles Enter Refresh action: RefreshAll
 === Profiles after Enter Refresh (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -805,7 +805,7 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 Profiles Enter setup action: None
 === Profiles setup from keyboard (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
 │ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
@@ -848,7 +848,7 @@ Targets Minimized size action: None
 Targets menu after size click: false
 === Targets Minimized pane (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -891,7 +891,7 @@ Targets Standard size action: None
 Targets menu after size click: false
 === Targets Standard pane (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -934,7 +934,7 @@ Profiles Minimized size action: None
 Profiles menu after size click: false
 === Profiles Minimized pane (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -977,7 +977,7 @@ Profiles Standard size action: None
 Profiles menu after size click: false
 === Profiles Standard pane (140x40) ===
 ╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                  ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
