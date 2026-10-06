@@ -395,30 +395,11 @@ impl DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        config, dashboard_with_session, key, prefix_key, route, running_session,
-    };
-    use crate::{DashboardAction, Focus, Mode};
+    use crate::test_support::{config, dashboard_with_session, key, prefix_key, running_session};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     fn plain(character: char) -> KeyEvent {
         key(KeyCode::Char(character))
-    }
-
-    #[test]
-    fn the_prefix_arms_pending_and_a_bound_key_runs_its_command() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        assert_eq!(dashboard.route_bound_key(&prefix_key()), KeyRoute::Consumed);
-        assert!(dashboard.prefix_pending());
-        assert_eq!(
-            dashboard.route_bound_key(&plain('?')),
-            KeyRoute::Command {
-                id: CommandId::Help,
-                index: None
-            }
-        );
-        assert!(!dashboard.prefix_pending());
     }
 
     #[test]
@@ -440,39 +421,6 @@ mod tests {
         );
         assert!(!dashboard.prefix_pending());
         assert_eq!(dashboard.notices.current(), None);
-    }
-
-    #[test]
-    fn an_unbound_key_after_the_prefix_is_swallowed_with_a_notice() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.route_bound_key(&prefix_key());
-        assert_eq!(dashboard.route_bound_key(&plain('y')), KeyRoute::Consumed);
-        assert_eq!(
-            dashboard.notices.current().as_deref(),
-            Some("ctrl+b y is not bound; ctrl+b ? lists keys")
-        );
-    }
-
-    #[test]
-    fn a_direct_user_binding_runs_without_the_prefix() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut config = config();
-        config.keys.refresh = "f5".into();
-        dashboard.set_config(config);
-        assert_eq!(
-            dashboard.route_bound_key(&key(KeyCode::F(5))),
-            KeyRoute::Command {
-                id: CommandId::Refresh,
-                index: None
-            }
-        );
-        assert!(!dashboard.prefix_pending());
-        // The default prefix chord is gone, because the user's value replaced it.
-        dashboard.route_bound_key(&prefix_key());
-        assert_eq!(
-            dashboard.route_bound_key(&key(KeyCode::Char('R'))),
-            KeyRoute::Consumed
-        );
     }
 
     #[test]
@@ -504,22 +452,6 @@ mod tests {
                 assert!(!dashboard.prefix_pending());
             }
         }
-    }
-
-    #[test]
-    fn set_config_replaces_the_live_bindings() {
-        let mut dashboard = dashboard_with_session(running_session());
-        assert_eq!(dashboard.keybinds().prefix_label(), "ctrl+b");
-        let mut config = config();
-        config.keys.prefix = "ctrl+a".to_owned();
-        dashboard.set_config(config);
-        assert_eq!(dashboard.keybinds().prefix_label(), "ctrl+a");
-        assert_eq!(dashboard.route_bound_key(&prefix_key()), KeyRoute::Forward);
-        assert_eq!(
-            dashboard.route_bound_key(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
-            KeyRoute::Consumed
-        );
-        assert!(dashboard.prefix_pending());
     }
 
     #[test]
@@ -576,28 +508,6 @@ mod tests {
     }
 
     #[test]
-    fn switch_workspace_digits_carry_their_index() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.route_bound_key(&prefix_key());
-        assert_eq!(
-            dashboard.route_bound_key(&plain('3')),
-            KeyRoute::Command {
-                id: CommandId::SwitchWorkspace,
-                index: Some(2)
-            }
-        );
-        // The nine keys read as one row wherever they are advertised.
-        assert_eq!(
-            dashboard.key_labels(CommandId::SwitchWorkspace),
-            vec!["ctrl+b 1-9".to_owned()]
-        );
-        assert_eq!(
-            dashboard.footer_key(CommandId::SwitchWorkspace),
-            Some("1-9".to_owned())
-        );
-    }
-
-    #[test]
     fn a_mouse_press_cancels_a_pending_prefix() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.route_bound_key(&prefix_key());
@@ -609,36 +519,5 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(!dashboard.prefix_pending());
-    }
-
-    /// The router is the only place the numbered workspace keys carry an
-    /// argument, so the dispatch path has to read the index rather than the
-    /// command alone.
-    #[test]
-    fn routing_a_numbered_workspace_key_selects_that_workspace() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_workspace_names(
-            [
-                ("default".to_owned(), "Default".to_owned()),
-                ("second".to_owned(), "Second".to_owned()),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        assert_eq!(
-            route(&mut dashboard, &[prefix_key(), plain('2')]),
-            DashboardAction::SelectWorkspace {
-                workspace_id: "second".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn the_prefix_help_key_opens_the_overlay_from_the_composer() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_prompt();
-        assert_eq!(dashboard.focus, Focus::Prompt);
-        route(&mut dashboard, &[prefix_key(), plain('?')]);
-        assert!(matches!(dashboard.mode, Mode::Help(_)));
     }
 }

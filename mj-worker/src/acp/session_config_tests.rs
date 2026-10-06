@@ -10,12 +10,12 @@ fn reset_on_load_harness(root: &std::path::Path) -> PathBuf {
         &script,
         r#"
 import json, os, sys
-model, effort = 'default', 'low'
+model, effort, report_raw_model = 'default', 'low', False
 def options():
     efforts = ['medium', 'high'] if model == 'chosen' else ['low']
     return [
       {'id':'model_id','name':'Model','category':'model','type':'select',
-       'currentValue':model,'options':[{'value':x,'name':x} for x in ['default','chosen']]},
+       'currentValue':model + '-transcript-id' if report_raw_model else model,'options':[{'value':x,'name':x} for x in ['default','chosen']]},
       {'id':'thinking','name':'Thinking','category':'thought_level','type':'select',
        'currentValue':effort,'options':[{'value':x,'name':x} for x in efforts]}]
 for line in sys.stdin:
@@ -31,12 +31,15 @@ for line in sys.stdin:
     elif method == 'session/set_config_option':
         key, value = params['configId'], params['value']
         if key == 'model_id':
+            assert value in ['default','chosen'], 'a transcript id is not a selectable model'
             model = value
+            report_raw_model = False
             effort = 'high' if model == 'chosen' else 'low'
         elif key == 'thinking':
             assert model == 'chosen', 'effort was applied before model'
             assert value in ['medium','high']
             effort = value
+            report_raw_model = 'raw' in sys.argv[1:]
         else: raise AssertionError(key)
         result = {'configOptions':options()}
     elif method == 'session/prompt':
@@ -255,6 +258,7 @@ async fn prompt(commands: &mpsc::Sender<CommandRequest>, text: &str) {
         .unwrap();
 }
 
+// Hard-won: 21f785d: an effort response replaced the accepted picker model with a transcript ID.
 #[tokio::test]
 async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_prompt() {
     let root = tempfile::tempdir().unwrap();
@@ -264,11 +268,12 @@ async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_p
         DurableRelay::open(&journal, "0123456789abcdef0123456789abcdef", "test").unwrap();
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    let spec = launch(
+    let mut spec = launch(
         root.path(),
         script.clone(),
         AcceptedSessionConfig::default(),
     );
+    spec.args.push("raw".into());
     let saved = spec.accepted_config.clone();
     let runtime = tokio::spawn(run(spec, requests, events_tx));
     configured(&mut events).await;
@@ -326,6 +331,7 @@ async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_p
         }
     }
     let accepted = saved.lock().unwrap().clone();
+    assert_eq!(accepted.model.as_deref(), Some("chosen"));
     commands
         .send(CommandRequest::SetConfig {
             request_id: "rejected".into(),
@@ -399,36 +405,91 @@ async fn accepted_selectors_survive_bridge_and_worker_restarts_before_the_next_p
         .unwrap();
 }
 
+// Hard-won: f822699: API validation refused a listed saved model and killed the worker before users could change it.
 #[tokio::test]
-async fn a_saved_selector_the_harness_refuses_fails_before_ready_or_prompt_delivery() {
+async fn a_refused_saved_model_keeps_the_worker_live_for_model_changes() {
     let root = tempfile::tempdir().unwrap();
     let spec = launch(
         root.path(),
         dropped_model_harness(root.path()),
         AcceptedSessionConfig {
-            // Listed by the harness, and rejected when it is selected. That
-            // is a real failure, not a withdrawn model, so startup keeps it.
             model: Some("broken".into()),
             effort: None,
         },
     );
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
-    prompt(&commands, "must-not-run").await;
-    let error = tokio::time::timeout(Duration::from_secs(10), run(spec, requests, events_tx))
+    let saved = spec.accepted_config.clone();
+    let runtime = tokio::spawn(run(spec, requests, events_tx));
+    let mut configured = false;
+    let mut warned = false;
+    let request = loop {
+        match next(&mut events).await {
+            RuntimeEvent::SessionConfigured { config_options } => {
+                assert_eq!(reported(&config_options, "model"), "default");
+                configured = true;
+            }
+            RuntimeEvent::Warning { message } => {
+                assert!(message.contains("broken"), "{message}");
+                assert!(
+                    message.contains("this model is listed but unusable"),
+                    "{message}"
+                );
+                warned = true;
+            }
+            RuntimeEvent::ElicitationRequested { request } => {
+                assert!(configured && warned);
+                break request;
+            }
+            RuntimeEvent::Stopped => panic!("a refused model must not stop the worker"),
+            _ => {}
+        }
+    };
+    answer_recovery(&commands, &request.id, ElicitationResponse::Decline).await;
+    commands
+        .send(CommandRequest::SetConfig {
+            request_id: "refused-live".into(),
+            key: "model".into(),
+            value: "broken".into(),
+        })
+        .await
+        .unwrap();
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::CommandRejected {
+                request_id,
+                message,
+                ..
+            } if request_id == "refused-live" => {
+                assert!(message.contains("this model is listed but unusable"));
+                break;
+            }
+            RuntimeEvent::Stopped => panic!("a live model refusal must not stop the worker"),
+            _ => {}
+        }
+    }
+    assert_eq!(saved.lock().unwrap().model.as_deref(), Some("broken"));
+    let options = set_config(&commands, &mut events, "model", "chosen").await;
+    assert_eq!(reported(&options, "model"), "chosen");
+    assert_eq!(saved.lock().unwrap().model.as_deref(), Some("chosen"));
+    prompt(&commands, "after-model-change").await;
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::PromptFinished { request_id, .. }
+                if request_id == "after-model-change" =>
+            {
+                break;
+            }
+            RuntimeEvent::Stopped => panic!("the repaired session must run its prompt"),
+            _ => {}
+        }
+    }
+    drop(commands);
+    tokio::time::timeout(Duration::from_secs(10), runtime)
         .await
         .unwrap()
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("restore this session's accepted model"),
-        "{error:#}"
-    );
-    while let Some(event) = events.recv().await {
-        assert!(!matches!(
-            event,
-            RuntimeEvent::SessionConfigured { .. } | RuntimeEvent::PromptFinished { .. }
-        ));
-    }
+        .unwrap()
+        .unwrap();
 }
 
 /// Drive startup until it raises the recovery question, checking on the way
@@ -477,6 +538,7 @@ async fn answer_recovery(
     resolution.await.unwrap().unwrap();
 }
 
+// Hard-won: f822699: A withdrawn saved model left sessions suspended and unreachable instead of using the default.
 #[tokio::test]
 async fn a_withdrawn_saved_model_starts_on_the_default_and_its_replacement_survives_a_restart() {
     let root = tempfile::tempdir().unwrap();
@@ -702,6 +764,7 @@ fn reported(options: &[SessionConfigOption], key: &str) -> String {
     select.current_value.to_string()
 }
 
+// Hard-won: 1c3e8e3: Codex and Kimi reported a successful config change while retaining the old value.
 #[tokio::test]
 async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_applied() {
     let root = tempfile::tempdir().unwrap();
@@ -735,6 +798,7 @@ async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_
         .unwrap();
 }
 
+// Hard-won: 582d09d: An empty config response erased the accepted selectors after a successful change.
 #[tokio::test]
 async fn a_change_the_harness_answers_with_no_configuration_keeps_the_selectors_and_the_new_value()
 {
@@ -783,38 +847,6 @@ fn permission_and_plan_configuration_are_not_restored_as_session_selectors() {
         &[],
     );
     assert_eq!(saved, AcceptedSessionConfig::default());
-}
-
-#[test]
-fn a_completed_model_change_keeps_its_new_effort_and_clears_an_absent_selector() {
-    let mut values = BTreeMap::from([
-        ("model".into(), "old".into()),
-        ("effort".into(), "xhigh".into()),
-    ]);
-    let mut options: Vec<SessionConfigOption> = serde_json::from_value(serde_json::json!([
-        {"id":"model_id", "name":"Model", "category":"model", "type":"select",
-         "currentValue":"new", "options":[{"value":"new", "name":"New"}]},
-        {"id":"thinking", "name":"Effort", "category":"thought_level", "type":"select",
-         "currentValue":"low", "options":[{"value":"low", "name":"Low"}]}
-    ]))
-    .unwrap();
-    AcceptedSessionConfig::record_completed(&mut values, "model_id", "new", &options);
-    assert_eq!(
-        AcceptedSessionConfig::from_configuration(&values, &options),
-        AcceptedSessionConfig {
-            model: Some("new".into()),
-            effort: Some("low".into())
-        }
-    );
-    options.pop();
-    AcceptedSessionConfig::record_completed(&mut values, "model_id", "new", &options);
-    assert_eq!(
-        AcceptedSessionConfig::from_configuration(&values, &options),
-        AcceptedSessionConfig {
-            model: Some("new".into()),
-            effort: None
-        }
-    );
 }
 
 /// Model menus under Claude setup-token auth retain the 1M alias only when
@@ -881,31 +913,6 @@ async fn claude_resume_pins_the_saved_model_before_catalogue_and_queued_prompt()
         .unwrap();
 }
 
-#[test]
-fn claude_session_requests_read_the_latest_accepted_model() {
-    let mut spec = launch(
-        std::path::Path::new("/workspace"),
-        PathBuf::from("adapter"),
-        AcceptedSessionConfig::default(),
-    );
-    spec.harness = HarnessKind::Claude;
-    for model in [None, Some("opus[1m]"), Some("opus")] {
-        spec.accepted_config.lock().unwrap().model = model.map(str::to_owned);
-        for request in [
-            serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-            serde_json::to_value(load_session_request(&spec, "native".into())).unwrap(),
-            serde_json::to_value(resume_session_request(&spec, "native".into())).unwrap(),
-        ] {
-            assert_eq!(
-                request
-                    .pointer("/_meta/claudeCode/options/model")
-                    .and_then(serde_json::Value::as_str),
-                model
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn claude_startup_errors_are_not_reported_as_model_replacement() {
     for cause in [
@@ -952,6 +959,7 @@ async fn claude_startup_errors_are_not_reported_as_model_replacement() {
 /// accepts its model after the worker started -- which every session created
 /// with an explicit model does -- resumed every later bridge on the profile
 /// default while the supervisor spec was written once and never updated.
+// Hard-won: 21f785d: A resumed Codex session reverted an accepted model to the profile default.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_codex_bridge_restart_starts_on_a_model_accepted_after_the_worker_did() {
@@ -1137,20 +1145,64 @@ async fn set_model_outcome(
     }
 }
 
+// Hard-won: bc7495e: Claude rejected a valid full model id and gave no useful accepted values.
 #[tokio::test]
 async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_on_refusal() {
     let root = tempfile::tempdir().unwrap();
     let mut spec = launch(
         root.path(),
         claude_alias_harness(root.path()),
-        AcceptedSessionConfig::default(),
+        AcceptedSessionConfig {
+            model: Some("claude-opus-5-5".into()),
+            effort: None,
+        },
     );
     spec.harness = HarnessKind::Claude;
     let accepted = spec.accepted_config.clone();
     let (commands, requests) = mpsc::channel(8);
     let (events_tx, mut events) = mpsc::channel(64);
     let runtime = tokio::spawn(run(spec, requests, events_tx));
-    configured(&mut events).await;
+    let journal = root.path().join("relay");
+    let mut relay =
+        DurableRelay::open(&journal, "0123456789abcdef0123456789abcdef", "test").unwrap();
+    let mut ready = false;
+    loop {
+        match next(&mut events).await {
+            RuntimeEvent::SessionConfigured { .. } => ready = true,
+            RuntimeEvent::ConfigApplied {
+                request_id,
+                key,
+                value,
+                config_options,
+            } if request_id.is_empty() => {
+                assert!(
+                    ready,
+                    "normalization must not publish readiness before startup completes"
+                );
+                assert_eq!((key.as_str(), value.as_str()), ("model", "opus[1m]"));
+                relay
+                    .record_observation(RelayObservation::SessionConfigured { config_options })
+                    .unwrap();
+                relay
+                    .record_observation(RelayObservation::ConfigurationUpdated { key, value })
+                    .unwrap();
+                break;
+            }
+            RuntimeEvent::Stopped => panic!("restoring a full model ID must stay usable"),
+            _ => {}
+        }
+    }
+    assert_eq!(accepted.lock().unwrap().model.as_deref(), Some("opus[1m]"));
+    drop(relay);
+    let relay = DurableRelay::open(&journal, "0123456789abcdef0123456789abcdef", "test").unwrap();
+    let state = relay.operational_state();
+    assert_eq!(
+        AcceptedSessionConfig::from_configuration(&state.config, &state.config_options)
+            .model
+            .as_deref(),
+        Some("opus[1m]")
+    );
+    drop(relay);
 
     // I1-3: the id commit 44957c9f says can be selected.
     let (value, options) = set_model_outcome(&commands, &mut events, "claude-opus-5-5")
@@ -1192,6 +1244,7 @@ async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_
 /// session silently ran the default model, because the bridge places text it
 /// cannot resolve on `default`. The value is refused as before bc7495e4 and
 /// the model the session had stays selected; full ids still resolve.
+// Hard-won: 9fb470e: The worker reported a Claude model selection that the bridge silently placed on its default.
 #[tokio::test]
 async fn a_claude_model_the_bridge_cannot_place_is_refused_and_the_model_kept() {
     let root = tempfile::tempdir().unwrap();
@@ -1415,6 +1468,7 @@ async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResum
 /// its default model, so the adapter passed Auto on and Claude Code refused it
 /// for haiku; the worker exited on every retry. Selecting the model first lets
 /// the adapter apply its own Accept edits fallback, as it does on load.
+// Hard-won: e794b25: Never-prompted Haiku sessions entered a permanent retry loop when the bridge refused Auto.
 #[tokio::test]
 async fn a_new_haiku_session_takes_the_adapters_auto_fallback_instead_of_failing() {
     let resumed = resume_a_missing_haiku_session(false).await;
@@ -1437,6 +1491,7 @@ async fn a_new_haiku_session_takes_the_adapters_auto_fallback_instead_of_failing
 /// R8-2: when the harness refuses the policy's mode for a new session, the
 /// session keeps the harness's own mode and says so once, rather than the
 /// worker exiting and the session staying suspended.
+// Hard-won: e794b25: A refused mode change stopped session startup instead of retaining the harness default.
 #[tokio::test]
 async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_and_one_warning() {
     let resumed = resume_a_missing_haiku_session(true).await;

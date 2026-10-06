@@ -257,6 +257,14 @@ impl HarnessKind {
                         .map(|expiry| expiry.timestamp_millis())
                 })
                 .max(),
+            // OpenCode records each provider login's OAuth expiry in epoch
+            // milliseconds; 0 marks a login with no recorded expiry.
+            Self::OpenCode => json
+                .as_object()?
+                .values()
+                .filter_map(|grant| grant.get("expires")?.as_i64())
+                .filter(|expires| *expires > 0)
+                .max(),
             // Muse stores no timestamp Hel can order two copies by.
             Self::Muse => None,
         }
@@ -271,9 +279,9 @@ impl HarnessKind {
                 .get("expires_at")?
                 .as_i64()
                 .and_then(|seconds| seconds.checked_mul(1000)),
-            // Neither has a proactive-refresh path, so neither reports an
-            // expiry Hel would act on.
-            Self::Grok | Self::Muse => None,
+            // None of these has a proactive-refresh path, so none reports an
+            // expiry Hel would act on: each refreshes its own tokens on demand.
+            Self::Grok | Self::Muse | Self::OpenCode => None,
         }
     }
 
@@ -281,10 +289,11 @@ impl HarnessKind {
     ///
     /// Verified against the locally installed CLIs with `--help`: `codex
     /// login`, `claude auth login` (there is no bare `claude login`), `kimi
-    /// login`, `grok login`, and `muse login`.
+    /// login`, `grok login`, `muse login`, and `opencode auth login`.
     pub fn native_login_command(self) -> (String, Vec<String>) {
         let arguments = match self {
             Self::Claude => vec!["auth".to_owned(), "login".to_owned()],
+            Self::OpenCode => vec!["auth".to_owned(), "login".to_owned()],
             Self::Codex | Self::Kimi | Self::Grok | Self::Muse => vec!["login".to_owned()],
         };
         (self.cli_binary_name().to_owned(), arguments)
@@ -627,6 +636,9 @@ pub struct CredentialSyncTarget {
     pub authenticates_with_api_key: bool,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
+    /// The controller has GitHub App configuration and should resolve a
+    /// session-scoped installation token for this target.
+    pub github_app_configured: bool,
     /// Target-derived availability of the host CLI skill.
     pub skills_scope: crate::skills::SkillsScope,
     /// Reconnect command for the session's worker proxy.

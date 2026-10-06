@@ -807,7 +807,7 @@ def main() -> int:
         reviewer_home = lab.runtime_root / "reviewer"
         reviewer_home.mkdir()
         profile = profile.replace(json.dumps(str(lab.profile)), json.dumps(str(reviewer_home)))
-        config_path.write_text(config_text + "\n[profiles.reviewer]" + profile + '\n[review]\nenabled = false\ntier = "extended"\nprofile = "reviewer"\n')
+        config_path.write_text(config_text + "\n[profiles.reviewer]" + profile + '\n[review]\nenabled = false\nprofile = "reviewer"\n')
         (lab.runtime_root / "fake_acp.py").write_text((REPO_ROOT / "tests/e2e/tui_components_acp.py").read_text())
         run_workflow(lab, tmux, evidence, args.seed, port, args.dialogs_only)
         evidence.finish("passed")

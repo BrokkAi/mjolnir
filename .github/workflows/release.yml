@@ -20,6 +20,15 @@ jobs:
           cargo metadata --locked --no-deps --format-version 1 |
             jq -e --arg version "${GITHUB_REF_NAME#v}" 'all(.packages[]; .version == $version)'
 
+  # The full CI suite on the tagged commit. Builds run beside it; only
+  # publication waits for it, so a release never depends on a branch CI run
+  # that a later push cancelled.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release-notices:
     name: Generate release notices
     needs: verify-version
@@ -420,7 +429,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos]
+    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos]
     runs-on: ubuntu-latest
     permissions:
       actions: write

@@ -23,6 +23,7 @@ All platform builds waited for both workers although compilation does not consum
 - Decision: Trust the maintainer's selection of a known-good commit without adding a CI approval gate.
   Rationale: The user explicitly requests a simpler tag-based release. Existing passing checks count; current master does not matter.
   Date/Author: 2026-09-16, Codex.
+  Superseded 2026-10-06: branch CI runs were often cancelled by later pushes before a release commit could go green, which blocked releases. `release.yml` now calls `ci.yml` on the tag; builds run beside it and only publication waits for it. Claude, at the user's request.
 - Decision: Keep version checks, archive verification, draft assembly, and registry dependency order.
   Rationale: These concern newly produced artifacts or publication constraints, rather than repeated source validation.
   Date/Author: 2026-09-16, Codex.

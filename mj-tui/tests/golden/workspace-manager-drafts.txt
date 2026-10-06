@@ -1,0 +1,211 @@
+action: None
+action: SelectWorkspace { workspace_id: "alpha" }
+
+=== dashboard after selecting the next workspace (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Alpha  Beta               ☰ ││                                                                    │
+╰──────────────────────────────────────╯│                                                                    │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                    │
+│ Create   Open   Filter: _____________││                                                                    │
+│No sessions yet                       ││                                                                    │
+│Create new work or open a session.    ││                          ✦  M J O L N I R                          │
+│                                      ││                                                                    │
+│                                      ││                 Create a session to start building.                │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ───────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                  │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                     │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets              │
+│                                      ││  claude-1  Claude Code  refreshing…                                │
+│                                      ││  codex-1   Codex        refreshing…                                │
+│                                      ││  codex-2   Codex        refreshing…                                │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+action: SelectWorkspace { workspace_id: "beta" }
+
+=== dashboard after selecting a numbered workspace (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Alpha  Beta               ☰ ││                                                                    │
+╰──────────────────────────────────────╯│                                                                    │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                    │
+│ Create   Open   Filter: _____________││                                                                    │
+│No sessions yet                       ││                                                                    │
+│Create new work or open a session.    ││                          ✦  M J O L N I R                          │
+│                                      ││                                                                    │
+│                                      ││                 Create a session to start building.                │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      ││                                                                    │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ───────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                  │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                     │
+│                                      │╰────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets              │
+│                                      ││  claude-1  Claude Code  refreshing…                                │
+│                                      ││  codex-1   Codex        refreshing…                                │
+│                                      ││  codex-2   Codex        refreshing…                                │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+action: LoadWorkspaceManagement { generation: 1 }
+
+=== workspace manager list (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Alpha  Beta               ☰ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces ───────────────────────────────────────────────────────────────╮               │
+│No sessions   │Enter opens the selected workspace · Tab moves between controls              │               │
+│Create new w  │Default  0 sessions                                           New workspace  │               │
+│              │Alpha  1 session                                              Rename         │               │
+│              │Beta  Current  2 sessions  2 drafts                           Delete…        │               │
+│              │                                                              Drafts         │               │
+│              │                                                              Open           │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+action: None
+
+=== drafts for the selected workspace (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Alpha  Beta               ☰ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
+│No sessions   │Enter recovers the selected draft · Esc returns to the list                  │               │
+│Create new w  │terminal composer  · 2026-10-01 12:00  · session-1                  Back     │               │
+│              │web viewer  · 2026-10-02 09:30                                      Recover  │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+action: None
+
+=== second draft selected (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Alpha  Beta               ☰ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
+│No sessions   │Enter recovers the selected draft · Esc returns to the list                  │               │
+│Create new w  │terminal composer  · 2026-10-01 12:00  · session-1                  Back     │               │
+│              │web viewer  · 2026-10-02 09:30                                      Recover  │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
+
+=== draft recovery completed (110x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
+│ Default  Alpha  Beta               ☰ ││                                                                    │
+╰────────────                                                                                                │
+╭ Sessions ──                                                                                                │
+│ Create   Op  ╭ × Workspaces · Drafts ──────────────────────────────────────────────────────╮               │
+│No sessions   │Draft recovered.                                                             │               │
+│Create new w  │No detached drafts.                                                 Back     │               │
+│              │                                                                    Recover  │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ─────────────╮
+│              │                                                                             │               │
+│              │                                                                             │  one.         │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              │                                                                             │  ─────────────╯
+│              │                                                                             │  ────── ▁   ▪ ╮
+│              │                                                                             │               │
+│              ╰─────────────────────────────────────────────────────────────────────────────╯               │
+│                                                                                                            │
+│                                                                                                            │
+╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys

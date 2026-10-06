@@ -26,8 +26,9 @@ use crate::targets::{
 };
 use mj_core::relay::RelayCommand;
 
-use super::backend::{backend_locator, controller_github_token, validate_resource_allocation};
+use super::backend::{backend_locator, validate_resource_allocation};
 use super::checkpoint::upload_checkpoint_spec;
+use super::github_app::{GithubAppTokenProvider, github_repositories};
 use super::provisioning::{
     ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
@@ -131,13 +132,34 @@ impl Controller {
     /// Prove that each configured repository source still supplies the commit
     /// boundary its checkpoint bundle expects, before provisioning anything,
     /// and describe a local checkout's conversion so a person can confirm it.
-    pub fn preflight_resume_repository_sources(
+    pub async fn preflight_resume_repository_sources(
         &self,
         session_id: &str,
         target_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
-        self.preflight_repository_sources(session_id, target_id, true, executor)
+        let github_token = self
+            .github_token_for_repository_preflight(session_id)
+            .await?;
+        self.preflight_repository_sources(
+            session_id,
+            target_id,
+            true,
+            github_token.as_deref(),
+            executor,
+        )
+    }
+
+    /// Preflight when the caller already resolved the session's token and must
+    /// keep the remaining repository checks synchronous.
+    pub fn preflight_resume_repository_sources_with_token(
+        &self,
+        session_id: &str,
+        target_id: &str,
+        github_token: Option<&str>,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        self.preflight_repository_sources(session_id, target_id, true, github_token, executor)
     }
 
     /// `describe_conversion` buys the conversion preview with a read of the
@@ -149,6 +171,7 @@ impl Controller {
         session_id: &str,
         target_id: &str,
         describe_conversion: bool,
+        github_token: Option<&str>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -182,7 +205,7 @@ impl Controller {
             // unreachable remote, a dirty submodule) are this preflight's
             // error, which every surface already reports.
             if describe_conversion && plan == ResumePlan::RawToWorkspace {
-                let preview = raw_conversion_preview_for(session, &self.config, executor)?;
+                let preview = raw_conversion_preview_for(session, executor)?;
                 return Ok(ResumeRepositorySourcePreflight::ConvertingRawCheckout {
                     receipt,
                     preview: Box::new(preview),
@@ -199,6 +222,7 @@ impl Controller {
             },
             None,
             plan != ResumePlan::WorkspaceToRaw,
+            github_token,
             executor,
         )
     }
@@ -209,6 +233,7 @@ impl Controller {
         verified: ResumeRepositoryBundles,
         skip_repository_id: Option<&str>,
         use_archived_network_sources: bool,
+        github_token: Option<&str>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
         let session = self
@@ -270,16 +295,11 @@ impl Controller {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let github_token = configured
-            .iter()
-            .any(|repository| repository.github.is_some())
-            .then(controller_github_token)
-            .flatten();
         let outcomes = verified
             .repositories
             .par_iter()
             .zip(configured.par_iter())
-            .map(|(archived, configured)| {
+            .map(move |(archived, configured)| {
                 if skip_repository_id == Some(configured.id.as_str()) {
                     return Ok(None);
                 }
@@ -291,7 +311,7 @@ impl Controller {
                         .and_then(|project| project.network_sources.get(&configured.id)),
                     archived,
                     executor,
-                    github_token.as_deref(),
+                    github_token,
                 )
                 .map(|missing_commit| {
                     missing_commit.map(|missing_commit| ResumeRepositorySourceMismatch {
@@ -355,7 +375,23 @@ impl Controller {
     /// Validate a replacement first, then atomically save it and check the
     /// remaining sources so multi-repository bundles can report the next moved
     /// repository without ever provisioning a partial target.
-    pub fn replace_resume_repository_origin(
+    pub async fn replace_resume_repository_origin(
+        &mut self,
+        session_id: &str,
+        repository_id: &str,
+        replacement: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<ResumeRepositorySourcePreflight> {
+        self.replace_resume_repository_origin_with_token(
+            session_id,
+            repository_id,
+            replacement,
+            executor,
+        )
+        .await
+    }
+
+    async fn replace_resume_repository_origin_with_token(
         &mut self,
         session_id: &str,
         repository_id: &str,
@@ -378,34 +414,6 @@ impl Controller {
             .as_ref()
             .map(|_| mj_core::remote_git::resolve_repository(&replacement, executor))
             .transpose()?;
-        let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
-        let verified = ResumeRepositoryBundles {
-            checkpoint_sha256: checkpoint.sha256.clone(),
-            repositories,
-        };
-        let archived = verified
-            .repositories
-            .iter()
-            .find(|repository| repository.metadata.id == repository_id)
-            .with_context(|| format!("checkpoint does not contain repository {repository_id:?}"))?;
-        if let Some(missing_commit) = checkpoint_source_missing_commit(
-            &replacement,
-            replacement_network.as_ref(),
-            archived,
-            executor,
-            controller_github_token().as_deref(),
-        )? {
-            return Ok(ResumeRepositorySourcePreflight::RepositoryMoved(
-                ResumeRepositorySourceMismatch {
-                    session_id: session_id.to_owned(),
-                    bundle_id,
-                    repository_id: repository_id.to_owned(),
-                    missing_commit,
-                    archived_origin: archived.metadata.origin.clone(),
-                    configured_origin: replacement.source_label(),
-                },
-            ));
-        }
         let previous = session.clone();
         let mut project = session.project.clone();
         if let Some(project) = &mut project {
@@ -423,6 +431,66 @@ impl Controller {
                     .clone()
                     .expect("accepted project source resolved above"),
             );
+        }
+        let github_token = if let Some(app) = self.config.github.app.as_ref() {
+            if let Some(project) = &project {
+                let bundle = project.bundle.clone();
+                let network_sources = project.network_sources.clone();
+                let repositories = tokio::task::spawn_blocking(move || {
+                    github_repositories(&bundle, Some(&network_sources), &ProcessExecutor)
+                })
+                .await
+                .context("replacement GitHub repository source task failed")??;
+                let provider = GithubAppTokenProvider::shared(app)?;
+                let scope = provider
+                    .token_for_owner_repo_pairs(&bundle_id, &repositories)
+                    .await
+                    .map_err(super::GithubBundleSelectionError::into_anyhow)?;
+                match scope {
+                    Some(scope) => Some(
+                        provider
+                            .token_for_installation(
+                                scope.installation_id,
+                                &scope.repositories,
+                                app.session_permissions.as_ref(),
+                            )
+                            .await?,
+                    ),
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            self.github_token_for_session(session_id).await?
+        };
+        let repositories = read_checkpoint_repository_bundles(&checkpoint.archive_path)?;
+        let verified = ResumeRepositoryBundles {
+            checkpoint_sha256: checkpoint.sha256.clone(),
+            repositories,
+        };
+        let archived = verified
+            .repositories
+            .iter()
+            .find(|repository| repository.metadata.id == repository_id)
+            .with_context(|| format!("checkpoint does not contain repository {repository_id:?}"))?;
+        if let Some(missing_commit) = checkpoint_source_missing_commit(
+            &replacement,
+            replacement_network.as_ref(),
+            archived,
+            executor,
+            github_token.as_deref(),
+        )? {
+            return Ok(ResumeRepositorySourcePreflight::RepositoryMoved(
+                ResumeRepositorySourceMismatch {
+                    session_id: session_id.to_owned(),
+                    bundle_id,
+                    repository_id: repository_id.to_owned(),
+                    missing_commit,
+                    archived_origin: archived.metadata.origin.clone(),
+                    configured_origin: replacement.source_label(),
+                },
+            ));
         }
         // A merged project can use different repository IDs. Its destination
         // and identity identify the authoring entry; the session keeps its IDs.
@@ -491,6 +559,7 @@ impl Controller {
             verified,
             Some(repository_id),
             false,
+            github_token.as_deref(),
             executor,
         )
     }
@@ -541,6 +610,9 @@ pub(super) struct RestoreIntoTarget<'a> {
     pub projection_build: Option<tokio::task::JoinHandle<Result<MaterializedSession>>>,
     /// Conversation lines to record once the destination answers.
     pub resume_notices: Vec<String>,
+    /// Refresh the retained-child roster immediately before prompt context and
+    /// the conversation notice are installed.
+    pub include_in_place_subagents: bool,
     pub install_attached_resources: bool,
     pub worker_root_reset: WorkerRootReset,
     /// A managed checkout to retire once, and only once, the restore succeeded.
@@ -570,6 +642,7 @@ impl Controller {
                 utility_handoff,
                 projection_build,
                 mut resume_notices,
+                include_in_place_subagents,
                 install_attached_resources: should_install_attached_resources,
                 worker_root_reset,
                 retire_after_ready,
@@ -591,9 +664,20 @@ impl Controller {
                 });
             let stopped_subagents_context =
                 mj_core::subagent::stopped_subagents_prompt_context(&stopped_subagents);
+            let reopen_move_subagents =
+                matches!(&worker_root_reset, WorkerRootReset::InPlace { .. })
+                    && self.state.sessions[session_id]
+                        .subagents
+                        .clone()
+                        .unwrap_or_default()
+                        .for_launch(profile.kind, false)
+                        .parent_role()
+                        .is_some();
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
                 &stopped_subagents,
             ));
+            let mut prompt_contexts = Vec::new();
+            prompt_contexts.extend(stopped_subagents_context);
             let (backend, worker_root) = self.worker_placement(session_id)?;
             let harness_home = target_profile_home(&backend, session_id, profile);
             let workspace_root = if let Some(project_directory) = &resumed_project_directory {
@@ -819,17 +903,37 @@ impl Controller {
                     connect_started_worker(&spec, session_id, executor, &backend, &worker_root)
                         .await?
                 };
+                if reopen_move_subagents {
+                    relay
+                        .set_subagent_admission(true)
+                        .await
+                        .context("reopen sub-agent requests on the replacement worker")?;
+                }
+                if include_in_place_subagents {
+                    let session_id = session_id.to_owned();
+                    let (context, _) = tokio::task::spawn_blocking(move || {
+                        load_in_place_subagent_prompt_data(&session_id)
+                    })
+                    .await
+                    .context("join the retained sub-agent roster read")??;
+                    prompt_contexts.extend(context);
+                }
                 // Installed before the harness is ready, so a queued prompt the
                 // restored relay starts on its own cannot claim the hidden
                 // context first. The relay hands it to one prompt only.
-                if let Some(context) = &stopped_subagents_context {
+                if !prompt_contexts.is_empty() {
                     relay
-                        .install_prompt_context(context.clone())
+                        .install_prompt_context(prompt_contexts.join("\n\n"))
                         .await
-                        .context("tell the resumed session which sub-agents its suspend stopped")?;
+                        .context("tell the resumed session about its sub-agents")?;
                 }
-                let native_session_id =
-                    wait_for_native_session_in_stage(&mut relay, executor, readiness_stage).await?;
+                let native_session_id = wait_for_native_session_in_stage(
+                    &mut relay,
+                    executor,
+                    readiness_stage,
+                    profile.kind,
+                )
+                .await?;
                 let owner = crate::worker_lifecycle::require(session_id)?;
                 crate::database::finish_worker_restart(session_id, owner.operation_id())?;
                 Ok::<_, anyhow::Error>((relay, native_session_id))
@@ -898,6 +1002,15 @@ impl Controller {
                 );
                 resume_notices.push(worktree_cleanup_notice(&worktree.worktree_root, &error));
             }
+            if include_in_place_subagents {
+                let session_id = session_id.to_owned();
+                let (_, notice) = tokio::task::spawn_blocking(move || {
+                    load_in_place_subagent_prompt_data(&session_id)
+                })
+                .await
+                .context("join the retained sub-agent notice roster read")??;
+                resume_notices.extend(notice);
+            }
             for notice in &resume_notices {
                 let submitted = async {
                     let command_id = new_command_id("resume-notice")?;
@@ -960,6 +1073,18 @@ pub(super) struct VerifiedResumeArchive {
     pub canonical_session: Arc<CanonicalSessionSnapshot>,
 }
 
+fn load_in_place_subagent_prompt_data(
+    session_id: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    let state = crate::database::load_state()
+        .context("load current retained sub-agents for the in-place resume")?;
+    let children = super::move_session::move_children(&state, session_id);
+    Ok((
+        mj_core::subagent::in_place_subagents_prompt_context(&children),
+        mj_core::subagent::in_place_subagents_notice(&children),
+    ))
+}
+
 /// Read and verify the archive a stopped session will be restored from.
 ///
 /// Canonicalizing first keeps one exact absolute path for the restore. The
@@ -1010,10 +1135,9 @@ pub(super) fn verify_resume_checkpoint(
 
 pub fn raw_conversion_preview_for(
     session: &SessionRecord,
-    config: &Config,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::RawConversionPreview> {
-    let conversion = plan_raw_to_workspace(session, config, executor)?;
+    let conversion = plan_raw_to_workspace(session, executor)?;
     raw_conversion_preview(session, &conversion, executor)
 }
 
@@ -1405,7 +1529,15 @@ impl Controller {
         {
             let _phase = ResumePhaseTimer::new(session_id, "preflight repository sources");
             if let ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) =
-                self.preflight_repository_sources(session_id, target_id, false, executor)?
+                self.preflight_repository_sources(
+                    session_id,
+                    target_id,
+                    false,
+                    self.github_token_for_repository_preflight(session_id)
+                        .await?
+                        .as_deref(),
+                    executor,
+                )?
             {
                 bail!(
                     "checkpoint base commit {} is missing from configured source {:?} for repository {:?}; the repository may have moved (archived origin: {:?})",
@@ -1466,10 +1598,10 @@ impl Controller {
             self.validate_project_directory(target_id, project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
-        let conversion = match plan {
+        let mut conversion = match plan {
             ResumePlan::InPlace => None,
             ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(
-                plan_raw_to_workspace(&previous, &self.config, executor)
+                plan_raw_to_workspace(&previous, executor)
                     .context("prepare the raw checkout for its new target")?,
             )),
             ResumePlan::WorkspaceToRaw => Some(ResumeConversion::WorkspaceToRaw(
@@ -1594,30 +1726,20 @@ impl Controller {
                 materialized_session_from_canonical(session_id, &canonical)
             })
         });
-        let github_token = controller_github_token();
+        let github_token = self.github_token_for_session(session_id).await?;
 
-        // The configuration gains the bundle before the record points at it, so
-        // no persisted session ever names a bundle that is not there.
+        // Choose the bundle id against the latest config and save the bundle
+        // under the same lock before the record starts referring to it.
         if let Some(conversion) = conversion
-            .as_ref()
-            .and_then(ResumeConversion::raw_to_workspace)
-            && let Some(bundle) = &conversion.new_bundle
+            .as_mut()
+            .and_then(ResumeConversion::raw_to_workspace_mut)
         {
-            let (config, ()) = Config::update(|config| {
-                if let Some(existing) = config.bundles.get(&conversion.bundle_id) {
-                    ensure!(
-                        existing == bundle,
-                        "bundle {:?} was configured concurrently with a different definition; retry the resume",
-                        conversion.bundle_id
-                    );
-                } else {
-                    config
-                        .bundles
-                        .insert(conversion.bundle_id.clone(), bundle.clone());
-                }
-                Ok(())
+            let planned_bundle = conversion.planned_bundle.clone();
+            let (config, bundle_id) = Config::update(|config| {
+                Ok(planned_bundle.save_to(config))
             })
             .context("save the bundle for a converted raw session")?;
+            conversion.bundle_id = Some(bundle_id);
             self.config = config;
         }
 
@@ -1643,7 +1765,7 @@ impl Controller {
                 crate::project_catalog::snapshot(
                     self.config
                         .bundles
-                        .get(&conversion.bundle_id)
+                        .get(conversion.resolved_bundle_id()?)
                         .context("converted project is missing")?,
                     executor,
                     true,
@@ -1674,7 +1796,7 @@ impl Controller {
         record.last_error = None;
         match &conversion {
             Some(ResumeConversion::RawToWorkspace(conversion)) => {
-                apply_raw_to_workspace(record, conversion);
+                apply_raw_to_workspace(record, conversion)?;
                 record.project = converted_project;
             }
             Some(ResumeConversion::WorkspaceToRaw(conversion)) => {
@@ -1705,8 +1827,10 @@ impl Controller {
             // an existing project (an imported checkout of a repository another
             // bundle covers). The context then holds the canonical project, and
             // the record follows it so publication sees an unchanged context.
-            let bundle_id =
-                crate::database::rebind_session_bundle(session_id, &conversion.bundle_id)?;
+            let bundle_id = crate::database::rebind_session_bundle(
+                session_id,
+                conversion.resolved_bundle_id()?,
+            )?;
             self.state
                 .sessions
                 .get_mut(session_id)
@@ -1898,6 +2022,7 @@ impl Controller {
                     utility_handoff,
                     projection_build,
                     resume_notices,
+                    include_in_place_subagents: false,
                     install_attached_resources: true,
                     worker_root_reset: WorkerRootReset::FreshTarget,
                     retire_after_ready: conversion

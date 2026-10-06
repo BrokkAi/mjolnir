@@ -7,6 +7,9 @@ use super::*;
 /// it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
+// `SessionReview` includes the deprecated string compatibility field. Keep
+// this public action's Rust construction shape inline; boxing would change it.
+#[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
     TurnControl {
         session_id: String,

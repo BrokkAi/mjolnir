@@ -335,6 +335,11 @@ mod tests {
         SessionConfigSelectOptions,
     };
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const GOLDEN_WIDTH: u16 = 100;
+    const GOLDEN_HEIGHT: u16 = 24;
 
     fn model_option(current: &str, values: &[(&str, &str)]) -> SessionConfigOption {
         SessionConfigOption::select(
@@ -387,160 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_prompt_title_chip_opens_that_keys_selector() {
-        let mut chat = chat_with_models();
-        let rows = drawn_transcript(&mut chat, 100, 24);
-        let chips = chat.config_chip_areas.clone();
-        let (column, row) = chips
-            .iter()
-            .find(|(key, _)| *key == "model")
-            .map(|(_, area)| (area.x, area.y))
-            .expect("the model chip is registered");
-        assert!(
-            chips.iter().any(|(key, _)| *key == "effort"),
-            "the effort chip is registered too: {chips:?}"
-        );
-        // The hitbox covers the model text drawn in the prompt's top border.
-        let title = &rows[usize::from(row)];
-        let covered = title
-            .chars()
-            .skip(usize::from(column))
-            .take(usize::from(
-                chips
-                    .iter()
-                    .find(|(key, _)| *key == "model")
-                    .map(|(_, area)| area.width)
-                    .unwrap_or(0),
-            ))
-            .collect::<String>();
-        assert!(
-            covered.trim_start().starts_with("Luna ▾"),
-            "chip covers {covered:?} in {title:?}"
-        );
-
-        let press = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert!(chat.component_handles_mouse(press));
-        assert_eq!(chat.handle_mouse(press), ChatAction::None);
-        assert!(chat.config_picker_active());
-    }
-
-    #[test]
-    fn outside_click_closes_the_selector_just_like_escape() {
-        let mut clicked = chat_with_models();
-        assert!(clicked.open_config_picker("model"));
-        drawn_transcript(&mut clicked, 100, 24);
-        let column = 99;
-        let row = 23;
-        let press = MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert_eq!(clicked.handle_mouse(press), ChatAction::None);
-        assert_eq!(
-            clicked.handle_mouse(MouseEvent {
-                kind: MouseEventKind::Up(MouseButton::Left),
-                ..press
-            }),
-            ChatAction::None
-        );
-        assert!(!clicked.config_picker_active());
-
-        let mut escaped = chat_with_models();
-        assert!(escaped.open_config_picker("model"));
-        assert_eq!(escaped.handle_key(key(KeyCode::Esc)), ChatAction::None);
-        assert!(!escaped.config_picker_active());
-    }
-
-    #[test]
-    fn bare_model_command_opens_the_selector_on_the_current_value() {
-        let mut chat = chat_with_models();
-        chat.set_input("/model".into());
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert!(chat.config_picker_active());
-        assert!(chat.input.is_empty(), "the composer was cleared");
-        let picker = chat.config_picker.as_ref().unwrap();
-        assert_eq!(
-            picker.selection().map(|choice| choice.value.as_str()),
-            Some("gpt-5.6-luna")
-        );
-    }
-
-    #[test]
-    fn a_completed_bare_command_still_submits_into_the_selector() {
-        // Enter on "/mod" first accepts the command completion ("/model "),
-        // and the value popup must not swallow the next Enter: with nothing
-        // typed after the command, Enter opens the selector instead.
-        let mut chat = chat_with_models();
-        chat.set_input("/mod".into());
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert_eq!(chat.input, "/model ");
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert!(chat.config_picker_active());
-    }
-
-    #[test]
-    fn typing_filters_choices_and_enter_applies_the_selection() {
-        let mut chat = chat_with_models();
-        assert!(chat.open_config_picker("model"));
-        for character in "terra".chars() {
-            chat.handle_key(key(KeyCode::Char(character)));
-        }
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::SetConfig {
-                key: "model".into(),
-                value: "gpt-5.6-terra".into(),
-            }
-        );
-        assert!(!chat.config_picker_active());
-    }
-
-    #[test]
-    fn effort_selector_stops_at_the_end_and_escape_closes_without_a_change() {
-        let mut chat = chat_with_models();
-        chat.set_input("/effort".into());
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        let picker = chat.config_picker.as_ref().unwrap();
-        assert_eq!(
-            picker.selection().map(|choice| choice.value.as_str()),
-            Some("high")
-        );
-        // Down from "high" reaches "max" and stays there at the end.
-        chat.handle_key(key(KeyCode::Down));
-        chat.handle_key(key(KeyCode::Down));
-        assert_eq!(
-            chat.config_picker
-                .as_ref()
-                .unwrap()
-                .selection()
-                .map(|choice| choice.value.as_str()),
-            Some("max")
-        );
-        assert_eq!(chat.handle_key(key(KeyCode::Esc)), ChatAction::None);
-        assert!(!chat.config_picker_active());
-    }
-
-    #[test]
-    fn bare_command_without_advertised_values_reports_instead_of_opening() {
-        let mut chat = ChatState::new(&snapshot(), &[]);
-        chat.set_input("/model".into());
-        assert_eq!(chat.handle_key(key(KeyCode::Enter)), ChatAction::None);
-        assert!(!chat.config_picker_active());
-        assert!(
-            chat.notice()
-                .is_some_and(|notice| notice.contains("does not advertise model values")),
-            "the footer says why nothing opened"
-        );
-    }
-
-    #[test]
     fn a_session_refresh_while_open_does_not_move_the_cursor() {
         let mut chat = chat_with_models();
         assert!(chat.open_config_picker("model"));
@@ -564,29 +415,6 @@ mod tests {
                 .map(|choice| choice.value.clone()),
             before
         );
-    }
-
-    #[test]
-    fn dropdown_is_anchored_and_shows_names_with_a_current_marker() {
-        let mut chat = chat_with_models();
-        assert!(chat.open_config_picker("model"));
-        let rows = drawn_transcript(&mut chat, 100, 24);
-        let body = rows.join("\n");
-        assert!(body.contains("✓ Luna"), "{body}");
-        assert!(body.contains("  Terra"), "{body}");
-        assert!(!body.contains("gpt-5.6-luna"));
-        assert!(!body.contains("Apply"));
-        let picker = chat.config_picker.as_ref().unwrap();
-        let anchor = chat
-            .config_chip_areas
-            .iter()
-            .find(|(key, _)| *key == "model")
-            .unwrap()
-            .1;
-        assert_eq!(picker.area.x, anchor.x);
-        assert_eq!(picker.area.bottom(), anchor.y);
-        assert!(picker.area.width < 30);
-        assert_eq!(picker.selection().unwrap().value, "gpt-5.6-luna");
     }
 
     #[test]
@@ -735,22 +563,242 @@ mod tests {
         assert!(chat.config_chip_areas.is_empty());
     }
 
+    fn type_text(chat: &mut ChatState, text: &str) {
+        for character in text.chars() {
+            let _ = chat.handle_key(key(KeyCode::Char(character)));
+        }
+    }
+
+    fn rendered_chat(chat: &mut ChatState) -> String {
+        let mut terminal =
+            Terminal::new(TestBackend::new(GOLDEN_WIDTH, GOLDEN_HEIGHT)).expect("terminal");
+        terminal
+            .draw(|frame| crate::chat::active::render_full_frame(frame, chat, false))
+            .expect("draw the chat surface");
+        crate::golden::buffer_lines(terminal.backend().buffer()).join("\n")
+    }
+
+    fn append_state(output: &mut String, label: &str, surface: &str, action: Option<ChatAction>) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} ({GOLDEN_WIDTH}x{GOLDEN_HEIGHT}) ===")
+            .expect("write state header");
+        output.push_str(surface);
+        output.push('\n');
+        if let Some(action) = action {
+            writeln!(output, "action: {action:?}").expect("write action");
+        }
+    }
+
     #[test]
-    fn ascii_dropdown_uses_names_and_ascii_markers_in_every_theme() {
-        for palette in crate::theme::UiTheme::ALL {
-            crate::theme::with_theme(palette, || {
+    fn golden_config_selection_render() {
+        let mut output = String::new();
+
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_config_options(&[SessionConfigOption::select(
+            "model",
+            "Model",
+            "m-fallback",
+            SessionConfigSelectOptions::Ungrouped(vec![
+                SessionConfigSelectOption::new("m-primary", "Model name")
+                    .description("Primary description is not a row"),
+                SessionConfigSelectOption::new("m-fallback", "  ")
+                    .description("Fallback description is not a row"),
+            ]),
+        )
+        .category(SessionConfigOptionCategory::Model)]);
+        type_text(&mut chat, "/model m");
+        append_state(
+            &mut output,
+            "autocomplete labels and blank-name fallback",
+            &rendered_chat(&mut chat),
+            None,
+        );
+
+        let mut chat = chat_with_models();
+        type_text(&mut chat, "/model lun");
+        append_state(
+            &mut output,
+            "advertised value autocomplete",
+            &rendered_chat(&mut chat),
+            None,
+        );
+        let _ = chat.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "accepted advertised value",
+            &rendered_chat(&mut chat),
+            None,
+        );
+
+        let mut chat = chat_with_models();
+        let _ = rendered_chat(&mut chat);
+        let model_chip = chat
+            .config_chip_areas
+            .iter()
+            .find(|(key, _)| *key == "model")
+            .map(|(_, area)| *area)
+            .expect("rendered model title chip");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: model_chip.x + model_chip.width / 2,
+            row: model_chip.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let action = chat.handle_mouse(click);
+        append_state(
+            &mut output,
+            "prompt model chip opens selector",
+            &rendered_chat(&mut chat),
+            Some(action),
+        );
+
+        let mut clicked = chat_with_models();
+        type_text(&mut clicked, "/model");
+        let _ = clicked.handle_key(key(KeyCode::Enter));
+        let _ = rendered_chat(&mut clicked);
+        let outside_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 99,
+            row: 23,
+            modifiers: KeyModifiers::NONE,
+        };
+        let _ = clicked.handle_mouse(outside_click);
+        let _ = clicked.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..outside_click
+        });
+        append_state(
+            &mut output,
+            "outside click dismisses selector",
+            &rendered_chat(&mut clicked),
+            None,
+        );
+
+        let mut escaped = chat_with_models();
+        type_text(&mut escaped, "/model");
+        let _ = escaped.handle_key(key(KeyCode::Enter));
+        let _ = escaped.handle_key(key(KeyCode::Esc));
+        append_state(
+            &mut output,
+            "escape dismisses selector",
+            &rendered_chat(&mut escaped),
+            None,
+        );
+
+        let mut bare_model = chat_with_models();
+        type_text(&mut bare_model, "/model");
+        let _ = bare_model.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "bare model command selects current value",
+            &rendered_chat(&mut bare_model),
+            None,
+        );
+
+        let mut completed_model = chat_with_models();
+        type_text(&mut completed_model, "/mod");
+        let _ = completed_model.handle_key(key(KeyCode::Enter));
+        let _ = completed_model.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "completed bare command opens selector",
+            &rendered_chat(&mut completed_model),
+            None,
+        );
+
+        let mut filtered = chat_with_models();
+        type_text(&mut filtered, "/model");
+        let _ = filtered.handle_key(key(KeyCode::Enter));
+        type_text(&mut filtered, "terra");
+        append_state(
+            &mut output,
+            "filtered selector before applying",
+            &rendered_chat(&mut filtered),
+            None,
+        );
+        let action = filtered.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "filtered selector applies selected value",
+            &rendered_chat(&mut filtered),
+            Some(action),
+        );
+
+        let mut effort = chat_with_models();
+        type_text(&mut effort, "/effort");
+        let _ = effort.handle_key(key(KeyCode::Enter));
+        let _ = effort.handle_key(key(KeyCode::Down));
+        let _ = effort.handle_key(key(KeyCode::Down));
+        let selected_effort = effort
+            .config_picker
+            .as_ref()
+            .and_then(|picker| picker.selection())
+            .map(|choice| choice.value.clone())
+            .expect("selected effort");
+        let effort_surface = format!(
+            "{}\nselection: {selected_effort}",
+            rendered_chat(&mut effort)
+        );
+        append_state(
+            &mut output,
+            "effort selection stops at final value",
+            &effort_surface,
+            None,
+        );
+        let _ = effort.handle_key(key(KeyCode::Esc));
+        append_state(
+            &mut output,
+            "effort escape closes without changing current value",
+            &rendered_chat(&mut effort),
+            None,
+        );
+
+        let mut unavailable = ChatState::new(&snapshot(), &[]);
+        type_text(&mut unavailable, "/model");
+        let _ = unavailable.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "bare model command without advertised values",
+            &rendered_chat(&mut unavailable),
+            None,
+        );
+
+        let mut anchored = chat_with_models();
+        type_text(&mut anchored, "/model");
+        let _ = anchored.handle_key(key(KeyCode::Enter));
+        append_state(
+            &mut output,
+            "selector anchored at prompt chip",
+            &rendered_chat(&mut anchored),
+            None,
+        );
+
+        for theme in crate::theme::UiTheme::ALL {
+            let surface = crate::theme::with_theme(theme, || {
                 crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
                     let mut chat = chat_with_models();
                     chat.set_subagent_count(1);
-                    chat.open_config_picker("model");
-                    let body = drawn_transcript(&mut chat, 100, 24).join("\n");
-                    assert!(body.contains("Luna v"), "{body}");
-                    assert!(body.contains("x Luna"), "{body}");
-                    assert!(body.contains("Subagents - 0/1 >"), "{body}");
-                    assert!(!body.contains('▾'));
-                    assert!(!body.contains('›'));
+                    type_text(&mut chat, "/model");
+                    let _ = chat.handle_key(key(KeyCode::Enter));
+                    rendered_chat(&mut chat)
                 })
             });
+            append_state(
+                &mut output,
+                &format!("ASCII selector in {} theme", theme.label()),
+                &surface,
+                None,
+            );
         }
+
+        mj_core::golden::assert_platform_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "config-selection-render",
+            &output,
+        );
     }
 }

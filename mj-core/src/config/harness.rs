@@ -17,6 +17,7 @@ pub enum HarnessKind {
     Kimi,
     Grok,
     Muse,
+    OpenCode,
 }
 
 /// The operating system of the machine a harness's own CLI runs on, as far as
@@ -83,6 +84,11 @@ impl ExecutionPolicy {
 pub struct ExecutionEnforcement {
     label: &'static str,
     acp_mode: Option<&'static str>,
+    /// The config option that carries `acp_mode` when the harness keeps it
+    /// apart from its Mode selector.
+    acp_mode_selector: Option<&'static str>,
+    /// A further ACP config option and value the policy requires.
+    acp_setting: Option<(&'static str, &'static str)>,
     launch_flag: Option<&'static str>,
     launch_environment: Option<(&'static str, &'static str)>,
     /// A word appended once to a whitespace-separated argv held in an env var.
@@ -149,6 +155,18 @@ impl ExecutionEnforcement {
         self.acp_mode
     }
 
+    /// The config option to select `acp_mode` on, when the bridge offers it.
+    /// Without it, the mode goes to the bridge's Mode selector.
+    pub const fn acp_mode_selector(self) -> Option<&'static str> {
+        self.acp_mode_selector
+    }
+
+    /// A further config option and value to select after the mode, when the
+    /// policy needs one.
+    pub const fn acp_setting(self) -> Option<(&'static str, &'static str)> {
+        self.acp_setting
+    }
+
     /// The launch flag to add to the bridge command line, when there is one.
     pub const fn launch_flag(self) -> Option<&'static str> {
         self.launch_flag
@@ -185,9 +203,10 @@ pub fn harness_authentication_marker(kind: HarnessKind, home: &Path) -> PathBuf 
 }
 
 impl HarnessKind {
-    /// Point this harness at `home` through its home variable. Muse's config
-    /// directory must be named `muse`, as required by the XDG directory layout,
-    /// so Muse is given the parent, with its session data beside it.
+    /// Point this harness at `home` through its home variable. Muse and
+    /// OpenCode resolve their configuration from `$XDG_CONFIG_HOME/<name>`, so
+    /// both are given the parent of their home, with session data under
+    /// `.data` beside it.
     ///
     /// Every session and every configuration probe runs from a home Mjolnir
     /// staged for it, on every target and every operating system, so this
@@ -197,7 +216,7 @@ impl HarnessKind {
         home: &Path,
         environment: &mut BTreeMap<String, String>,
     ) {
-        let config_root = if self == Self::Muse {
+        let config_root = if self.nested_home() {
             environment.insert(
                 "XDG_DATA_HOME".into(),
                 home.join(".data").to_string_lossy().into_owned(),
@@ -246,20 +265,28 @@ impl HarnessKind {
         !matches!((self, host), (Self::Claude, HarnessHost::MacOs))
     }
 
+    /// Whether this harness's home is a named subdirectory of the directory
+    /// its home variable points at. The XDG layout fixes the leaf name
+    /// (`muse`, `opencode`), which is also [`HarnessKind::id`].
+    pub const fn nested_home(self) -> bool {
+        matches!(self, Self::Muse | Self::OpenCode)
+    }
+
     pub fn home_from_environment(self, value: impl AsRef<Path>) -> PathBuf {
-        if self == Self::Muse {
-            value.as_ref().join("muse")
+        if self.nested_home() {
+            value.as_ref().join(self.id())
         } else {
             value.as_ref().to_path_buf()
         }
     }
 
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
         Self::Grok,
         Self::Muse,
+        Self::OpenCode,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -270,6 +297,7 @@ impl HarnessKind {
             Self::Kimi => "KIMI_CODE_HOME",
             Self::Grok => "GROK_HOME",
             Self::Muse => "XDG_CONFIG_HOME",
+            Self::OpenCode => "XDG_CONFIG_HOME",
         }
     }
 
@@ -282,6 +310,7 @@ impl HarnessKind {
             Self::Kimi => ".kimi-code",
             Self::Grok => ".grok",
             Self::Muse => ".config/muse",
+            Self::OpenCode => ".config/opencode",
         }
     }
 
@@ -294,6 +323,7 @@ impl HarnessKind {
             Self::Kimi => "credentials/kimi-code.json",
             Self::Grok => "auth.json",
             Self::Muse => "auth.json",
+            Self::OpenCode => ".data/opencode/auth.json",
         }
     }
 
@@ -305,6 +335,7 @@ impl HarnessKind {
             Self::Kimi => "kimi",
             Self::Grok => "grok",
             Self::Muse => "muse",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -312,7 +343,7 @@ impl HarnessKind {
     pub const fn agent_instructions_file(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE.md",
-            Self::Codex | Self::Kimi | Self::Grok | Self::Muse => "AGENTS.md",
+            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => "AGENTS.md",
         }
     }
 
@@ -322,7 +353,9 @@ impl HarnessKind {
     /// home, matching the provisioning allowlist the controller stages.
     pub const fn synced_skill_dirs(self) -> &'static [&'static str] {
         match self {
-            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse => &["skills"],
+            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
+                &["skills"]
+            }
         }
     }
 
@@ -335,15 +368,16 @@ impl HarnessKind {
     /// it moves skills it removed. The Codex CLI writes its built-in skills
     /// into `skills/.system/`, with a `.codex-system-skills.marker` file there.
     ///
-    /// Kimi, Grok and Muse keep none inside `skills/`. Kimi registers its
-    /// built-in skills in memory, Grok caches its bundled skills under
-    /// `bundled/skills/`, and Muse writes its own under its data directory
-    /// (`.data/muse/skills/` in a Mjolnir home).
+    /// Kimi, Grok, Muse and OpenCode keep none inside `skills/`. Kimi
+    /// registers its built-in skills in memory, Grok caches its bundled skills
+    /// under `bundled/skills/`, Muse writes its own under its data directory
+    /// (`.data/muse/skills/` in a Mjolnir home), and OpenCode embeds its
+    /// built-in skill.
     pub const fn harness_owned_skill_paths(self) -> &'static [&'static str] {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
             Self::Codex => &["skills/.system"],
-            Self::Kimi | Self::Grok | Self::Muse => &[],
+            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => &[],
         }
     }
 
@@ -355,6 +389,7 @@ impl HarnessKind {
             Self::Kimi => "kimi",
             Self::Grok => "grok",
             Self::Muse => "muse",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -366,6 +401,7 @@ impl HarnessKind {
             Self::Kimi => "Kimi Code",
             Self::Grok => "Grok Build",
             Self::Muse => "Muse Code",
+            Self::OpenCode => "OpenCode",
         }
     }
 
@@ -384,9 +420,9 @@ impl HarnessKind {
     }
 
     /// Every harness by product name, in [`Self::ALL`] order, as a list that
-    /// ends with "or": "Codex, Claude Code, Kimi Code, Grok Build, or Muse
-    /// Code". Messages that say no agent was found use it, so each one names
-    /// every agent Mjolnir looks for.
+    /// ends with "or": "Codex, Claude Code, Kimi Code, Grok Build, Muse Code,
+    /// or OpenCode". Messages that say no agent was found use it, so each one
+    /// names every agent Mjolnir looks for.
     pub fn every_display_name_or() -> String {
         let names = Self::ALL.map(Self::display_name);
         let (last, rest) = names.split_last().expect("ALL is not empty");
@@ -404,6 +440,11 @@ impl HarnessKind {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "allowAll / sandbox-off / :unrestricted",
                 acp_mode: Some("allowAll"),
+                // muse-acp 0.10 puts Default, Read-only, and Plan on `mode`
+                // and the approval policy on `approval_mode`. Container images
+                // built before it keep the approval policy on `mode`.
+                acp_mode_selector: Some("approval_mode"),
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
                 launch_argument: Some(("MUSE_SERVE_ARGS", "--disable-sandbox")),
@@ -415,9 +456,31 @@ impl HarnessKind {
                     object_version: Some(("schema_version", 1)),
                 }),
             }),
+            // Muse's guardian is muse-acp's auto-review: a read-only Muse
+            // reviewer answers each approval, and a failed review denies.
+            // `muse serve` refuses Muse's own `:auto-review` profile, so the
+            // staged profile asks and the adapter's reviewer answers.
+            (Self::Muse, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
+                label: "promptUnmatched / auto-review / :ask-me",
+                acp_mode: Some("promptUnmatched"),
+                acp_mode_selector: Some("approval_mode"),
+                acp_setting: Some(("auto_review", "on")),
+                launch_flag: None,
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: Some(StagedSetting {
+                    file: "settings.json",
+                    path: &["permissions", "default_profile"],
+                    value: ":ask-me",
+                    object_version: Some(("schema_version", 1)),
+                }),
+            }),
             (Self::Codex, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "agent / guardian",
                 acp_mode: Some("agent"),
+                acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent")),
                 launch_argument: None,
@@ -427,6 +490,8 @@ impl HarnessKind {
             (Self::Codex, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "agent-full-access",
                 acp_mode: Some("agent-full-access"),
+                acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent-full-access")),
                 launch_argument: None,
@@ -439,6 +504,8 @@ impl HarnessKind {
             (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "auto / guardian",
                 acp_mode: Some("auto"),
+                acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -446,12 +513,12 @@ impl HarnessKind {
                 staged_setting: None,
             }),
             // Every remaining harness keeps the configuration its user wrote.
-            // Muse never reaches this arm: `effective_execution_policy` has
-            // already forced it unconstrained.
             (_, ExecutionPolicy::ConfiguredApprovals) => None,
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "bypassPermissions / sandbox-off",
                 acp_mode: Some("bypassPermissions"),
+                acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -461,6 +528,8 @@ impl HarnessKind {
             (Self::Kimi, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "auto",
                 acp_mode: Some("auto"),
+                acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -470,11 +539,31 @@ impl HarnessKind {
             (Self::Grok, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "always-approve / sandbox-off",
                 acp_mode: None,
+                acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: Some("--always-approve"),
                 launch_environment: Some(("GROK_SANDBOX", "off")),
                 launch_argument: None,
                 session_sandbox: None,
                 staged_setting: None,
+            }),
+            // OpenCode reads permission rules from its config file; `allow`
+            // is its shorthand for allowing every tool without a prompt.
+            (Self::OpenCode, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
+                label: "permission-allow",
+                acp_mode: None,
+                acp_mode_selector: None,
+                acp_setting: None,
+                launch_flag: None,
+                launch_environment: None,
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: Some(StagedSetting {
+                    file: "opencode.json",
+                    path: &["permission"],
+                    value: "allow",
+                    object_version: None,
+                }),
             }),
         }
     }
@@ -507,19 +596,10 @@ impl HarnessKind {
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok)
-    }
-
-    /// The policy a session actually runs under. Muse cannot honor configured
-    /// approvals: its permission profile is a host-lifetime setting that
-    /// `muse serve` refuses when it names the automated reviewer, and the wire
-    /// cannot select another. Muse therefore runs unconstrained on every
-    /// target and the target wizard warns on raw ones.
-    pub const fn effective_execution_policy(self, target: ExecutionPolicy) -> ExecutionPolicy {
-        match self {
-            Self::Muse => ExecutionPolicy::Unconstrained,
-            _ => target,
-        }
+        matches!(
+            self,
+            Self::Codex | Self::Claude | Self::Grok | Self::OpenCode | Self::Muse
+        )
     }
 
     /// Shared warning for selecting a harness without guardian approvals on a
@@ -549,7 +629,7 @@ impl HarnessKind {
         match self {
             Self::Claude => Some(".claude.json"),
             Self::Kimi => Some("mcp.json"),
-            Self::Codex | Self::Grok | Self::Muse => None,
+            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode => None,
         }
     }
 
@@ -567,6 +647,7 @@ impl HarnessKind {
             Self::Claude => &["projects", "session-env", "file-history"],
             Self::Kimi | Self::Grok => &["sessions"],
             Self::Muse => &[".data/muse/sessions"],
+            Self::OpenCode => &[".data/opencode"],
         }
     }
 
@@ -584,7 +665,7 @@ impl HarnessKind {
         match self {
             Self::Muse => Some("bin/muse"),
             Self::Grok => Some("bin/agent"),
-            Self::Codex | Self::Claude | Self::Kimi => None,
+            Self::Codex | Self::Claude | Self::Kimi | Self::OpenCode => None,
         }
     }
 
@@ -595,6 +676,7 @@ impl HarnessKind {
             Self::Codex | Self::Claude | Self::Muse => Vec::new(),
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
+            Self::OpenCode => vec!["acp"],
         }
     }
 }
@@ -769,14 +851,16 @@ impl HarnessProfile {
         self.subagents
             .validate_profile(self.kind)
             .with_context(|| format!("profile {id:?}"))?;
-        if self.kind == HarnessKind::Muse {
-            if self.home.file_name().is_none_or(|name| name != "muse") {
+        if self.kind.nested_home() {
+            let leaf = self.kind.id();
+            let name = self.kind.display_name();
+            if self.home.file_name().is_none_or(|part| part != leaf) {
                 bail!(
-                    "Muse profile {id:?} home must end in /muse (its XDG configuration directory)"
+                    "{name} profile {id:?} home must end in /{leaf} (its XDG configuration directory)"
                 );
             }
             if self.environment.contains_key("XDG_DATA_HOME") {
-                bail!("Muse profile {id:?} must not override its managed XDG_DATA_HOME");
+                bail!("{name} profile {id:?} must not override its managed XDG_DATA_HOME");
             }
         }
         if self.home.as_os_str().is_empty() {

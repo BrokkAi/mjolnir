@@ -83,7 +83,7 @@ RUN apt-get update \
 # demand.
 RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.13.5 \
-        @agentclientprotocol/claude-agent-acp@0.84.0 \
+        @agentclientprotocol/claude-agent-acp@0.86.0 \
         @openai/codex@0.159.1 \
     && npm cache clean --force \
     && codex --version \

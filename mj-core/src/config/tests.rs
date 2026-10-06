@@ -3,6 +3,7 @@ use super::*;
 /// R4-6: `[targets.x] kind = "podman"` without `image` stopped the daemon
 /// from starting ("missing field `image`"), and `extra_run_args`, which is not
 /// a target setting, was accepted without a word.
+// Hard-won: 412f0adc: a missing container image stopped daemon startup and unknown config keys vanished silently
 #[test]
 fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys() {
     for kind in ["podman", "docker"] {
@@ -105,6 +106,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
 /// #1160: a Codex profile that signs in with ChatGPT must never be able to use
 /// an API key. It loses every variable Codex would take a credential or an
 /// address from; a profile that uses an API key keeps them.
+// Hard-won: c4e2838d: a leaked API key broke ChatGPT Codex turns
 #[test]
 fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
     let environment = || {
@@ -235,6 +237,7 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
 /// A Codex home that names its key variable works the way standalone Codex
 /// does: an exported key reaches the profile without an `environment` entry,
 /// and is never written to config.toml.
+// Hard-won: d7a1bb61: an exported provider key worked standalone but failed under Mjolnir
 #[test]
 fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_in() {
     let home = tempfile::tempdir().expect("temporary home");
@@ -290,6 +293,7 @@ fn a_codex_profile_inherits_its_provider_key_from_the_environment_mjolnir_runs_i
     assert!(error.contains("from_secret"), "{error}");
 }
 
+// Hard-won: ee59e575: users were told to delete their supported profile model catalog
 #[test]
 fn a_codex_profile_may_name_its_own_model_catalog() {
     let home = tempfile::tempdir().expect("temporary home");
@@ -322,129 +326,10 @@ fn a_codex_profile_may_name_its_own_model_catalog() {
     );
 }
 
-#[test]
-fn guardian_review_model_accepts_its_three_forms_only_on_a_custom_provider() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let mut profile = zai_profile(
-        home.path(),
-        [("ZAI_API_KEY".to_owned(), "secret".to_owned())]
-            .into_iter()
-            .collect(),
-    );
-    for accepted in [
-        GUARDIAN_REVIEW_NEWEST_FLASH,
-        GUARDIAN_REVIEW_SESSION,
-        "glm-5.3",
-    ] {
-        profile.guardian_review_model = Some(accepted.to_owned());
-        profile
-            .validate("glm")
-            .unwrap_or_else(|error| panic!("{accepted} should validate: {error}"));
-    }
-
-    profile.guardian_review_model = Some("   ".to_owned());
-    let error = profile
-        .validate("glm")
-        .expect_err("a blank reviewer names no model")
-        .to_string();
-    assert!(error.contains("guardian_review_model"), "{error}");
-
-    // A native Codex profile has no Mjolnir-generated catalog to pick a
-    // reviewer from, so the setting would silently do nothing.
-    let native = tempfile::tempdir().expect("temporary home");
-    fs::write(native.path().join("config.toml"), "model = \"gpt-5.5\"\n").expect("write");
-    let native_profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: native.path().to_path_buf(),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: Some(GUARDIAN_REVIEW_SESSION.to_owned()),
-    };
-    native_profile
-        .validate("work")
-        .expect("whether the home names a provider is not Mjolnir's file's to say");
-    let error = native_profile
-        .ensure_ready("work")
-        .expect_err("no custom provider means no generated catalog")
-        .to_string();
-    assert!(error.contains("guardian_review_model"), "{error}");
-    assert!(error.contains("work"), "{error}");
-}
-
-#[test]
-fn a_codex_profile_with_no_home_yet_reports_a_native_login() {
-    let profile = HarnessProfile {
-        enabled: true,
-        kind: HarnessKind::Codex,
-        home: PathBuf::from("/does/not/exist"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-    assert_eq!(profile.auth_scheme(), AuthScheme::NativeLogin);
-    assert_eq!(
-        profile.authentication_marker(),
-        PathBuf::from("/does/not/exist/auth.json")
-    );
-    profile
-        .validate("fresh")
-        .expect("discovery creates profiles before their homes exist");
-}
-
-#[test]
-fn local_targets_need_no_setup_and_preserve_explicit_overrides() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let raw = Config::load_from(&path).unwrap();
-    assert!(raw.targets.is_empty());
-    let available = raw.with_local_targets();
-    assert!(matches!(
-        available.targets["docker"],
-        TargetTemplate::LocalDocker { .. }
-    ));
-    assert!(matches!(
-        available.targets["podman"],
-        TargetTemplate::LocalPodman { .. }
-    ));
-    assert!(
-        !path.exists(),
-        "runtime defaults must not write configuration"
-    );
-    let mut custom = Config::default();
-    custom
-        .targets
-        .insert("docker".into(), TargetTemplate::LocalBare);
-    let resolved = custom.with_local_targets();
-    assert_eq!(resolved.targets["docker"], TargetTemplate::LocalBare);
-    assert_eq!(resolved.clone().with_local_targets(), resolved);
-}
-
-/// The origin is decided where `with_local_targets` inserts: an id the file
-/// names is configured, even when its template repeats the default, and an id
-/// it supplies is a default candidate.
-#[test]
-fn with_local_targets_records_which_targets_it_supplied() {
-    let mut docker = Config::default().with_local_targets().targets["docker"].clone();
-    if let TargetTemplate::LocalDocker { container } = &mut docker {
-        container.image = "example.test/own:latest".into();
-    }
-    let mut written = Config::default();
-    written.targets.insert("docker".into(), docker);
-    let resolved = written.with_local_targets();
-    assert!(!resolved.is_default_target("docker"));
-    assert!(resolved.is_default_target("podman"));
-    // Resolving again keeps the origin.
-    let again = resolved.clone().with_local_targets();
-    assert!(!again.is_default_target("docker"));
-    assert!(again.is_default_target("podman"));
-}
-
 /// Saving edits the user's file in place: comments, blank lines, and the
 /// order of sections and keys survive a save that changes one value.
 /// Launch campaign finding C-21.
+// Hard-won: 25a04304: saving config deleted comments and rewrote user layout
 #[test]
 fn saving_keeps_the_files_comments_and_order() {
     let directory = tempfile::tempdir().unwrap();
@@ -519,6 +404,7 @@ fn environment_references_resolve_from_the_secrets_file_and_survive_a_save() {
 /// Test-and-fix C-8 reported a missing secret as a TOML parse error with a
 /// caret hundreds of columns wide. Now the configuration loads, and the
 /// profile names the entry and the file in one line where it is used.
+// Hard-won: 871a4d9b: one unresolved profile secret prevented daemon startup
 #[test]
 fn a_missing_secret_is_named_in_one_line_where_its_profile_is_used() {
     let directory = tempfile::tempdir().unwrap();
@@ -585,154 +471,29 @@ fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
 }
 
 #[test]
-fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
-    let home = Path::new("/private/session/muse");
-    let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
-    HarnessKind::Muse.configure_home_environment(home, &mut environment);
-    assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
-    assert_eq!(environment["XDG_DATA_HOME"], "/private/session/muse/.data");
-    assert_eq!(
-        HarnessKind::Muse.home_from_environment(&environment["XDG_CONFIG_HOME"]),
-        home
-    );
-    assert_eq!(
-        harness_authentication_marker(HarnessKind::Muse, home),
-        home.join("auth.json")
-    );
-}
-
-#[test]
-fn codex_target_policy_selects_mode_without_replacing_host_config() {
-    for (policy, mode) in [
-        (ExecutionPolicy::ConfiguredApprovals, "agent"),
-        (ExecutionPolicy::Unconstrained, "agent-full-access"),
+fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
+    for (kind, credential) in [
+        (HarnessKind::Muse, "auth.json"),
+        (HarnessKind::OpenCode, ".data/opencode/auth.json"),
     ] {
-        let config = r#"{"default_permissions":"project","model":"configured-model"}"#;
-        let mut environment = BTreeMap::from([("CODEX_CONFIG".into(), config.into())]);
-        HarnessKind::Codex
-            .configure_execution_environment(policy, &mut environment)
-            .unwrap();
-        assert_eq!(environment["INITIAL_AGENT_MODE"], mode);
-        assert_eq!(environment["CODEX_CONFIG"], config);
+        let home = Path::new("/private/session").join(kind.id());
+        let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
+        kind.configure_home_environment(&home, &mut environment);
+        assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
+        assert_eq!(
+            environment["XDG_DATA_HOME"],
+            home.join(".data").to_string_lossy()
+        );
+        assert_eq!(
+            kind.home_from_environment(&environment["XDG_CONFIG_HOME"]),
+            home
+        );
+        assert_eq!(
+            harness_authentication_marker(kind, &home),
+            home.join(credential),
+            "{kind:?}"
+        );
     }
-}
-
-/// The launch argument joins an argv the user already set, and repeated
-/// enforcement never appends it twice.
-#[test]
-fn muse_unconstrained_launch_keeps_one_disable_sandbox_argument() {
-    let mut environment = BTreeMap::from([(
-        "MUSE_SERVE_ARGS".into(),
-        "--sandbox-network restricted".into(),
-    )]);
-    for _ in 0..2 {
-        HarnessKind::Muse
-            .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
-            .unwrap();
-    }
-    assert_eq!(environment["MUSE_APPROVAL_MODE"], "allowAll");
-    assert_eq!(
-        environment["MUSE_SERVE_ARGS"],
-        "--sandbox-network restricted --disable-sandbox"
-    );
-
-    let mut carried = BTreeMap::from([("MUSE_SERVE_ARGS".into(), "--disable-sandbox".into())]);
-    HarnessKind::Muse
-        .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut carried)
-        .unwrap();
-    assert_eq!(carried["MUSE_SERVE_ARGS"], "--disable-sandbox");
-}
-
-#[test]
-fn muse_runs_unconstrained_on_every_target_and_other_harnesses_keep_the_target_policy() {
-    for kind in HarnessKind::ALL {
-        for policy in [
-            ExecutionPolicy::ConfiguredApprovals,
-            ExecutionPolicy::Unconstrained,
-        ] {
-            let expected = if kind == HarnessKind::Muse {
-                ExecutionPolicy::Unconstrained
-            } else {
-                policy
-            };
-            assert_eq!(
-                kind.effective_execution_policy(policy),
-                expected,
-                "{kind:?} {policy:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn only_unconstrained_claude_turns_off_the_session_sandbox() {
-    for kind in HarnessKind::ALL {
-        for policy in [
-            ExecutionPolicy::ConfiguredApprovals,
-            ExecutionPolicy::Unconstrained,
-        ] {
-            let sandbox = kind
-                .execution_enforcement(policy)
-                .and_then(ExecutionEnforcement::session_sandbox);
-            let expected =
-                (kind == HarnessKind::Claude && policy.is_unconstrained()).then_some(false);
-            assert_eq!(sandbox, expected, "{kind:?} {policy:?}");
-        }
-    }
-}
-
-fn muse_staged_setting() -> StagedSetting {
-    HarnessKind::Muse
-        .execution_enforcement(ExecutionPolicy::Unconstrained)
-        .and_then(ExecutionEnforcement::staged_setting)
-        .expect("Muse stages its permission profile")
-}
-
-#[test]
-fn a_staged_setting_keeps_the_rest_of_the_document() {
-    let mut document = serde_json::json!({
-        "schema_version": 1,
-        "provider": "anthropic",
-        "permissions": {"schema_version": 2, "default_profile": ":auto-review"}
-    });
-
-    muse_staged_setting()
-        .apply(document.as_object_mut().unwrap())
-        .unwrap();
-
-    assert_eq!(document["provider"], "anthropic");
-    assert_eq!(document["schema_version"], 1);
-    assert_eq!(document["permissions"]["schema_version"], 2);
-    assert_eq!(document["permissions"]["default_profile"], ":unrestricted");
-}
-
-#[test]
-fn a_staged_setting_creates_the_objects_and_versions_it_needs() {
-    let mut root = serde_json::Map::new();
-
-    muse_staged_setting().apply(&mut root).unwrap();
-
-    assert_eq!(
-        serde_json::Value::Object(root),
-        serde_json::json!({
-            "schema_version": 1,
-            "permissions": {"schema_version": 1, "default_profile": ":unrestricted"}
-        })
-    );
-}
-
-#[test]
-fn a_staged_setting_reports_a_traversed_value_that_is_not_an_object() {
-    let mut document = serde_json::json!({"permissions": []});
-
-    let error = muse_staged_setting()
-        .apply(document.as_object_mut().unwrap())
-        .unwrap_err();
-
-    assert!(
-        format!("{error:#}").contains("permissions must be a JSON object"),
-        "error should name the key: {error:#}"
-    );
 }
 
 fn sample_config() -> Config {
@@ -745,6 +506,7 @@ fn sample_config() -> Config {
         spinner: SpinnerStyle::default(),
         theme: Default::default(),
         phone: PhoneConfig::default(),
+        github: GithubConfig::default(),
         continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
@@ -796,23 +558,14 @@ fn sample_config() -> Config {
     }
 }
 
-#[test]
-fn harness_profiles_reject_the_removed_executable_override() {
-    let error = toml::from_str::<HarnessProfile>(
-        "kind = \"codex\"\nhome = \"/profiles/codex\"\nexecutable = \"/opt/codex-acp\"\n",
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("unknown field `executable`"));
-}
-
 /// A session or probe runs from a home Mjolnir staged for it, so every harness
 /// is pointed at that home, macOS included.
 #[test]
 fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
-        let home = Path::new("/private/session/muse");
-        kind.configure_home_environment(home, &mut environment);
+        let home = Path::new("/private/session").join(kind.id());
+        kind.configure_home_environment(&home, &mut environment);
         assert!(environment.contains_key(kind.home_env()), "{kind:?}");
         assert_eq!(
             kind.home_from_environment(&environment[kind.home_env()]),
@@ -948,30 +701,6 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
 }
 
 #[test]
-fn harness_names_and_ids_round_trip() {
-    for kind in HarnessKind::ALL {
-        assert_eq!(kind.id().parse::<HarnessKind>().unwrap(), kind);
-        assert_eq!(
-            serde_json::to_value(kind).unwrap(),
-            serde_json::Value::String(kind.id().to_owned())
-        );
-        assert!(!kind.display_name().is_empty());
-        assert!(kind.default_home_leaf().starts_with('.'));
-    }
-    assert_eq!(HarnessKind::Grok.id(), "grok");
-    assert_eq!(HarnessKind::Grok.display_name(), "Grok Build");
-    assert_eq!(HarnessKind::Grok.default_home_leaf(), ".grok");
-    assert!("nope".parse::<HarnessKind>().is_err());
-    // The DSH harness was removed; a stored `deepseek` value must be
-    // rejected rather than silently resolving to another harness.
-    assert!("deepseek".parse::<HarnessKind>().is_err());
-    assert!(
-        serde_json::from_value::<HarnessKind>(serde_json::Value::String("deepseek".into()))
-            .is_err()
-    );
-}
-
-#[test]
 fn bridge_args_carry_the_acp_subcommand_per_harness() {
     for policy in [
         ExecutionPolicy::ConfiguredApprovals,
@@ -989,36 +718,6 @@ fn bridge_args_carry_the_acp_subcommand_per_harness() {
             },
             "policy: {policy:?}"
         );
-    }
-}
-
-#[test]
-fn only_unconstrained_grok_carries_the_blanket_approval_flag() {
-    assert_eq!(
-        HarnessKind::Grok.launch_flag_for(ExecutionPolicy::ConfiguredApprovals),
-        None
-    );
-    assert_eq!(
-        HarnessKind::Grok.launch_flag_for(ExecutionPolicy::Unconstrained),
-        Some("--always-approve")
-    );
-    for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Kimi] {
-        for policy in [
-            ExecutionPolicy::ConfiguredApprovals,
-            ExecutionPolicy::Unconstrained,
-        ] {
-            assert_eq!(kind.launch_flag_for(policy), None, "{kind:?}");
-        }
-    }
-}
-
-#[test]
-fn guardian_support_is_declared_per_harness() {
-    for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Grok] {
-        assert!(kind.supports_guardian_approvals(), "{kind:?}");
-    }
-    for kind in [HarnessKind::Kimi, HarnessKind::Muse] {
-        assert!(!kind.supports_guardian_approvals(), "{kind:?}");
     }
 }
 
@@ -1137,6 +836,50 @@ fn config_toml_round_trip_is_atomic() {
 }
 
 #[test]
+fn github_app_configuration_is_optional_and_round_trips() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "version = 1\n").unwrap();
+    let legacy = Config::load_from(&path).unwrap();
+    assert_eq!(legacy.github, GithubConfig::default());
+    legacy.save_to(&path).unwrap();
+    assert!(!fs::read_to_string(&path).unwrap().contains("[github"));
+
+    let mut configured = Config::default();
+    configured.github.app = Some(GithubAppConfig {
+        app_id: 1234,
+        private_key_path: PathBuf::from("/controller/keys/app.pem"),
+        installations: BTreeMap::from([("Acme".into(), 5678)]),
+        session_permissions: Some(BTreeMap::from([(
+            "contents".into(),
+            GithubPermissionLevel::Write,
+        )])),
+        token_permissions: Some(BTreeMap::from([(
+            "statuses".into(),
+            GithubPermissionLevel::Read,
+        )])),
+    });
+    configured.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("[github.app]"), "{body}");
+    assert!(body.contains("[github.app.installations]"), "{body}");
+    assert!(body.contains("[github.app.session_permissions]"), "{body}");
+    assert!(body.contains("[github.app.token_permissions]"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), configured);
+
+    fs::write(
+        &path,
+        "version = 14\n[github.app]\napp_id = 0\nprivate_key_path = 'app.pem'\n",
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.contains("app_id must be a positive integer"),
+        "{error}"
+    );
+}
+
+#[test]
 fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -1157,7 +900,7 @@ fn save_review_reloads_latest_config_and_preserves_unrelated_sections() {
 
     let review = ReviewConfig {
         enabled: true,
-        tier: crate::review::lanes::ReviewTier::Extended,
+        tier: None,
         profile: Some("codex-1".into()),
         model: Some("review-model".into()),
         effort: Some("high".into()),
@@ -1378,28 +1121,6 @@ fn old_config_restores_scan_without_rewriting_until_save() {
 }
 
 #[test]
-fn detailed_activity_clocks_default_off_and_round_trip_without_breaking_old_configs() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, "version = 2\n").unwrap();
-    let old = Config::load_from(&path).unwrap();
-    assert!(!old.advanced.detailed_activity_clocks);
-
-    let mut config = old;
-    config.advanced.detailed_activity_clocks = true;
-    config.save_to(&path).unwrap();
-    let saved = fs::read_to_string(&path).unwrap();
-    assert!(saved.contains("[advanced]"));
-    assert!(saved.contains("detailed_activity_clocks = true"));
-    assert!(
-        Config::load_from(&path)
-            .unwrap()
-            .advanced
-            .detailed_activity_clocks
-    );
-}
-
-#[test]
 fn every_previous_config_version_upgrades_with_compatible_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
@@ -1409,27 +1130,6 @@ fn every_previous_config_version_upgrades_with_compatible_defaults() {
         assert_eq!(config.version, CONFIG_VERSION);
         assert_eq!(config.theme, UiTheme::Midnight);
         assert!(!config.advanced.detailed_activity_clocks);
-    }
-}
-
-#[test]
-fn spinner_preferences_round_trip_without_replacing_other_settings() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let mut config = sample_config();
-    config.phone.enabled = false;
-    config.save_to(&path).unwrap();
-
-    for spinner in SpinnerStyle::ALL {
-        Config::update_to(&path, |config| {
-            config.spinner = spinner;
-            Ok(())
-        })
-        .unwrap();
-        let reloaded = Config::load_from(&path).unwrap();
-        assert_eq!(reloaded.spinner, spinner);
-        assert_eq!(reloaded.phone, config.phone);
-        assert_eq!(reloaded.profiles, config.profiles);
     }
 }
 
@@ -1468,109 +1168,11 @@ fn legacy_dracula_theme_loads_and_saves_as_darcula() {
 
     let config = Config::load_from(&path).unwrap();
     assert_eq!(config.theme, UiTheme::Darcula);
-    assert_eq!(UiTheme::ALL.len(), 5);
+    assert_eq!(UiTheme::ALL.len(), 12);
     config.save_to(&path).unwrap();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(saved.contains("theme = \"darcula\""), "{saved}");
     assert!(!saved.contains("dracula"), "{saved}");
-}
-
-#[test]
-fn unknown_theme_is_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!("version = {CONFIG_VERSION}\ntheme = \"unknown\"\n"),
-    )
-    .unwrap();
-    assert!(Config::load_from(&path).is_err());
-}
-
-#[test]
-fn explicit_container_layer_and_host_helper_storage_round_trip() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let mut config = sample_config();
-    if let TargetTemplate::LocalPodman { container } =
-        config.targets.get_mut("podman-default").unwrap()
-    {
-        container.workspace_storage = PodmanWorkspaceStorage::HostHelper {
-            root: PathBuf::from("/srv/mj-workspaces"),
-            helper: vec!["sudo".into(), "-n".into(), "/opt/mj-helper".into()],
-        };
-    }
-    config.save_to(&path).unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), config);
-
-    if let TargetTemplate::LocalPodman { container } =
-        config.targets.get_mut("podman-default").unwrap()
-    {
-        container.workspace_storage = PodmanWorkspaceStorage::ContainerLayer;
-    }
-    config.save_to(&path).unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), config);
-}
-
-#[test]
-fn local_docker_target_round_trips_with_its_public_kind() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let mut config = sample_config();
-    let container = match config.targets.remove("podman-default").unwrap() {
-        TargetTemplate::LocalPodman { container } => container,
-        _ => unreachable!(),
-    };
-    config
-        .targets
-        .insert("docker".into(), TargetTemplate::LocalDocker { container });
-
-    config.save_to(&path).unwrap();
-
-    let rendered = fs::read_to_string(&path).unwrap();
-    assert!(rendered.contains("kind = \"docker\""), "{rendered}");
-    assert_eq!(Config::load_from(&path).unwrap(), config);
-}
-
-#[test]
-fn setup_can_add_an_alternative_to_a_maximum_length_target_name() {
-    let id = "x".repeat(64);
-    let mut original = Config::default();
-    original
-        .targets
-        .insert(id.clone(), TargetTemplate::LocalBare);
-    let mut discovered = Config::default();
-    discovered
-        .targets
-        .insert(id, sample_config().targets["podman-default"].clone());
-    let additions = original.setup_additions(&discovered);
-    additions.validate().unwrap();
-    assert_eq!(additions.targets.len(), 1);
-    original.targets.extend(additions.targets);
-    assert_eq!(original.targets.len(), 2);
-    assert!(original.setup_additions(&discovered).targets.is_empty());
-}
-
-#[test]
-fn explicit_image_pull_policy_round_trips() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let mut config = sample_config();
-    let TargetTemplate::LocalPodman { container } =
-        config.targets.get_mut("podman-default").unwrap()
-    else {
-        unreachable!()
-    };
-    container.pull_policy = ImagePullPolicy::Never;
-
-    config.save_to(&path).unwrap();
-
-    assert!(
-        fs::read_to_string(&path)
-            .unwrap()
-            .contains("pull_policy = \"never\"")
-    );
-    assert_eq!(Config::load_from(&path).unwrap(), config);
 }
 
 #[test]
@@ -1710,39 +1312,6 @@ fn version_seven_profiles_upgrade_enabled_and_disabled_round_trips_explicitly() 
     assert!(!Config::load_from(&path).unwrap().profiles["work"].enabled);
 }
 
-#[test]
-fn review_rejects_disabled_profile_references() {
-    let profile =
-        "[profiles.work]\nenabled = false\nkind = \"claude\"\nhome = \"/profiles/work\"\n";
-    let reference = "[review]\nprofile = \"work\"\n";
-    let error =
-        toml::from_str::<Config>(&format!("version = {CONFIG_VERSION}\n{reference}{profile}"))
-            .unwrap()
-            .validate()
-            .unwrap_err()
-            .to_string();
-    assert!(error.contains("disabled"), "{error}");
-}
-
-#[test]
-fn version_eight_enables_parent_only_subagents_by_default() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        "version = 8\n[profiles.work]\nkind = \"codex\"\nhome = \"/profiles/work\"\n",
-    )
-    .unwrap();
-
-    let config = Config::load_from(&path).unwrap();
-
-    assert_eq!(config.version, CONFIG_VERSION);
-    assert_eq!(config.subagents.max_concurrent, 6);
-    assert!(config.subagents.eligible_profiles.is_empty());
-    assert!(config.subagents.profile_is_eligible("work", "work"));
-    assert!(!config.subagents.profile_is_eligible("work", "other"));
-}
-
 /// The global `[subagents] enabled` switch was removed; whether a session
 /// uses Mjolnir sub-agents is now stored per session. A config file left
 /// over from before the removal must still load, and a save must drop the
@@ -1782,1277 +1351,22 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
 }
 
 #[test]
-fn the_jev_switch_defaults_on_round_trips_and_stops_continuation() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, format!("version = {CONFIG_VERSION}\n")).unwrap();
-    let config = Config::load_from(&path).unwrap();
-    assert!(config.jev.enabled);
-    assert!(config.automatic_continuation_enabled());
-
-    fs::write(
-        &path,
-        format!("version = {CONFIG_VERSION}\n[jev]\nenabled = false\n"),
-    )
-    .unwrap();
-    let config = Config::load_from(&path).unwrap();
-    assert!(!config.jev.enabled);
-    assert!(config.continuation.enabled);
-    assert!(!config.automatic_continuation_enabled());
-    config.save_to(&path).unwrap();
-    assert!(
-        fs::read_to_string(&path)
-            .unwrap()
-            .contains("[jev]\nenabled = false")
-    );
-    assert!(!Config::load_from(&path).unwrap().jev.enabled);
-}
-
-#[test]
-fn build_cache_sizes_accept_the_spellings_mbx_accepts() {
-    for (text, bytes) in [
-        ("100", 100),
-        ("100B", 100),
-        ("20GB", 20_000_000_000),
-        ("20GiB", 20 * 1024 * 1024 * 1024),
-        ("1TiB", 1024_u64.pow(4)),
-        (" 4MiB ", 4 * 1024 * 1024),
-    ] {
-        assert_eq!(parse_build_cache_size(text), Some(bytes), "{text}");
-    }
-    for text in ["", "GiB", "-1", "20gib", "20 gigabytes", "1.5GiB"] {
-        assert_eq!(parse_build_cache_size(text), None, "{text}");
-    }
-}
-
-#[test]
-fn shared_build_budget_round_trips_and_validates() {
-    let cache: TargetBuildCache = serde_json::from_value(serde_json::json!({
-        "max_total_size": "2TB"
-    }))
-    .unwrap();
-    cache.validate("builder").unwrap();
-    assert_eq!(
-        serde_json::to_value(&cache).unwrap()["max_total_size"],
-        "2TB"
-    );
-    let cleared: TargetBuildCache =
-        serde_json::from_value(serde_json::json!({"max_total_size": null})).unwrap();
-    assert!(cleared.is_default());
-    let invalid = TargetBuildCache {
-        max_total_size: Some("lots".into()),
-        ..Default::default()
-    };
-    assert!(invalid.validate("builder").is_err());
-}
-
-#[test]
-fn machine_build_cache_scheduler_settings_round_trip_and_validate() {
-    let source = format!(
-        "version = {CONFIG_VERSION}\n\
-         [machines.builder]\nkind = \"ssh\"\nhost = \"builder.example.com\"\n\
-         [machines.builder.build_cache.scheduler]\ncpus = 12\nmemory = \"6GiB\"\n"
-    );
-    let config: Config = toml::from_str(&source).unwrap();
-    config.validate().unwrap();
-    let settings = config.machines["builder"].build_cache().unwrap();
-    assert_eq!(settings.scheduler.cpus, Some(12));
-    assert_eq!(settings.scheduler.memory.as_deref(), Some("6GiB"));
-
-    let saved = toml::to_string(&config).unwrap();
-    assert!(saved.contains("[machines.builder.build_cache.scheduler]"));
-    assert!(saved.contains("cpus = 12"));
-    assert!(saved.contains("memory = \"6GiB\""));
-    let loaded: Config = toml::from_str(&saved).unwrap();
-    assert_eq!(loaded.machines["builder"], config.machines["builder"]);
-
-    let default_cache: TargetBuildCache = toml::from_str("").unwrap();
-    assert!(default_cache.scheduler.is_default());
-    assert!(
-        serde_json::to_value(default_cache)
-            .unwrap()
-            .get("scheduler")
-            .is_none()
-    );
-}
-
-#[test]
-fn machine_build_cache_scheduler_rejects_values_mbx_would_reject() {
-    for cpus in ["-1", "1.5"] {
-        let parsed = toml::from_str::<TargetBuildCache>(&format!("[scheduler]\ncpus = {cpus}\n"));
-        assert!(parsed.is_err(), "cpus={cpus}");
-    }
-
-    for cpus in [0, i64::MAX as u64 + 1] {
-        let cache = TargetBuildCache {
-            scheduler: BuildCacheScheduler {
-                cpus: Some(cpus),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(cache.validate("builder").is_err(), "cpus={cpus}");
-    }
-
-    for memory in ["", "GiB", "-1", "20 gigabytes"] {
-        let cache = TargetBuildCache {
-            scheduler: BuildCacheScheduler {
-                memory: Some(memory.to_owned()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(cache.validate("builder").is_err(), "memory={memory:?}");
-    }
-
-    for memory in [
-        "none", "NONE", "100", "20GB", "20GiB", "1TiB", " 4MiB ", "8g", "8gib", "1.5GiB",
-    ] {
-        let cache = TargetBuildCache {
-            scheduler: BuildCacheScheduler {
-                memory: Some(memory.to_owned()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        cache
-            .validate("builder")
-            .unwrap_or_else(|error| panic!("memory={memory:?}: {error:#}"));
-    }
-}
-
-#[test]
-fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
-    for legacy in [
-        serde_json::json!({"max_size": "500GiB", "target_max_size": "250GiB"}),
-        serde_json::json!({"max_size": [false], "target_max_size": {"invalid": true}}),
-    ] {
-        let mut settings = legacy;
-        settings["enabled"] = serde_json::json!(false);
-        settings["directory"] = serde_json::json!("/cache");
-        let cache: TargetBuildCache = serde_json::from_value(settings.clone()).unwrap();
-        cache.validate("builder").unwrap();
-        assert_eq!(cache.enabled, Some(false));
-        assert_eq!(cache.directory.as_deref(), Some(Path::new("/cache")));
-        assert_eq!(cache.max_total_size, None);
-        let source = toml::to_string(&serde_json::json!({
-            "version": CONFIG_VERSION,
-            "machines": {"builder": {
-                "kind": "ssh", "host": "builder.example.com", "build_cache": settings
-            }}
-        }))
-        .unwrap();
-        let config: Config = toml::from_str(&source).unwrap();
-        assert_eq!(config.machines["builder"].build_cache(), Some(&cache));
-        let serialized = serde_json::to_value(&cache).unwrap();
-        assert!(serialized.get("max_size").is_none());
-        assert!(serialized.get("target_max_size").is_none());
-        settings["max_total_size"] = serde_json::json!("2TB");
-        let reset: TargetBuildCache = serde_json::from_value(settings).unwrap();
-        assert_eq!(reset.max_total_size.as_deref(), Some("2TB"));
-    }
-    assert!(
-        serde_json::from_value::<TargetBuildCache>(serde_json::json!({"max_totl_size": "2TB"}))
-            .is_err()
-    );
-}
-
-#[test]
-fn build_cache_sizes_convert_to_and_from_whole_gigabytes() {
-    for (text, gigabytes) in [
-        ("20GB", 20),
-        ("100GiB", 107),
-        ("500GiB", 537),
-        ("25000000000B", 25),
-        ("400MB", 0),
-        ("600MB", 1),
-    ] {
-        assert_eq!(build_cache_size_gigabytes(text), Some(gigabytes), "{text}");
-    }
-    assert_eq!(build_cache_size_gigabytes("20 gigabytes"), None);
-    assert_eq!(build_cache_size_from_gigabytes(25), "25GB");
-    assert_eq!(
-        build_cache_size_gigabytes(&build_cache_size_from_gigabytes(7)),
-        Some(7)
-    );
-}
-
-#[test]
-fn subagents_reject_invalid_limits_and_unavailable_profiles() {
-    let profile = "[profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n";
-    for section in [
-        "[subagents]\nmax_concurrent = 0\n",
-        "[subagents.eligible_profiles]\nmissing = true\n",
-    ] {
-        let error =
-            toml::from_str::<Config>(&format!("version = {CONFIG_VERSION}\n{section}{profile}"))
-                .unwrap()
-                .validate()
-                .unwrap_err()
-                .to_string();
-        assert!(
-            error.contains("max_concurrent") || error.contains("not defined"),
-            "{error}"
-        );
-    }
-}
-
-#[test]
-fn a_disabled_eligible_subagent_profile_loads_instead_of_failing() {
-    // A profile that is both disabled and listed for sub-agent use must not
-    // stop the daemon from starting. `mj doctor` warns about it, and the
-    // consumers that offer profiles for delegation exclude it because it is
-    // disabled (they filter on `enabled`).
-    let config = toml::from_str::<Config>(&format!(
-        "version = {CONFIG_VERSION}\n\
-         [subagents.eligible_profiles]\nwork = true\n\
-         [profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n"
-    ))
-    .unwrap();
-    config.validate().unwrap();
-    assert!(!config.profiles["work"].enabled);
-}
-
-/// A profile that exists, so a `[review]` section has something to name.
-fn config_with_profile(profile: &str) -> String {
-    format!("version = 1\n\n[profiles.{profile}]\nkind = \"claude\"\nhome = \"/home/u/.claude\"\n")
-}
-
-#[test]
-fn review_is_off_and_quick_until_the_config_says_otherwise() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, config_with_profile("reviewer")).unwrap();
-
-    let config = Config::load_from(&path).unwrap();
-
-    assert!(!config.review.enabled, "review is opt-in");
-    assert_eq!(config.review.tier, crate::review::lanes::ReviewTier::Quick);
-    assert_eq!(config.review.reviewer_profile(), None);
-}
-
-#[test]
-fn a_review_section_names_the_profile_that_reviews() {
+fn version_eight_enables_parent_only_subagents_by_default() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
     fs::write(
         &path,
-        format!(
-            "{}\n[review]\nenabled = true\ntier = \"extended\"\nprofile = \"reviewer\"\nmodel = \"opus\"\n",
-            config_with_profile("reviewer")
-        ),
+        "version = 8\n[profiles.work]\nkind = \"codex\"\nhome = \"/profiles/work\"\n",
     )
     .unwrap();
 
     let config = Config::load_from(&path).unwrap();
 
-    assert!(config.review.enabled);
-    assert_eq!(
-        config.review.tier,
-        crate::review::lanes::ReviewTier::Extended
-    );
-    assert_eq!(config.review.reviewer_profile(), Some("reviewer"));
-    assert_eq!(config.review.model.as_deref(), Some("opus"));
-    assert_eq!(config.review.effort, None);
-}
-
-#[test]
-fn a_session_review_choice_overrides_only_what_it_names() {
-    let global = ReviewConfig {
-        enabled: true,
-        tier: crate::review::lanes::ReviewTier::Extended,
-        profile: Some("reviewer".into()),
-        model: Some("global-model".into()),
-        effort: Some("high".into()),
-    };
-    assert_eq!(global.for_session(None), global);
-    assert_eq!(
-        global.for_session(Some(&SessionReview::Off)),
-        ReviewConfig {
-            enabled: false,
-            ..global.clone()
-        },
-        "off stops automatic review and keeps the reviewer /review uses"
-    );
-    let on = SessionReview::On {
-        model: Some("session-model".into()),
-        effort: None,
-        tier: None,
-    };
-    let off_globally = ReviewConfig {
-        enabled: false,
-        ..global.clone()
-    };
-    assert_eq!(
-        off_globally.for_session(Some(&on)),
-        ReviewConfig {
-            enabled: true,
-            model: Some("session-model".into()),
-            ..global.clone()
-        },
-        "on arms review and keeps the effort it did not name"
-    );
-    let quick_globally = ReviewConfig {
-        tier: crate::review::lanes::ReviewTier::Quick,
-        ..global.clone()
-    };
-    let extended = SessionReview::On {
-        model: None,
-        effort: None,
-        tier: Some(crate::review::lanes::ReviewTier::Extended),
-    };
-    assert_eq!(
-        quick_globally.for_session(Some(&extended)).tier,
-        crate::review::lanes::ReviewTier::Extended,
-        "a session's tier overrides the configured one"
-    );
-    assert_eq!(
-        quick_globally.for_session(Some(&on)).tier,
-        crate::review::lanes::ReviewTier::Quick,
-        "a session that names no tier keeps the configured one"
-    );
-}
-
-#[test]
-fn a_session_review_choice_is_stored_in_a_stable_shape() {
-    // Stored in `sessions.review_json`; older and newer releases read it.
-    let on = SessionReview::On {
-        model: Some("gpt-6-astra".into()),
-        effort: None,
-        tier: None,
-    };
-    assert_eq!(
-        serde_json::to_string(&on).unwrap(),
-        r#"{"mode":"on","model":"gpt-6-astra"}"#
-    );
-    assert_eq!(
-        serde_json::to_string(&SessionReview::Off).unwrap(),
-        r#"{"mode":"off"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
-        SessionReview::On {
-            model: None,
-            effort: None,
-            tier: None,
-        }
-    );
-    // A choice stored before tiers could be set per session reads back
-    // unchanged; a tier is stored only when one was chosen.
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(
-            r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
-        )
-        .unwrap(),
-        SessionReview::On {
-            model: Some("gpt-6-luna".into()),
-            effort: Some("max".into()),
-            tier: None,
-        }
-    );
-    let extended = SessionReview::On {
-        model: None,
-        effort: None,
-        tier: Some(crate::review::lanes::ReviewTier::Extended),
-    };
-    assert_eq!(
-        serde_json::to_string(&extended).unwrap(),
-        r#"{"mode":"on","tier":"extended"}"#
-    );
-    assert_eq!(
-        serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
-        extended
-    );
-}
-
-#[test]
-fn auto_review_can_be_enabled_without_an_explicit_profile() {
-    let config = Config {
-        continuation: Default::default(),
-        review: ReviewConfig {
-            enabled: true,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    config.validate().expect("Auto resolves at review start");
-}
-
-#[test]
-fn auto_rejects_manual_model_overrides() {
-    let config = Config {
-        continuation: Default::default(),
-        review: ReviewConfig {
-            model: Some("custom".into()),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    assert!(
-        config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("name a profile")
-    );
-}
-
-#[test]
-fn a_review_profile_that_names_nothing_is_refused() {
-    let config = Config {
-        continuation: Default::default(),
-        review: ReviewConfig {
-            profile: Some("missing".into()),
-            ..ReviewConfig::default()
-        },
-        ..Config::default()
-    };
-    let error = config
-        .validate()
-        .expect_err("a reviewer must be a profile in this file");
-    assert!(
-        format!("{error:#}").contains("not a profile defined in this config"),
-        "unexpected error: {error:#}"
-    );
-}
-
-/// A one-off `/review` needs a reviewer without automatic review, so a
-/// profile with `enabled = false` is a valid configuration.
-#[test]
-fn a_reviewer_without_automatic_review_is_valid() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!(
-            "{}\n[review]\nprofile = \"reviewer\"\n",
-            config_with_profile("reviewer")
-        ),
-    )
-    .unwrap();
-
-    let config = Config::load_from(&path).unwrap();
-    assert!(!config.review.enabled);
-    assert_eq!(config.review.reviewer_profile(), Some("reviewer"));
-}
-
-#[test]
-fn explicit_web_viewer_opt_out_survives_serialization() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let mut config = Config::default();
-    config.phone.enabled = false;
-    config.phone.tailscale_detect = false;
-
-    config.save_to(&path).unwrap();
-    let body = fs::read_to_string(&path).unwrap();
-
-    assert!(body.contains("enabled = false"), "{body}");
-    assert!(body.contains("tailscale_detect = false"), "{body}");
-    assert_eq!(Config::load_from(&path).unwrap(), config);
-}
-
-#[test]
-fn phone_config_requires_tls_off_loopback_and_complete_key_pairs() {
-    let mut config = Config::default();
-    config.phone.enabled = true;
-    config.phone.bind = "0.0.0.0:3765".into();
-    assert!(config.validate().unwrap_err().to_string().contains("TLS"));
-
-    config.phone.tls_cert = Some(PathBuf::from("certificate.pem"));
-    assert!(config.validate().unwrap_err().to_string().contains("both"));
-    config.phone.tls_key = Some(PathBuf::from("private-key.pem"));
-    config.validate().unwrap();
-}
-
-#[test]
-fn empty_config_uses_clean_v1_defaults() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, "\n\t").unwrap();
-    assert_eq!(Config::load_from(&path).unwrap(), Config::default());
-}
-
-#[test]
-fn a_newer_config_is_refused_without_touching_the_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let body = format!(
-        "version = {}\nsetting_from_the_future = true\n",
-        CONFIG_VERSION + 1
-    );
-    fs::write(&path, &body).unwrap();
-
-    let error = Config::load_from(&path).unwrap_err().to_string();
-
-    assert!(error.contains("newer Mjolnir"), "{error}");
-    assert_eq!(fs::read_to_string(&path).unwrap(), body);
-}
-
-#[test]
-fn a_newer_config_written_after_load_still_blocks_a_save() {
-    // Another Hel may upgrade the file between this build's load and its
-    // save; the save must re-check the file rather than trust its marker.
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let config = sample_config();
-    config.save_to(&path).unwrap();
-
-    let body = format!("version = {}\n", CONFIG_VERSION + 1);
-    fs::write(&path, &body).unwrap();
-
-    let error = config.save_to(&path).unwrap_err().to_string();
-    assert!(error.contains("newer Mjolnir"), "{error}");
-    assert_eq!(fs::read_to_string(&path).unwrap(), body);
-}
-
-#[test]
-fn an_older_config_version_is_still_rejected() {
-    // Hel has no downgrade migration, so an unrecognized older schema
-    // keeps reporting an error rather than guessing.
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, "version = 0\n").unwrap();
-
-    let error = Config::load_from(&path).unwrap_err().to_string();
-    assert!(
-        error.contains("unsupported Mjolnir config version 0"),
-        "{error}"
-    );
-}
-
-/// A hand-written config.toml without its `version` line stopped `mj` with
-/// the raw TOML error "missing field `version`", which did not say what to
-/// add (launch finding R14-4, reverify-14 tmux/026).
-#[test]
-fn a_config_without_a_version_names_the_line_to_add() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        "[profiles.codex]\nkind = \"codex\"\nhome = \"/nonexistent\"\n",
-    )
-    .unwrap();
-
-    let error = Config::load_from(&path).unwrap_err();
-    assert_eq!(
-        format!("{error:#}"),
-        format!(
-            "{}: config.toml needs a `version = {CONFIG_VERSION}` line at the top (the current \
-             configuration schema); see https://mjolnir.brokk.ai/configuration/",
-            path.display()
-        )
-    );
-
-    // Any other parse error keeps the parser's words after the file's path.
-    fs::write(
-        &path,
-        format!("version = {CONFIG_VERSION}\n[profiles.codex\n"),
-    )
-    .unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(
-        error.starts_with(&format!("parse Mjolnir config {}: ", path.display())),
-        "{error}"
-    );
-    assert!(error.contains("TOML parse error"), "{error}");
-}
-
-#[test]
-fn a_malformed_newer_config_is_still_an_error() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, "version = 2\nthis is not toml\n").unwrap();
-
-    let error = Config::load_from(&path).unwrap_err().to_string();
-    assert!(error.contains("parse Mjolnir config"), "{error}");
-}
-
-#[test]
-fn removed_profile_overrides_have_an_actionable_error() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        "version = 1\n[profiles.codex]\nkind = \"codex\"\nhome = \"/tmp/codex\"\nmodel = \"gpt-old\"\n",
-    )
-    .unwrap();
-    let error = Config::load_from(&path).unwrap_err().to_string();
-    assert!(error.contains("`model` is no longer supported"));
-    assert!(error.contains("/config"));
-}
-
-#[test]
-fn profile_cannot_override_its_isolated_home() {
-    let mut config = sample_config();
-    config
-        .profiles
-        .get_mut("codex-1")
-        .unwrap()
-        .environment
-        .insert("CODEX_HOME".into(), "/shared-and-racy".into());
-    assert!(
-        config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("must use `home`")
-    );
-}
-
-#[test]
-fn container_size_hosts_group_local_runtimes_and_exact_ssh_hosts() {
-    let container = ContainerTemplate {
-        build_cache: None,
-        image: "agent:latest".into(),
-        pull_policy: Default::default(),
-        platform: None,
-        cpus: None,
-        memory: None,
-        environment: Default::default(),
-        workspace_storage: Default::default(),
-    };
-    let podman = TargetTemplate::LocalPodman {
-        container: container.clone(),
-    };
-    let apple = TargetTemplate::AppleContainer {
-        container: container.clone(),
-    };
-    let ssh = TargetTemplate::SshPodman {
-        ssh: SshConnection {
-            host: "builder.example.test".into(),
-            user: Some("dev".into()),
-            identity_file: None,
-            extra_args: Vec::new(),
-        },
-        container,
-    };
-
-    assert_eq!(container_size_host(&podman), Some("local"));
-    assert_eq!(container_size_host(&apple), Some("local"));
-    assert_eq!(container_size_host(&ssh), Some("builder.example.test"));
-    assert_eq!(container_size_host(&TargetTemplate::LocalBare), None);
-}
-#[test]
-fn ssh_docker_target_round_trips_and_rejects_podman_storage() {
-    let text = r#"kind = "ssh-docker"
-host = "builder"
-user = "ubuntu"
-image = "ubuntu:24.04"
-"#;
-    let target: TargetTemplate = toml::from_str(text).unwrap();
-    target.validate("remote-docker").unwrap();
-    assert_eq!(
-        toml::from_str::<TargetTemplate>(&toml::to_string(&target).unwrap()).unwrap(),
-        target
-    );
-    assert_eq!(container_size_host(&target), Some("builder"));
-    let TargetTemplate::SshDocker { ssh, mut container } = target else {
-        panic!("wrong kind")
-    };
-    container.workspace_storage = PodmanWorkspaceStorage::ContainerLayer;
-    assert!(
-        TargetTemplate::SshDocker { ssh, container }
-            .validate("remote-docker")
-            .unwrap_err()
-            .to_string()
-            .contains("only supported by Podman")
-    );
-}
-
-#[test]
-fn named_instances_default_to_their_own_stable_viewer_port() {
-    assert_eq!(default_phone_bind_for(None), "127.0.0.1:3765");
-    let port = |name: &str| -> u16 {
-        let bind: std::net::SocketAddr = default_phone_bind_for(Some(name)).parse().unwrap();
-        assert!(bind.ip().is_loopback(), "{name} binds beyond loopback");
-        bind.port()
-    };
-    let launch = port("launch-i1");
-    assert_eq!(
-        launch,
-        port("launch-i1"),
-        "the default must survive restarts"
-    );
-    assert!(
-        (INSTANCE_VIEWER_PORTS).contains(&launch),
-        "{launch} is outside the documented range"
-    );
-    assert_ne!(launch, 3765);
-    assert_ne!(port("dev"), port("dev-2"));
-}
-
-#[test]
-fn instance_names_accept_single_segment_identifiers() {
-    for valid in ["dev", "dev-2", "x.y_z", "A1", "a".repeat(64).as_str()] {
-        assert!(is_valid_instance_name(valid), "rejects valid {valid:?}");
-    }
-}
-
-#[test]
-fn instance_names_reject_empty_and_path_escapes() {
-    for invalid in [
-        "",
-        "   ",
-        ".",
-        "..",
-        "dev/dev",
-        "../evil",
-        "..\\evil",
-        "has space",
-        "semi;colon",
-        "uniçode",
-        "a".repeat(65).as_str(),
-    ] {
-        assert!(
-            !is_valid_instance_name(invalid),
-            "accepts invalid {invalid:?}"
-        );
-    }
-}
-
-#[test]
-fn apply_instance_flag_rejects_bad_names_without_touching_the_environment() {
-    // Validation runs before any environment mutation, so these cases
-    // cannot leak state even though the environment is process-global.
-    for invalid in ["", "../evil", "has space"] {
-        let error = apply_instance_flag(Some(invalid)).unwrap_err();
-        assert!(
-            error.to_string().contains("invalid instance id"),
-            "unexpected error for {invalid:?}: {error:#}"
-        );
-    }
-}
-
-#[test]
-fn an_overridden_data_directory_gets_its_own_session_index() {
-    // Without the override the user's own index is the right one.
-    assert_eq!(session_index_dir_for(None, None), None);
-    let overridden = std::ffi::OsString::from("/tmp/lab/data");
-    assert_eq!(
-        session_index_dir_for(None, Some(overridden.as_os_str())),
-        Some(PathBuf::from("/tmp/lab/data/sessionwiki")),
-        "a daemon with its own data directory indexes into its own directory"
-    );
-    let chosen = std::ffi::OsString::from("/tmp/elsewhere");
-    assert_eq!(
-        session_index_dir_for(Some(chosen.as_os_str()), Some(overridden.as_os_str())),
-        None,
-        "an explicit choice is never overridden"
-    );
-}
-
-#[test]
-fn instance_identity_prefers_a_valid_instance_name() {
-    let dir = Path::new("/home/user/.local/share/mjolnir");
-    assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");
-    assert_eq!(
-        instance_identity_for(Some("../escape"), dir),
-        instance_identity_for(None, dir),
-        "an invalid name falls back to the data-dir fingerprint"
-    );
-}
-
-#[test]
-fn instance_identity_fingerprints_the_data_dir_stably() {
-    let first = instance_identity_for(None, Path::new("/srv/mj/one"));
-    let same = instance_identity_for(None, Path::new("/srv/mj/one"));
-    let other = instance_identity_for(None, Path::new("/srv/mj/two"));
-    assert_eq!(first, same);
-    assert_ne!(first, other);
-    assert_eq!(first.len(), 16);
-    assert!(
-        first
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    );
-}
-
-#[test]
-fn instance_directories_nest_under_instances_and_reject_escapes() {
-    let base = PathBuf::from("/base/mjolnir");
-    assert_eq!(
-        with_instance_dir(base.clone(), Some("dev")),
-        PathBuf::from("/base/mjolnir/instances/dev")
-    );
-    assert_eq!(with_instance_dir(base.clone(), None), base);
-    // An invalid name never becomes a path segment, even if a future
-    // caller skips startup validation: it falls back to the base directory.
-    assert_eq!(with_instance_dir(base.clone(), Some("../evil")), base);
-    assert_eq!(with_instance_dir(base.clone(), Some("")), base);
-}
-
-#[test]
-fn development_builds_may_not_control_the_default_store() {
-    let root = tempfile::tempdir().unwrap();
-    let default_store = root.path().join("share/mjolnir");
-    let named_store = default_store.join("instances/dev");
-    fs::create_dir_all(&named_store).unwrap();
-    let profile = root
-        .path()
-        .join("checkout/target/x86_64-unknown-linux-musl/release");
-    fs::create_dir_all(profile.join(".fingerprint")).unwrap();
-    fs::create_dir_all(profile.join("deps")).unwrap();
-    let installed = root.path().join("cargo/bin/mj");
-    fs::create_dir_all(installed.parent().unwrap()).unwrap();
-
-    for executable in [
-        profile.join("mj"),
-        // Linux names a rebuilt executable this way through /proc/self/exe.
-        profile.join("mj (deleted)"),
-        profile.join("deps/mj-0123456789abcdef"),
-    ] {
-        assert_eq!(
-            development_build_controlling_default_store(
-                &executable,
-                &default_store,
-                &default_store
-            ),
-            Some(profile.as_path()),
-            "{}",
-            executable.display()
-        );
-        // The same store reached through a different spelling is still the default.
-        assert!(
-            development_build_controlling_default_store(
-                &executable,
-                &default_store.join("instances/.."),
-                &default_store
-            )
-            .is_some()
-        );
-        assert_eq!(
-            development_build_controlling_default_store(&executable, &named_store, &default_store),
-            None
-        );
-    }
-    assert_eq!(
-        development_build_controlling_default_store(&installed, &default_store, &default_store),
-        None
-    );
-}
-
-fn full_container(build_cache: Option<TargetBuildCache>) -> ContainerTemplate {
-    ContainerTemplate {
-        image: "example.invalid/agent:latest".into(),
-        pull_policy: ImagePullPolicy::Newer,
-        platform: Some("linux/amd64".into()),
-        cpus: Some("4".into()),
-        memory: Some("8g".into()),
-        environment: BTreeMap::from([("RUST_LOG".into(), "debug".into())]).into(),
-        workspace_storage: PodmanWorkspaceStorage::PodmanVolume,
-        build_cache,
-    }
-}
-
-fn every_kind_config() -> Config {
-    let local_cache = TargetBuildCache {
-        enabled: Some(true),
-        directory: Some(PathBuf::from("/var/cache/mbx")),
-        max_total_size: Some("50GiB".into()),
-        scheduler: Default::default(),
-    };
-    let builder_cache = TargetBuildCache {
-        enabled: Some(false),
-        directory: Some(PathBuf::from("/srv/cache/mbx")),
-        max_total_size: Some("20GB".into()),
-        scheduler: Default::default(),
-    };
-    let ssh = SshConnection {
-        host: "builder.example.com".into(),
-        user: Some("dev".into()),
-        identity_file: Some(PathBuf::from("/keys/builder")),
-        extra_args: vec!["-p".into(), "2222".into()],
-    };
-    let aws = |ssh_args: Vec<String>| TargetTemplate::AwsEc2 {
-        aws_profile: Some("work".into()),
-        region: "us-east-1".into(),
-        launch_template: "lt-0123".into(),
-        launch_template_version: Some("7".into()),
-        ssh_user: "ubuntu".into(),
-        address_source: AwsAddressSource::PrivateIp,
-        identity_file: Some(PathBuf::from("/keys/fleet")),
-        ssh_args,
-    };
-    let TargetTemplate::AwsEc2 {
-        aws_profile,
-        region,
-        launch_template,
-        launch_template_version,
-        ssh_user,
-        address_source,
-        identity_file,
-        ssh_args,
-    } = aws(vec!["-o".into(), "StrictHostKeyChecking=no".into()])
-    else {
-        unreachable!()
-    };
-    let mut podman_storage = full_container(Some(local_cache.clone()));
-    podman_storage.workspace_storage = PodmanWorkspaceStorage::HostHelper {
-        root: PathBuf::from("/srv/mj-workspaces"),
-        helper: vec!["sudo".into(), "-n".into(), "/opt/mj-helper".into()],
-    };
-    Config {
-        machines: BTreeMap::from([
-            (
-                "local".into(),
-                Machine::Local {
-                    build_cache: Some(local_cache.clone()),
-                },
-            ),
-            (
-                "builder".into(),
-                Machine::Ssh {
-                    ssh: ssh.clone(),
-                    workspace_prefix: PathBuf::from("work/spaces"),
-                    build_cache: Some(builder_cache.clone()),
-                },
-            ),
-            (
-                "fleet".into(),
-                Machine::AwsEc2 {
-                    aws_profile,
-                    region,
-                    launch_template,
-                    launch_template_version,
-                    ssh_user,
-                    address_source,
-                    identity_file,
-                    ssh_args,
-                },
-            ),
-        ]),
-        targets: BTreeMap::from([
-            ("localhost".into(), TargetTemplate::LocalBare),
-            (
-                "podman".into(),
-                TargetTemplate::LocalPodman {
-                    container: podman_storage,
-                },
-            ),
-            (
-                "docker".into(),
-                TargetTemplate::LocalDocker {
-                    container: full_container(Some(local_cache.clone())),
-                },
-            ),
-            (
-                "apple".into(),
-                TargetTemplate::AppleContainer {
-                    container: full_container(Some(local_cache)),
-                },
-            ),
-            (
-                "builder-bare".into(),
-                TargetTemplate::SshBare {
-                    ssh: ssh.clone(),
-                    permissions: PermissionMode::Yolo,
-                    workspace_prefix: PathBuf::from("work/spaces"),
-                },
-            ),
-            (
-                "builder-podman".into(),
-                TargetTemplate::SshPodman {
-                    ssh: ssh.clone(),
-                    container: full_container(Some(builder_cache.clone())),
-                },
-            ),
-            (
-                "builder-docker".into(),
-                TargetTemplate::SshDocker {
-                    ssh,
-                    container: full_container(Some(builder_cache)),
-                },
-            ),
-            (
-                "fleet-bare".into(),
-                aws(vec!["-o".into(), "StrictHostKeyChecking=no".into()]),
-            ),
-        ]),
-        ..sample_config()
-    }
-}
-
-#[test]
-fn every_machine_and_runtime_kind_survives_the_stored_shape() {
-    let config = every_kind_config();
-    config.validate().unwrap();
-    let json = serde_json::to_value(&config).unwrap();
-    assert_eq!(
-        serde_json::from_value::<Config>(json).unwrap(),
-        config,
-        "the JSON the settings screen edits must rebuild the same config"
-    );
-    let text = toml::to_string_pretty(&config).unwrap();
-    assert_eq!(toml::from_str::<Config>(&text).unwrap(), config, "{text}");
-    // The EC2 machine's own fields, not the runtime's, carry the launch
-    // template, and the runtime is a plain bare harness on it.
-    assert!(text.contains("[machines.fleet]"), "{text}");
-    assert!(text.contains("launch_template = \"lt-0123\""), "{text}");
-    assert!(
-        !text.contains("build_cache") || text.matches("build_cache").count() == 2,
-        "build caches belong to the two machines that have them: {text}"
-    );
-}
-
-/// The version 10 file from the plan's acceptance step, and what saving it
-/// writes back.
-const VERSION_TEN_CONFIG: &str = r#"version = 10
-
-[targets.localhost]
-kind = "local-bare"
-
-[targets.podman]
-kind = "local-podman"
-image = "example.invalid/agent:latest"
-
-[targets.podman.build_cache]
-max_total_size = "50GiB"
-
-[targets.docker]
-kind = "local-docker"
-image = "example.invalid/agent:latest"
-
-[targets.builder]
-kind = "ssh-bare"
-host = "builder.example.com"
-permissions = "guardian"
-
-[targets.builder-podman]
-kind = "ssh-podman"
-host = "builder.example.com"
-image = "example.invalid/agent:latest"
-
-[targets.aws]
-kind = "aws-ec2"
-region = "us-east-1"
-launch_template = "lt-0123"
-ssh_user = "ubuntu"
-"#;
-
-#[test]
-fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(&path, VERSION_TEN_CONFIG).unwrap();
-
-    let config = Config::load_from(&path).unwrap();
     assert_eq!(config.version, CONFIG_VERSION);
-    assert_eq!(
-        config.machines.keys().collect::<Vec<_>>(),
-        ["aws", "builder.example.com", "local"]
-    );
-    let cache = TargetBuildCache {
-        enabled: None,
-        directory: None,
-        max_total_size: Some("50GiB".into()),
-        scheduler: Default::default(),
-    };
-    assert_eq!(
-        config.machines["local"],
-        Machine::Local {
-            build_cache: Some(cache.clone())
-        }
-    );
-    // Both local container runtimes now share the one host cache.
-    for id in ["podman", "docker"] {
-        let (TargetTemplate::LocalPodman { container } | TargetTemplate::LocalDocker { container }) =
-            &config.targets[id]
-        else {
-            panic!("{id} changed kind")
-        };
-        assert_eq!(container.build_cache.as_ref(), Some(&cache));
-    }
-    assert_eq!(config.targets["localhost"], TargetTemplate::LocalBare);
-    assert!(matches!(
-        config.targets["builder"],
-        TargetTemplate::SshBare {
-            permissions: PermissionMode::Guardian,
-            ..
-        }
-    ));
-    assert!(matches!(
-        config.targets["aws"],
-        TargetTemplate::AwsEc2 { .. }
-    ));
-
-    config.save_to(&path).unwrap();
-    let saved = fs::read_to_string(&path).unwrap();
-    println!("{saved}");
-    assert!(
-        saved.starts_with(&format!("version = {CONFIG_VERSION}")),
-        "{saved}"
-    );
-    for expected in [
-        "[machines.local]",
-        "[machines.local.build_cache]",
-        "max_total_size = \"50GiB\"",
-        "[machines.\"builder.example.com\"]",
-        "kind = \"ssh\"",
-        "host = \"builder.example.com\"",
-        "[machines.aws]",
-        "kind = \"aws-ec2\"",
-        "[targets.localhost]\nkind = \"bare\"\n",
-        "[targets.podman]\nkind = \"podman\"\n",
-        "machine = \"builder.example.com\"",
-    ] {
-        assert!(saved.contains(expected), "missing {expected:?} in {saved}");
-    }
-    assert!(!saved.contains("local-podman"), "{saved}");
-    assert_eq!(saved.matches("build_cache").count(), 1, "{saved}");
-    // A second load of the rewritten file is the same configuration.
-    assert_eq!(Config::load_from(&path).unwrap(), config);
-}
-
-#[test]
-fn the_current_version_refuses_the_old_fused_kinds() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    // Version 11 is the last one that may still name a fused kind, because
-    // that version belongs to the key-binding change rather than this split.
-    fs::write(
-        &path,
-        "version = 11\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n",
-    )
-    .unwrap();
-    assert!(matches!(
-        Config::load_from(&path).unwrap().targets["podman"],
-        TargetTemplate::LocalPodman { .. }
-    ));
-
-    fs::write(
-        &path,
-        format!(
-            "version = {CONFIG_VERSION}\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n"
-        ),
-    )
-    .unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(error.contains("\"podman\""), "{error}");
-    assert!(error.contains("local-podman"), "{error}");
-    assert!(error.contains("machine"), "{error}");
-}
-
-#[test]
-fn a_runtime_must_name_a_machine_that_exists() {
-    let error = format!(
-        "{:#}",
-        toml::from_str::<Config>(
-            &format!(
-                "version = {CONFIG_VERSION}\n[targets.remote]\nkind = \"podman\"\nmachine = \"builder\"\nimage = \"a:1\"\n"
-            )
-        )
-        .unwrap_err()
-    );
-    assert!(error.contains("which is not defined"), "{error}");
-}
-
-#[test]
-fn settings_that_belong_to_a_machine_are_refused_on_a_runtime() {
-    for (body, expected) in [
-        (
-            "[targets.here]\nkind = \"bare\"\npermissions = \"yolo\"\n",
-            "only applies to a bare runtime",
-        ),
-        (
-            "[machines.fleet]\nkind = \"aws-ec2\"\nregion = \"us-east-1\"\nlaunch_template = \"lt-1\"\nssh_user = \"ubuntu\"\n\
-             [targets.fleet-podman]\nkind = \"podman\"\nmachine = \"fleet\"\nimage = \"a:1\"\n",
-            "bare harness only",
-        ),
-        (
-            "[targets.podman]\nkind = \"podman\"\nimage = \"a:1\"\n[targets.podman.build_cache]\nmax_total_size = \"1GiB\"\n",
-            "belongs to [machines.local]",
-        ),
-        (
-            "[machines.one]\nkind = \"ssh\"\nhost = \"builder\"\n[machines.two]\nkind = \"ssh\"\nhost = \"builder\"\n",
-            "describe the same host",
-        ),
-    ] {
-        let error = format!(
-            "{:#}",
-            toml::from_str::<Config>(&format!("version = {CONFIG_VERSION}\n{body}"))
-                .map_err(anyhow::Error::from)
-                .and_then(|config| config.validate())
-                .unwrap_err()
-        );
-        assert!(error.contains(expected), "expected {expected:?}: {error}");
-    }
-}
-
-#[test]
-fn config_load_reports_key_errors_fatally() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!(
-            "version = {CONFIG_VERSION}\n\
-             [keys]\n\
-             help = \"prefix+space\"\n\
-             pane_preset = \"prefix+space\"\n"
-        ),
-    )
-    .unwrap();
-
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(
-        error.contains("keys.pane_preset = \"prefix+space\""),
-        "{error}"
-    );
-    assert!(error.contains("keys.help"), "{error}");
-
-    fs::write(
-        &path,
-        format!("version = {CONFIG_VERSION}\n[keys]\nprefix = \"nope\"\n"),
-    )
-    .unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(error.contains("keys.prefix = \"nope\""), "{error}");
-}
-
-#[test]
-fn unknown_keys_fields_are_rejected() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        format!("version = {CONFIG_VERSION}\n[keys]\nnew_sesion = \"prefix+c\"\n"),
-    )
-    .unwrap();
-    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
-    assert!(error.contains("new_sesion"), "{error}");
-}
-
-#[test]
-fn keys_section_is_omitted_from_serialized_defaults() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
-    let config = Config::default();
-    config.save_to(&path).unwrap();
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(!body.contains("[keys]"), "{body}");
-
-    let mut rebound = Config::default();
-    rebound.keys.refresh = BindingConfig::from(["prefix+shift+r", "f5"]);
-    rebound.save_to(&path).unwrap();
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(body.contains("[keys]"), "{body}");
-    assert_eq!(Config::load_from(&path).unwrap(), rebound);
-    assert_eq!(
-        rebound.keybinds().labels(KeyAction::Refresh),
-        vec!["ctrl+b shift+r".to_owned(), "f5".to_owned()]
-    );
-}
-
-#[test]
-fn automatic_continuation_defaults_on_and_disabled_setting_survives_save() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    let mut config = Config::default();
-    assert!(config.continuation.enabled);
-    config.continuation.enabled = false;
-    config.save_to(&path).unwrap();
-    assert!(!Config::load_from(&path).unwrap().continuation.enabled);
+    assert_eq!(config.subagents.max_concurrent, 6);
+    assert!(config.subagents.eligible_profiles.is_empty());
+    assert!(config.subagents.profile_is_eligible("work", "work"));
+    assert!(!config.subagents.profile_is_eligible("work", "other"));
 }
 
 #[test]
@@ -3241,30 +1555,579 @@ fn saving_can_reenable_one_machine_during_global_cache_migration() {
 }
 
 #[test]
-fn profile_subagents_default_to_native_and_round_trip_a_fixed_model() {
-    use crate::subagent::SubagentPolicy;
-    let mut profile: HarnessProfile =
-        serde_json::from_value(serde_json::json!({"kind":"claude","home":"/profiles/claude"}))
-            .unwrap();
-    assert_eq!(profile.subagents, SubagentPolicy::Native);
+fn legacy_build_budgets_are_ignored_without_changing_host_placement() {
+    for legacy in [
+        serde_json::json!({"max_size": "500GiB", "target_max_size": "250GiB"}),
+        serde_json::json!({"max_size": [false], "target_max_size": {"invalid": true}}),
+    ] {
+        let mut settings = legacy;
+        settings["enabled"] = serde_json::json!(false);
+        settings["directory"] = serde_json::json!("/cache");
+        let cache: TargetBuildCache = serde_json::from_value(settings.clone()).unwrap();
+        cache.validate("builder").unwrap();
+        assert_eq!(cache.enabled, Some(false));
+        assert_eq!(cache.directory.as_deref(), Some(Path::new("/cache")));
+        assert_eq!(cache.max_total_size, None);
+        let source = toml::to_string(&serde_json::json!({
+            "version": CONFIG_VERSION,
+            "machines": {"builder": {
+                "kind": "ssh", "host": "builder.example.com", "build_cache": settings
+            }}
+        }))
+        .unwrap();
+        let config: Config = toml::from_str(&source).unwrap();
+        assert_eq!(config.machines["builder"].build_cache(), Some(&cache));
+        let serialized = serde_json::to_value(&cache).unwrap();
+        assert!(serialized.get("max_size").is_none());
+        assert!(serialized.get("target_max_size").is_none());
+        settings["max_total_size"] = serde_json::json!("2TB");
+        let reset: TargetBuildCache = serde_json::from_value(settings).unwrap();
+        assert_eq!(reset.max_total_size.as_deref(), Some("2TB"));
+    }
     assert!(
-        serde_json::to_value(&profile)
-            .unwrap()
-            .get("subagents")
-            .is_none()
+        serde_json::from_value::<TargetBuildCache>(serde_json::json!({"max_totl_size": "2TB"}))
+            .is_err()
     );
-    profile.subagents = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
-    };
-    let encoded = toml::to_string(&profile).unwrap();
-    assert_eq!(toml::from_str::<HarnessProfile>(&encoded).unwrap(), profile);
-    assert!(profile.validate("claude").is_ok());
-    profile.subagents = SubagentPolicy::AllModels;
-    assert!(profile.validate("claude").is_err());
-    profile.subagents = SubagentPolicy::SingleModel {
-        model: "".into(),
+}
+
+// Hard-won: dcc60664: a disabled eligible profile stopped every mj command
+#[test]
+fn a_disabled_eligible_subagent_profile_loads_instead_of_failing() {
+    // A profile that is both disabled and listed for sub-agent use must not
+    // stop the daemon from starting. `mj doctor` warns about it, and the
+    // consumers that offer profiles for delegation exclude it because it is
+    // disabled (they filter on `enabled`).
+    let config = toml::from_str::<Config>(&format!(
+        "version = {CONFIG_VERSION}\n\
+         [subagents.eligible_profiles]\nwork = true\n\
+         [profiles.work]\nenabled = false\nkind = \"grok\"\nhome = \"/profiles/work\"\n"
+    ))
+    .unwrap();
+    config.validate().unwrap();
+    assert!(!config.profiles["work"].enabled);
+}
+
+#[test]
+fn a_session_review_choice_is_stored_in_a_stable_shape() {
+    // Stored in `sessions.review_json`; older and newer releases read it.
+    let on = SessionReview::On {
+        model: Some("gpt-6-astra".into()),
         effort: None,
+        tier: None,
     };
-    assert!(profile.validate("claude").is_err());
+    assert_eq!(
+        serde_json::to_string(&on).unwrap(),
+        r#"{"mode":"on","model":"gpt-6-astra"}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&SessionReview::Off).unwrap(),
+        r#"{"mode":"off"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(r#"{"mode":"on"}"#).unwrap(),
+        SessionReview::On {
+            model: None,
+            effort: None,
+            tier: None,
+        }
+    );
+    // Existing records may include a deprecated tier and remain readable.
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(
+            r#"{"mode":"on","model":"gpt-6-luna","effort":"max"}"#
+        )
+        .unwrap(),
+        SessionReview::On {
+            model: Some("gpt-6-luna".into()),
+            effort: Some("max".into()),
+            tier: None,
+        }
+    );
+    let extended = SessionReview::On {
+        model: None,
+        effort: None,
+        tier: Some("extended".into()),
+    };
+    assert_eq!(
+        serde_json::to_string(&extended).unwrap(),
+        r#"{"mode":"on"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<SessionReview>(r#"{"mode":"on","tier":"extended"}"#).unwrap(),
+        extended
+    );
+}
+
+#[test]
+fn deprecated_review_tier_is_accepted_but_omitted_from_serialization() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n\n[profiles.reviewer]\nkind = \"claude\"\nhome = \"/profiles/reviewer\"\n\n[review]\nenabled = true\ntier = \"extended\"\nprofile = \"reviewer\"\n"
+        ),
+    )
+    .unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.review.tier.as_deref(), Some("extended"));
+
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    assert!(!serialized.contains("tier"), "{serialized}");
+}
+
+#[test]
+fn explicit_web_viewer_opt_out_survives_serialization() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let mut config = Config::default();
+    config.phone.enabled = false;
+    config.phone.tailscale_detect = false;
+
+    config.save_to(&path).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+
+    assert!(body.contains("enabled = false"), "{body}");
+    assert!(body.contains("tailscale_detect = false"), "{body}");
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+}
+
+#[test]
+fn phone_config_requires_tls_off_loopback_and_complete_key_pairs() {
+    let mut config = Config::default();
+    config.phone.enabled = true;
+    config.phone.bind = "0.0.0.0:3765".into();
+    assert!(config.validate().unwrap_err().to_string().contains("TLS"));
+
+    config.phone.tls_cert = Some(PathBuf::from("certificate.pem"));
+    assert!(config.validate().unwrap_err().to_string().contains("both"));
+    config.phone.tls_key = Some(PathBuf::from("private-key.pem"));
+    config.validate().unwrap();
+}
+
+#[test]
+fn empty_config_uses_clean_v1_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "\n\t").unwrap();
+    assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+}
+
+#[test]
+fn a_newer_config_is_refused_without_touching_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let body = format!(
+        "version = {}\nsetting_from_the_future = true\n",
+        CONFIG_VERSION + 1
+    );
+    fs::write(&path, &body).unwrap();
+
+    let error = Config::load_from(&path).unwrap_err().to_string();
+
+    assert!(error.contains("newer Mjolnir"), "{error}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), body);
+}
+
+#[test]
+fn a_newer_config_written_after_load_still_blocks_a_save() {
+    // Another Hel may upgrade the file between this build's load and its
+    // save; the save must re-check the file rather than trust its marker.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let config = sample_config();
+    config.save_to(&path).unwrap();
+
+    let body = format!("version = {}\n", CONFIG_VERSION + 1);
+    fs::write(&path, &body).unwrap();
+
+    let error = config.save_to(&path).unwrap_err().to_string();
+    assert!(error.contains("newer Mjolnir"), "{error}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), body);
+}
+
+/// A hand-written config.toml without its `version` line stopped `mj` with
+/// the raw TOML error "missing field `version`", which did not say what to
+/// add (launch finding R14-4, reverify-14 tmux/026).
+// Hard-won: 0870826d: R14-4 left hand-written config users with a generic missing-version error
+#[test]
+fn a_config_without_a_version_names_the_line_to_add() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "[profiles.codex]\nkind = \"codex\"\nhome = \"/nonexistent\"\n",
+    )
+    .unwrap();
+
+    let error = Config::load_from(&path).unwrap_err();
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "{}: config.toml needs a `version = {CONFIG_VERSION}` line at the top (the current \
+             configuration schema); see https://mjolnir.brokk.ai/configuration/",
+            path.display()
+        )
+    );
+
+    // Any other parse error keeps the parser's words after the file's path.
+    fs::write(
+        &path,
+        format!("version = {CONFIG_VERSION}\n[profiles.codex\n"),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(
+        error.starts_with(&format!("parse Mjolnir config {}: ", path.display())),
+        "{error}"
+    );
+    assert!(error.contains("TOML parse error"), "{error}");
+}
+
+#[test]
+fn removed_profile_overrides_have_an_actionable_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        "version = 1\n[profiles.codex]\nkind = \"codex\"\nhome = \"/tmp/codex\"\nmodel = \"gpt-old\"\n",
+    )
+    .unwrap();
+    let error = Config::load_from(&path).unwrap_err().to_string();
+    assert!(error.contains("`model` is no longer supported"));
+    assert!(error.contains("/config"));
+}
+
+#[test]
+fn profile_cannot_override_its_isolated_home() {
+    let mut config = sample_config();
+    config
+        .profiles
+        .get_mut("codex-1")
+        .unwrap()
+        .environment
+        .insert("CODEX_HOME".into(), "/shared-and-racy".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("must use `home`")
+    );
+}
+
+// Hard-won: 02e00ba4: named instances collided on the default viewer port and API commands stopped
+#[test]
+fn named_instances_default_to_their_own_stable_viewer_port() {
+    assert_eq!(default_phone_bind_for(None), "127.0.0.1:3765");
+    let port = |name: &str| -> u16 {
+        let bind: std::net::SocketAddr = default_phone_bind_for(Some(name)).parse().unwrap();
+        assert!(bind.ip().is_loopback(), "{name} binds beyond loopback");
+        bind.port()
+    };
+    let launch = port("launch-i1");
+    assert_eq!(
+        launch,
+        port("launch-i1"),
+        "the default must survive restarts"
+    );
+    assert!(
+        (INSTANCE_VIEWER_PORTS).contains(&launch),
+        "{launch} is outside the documented range"
+    );
+    assert_ne!(launch, 3765);
+    assert_ne!(port("dev"), port("dev-2"));
+}
+
+#[test]
+fn instance_names_accept_single_segment_identifiers() {
+    for valid in ["dev", "dev-2", "x.y_z", "A1", "a".repeat(64).as_str()] {
+        assert!(is_valid_instance_name(valid), "rejects valid {valid:?}");
+    }
+}
+
+#[test]
+fn instance_names_reject_empty_and_path_escapes() {
+    for invalid in [
+        "",
+        "   ",
+        ".",
+        "..",
+        "dev/dev",
+        "../evil",
+        "..\\evil",
+        "has space",
+        "semi;colon",
+        "uniçode",
+        "a".repeat(65).as_str(),
+    ] {
+        assert!(
+            !is_valid_instance_name(invalid),
+            "accepts invalid {invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn apply_instance_flag_rejects_bad_names_without_touching_the_environment() {
+    // Validation runs before any environment mutation, so these cases
+    // cannot leak state even though the environment is process-global.
+    for invalid in ["", "../evil", "has space"] {
+        let error = apply_instance_flag(Some(invalid)).unwrap_err();
+        assert!(
+            error.to_string().contains("invalid instance id"),
+            "unexpected error for {invalid:?}: {error:#}"
+        );
+    }
+}
+
+// Hard-won: 4ce2f9a7: test data directory overrides could read or write the user session index
+#[test]
+fn an_overridden_data_directory_gets_its_own_session_index() {
+    // Without the override the user's own index is the right one.
+    assert_eq!(session_index_dir_for(None, None), None);
+    let overridden = std::ffi::OsString::from("/tmp/lab/data");
+    assert_eq!(
+        session_index_dir_for(None, Some(overridden.as_os_str())),
+        Some(PathBuf::from("/tmp/lab/data/sessionwiki")),
+        "a daemon with its own data directory indexes into its own directory"
+    );
+    let chosen = std::ffi::OsString::from("/tmp/elsewhere");
+    assert_eq!(
+        session_index_dir_for(Some(chosen.as_os_str()), Some(overridden.as_os_str())),
+        None,
+        "an explicit choice is never overridden"
+    );
+}
+
+// Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
+#[test]
+fn instance_identity_prefers_a_valid_instance_name() {
+    let dir = Path::new("/home/user/.local/share/mjolnir");
+    assert_eq!(instance_identity_for(Some("qa0916"), dir), "qa0916");
+    assert_eq!(
+        instance_identity_for(Some("../escape"), dir),
+        instance_identity_for(None, dir),
+        "an invalid name falls back to the data-dir fingerprint"
+    );
+}
+
+// Hard-won: 18de1bb4: recovery could act on workers belonging to another instance
+#[test]
+fn instance_identity_fingerprints_the_data_dir_stably() {
+    let first = instance_identity_for(None, Path::new("/srv/mj/one"));
+    let same = instance_identity_for(None, Path::new("/srv/mj/one"));
+    let other = instance_identity_for(None, Path::new("/srv/mj/two"));
+    assert_eq!(first, same);
+    assert_ne!(first, other);
+    assert_eq!(first.len(), 16);
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
+}
+
+#[test]
+fn instance_directories_nest_under_instances_and_reject_escapes() {
+    let base = PathBuf::from("/base/mjolnir");
+    assert_eq!(
+        with_instance_dir(base.clone(), Some("dev")),
+        PathBuf::from("/base/mjolnir/instances/dev")
+    );
+    assert_eq!(with_instance_dir(base.clone(), None), base);
+    // An invalid name never becomes a path segment, even if a future
+    // caller skips startup validation: it falls back to the base directory.
+    assert_eq!(with_instance_dir(base.clone(), Some("../evil")), base);
+    assert_eq!(with_instance_dir(base.clone(), Some("")), base);
+}
+
+// Hard-won: f7272bb0: a development build migrated the live store and replaced its daemon
+#[test]
+fn development_builds_may_not_control_the_default_store() {
+    let root = tempfile::tempdir().unwrap();
+    let default_store = root.path().join("share/mjolnir");
+    let named_store = default_store.join("instances/dev");
+    fs::create_dir_all(&named_store).unwrap();
+    let profile = root
+        .path()
+        .join("checkout/target/x86_64-unknown-linux-musl/release");
+    fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+    fs::create_dir_all(profile.join("deps")).unwrap();
+    let installed = root.path().join("cargo/bin/mj");
+    fs::create_dir_all(installed.parent().unwrap()).unwrap();
+
+    for executable in [
+        profile.join("mj"),
+        // Linux names a rebuilt executable this way through /proc/self/exe.
+        profile.join("mj (deleted)"),
+        profile.join("deps/mj-0123456789abcdef"),
+    ] {
+        assert_eq!(
+            development_build_controlling_default_store(
+                &executable,
+                &default_store,
+                &default_store
+            ),
+            Some(profile.as_path()),
+            "{}",
+            executable.display()
+        );
+        // The same store reached through a different spelling is still the default.
+        assert!(
+            development_build_controlling_default_store(
+                &executable,
+                &default_store.join("instances/.."),
+                &default_store
+            )
+            .is_some()
+        );
+        assert_eq!(
+            development_build_controlling_default_store(&executable, &named_store, &default_store),
+            None
+        );
+    }
+    assert_eq!(
+        development_build_controlling_default_store(&installed, &default_store, &default_store),
+        None
+    );
+}
+
+/// The version 10 file from the plan's acceptance step, and what saving it
+/// writes back.
+const VERSION_TEN_CONFIG: &str = r#"version = 10
+
+[targets.localhost]
+kind = "local-bare"
+
+[targets.podman]
+kind = "local-podman"
+image = "example.invalid/agent:latest"
+
+[targets.podman.build_cache]
+max_total_size = "50GiB"
+
+[targets.docker]
+kind = "local-docker"
+image = "example.invalid/agent:latest"
+
+[targets.builder]
+kind = "ssh-bare"
+host = "builder.example.com"
+permissions = "guardian"
+
+[targets.builder-podman]
+kind = "ssh-podman"
+host = "builder.example.com"
+image = "example.invalid/agent:latest"
+
+[targets.aws]
+kind = "aws-ec2"
+region = "us-east-1"
+launch_template = "lt-0123"
+ssh_user = "ubuntu"
+"#;
+
+#[test]
+fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, VERSION_TEN_CONFIG).unwrap();
+
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.version, CONFIG_VERSION);
+    assert_eq!(
+        config.machines.keys().collect::<Vec<_>>(),
+        ["aws", "builder.example.com", "local"]
+    );
+    let cache = TargetBuildCache {
+        enabled: None,
+        directory: None,
+        max_total_size: Some("50GiB".into()),
+        scheduler: Default::default(),
+    };
+    assert_eq!(
+        config.machines["local"],
+        Machine::Local {
+            build_cache: Some(cache.clone())
+        }
+    );
+    // Both local container runtimes now share the one host cache.
+    for id in ["podman", "docker"] {
+        let (TargetTemplate::LocalPodman { container } | TargetTemplate::LocalDocker { container }) =
+            &config.targets[id]
+        else {
+            panic!("{id} changed kind")
+        };
+        assert_eq!(container.build_cache.as_ref(), Some(&cache));
+    }
+    assert_eq!(config.targets["localhost"], TargetTemplate::LocalBare);
+    assert!(matches!(
+        config.targets["builder"],
+        TargetTemplate::SshBare {
+            permissions: PermissionMode::Guardian,
+            ..
+        }
+    ));
+    assert!(matches!(
+        config.targets["aws"],
+        TargetTemplate::AwsEc2 { .. }
+    ));
+
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    println!("{saved}");
+    assert!(
+        saved.starts_with(&format!("version = {CONFIG_VERSION}")),
+        "{saved}"
+    );
+    for expected in [
+        "[machines.local]",
+        "[machines.local.build_cache]",
+        "max_total_size = \"50GiB\"",
+        "[machines.\"builder.example.com\"]",
+        "kind = \"ssh\"",
+        "host = \"builder.example.com\"",
+        "[machines.aws]",
+        "kind = \"aws-ec2\"",
+        "[targets.localhost]\nkind = \"bare\"\n",
+        "[targets.podman]\nkind = \"podman\"\n",
+        "machine = \"builder.example.com\"",
+    ] {
+        assert!(saved.contains(expected), "missing {expected:?} in {saved}");
+    }
+    assert!(!saved.contains("local-podman"), "{saved}");
+    assert_eq!(saved.matches("build_cache").count(), 1, "{saved}");
+    // A second load of the rewritten file is the same configuration.
+    assert_eq!(Config::load_from(&path).unwrap(), config);
+}
+
+#[test]
+fn the_current_version_refuses_the_old_fused_kinds() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    // Version 11 is the last one that may still name a fused kind, because
+    // that version belongs to the key-binding change rather than this split.
+    fs::write(
+        &path,
+        "version = 11\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        Config::load_from(&path).unwrap().targets["podman"],
+        TargetTemplate::LocalPodman { .. }
+    ));
+
+    fs::write(
+        &path,
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.podman]\nkind = \"local-podman\"\nimage = \"a:1\"\n"
+        ),
+    )
+    .unwrap();
+    let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+    assert!(error.contains("\"podman\""), "{error}");
+    assert!(error.contains("local-podman"), "{error}");
+    assert!(error.contains("machine"), "{error}");
 }

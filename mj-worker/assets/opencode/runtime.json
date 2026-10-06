@@ -1,0 +1,9 @@
+{
+  "version": "1.18.34",
+  "platforms": {
+    "linux-x86_64": {"file":"opencode-linux-x64.tar.gz","sha256":"0f22479647226d1d2dd99595d20082ee7bda3870b62dc6a90b41efc1a71d7e9a"},
+    "linux-aarch64": {"file":"opencode-linux-arm64.tar.gz","sha256":"bbdb3f00c2c51e42e315525233151309724226a8776da8e9145e3b0fa3d5310f"},
+    "macos-x86_64": {"file":"opencode-darwin-x64.zip","sha256":"66bf0638cffad3b65bd6648cc3947619e1dd71f4bfeee0a81e087ac036bb1088"},
+    "macos-aarch64": {"file":"opencode-darwin-arm64.zip","sha256":"8522b70f545184b3a8d97c5ca4f814093b2476d72aebfda8c48bcd072ec31d1b"}
+  }
+}

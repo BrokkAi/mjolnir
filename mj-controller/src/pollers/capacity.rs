@@ -262,19 +262,28 @@ fn probe_storage_host(command: &CommandSpec) -> String {
     mj_core::targets::storage::storage_host_of_destination(command.ssh_destination.as_deref())
 }
 
-/// Measure local free space with the local target's storage probe. A failed
+/// Measure local free space over the local target's storage paths. A failed
 /// measurement leaves storage unknown; CPU and memory still publish.
 async fn collect_local_storage(
     target: &DeploymentCapacityTarget,
 ) -> Vec<mj_core::targets::storage::HostStorageSample> {
-    let Some(command) = target.probes.first() else {
-        return Vec::new();
-    };
-    match execute_resource_command(command).await {
-        Ok(output) => crate::targets::storage_samples(
-            &output.stdout,
-            mj_core::targets::storage::LOCAL_STORAGE_HOST,
-        ),
+    let paths = target.local_storage_paths.clone();
+    let measured = tokio::task::spawn_blocking(move || {
+        crate::targets::measure_local_storage(
+            &paths,
+            &crate::targets::BoundedProcessExecutor::new(RESOURCE_POLL_TIMEOUT),
+        )
+    })
+    .await
+    .context("join the local free-space probe")
+    .and_then(|measured| measured);
+    match measured {
+        Ok((_, filesystems)) if filesystems.is_empty() => Vec::new(),
+        Ok((home, filesystems)) => vec![mj_core::targets::storage::HostStorageSample {
+            host: mj_core::targets::storage::LOCAL_STORAGE_HOST.to_owned(),
+            home,
+            filesystems,
+        }],
         Err(error) => {
             tracing::warn!(
                 error = format!("{error:#}"),

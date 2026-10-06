@@ -268,12 +268,24 @@ impl DashboardState {
             self.collapsed_project_keys.clear();
             self.focus = Focus::Sessions;
         }
-        if let Some(session) = self.navigation_session.clone()
+        if let Some(parent_id) = self.navigation_subagent_parent.clone() {
+            if self.state.sessions.get(&parent_id).is_some_and(|record| {
+                Some(record.workspace_id.as_str()) == self.active_workspace_id()
+            }) {
+                self.open_subagent_workspace(parent_id);
+                if let Some(session) = self.navigation_session.clone() {
+                    self.select_active_session(&session);
+                    self.clear_filter_hiding_selection();
+                }
+            }
+            self.navigation_subagent_parent = None;
+        } else if let Some(session) = self.navigation_session.clone()
             && self.state.sessions.get(&session).is_some_and(|record| {
                 Some(record.workspace_id.as_str()) == self.active_workspace_id()
             })
         {
             self.select_active_session(&session);
+            self.clear_filter_hiding_selection();
         }
         self.clamp_selections();
         if workspace_focused {

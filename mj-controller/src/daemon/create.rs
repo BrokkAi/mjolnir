@@ -155,6 +155,12 @@ impl RuntimeState {
             &policy,
         )
         .await?;
+        if !request.bundle_id.is_empty() {
+            crate::controller::config_only_controller(config.clone())
+                .validate_github_bundle_installations(&request.bundle_id)
+                .await
+                .map_err(crate::controller::GithubBundleSelectionError::into_anyhow)?;
+        }
         // Discovery is restartable preparation, not admitted lifecycle work.
         let _upgrade_work = crate::upgrade::activity("session admission")?;
         request.subagents = Some(policy);

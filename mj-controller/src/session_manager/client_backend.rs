@@ -57,7 +57,6 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         Box::pin(crate::review_selection::resolve(
             self.0.clone(),
             None,
-            false,
             cancelled,
             None,
         ))
@@ -138,6 +137,10 @@ impl mj_client::session::SessionHandleBackend for ClientSessionHandle {
         background_task_id: String,
     ) -> mj_client::session::BoxFuture<'_, Result<()>> {
         Box::pin(self.0.stop_background_task(background_task_id))
+    }
+
+    fn install_github_token(&self, token: String) -> mj_client::session::BoxFuture<'_, Result<()>> {
+        Box::pin(self.0.install_github_token(token))
     }
 
     fn reviewer(

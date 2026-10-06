@@ -348,6 +348,31 @@ def main():
             raise RuntimeError(f"startup teardown did not settle after restart: {row}")
         assert child_usage == json.loads(cli("usage", "--session", child, "--json"))
 
+        # Hard-won: d3312d34: a failed child queues a parent prompt that can
+        # otherwise become an unfinished turn while the parent is destroyed.
+        startup_failure = tool(parent, "wait_agents")
+        assert startup_failure["status"] == "reported", startup_failure
+        assert any(
+            agent["child_session_id"] == child
+            and agent["output"] == "fixture startup failure"
+            for agent in startup_failure["agents"]
+        ), startup_failure
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                unfinished = database.execute(
+                    "SELECT COUNT(*) FROM session_turn_selections s "
+                    "WHERE session_id=? AND NOT EXISTS("
+                    "SELECT 1 FROM session_turn_usage u "
+                    "WHERE u.session_id=s.session_id AND u.command_id=s.command_id)",
+                    (parent,),
+                ).fetchone()[0]
+            if unfinished == 0:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("parent wait prompt did not finish before accounting checks")
+
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
         for session in [child, legacy, parent]:
             cli("destroy", "--session", session)

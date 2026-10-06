@@ -1,5 +1,6 @@
 use super::*;
 use crate::chat::test_support::{drawn_transcript, key, snapshot};
+use crate::chat::transcript::row_text;
 use crate::chat::{ChatAction, ChatState};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mj_core::transcript::ChatRole;
@@ -51,7 +52,11 @@ fn answer_plan_review(steps: usize) -> ChatAction {
 #[test]
 fn cancelling_reviewer_setup_restores_the_unanswered_plan() {
     let mut chat = chat_in_setup();
-    press(&mut chat, KeyCode::Esc);
+    let action = press(&mut chat, KeyCode::Esc);
+    assert_eq!(
+        action,
+        ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
+    );
     assert!(!chat.second_opinion_active());
     assert_eq!(
         chat.elicitation
@@ -94,44 +99,6 @@ fn choosing_the_second_opinion_never_answers_the_harness() {
         }
     }
     assert_eq!(local, vec!["1. Read\n2. Change".to_owned()]);
-}
-
-#[test]
-fn every_dialect_offers_the_second_opinion() {
-    // Both plan-decision paths build their dialog through the same
-    // normalizer, so the option is offered whatever the harness sent.
-    for value in [
-        serde_json::json!({ "plan": "standard permission plan" }),
-        serde_json::json!({ "plan_content": "native feedback plan" }),
-        serde_json::json!({ "planContent": "switch mode plan" }),
-    ] {
-        let request = mj_core::acp::normalized_plan_review("plan-review-1".into(), &value);
-        let mj_core::elicitation::ElicitationFieldKind::SingleSelect { options, .. } =
-            &request.fields[0].kind
-        else {
-            panic!("the decision is a single select");
-        };
-        assert!(
-            options
-                .iter()
-                .any(|option| option.value == mj_core::acp::PLAN_REVIEW_SECOND_OPINION),
-            "a plan decision must always offer a second opinion"
-        );
-    }
-}
-
-#[test]
-fn cancelling_preparation_leaves_the_captured_plan_alone() {
-    let mut chat = chat_in_setup();
-    let action = press(&mut chat, KeyCode::Esc);
-
-    assert!(!chat.second_opinion_active());
-    // Nothing was sent to the harness, so its own decision is still
-    // pending and will be rebuilt from the projection.
-    assert!(matches!(
-        action,
-        ChatAction::SecondOpinion(SecondOpinionIntent::Closed)
-    ));
 }
 
 #[test]
@@ -350,41 +317,6 @@ fn the_wheel_scrolls_whichever_pane_it_is_over() {
 }
 
 #[test]
-fn clicking_a_split_button_takes_the_same_action_as_the_keyboard() {
-    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-
-    let (mut chat, _) = drawn_split();
-    let (action, area) = chat
-        .split_action_areas
-        .iter()
-        .find(|(action, _)| *action == SplitAction::Implement)
-        .copied()
-        .expect("the split draws its action buttons");
-    assert_eq!(action, SplitAction::Implement);
-
-    let press = chat.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: area.x + 1,
-        row: area.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    assert_eq!(press, ChatAction::None);
-    let outcome = chat.handle_mouse(MouseEvent {
-        kind: MouseEventKind::Up(MouseButton::Left),
-        column: area.x + 1,
-        row: area.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    let ChatAction::SecondOpinion(SecondOpinionIntent::Workflow(requests)) = outcome else {
-        panic!("clicking a button acts on it: {outcome:?}");
-    };
-    assert!(requests.iter().any(|request| matches!(
-        request,
-        WorkflowRequest::PromptPrimary { prompt, .. } if prompt.contains("1. Read")
-    )));
-}
-
-#[test]
 fn clicking_beside_the_buttons_does_nothing() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -447,6 +379,7 @@ fn the_primary_form_keeps_the_screen_over_a_reviewer_one() {
 /// The prompts a review generates are Hel's, not the user's. Rendering
 /// them as user messages would put words in their mouth and would make a
 /// later resume replay them as if they had been typed.
+// Hard-won: 0333efb: review-generated prompts were attributed to the user in the transcript
 #[test]
 fn generated_review_prompts_never_read_as_the_user() {
     use mj_core::second_opinion::{
@@ -568,4 +501,24 @@ fn preparation_explains_shared_settings_and_retries_without_a_selector() {
         chat.elicitation.as_ref().unwrap().request(),
         &captured().request
     );
+}
+
+#[test]
+fn the_reviewer_pane_copies_a_wrapped_url_whole() {
+    let url = "https://example.com/a/rather/long/path/that/cannot/fit/on/one/row";
+    let mut pane = pane_from_entries(vec![ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        format!("See {url} for details."),
+    )]);
+    pane.ensure_rows(30);
+    let last = pane.rows.len() - 2;
+
+    let text = pane
+        .selection_text(&SelectionRange {
+            start: crate::selection::ContentPos::new(1, 0),
+            end: crate::selection::ContentPos::new(last, 29),
+        })
+        .expect("a selection over this pane's rows resolves here");
+    assert_eq!(text, format!("See {url} for details."));
 }

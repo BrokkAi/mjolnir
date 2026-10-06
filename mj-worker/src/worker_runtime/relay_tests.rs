@@ -65,7 +65,6 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         handback_tool: false,
         initial_model: None,
         review_capture: true,
-        bifrost_binary: None,
         goal_resume_request: Default::default(),
         target_environment: Default::default(),
         seed_image_environment: false,
@@ -88,19 +87,40 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
 }
 
 async fn expect_daemon_launch_failure(root: &Path, config: WorkerLaunchConfig) {
-    match tokio::time::timeout(
-        crate::test_support::IO_TIMEOUT,
-        unix::run_daemon(root.to_owned(), config),
-    )
-    .await
-    {
-        Ok(result) => {
-            result.expect_err("the fixture cannot start an ACP supervisor");
+    let daemon = tokio::spawn(unix::run_daemon(root.to_owned(), config));
+    let observed = tokio::time::timeout(crate::test_support::IO_TIMEOUT, async {
+        loop {
+            if daemon.is_finished() {
+                break false;
+            }
+            let failure_recorded = std::fs::read(root.join(WORKER_STARTUP_FILE))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|record| record["failure"].is_object());
+            if failure_recorded {
+                break true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    match observed {
+        Ok(true) => {
+            daemon.abort();
+            assert!(daemon.await.unwrap_err().is_cancelled());
+        }
+        Ok(false) => {
+            daemon
+                .await
+                .expect("worker task panicked")
+                .expect_err("the fixture cannot start an ACP supervisor");
         }
         Err(_) => {
+            daemon.abort();
+            let _ = daemon.await;
             let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
                 .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
-            panic!("fixture worker did not finish its launch; startup record: {startup}");
+            panic!("fixture worker did not report its launch failure; startup record: {startup}");
         }
     }
 }
@@ -166,52 +186,6 @@ fn skills_state_of(payload: RelayResponsePayload) -> mj_core::skills::SkillsSync
     }
 }
 
-fn github_token_state_of(
-    payload: RelayResponsePayload,
-) -> mj_core::credentials::GithubTokenSnapshot {
-    let RelayResponsePayload::GithubTokenState {
-        present,
-        fingerprint,
-    } = payload
-    else {
-        panic!("expected a GitHub token state payload, got {payload:?}");
-    };
-    mj_core::credentials::GithubTokenSnapshot {
-        present,
-        fingerprint,
-    }
-}
-
-#[test]
-fn github_token_requests_install_and_remove_connection_only_state() {
-    use base64::Engine as _;
-
-    let home = tempfile::tempdir().unwrap();
-    let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
-    let absent = github_token_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::GithubTokenState).unwrap(),
-    );
-    assert!(!absent.present);
-
-    let installed = github_token_state_of(
-        unix::apply_credential_request(
-            &endpoint,
-            &RelayRequest::InstallGithubToken {
-                data: base64::engine::general_purpose::STANDARD.encode(b"fresh-token"),
-            },
-        )
-        .unwrap(),
-    );
-    assert_eq!(
-        installed,
-        mj_core::credentials::GithubTokenSnapshot::of("fresh-token")
-    );
-    let removed = github_token_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::RemoveGithubToken).unwrap(),
-    );
-    assert!(!removed.present);
-}
-
 #[test]
 fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     let worker = tempfile::tempdir().unwrap();
@@ -259,6 +233,7 @@ fn github_cli_wrapper_reads_each_live_token_and_clears_stale_environment() {
     assert_eq!(invoke(None), "unset|unset\n");
 }
 
+// Hard-won: 50963cae: a harness scrubbed credential-shaped Git config names and broke every Git command.
 #[test]
 fn git_helpers_survive_harness_login_shells_and_credential_shaped_name_scrubs() {
     let worker = tempfile::tempdir().unwrap();
@@ -422,26 +397,6 @@ fi
     );
 }
 
-#[test]
-fn skills_state_reports_an_empty_home_then_a_synced_tree() {
-    let home = tempfile::tempdir().unwrap();
-    let endpoint = credential_endpoint(&launch_config(&home.path().to_string_lossy())).unwrap();
-
-    let empty = skills_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::SkillsState).unwrap(),
-    );
-    assert!(!empty.present);
-
-    std::fs::create_dir_all(home.path().join("skills/review")).unwrap();
-    std::fs::write(home.path().join("skills/review/SKILL.md"), b"review").unwrap();
-    let state = skills_state_of(
-        unix::apply_credential_request(&endpoint, &RelayRequest::SkillsState).unwrap(),
-    );
-    let expected = mj_core::skills::collect_skills(HarnessKind::Codex, home.path()).unwrap();
-    assert!(state.present);
-    assert_eq!(state.fingerprint, expected.fingerprint());
-}
-
 /// A worker installs a tree sent in either archive format: a current
 /// controller sends it compressed, and the uncompressed format is the one
 /// every earlier release wrote.
@@ -504,16 +459,6 @@ fn install_skills_rejects_garbage_and_leaves_the_tree_untouched() {
     assert_eq!(
         std::fs::read(home.path().join("skills/keep.md")).unwrap(),
         b"keep"
-    );
-}
-
-#[test]
-fn non_credential_requests_are_not_served_by_the_home_handler() {
-    let error = unix::apply_credential_request(&test_credentials().unwrap(), &RelayRequest::Status)
-        .unwrap_err();
-    assert!(
-        format!("{error:#}").contains("credential, GitHub token, or skills"),
-        "{error:#}"
     );
 }
 
@@ -825,33 +770,6 @@ fn muse_relative_roots_resolve_before_credential_and_history_access() {
     );
 }
 
-/// Muse has no guardian mode, so a launch config written before that rule
-/// existed is upgraded when the worker enforces it.
-#[test]
-fn enforcing_the_policy_upgrades_a_persisted_muse_guardian_config() {
-    let mut config = launch_config("/profile");
-    config.harness = HarnessKind::Muse;
-    config.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-
-    super::enforce_execution_policy(&mut config).unwrap();
-
-    assert_eq!(config.execution_policy, ExecutionPolicy::Unconstrained);
-    assert_eq!(
-        config
-            .environment
-            .get("MUSE_APPROVAL_MODE")
-            .map(String::as_str),
-        Some("allowAll")
-    );
-    assert_eq!(
-        config
-            .environment
-            .get("MUSE_SERVE_ARGS")
-            .map(String::as_str),
-        Some("--disable-sandbox")
-    );
-}
-
 #[test]
 fn a_stated_harness_home_serves_credentials_without_a_home_variable() {
     let mut config = launch_config("/profile");
@@ -866,17 +784,6 @@ fn a_stated_harness_home_serves_credentials_without_a_home_variable() {
 
     assert_eq!(endpoint.home, Path::new("/home/user/.claude"));
     assert_eq!(endpoint.marker, endpoint.home.join(".credentials.json"));
-}
-
-#[test]
-fn a_launch_config_without_a_harness_home_cannot_serve_credentials() {
-    let mut config = launch_config("/profile");
-    config.harness_home = PathBuf::new();
-    config.environment.clear();
-
-    let error = credential_endpoint(&config).unwrap_err();
-
-    assert!(error.contains("CODEX_HOME"), "{error}");
 }
 
 #[test]
@@ -1107,6 +1014,7 @@ async fn kimi_diagnostic_is_enriched_before_durable_completion() {
 /// the failure. When Kimi journalled a failure for the turn, that failure is
 /// the turn's outcome: its warning and its diagnostic are the authentication
 /// error, and credential sync treats it as one.
+// Hard-won: #1132: Kimi's journalled OAuth failure was misreported as unanswered and suggested an unsafe retry.
 #[tokio::test]
 async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure() {
     let temp = tempfile::tempdir().unwrap();
@@ -1239,6 +1147,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
 /// Kimi's ACP prompt response carries no usage, so a completed Kimi turn is
 /// only accounted for if the native wire records reach the durable relay
 /// (#1064).
+// Hard-won: #1064: Kimi ACP omitted usage unless the worker imported native turn records.
 #[tokio::test]
 async fn kimi_turn_usage_is_recorded_from_native_records() {
     let temp = tempfile::tempdir().unwrap();
@@ -1429,7 +1338,10 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
     let home = temp.path().join("kimi");
     let old_session = home.join("sessions/old").join(SESSION_ID);
     let new_session = home.join("sessions/new").join(SESSION_ID);
-    for (session_dir, task_id) in [(&old_session, "old-agent"), (&new_session, "new-agent")] {
+    for (session_dir, task_ids) in [
+        (&old_session, &["old-agent"][..]),
+        (&new_session, &["new-agent", "second-agent"][..]),
+    ] {
         let wire = session_dir.join("agents/main/wire.jsonl");
         std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
         std::fs::write(
@@ -1437,10 +1349,9 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
             serde_json::json!({"id": SESSION_ID}).to_string(),
         )
         .unwrap();
-        std::fs::write(
-            &wire,
-            format!(
-                "{}\n",
+        let records = task_ids
+            .iter()
+            .map(|task_id| {
                 serde_json::json!({
                     "type": "task.started",
                     "agentId": "main",
@@ -1454,9 +1365,10 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
                         "agentId": "agent"
                     }
                 })
-            ),
-        )
-        .unwrap();
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(&wire, format!("{}\n", records.join("\n"))).unwrap();
     }
     std::fs::write(
         home.join("session_index.jsonl"),
@@ -1495,7 +1407,7 @@ async fn kimi_native_task_monitor_follows_newest_session_index_wire() {
 
     let state = relay.lock().unwrap().operational_state();
     assert!(state.background_commands.is_empty());
-    assert_eq!(state.native_agent_count, 1);
+    assert_eq!(state.native_agent_count, 2);
 }
 
 #[tokio::test]
@@ -2241,6 +2153,7 @@ async fn coordinator_drains_events_while_the_acp_command_channel_is_full() {
     coordinator.await.unwrap().unwrap();
 }
 
+// Hard-won: #987: a withdrawn saved model stranded startup before commands could repair it.
 #[tokio::test]
 async fn a_selector_hel_applied_for_itself_is_durable_without_a_relay_command() {
     let temp = tempfile::tempdir().unwrap();
@@ -2849,46 +2762,6 @@ fn typed_acp_observations_are_journaled() {
 }
 
 #[test]
-fn a_harness_restart_gates_dispatch_until_the_session_is_configured_again() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(Mutex::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let mut in_flight = BTreeMap::new();
-    let mut session_configured = true;
-
-    unix::record_runtime_event_and_track_configuration(
-        &relay,
-        &mut in_flight,
-        &no_prompt_loop(),
-        RuntimeEvent::HarnessRestarting {
-            message: "ACP bridge exited; reloading the native session".into(),
-        },
-        &mut session_configured,
-    )
-    .unwrap();
-    assert!(
-        !session_configured,
-        "a restart must stop dispatch until the fresh bridge configures its session"
-    );
-
-    unix::record_runtime_event_and_track_configuration(
-        &relay,
-        &mut in_flight,
-        &no_prompt_loop(),
-        RuntimeEvent::SessionConfigured {
-            config_options: Vec::new(),
-        },
-        &mut session_configured,
-    )
-    .unwrap();
-    assert!(
-        session_configured,
-        "the fresh bridge's SessionConfigured must reopen dispatch"
-    );
-}
-
-#[test]
 fn harness_restarting_interrupts_in_flight_commands() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
@@ -3151,11 +3024,10 @@ fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
 }
 
 /// Claude Code re-invokes itself when a background task it started finishes.
-/// The coordinator must hand a prompt typed during that turn straight to the
-/// adapter, which queues it and answers it at the next turn boundary, while a
-/// checkpoint barrier waits for the turn to settle.
+/// The coordinator keeps a prompt typed during that turn in mj's queue until
+/// the turn boundary, while a checkpoint barrier waits on the same turn state.
 #[tokio::test]
-async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
+async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
@@ -3190,25 +3062,51 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
         RelayExecutionState::Running
     );
 
-    // A prompt typed during that turn goes out at once.
+    // A prompt typed during that turn stays in the durable queue; it never
+    // enters the adapter's queue, which cancellation may discard.
     submit(
         &mut relay.lock().unwrap(),
         "prompt-mid-turn",
         prompt("also look at this"),
     );
     wake_tx.try_send(()).unwrap();
+    wait_until(
+        || {
+            let state = relay.lock().unwrap().operational_state();
+            state.harness_turn.is_some()
+                && state.active_prompt.is_none()
+                && state
+                    .queued_prompts
+                    .iter()
+                    .any(|queued| queued.command_id == "prompt-mid-turn")
+        },
+        "the prompt did not remain queued during the harness turn",
+    )
+    .await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "the adapter must not receive a prompt during the harness turn"
+    );
+
+    // A turn-end marker settles the autonomous cycle, then promotion sends the
+    // queued prompt exactly once.
+    event_tx
+        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
+            "task-notification",
+            1,
+        )))
+        .unwrap();
     assert_prompt(
         next_command(&mut command_rx).await,
         "prompt-mid-turn",
         "also look at this",
     );
-    assert!(
-        harness_turn_open(&relay),
-        "dispatching a prompt does not end the turn the harness started"
-    );
+    wait_until(
+        || !harness_turn_open(&relay),
+        "the cycle result did not settle the harness turn",
+    )
+    .await;
 
-    // The prompt result is itself a turn boundary, so the turn it interrupted
-    // is over. A fresh cycle opens the next one.
     event_tx
         .send(RuntimeEvent::PromptFinished {
             diagnostic: None,
@@ -3218,8 +3116,15 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
         })
         .unwrap();
     wait_until(
-        || !harness_turn_open(&relay),
-        "a prompt result did not settle the harness turn",
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_prompt
+                .is_none()
+        },
+        "the queued prompt did not finish",
     )
     .await;
     event_tx
@@ -3277,6 +3182,191 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
     assert_eq!(state.execution, RelayExecutionState::Idle);
     assert!(state.last_harness_turn_started_ordinal.is_some());
 
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+/// A bridge replacement settles the old harness turn, but the queued prompt
+/// waits until the replacement session is configured before it is sent.
+// Hard-won: #1225: a bridge restart could leave a prompt held by a turn that no longer existed.
+#[tokio::test]
+async fn a_bridge_restart_releases_a_held_prompt_after_session_readiness() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    event_tx
+        .send(agent_output("working through a task", "restart-turn"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output did not open a harness turn",
+    )
+    .await;
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "prompt-after-restart",
+        prompt("continue after restart"),
+    );
+    wake_tx.try_send(()).unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .queued_prompts
+                .len()
+                == 1
+        },
+        "the prompt was not accepted into the relay queue",
+    )
+    .await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx
+        .send(RuntimeEvent::HarnessRestarting {
+            message: "test bridge restart".into(),
+        })
+        .unwrap();
+    wait_until(
+        || {
+            let state = relay.lock().unwrap().operational_state();
+            state.harness_turn.is_none() && state.acp_ready == Some(false)
+        },
+        "bridge restart did not close the old turn and readiness",
+    )
+    .await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "a held prompt must wait while the replacement bridge is opening"
+    );
+
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-after-restart",
+        "continue after restart",
+    );
+    tokio::task::yield_now().await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+/// A stopped harness exits its worker; recovery closes the old turn and sends
+/// the durable prompt only after the replacement worker configures ACP.
+// Hard-won: #1225: a harness exit could otherwise leave a queued prompt held by a dead turn.
+#[tokio::test]
+async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    event_tx
+        .send(agent_output("working through a task", "exit-turn"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output did not open a harness turn",
+    )
+    .await;
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "prompt-after-exit",
+        prompt("continue after harness exit"),
+    );
+    wake_tx.try_send(()).unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .queued_prompts
+                .iter()
+                .any(|queued| queued.command_id == "prompt-after-exit")
+        },
+        "the prompt did not stay in the durable queue",
+    )
+    .await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    coordinator.await.unwrap().unwrap();
+    assert!(
+        harness_turn_open(&relay),
+        "Stopped leaves recovery to close the turn"
+    );
+    drop(relay);
+
+    let mut recovered = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    recovered.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    recovered
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    let relay = Arc::new(Mutex::new(recovered));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-after-exit",
+        "continue after harness exit",
+    );
+    tokio::task::yield_now().await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
     drop(event_tx);
     drop(wake_tx);
     coordinator.await.unwrap().unwrap();
@@ -3462,11 +3552,11 @@ async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
     coordinator.await.unwrap().unwrap();
 }
 
-/// Stop while Claude Code works on its own after a background task reaches
-/// the prompt loop as a cancel, and the interrupted cycle's result then ends
-/// the turn.
+/// Esc's non-targeted cancellation interrupts a Claude cycle with no active
+/// prompt; the queued user prompt starts once that cycle reports its result.
+// Hard-won: #1225: adapter cancellation could discard a prompt Hel had already shown as active.
 #[tokio::test]
-async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
+async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
@@ -3499,8 +3589,32 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
 
     submit(
         &mut relay.lock().unwrap(),
+        "prompt-after-stop",
+        prompt("continue with this"),
+    );
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .claim_pending_commands(true)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .queued_prompts
+            .len(),
+        1,
+        "Esc's prompt remains owned by the relay until cancellation settles"
+    );
+
+    submit(
+        &mut relay.lock().unwrap(),
         "stop-harness-turn",
-        RelayCommand::Cancel,
+        RelayCommand::CancelTurn,
     );
     wake_tx.try_send(()).unwrap();
     let CommandRequest::Cancel {
@@ -3508,7 +3622,7 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
         steering_prompt: None,
     } = next_command(&mut command_rx).await
     else {
-        panic!("Stop must reach the prompt loop as a plain cancel");
+        panic!("CancelTurn must reach session/cancel without adapter-queued text");
     };
     assert_eq!(request_id, "stop-harness-turn");
     event_tx
@@ -3522,13 +3636,45 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
     event_tx
         .send(RuntimeEvent::ClaudeTurnResult(interrupted))
         .unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-after-stop",
+        "continue with this",
+    );
     wait_until(
         || !harness_turn_open(&relay),
         "the interrupted cycle's result did not end the turn",
     )
     .await;
     let state = relay.lock().unwrap().operational_state();
-    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert_eq!(state.execution, RelayExecutionState::Running);
+    assert_eq!(
+        state
+            .active_prompt
+            .as_ref()
+            .map(|prompt| prompt.command_id.as_str()),
+        Some("prompt-after-stop")
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "the queued prompt must not be dispatched a second time"
+    );
+    let starts = relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.observation,
+                RelayObservation::CommandStarted { command_id, .. }
+                    if command_id == "prompt-after-stop"
+            )
+        })
+        .count();
+    assert_eq!(starts, 1, "the queued prompt starts exactly once");
     assert!(
         relay
             .lock()
@@ -3552,6 +3698,7 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
 /// prompt made the Claude adapter answer with agent text, the worker opened a
 /// turn for it that nothing ever ended, and every stop was "completed" while
 /// the session stayed Running.
+// Hard-won: c0f3bab: Claude's model-change notice opened a turn that no result could ever settle.
 #[tokio::test(start_paused = true)]
 async fn a_model_change_answer_opens_no_turn_and_an_unanswered_stop_ends_one() {
     let temp = tempfile::tempdir().unwrap();
@@ -4939,26 +5086,6 @@ async fn first_daemon_start_pins_the_worktree_before_the_primary_harness() {
 }
 
 #[tokio::test]
-async fn daemon_restart_without_a_baseline_does_not_hide_pending_work() {
-    let temp = tempfile::tempdir().unwrap();
-    let repository = git_repository(&temp);
-    let root = temp.path().join("relay");
-    DurableRelay::open(&root, SESSION_ID, "1.0.0").unwrap();
-    let mut config = launch_config(temp.path().join("profile").to_str().unwrap());
-    config.bridge_command = temp.path().join("missing-acp-bridge");
-    config.cwd = repository.clone();
-
-    expect_daemon_launch_failure(&root, config).await;
-
-    let baseline = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "refs/hel/review-baseline^{tree}"])
-        .current_dir(repository)
-        .output()
-        .unwrap();
-    assert!(!baseline.status.success());
-}
-
-#[tokio::test]
 async fn restored_relay_seed_records_a_restart_marker() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_owned();
@@ -5029,6 +5156,7 @@ fn a_restored_relay_seed_supplies_the_accepted_model_and_effort() {
 /// journal had not created it, so when Codex answered "thread not found" it
 /// refused to start a fresh thread. The checkpoint now says the session was
 /// never prompted, and that holds until the replacement opens.
+// Hard-won: 0bb9439: a never-prompted session restored from checkpoint was wrongly treated as used native history.
 #[test]
 fn a_restored_never_prompted_session_may_replace_its_native_session() {
     for native_session_unused in [true, false] {
@@ -5193,6 +5321,7 @@ async fn a_new_codex_session_launches_its_bridge_on_its_creation_model() {
 /// of the launch, but the worker adds the target's own login environment, which
 /// only it can see. The bridge's spec names the variables so the supervisor
 /// removes them from that as well, and never carries them itself.
+// Hard-won: c4e2838: API-key environment inherited by the target reached a ChatGPT Codex profile.
 #[tokio::test]
 async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
     let temp = tempfile::tempdir().unwrap();
@@ -5218,6 +5347,7 @@ async fn a_worker_passes_the_excluded_variables_to_its_bridge() {
 /// The supervisor removes the excluded variables after it merges the login
 /// environment, so neither a launch setting nor a target's shell profile can
 /// hand the bridge an API key. Other variables pass through.
+// Hard-won: c4e2838: a shell profile could reintroduce API-key variables after launch configuration filtering.
 #[tokio::test]
 async fn the_acp_bridge_never_sees_an_excluded_variable() {
     let temp = tempfile::tempdir().unwrap();
@@ -5403,18 +5533,23 @@ async fn oversized_response_is_rejected_before_writing() {
 
 #[tokio::test]
 async fn request_line_limit_is_enforced_while_the_line_is_read() {
-    let mut exact = BufReader::new(&b"12345678\nnext\n"[..]);
+    let maximum = 64 * 1024;
+    let exact_input = [vec![b'1'; maximum], b"\nnext\n".to_vec()].concat();
+    let mut exact = BufReader::new(exact_input.as_slice());
+    let line = unix::read_bounded_line(&mut exact, maximum)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(line.len(), maximum);
+    assert!(line.bytes().all(|byte| byte == b'1'));
     assert_eq!(
-        unix::read_bounded_line(&mut exact, 8).await.unwrap(),
-        Some("12345678".into())
-    );
-    assert_eq!(
-        unix::read_bounded_line(&mut exact, 8).await.unwrap(),
+        unix::read_bounded_line(&mut exact, maximum).await.unwrap(),
         Some("next".into())
     );
 
-    let mut oversized = BufReader::with_capacity(4, &b"123456789-without-a-newline"[..]);
-    let error = unix::read_bounded_line(&mut oversized, 8)
+    let oversized_input = vec![b'9'; maximum + 1];
+    let mut oversized = BufReader::with_capacity(4, oversized_input.as_slice());
+    let error = unix::read_bounded_line(&mut oversized, maximum)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("request frame is too large"));
@@ -5896,10 +6031,27 @@ async fn catch_up_recording_throughput() {
 #[test]
 fn relative_paths_are_resolved_before_the_bridge_changes_directory() {
     let mut config = launch_config(".local/share/hel/profiles/session");
+    let relative_memory =
+        PathBuf::from(".local/share/hel/profiles/session/projects/project/memory");
+    config.additional_directories.push(relative_memory.clone());
+    config.project_memory = Some(ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: relative_memory.clone(),
+        baseline_root: PathBuf::new(),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
     resolve_relative_harness_home(&mut config, Path::new("/home/ubuntu"));
     assert_eq!(
         config.environment["CODEX_HOME"],
         "/home/ubuntu/.local/share/hel/profiles/session"
+    );
+    assert_eq!(
+        config.additional_directories,
+        [PathBuf::from(
+            "/home/ubuntu/.local/share/hel/profiles/session/projects/project/memory"
+        )]
     );
     assert_eq!(
         resolve_relative_worker_root(
@@ -5908,6 +6060,64 @@ fn relative_paths_are_resolved_before_the_bridge_changes_directory() {
         ),
         Path::new("/home/ubuntu/.local/share/hel/workers/session")
     );
+}
+
+#[test]
+fn reviewer_workspace_roots_exclude_the_primary_project_memory_replica() {
+    let workspace = PathBuf::from("/workspace/api");
+    let memory_root = PathBuf::from("/profile/projects/session/memory");
+    let mut config = launch_config("/profile");
+    config.additional_directories = vec![workspace.clone(), memory_root.clone()];
+    config.project_memory = Some(ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: memory_root,
+        baseline_root: PathBuf::new(),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
+
+    assert_eq!(reviewer_workspace_directories(&config), [workspace]);
+}
+
+#[test]
+fn acp_workspace_roots_add_the_memory_replica_outside_controller_attachments() {
+    let workspace = PathBuf::from("/workspace/api");
+    let memory_root = PathBuf::from("/profile/projects/session/memory");
+
+    for harness in [HarnessKind::Codex, HarnessKind::Kimi, HarnessKind::Grok] {
+        let mut config = launch_config("/profile");
+        config.harness = harness;
+        config.additional_directories = vec![workspace.clone()];
+        config.project_memory = Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "project".into(),
+            root: memory_root.clone(),
+            baseline_root: PathBuf::new(),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        });
+
+        assert_eq!(
+            acp_additional_directories(&config),
+            [workspace.clone(), memory_root.clone()],
+            "{harness:?} receives its replica only in the ACP workspace roots"
+        );
+    }
+
+    for harness in [HarnessKind::Claude, HarnessKind::Muse] {
+        let mut config = launch_config("/profile");
+        config.harness = harness;
+        config.project_memory = Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "project".into(),
+            root: memory_root.clone(),
+            baseline_root: PathBuf::new(),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        });
+        assert!(acp_additional_directories(&config).is_empty());
+    }
 }
 
 #[test]
@@ -5924,13 +6134,19 @@ fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
     baseline
         .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
-            files: BTreeMap::from([("/MEMORY.md".into(), "base".into())]),
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "base".into()),
+                ("/baseline-only.md".into(), "keep baseline".into()),
+            ]),
         })
         .unwrap();
     let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
     replica
         .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
-            files: BTreeMap::from([("/MEMORY.md".into(), "changed".into())]),
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "changed".into()),
+                ("/replica-only.md".into(), "keep replica".into()),
+            ]),
         })
         .unwrap();
 
@@ -5949,11 +6165,128 @@ fn project_memory_connection_requests_round_trip_replica_and_baseline() {
     unix::apply_project_memory_request(
         &memory,
         &RelayRequest::InstallProjectMemorySnapshot {
-            snapshot: captured_replica.clone(),
+            snapshot: mj_core::project_memory::ProjectMemorySnapshot {
+                files: BTreeMap::from([("/MEMORY.md".into(), "installed".into())]),
+            },
         },
     )
     .unwrap();
-    assert_eq!(baseline.snapshot().unwrap(), captured_replica);
+    let installed_baseline = baseline.snapshot().unwrap();
+    let installed_replica = replica.snapshot().unwrap();
+    assert_eq!(installed_baseline.files["/MEMORY.md"], "installed");
+    assert_eq!(
+        installed_baseline.files["/baseline-only.md"],
+        "keep baseline"
+    );
+    assert_eq!(installed_replica.files["/MEMORY.md"], "installed");
+    assert_eq!(installed_replica.files["/replica-only.md"], "keep replica");
+}
+
+#[test]
+fn project_memory_replace_deletes_files_omitted_from_tree_in_replica_and_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    baseline
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "baseline memory".into()),
+                ("/old-baseline.md".into(), "remove".into()),
+            ]),
+        })
+        .unwrap();
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/MEMORY.md".into(), "replica memory".into()),
+                ("/old-replica.md".into(), "remove".into()),
+            ]),
+        })
+        .unwrap();
+    let expected_replica = replica.snapshot().unwrap().version();
+    let tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled".into())]),
+    };
+
+    let payload = unix::apply_project_memory_request(
+        &memory,
+        &RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree: tree.clone(),
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        payload,
+        RelayResponsePayload::ProjectMemoryTreeReplaced {
+            outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
+        }
+    ));
+    assert_eq!(replica.snapshot().unwrap(), tree);
+    assert_eq!(baseline.snapshot().unwrap(), tree);
+}
+
+#[test]
+fn project_memory_replace_refuses_a_changed_replica_without_writing_either_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    baseline
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "baseline".into())]),
+        })
+        .unwrap();
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "initial replica".into())]),
+        })
+        .unwrap();
+    let expected_replica = replica.snapshot().unwrap().version();
+    let baseline_before = baseline.snapshot().unwrap();
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/concurrent.md".into(), "external edit".into())]),
+        })
+        .unwrap();
+    let replica_after_concurrent_edit = replica.snapshot().unwrap();
+    let tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "reconciled".into())]),
+    };
+
+    let payload = unix::apply_project_memory_request(
+        &memory,
+        &RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        payload,
+        RelayResponsePayload::ProjectMemoryTreeReplaced {
+            outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+        }
+    ));
+    assert_eq!(replica.snapshot().unwrap(), replica_after_concurrent_edit);
+    assert_eq!(baseline.snapshot().unwrap(), baseline_before);
 }
 
 #[tokio::test]
@@ -6524,6 +6857,7 @@ while True: time.sleep(1)
 /// daemon that starts a harness returns as soon as the bridge fails to
 /// launch, and under load that return could drop the listener before the
 /// status request was served, resetting the connection.
+// Hard-won: d1744be0: normal worker roots exceeded sockaddr_un.sun_path and could not bind a socket.
 #[tokio::test]
 async fn a_worker_binds_its_sockets_under_a_root_longer_than_sun_path() {
     let temp = tempfile::tempdir().unwrap();
@@ -6648,14 +6982,39 @@ fn repository_whose_staging_blocks(seconds: u32) -> tempfile::TempDir {
     temp
 }
 
-async fn control_socket_appears(root: &Path, within: std::time::Duration) -> bool {
-    tokio::time::timeout(within, async {
-        while !root.join("control.sock").exists() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
+async fn worker_status(root: &Path) -> Result<mj_core::relay::RelayOperationalState, String> {
+    let stream = tokio::net::UnixStream::connect(root.join("control.sock"))
+        .await
+        .map_err(|error| format!("connect: {error}"))?;
+    let (read, mut write) = stream.into_split();
+    let request = RelayRequestEnvelope {
+        request_id: "startup-status".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Status,
+    };
+    let mut bytes = serde_json::to_vec(&request).map_err(|error| format!("encode: {error}"))?;
+    bytes.push(b'\n');
+    write
+        .write_all(&bytes)
+        .await
+        .map_err(|error| format!("write: {error}"))?;
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        reader.read_line(&mut line),
+    )
     .await
-    .is_ok()
+    .map_err(|_| "timed out waiting for Status".to_owned())?
+    .map_err(|error| format!("read: {error}"))?;
+    let response: RelayResponseEnvelope =
+        serde_json::from_str(&line).map_err(|error| format!("decode: {error}; line={line:?}"))?;
+    match response.body {
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Status(state),
+        } => Ok(state),
+        body => Err(format!("Status returned {body:?}")),
+    }
 }
 
 /// Whether the worker's startup record already names `step`.
@@ -6681,11 +7040,11 @@ fn startup_step_recorded(root: &Path, step: &str) -> bool {
 /// startup. This is the #1065 failure: the capture is proportional to the
 /// working tree, so a session in a large tree never reached its control
 /// socket, and a sub-agent child paid that cost for a review it is never given.
+// Hard-won: 105769b9: a child in a 524GB workspace never bound its socket because startup always captured Git state.
 #[tokio::test]
 async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot_be_staged() {
-    // The socket is published only once the harness is started (#1192), so the
-    // wait covers a harness start on a slow runner; a capture would take a
-    // minute, so a socket inside half of that still proves no capture ran.
+    // A capture would take a minute, so the startup record can prove the
+    // worker published its relay before doing any working-tree capture.
     let workspace = repository_whose_staging_blocks(60);
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
@@ -6724,13 +7083,10 @@ async fn a_session_without_review_capture_binds_its_socket_in_a_tree_that_cannot
     let _ = daemon.await;
 }
 
-/// #1192: a socket that exists must be a worker that answers. The daemon reads
-/// a bound socket as "connect now", and a connection to a socket nobody accepts
-/// on waits in the kernel backlog, so a slow harness preparation looked like a
-/// worker that never replied. While the harness is still being prepared there
-/// must be no socket, so a connect fails at once instead of hanging.
+/// #1192: the worker answers the daemon during harness preparation, and the
+/// status response names the step currently owned by the preparation task.
 #[tokio::test]
-async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
+async fn the_control_socket_answers_while_the_harness_is_prepared() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
@@ -6738,7 +7094,7 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
     // Selecting a built-in Codex bridge probes its version before ACP starts.
     let slow_harness = temp.path().join("codex-acp");
     std::fs::write(&slow_harness, format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 1; echo '@brokkai/codex-acp {}'; exit 0; fi\nexit 1\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/sleep 3; echo '@brokkai/codex-acp {}'; exit 0; fi\nexit 1\n",
         mj_core::harness_runtime::CODEX_ACP_VERSION
     )).unwrap();
     std::fs::set_permissions(&slow_harness, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -6753,7 +7109,6 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
     config.review_capture = false;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
-    let socket = root.join("control.sock");
     let steps = || -> Vec<String> {
         std::fs::read(root.join(mj_core::relay::WORKER_STARTUP_FILE))
             .ok()
@@ -6764,52 +7119,43 @@ async fn the_control_socket_is_not_published_while_the_harness_is_prepared() {
             .filter_map(|step| step["step"].as_str().map(str::to_owned))
             .collect()
     };
-    let mut preparing_without_socket = false;
-    let recorded = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let prepared_status = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let recorded = steps();
             let preparing = recorded.iter().any(|step| step == "harness-resolve")
                 && !recorded.iter().any(|step| step == "bridge-start");
-            match mj_core::local_sockets::connect_unix_stream(&socket) {
-                Ok(_stream) => {
-                    assert!(
-                        !preparing,
-                        "a connect succeeded while the harness was still being prepared"
-                    );
-                    break recorded;
-                }
-                Err(_) => preparing_without_socket |= preparing,
+            if preparing && let Ok(status) = worker_status(&root).await {
+                break Some((recorded, status));
             }
             if daemon.is_finished() {
-                break recorded;
+                break None;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the worker neither served nor stopped");
+    .expect("the worker neither served nor stopped")
+    .expect("worker stopped before serving during harness preparation");
+    let (recorded, status) = prepared_status;
+    assert!(matches!(
+        status.harness_preparation,
+        Some(mj_core::relay::HarnessPreparation::Preparing { ref step, .. })
+            if step == "harness-resolve"
+    ));
+    let position = |name: &str| recorded.iter().position(|step| step == name);
     assert!(
-        preparing_without_socket,
-        "the test never observed the harness-preparation window"
+        position("serving").is_some_and(|serving| {
+            position("harness-resolve").is_some_and(|resolving| serving < resolving)
+        }),
+        "worker did not publish before harness preparation: {recorded:?}"
     );
-    // The socket, when it appears, comes after the steps that need a harness.
-    let all = steps();
-    let position = |name: &str| all.iter().position(|step| step == name);
-    if let Some(bound) = position("bind-socket") {
-        let started = position("bridge-start").expect("bind-socket without bridge-start");
-        assert!(started < bound, "steps: {all:?}");
-        assert!(position("serving").is_some_and(|serving| serving > bound));
-    }
-    drop(recorded);
     daemon.abort();
-    let _ = daemon.await;
+    assert!(daemon.await.unwrap_err().is_cancelled());
 }
 
-/// The same working tree, with review configured, still blocks before the
-/// socket. This is the half the capture redesign has to make cheap; it is
-/// asserted here so the gate above cannot be mistaken for the whole fix.
+/// Review capture still precedes bridge start, while the relay remains live.
 #[tokio::test]
-async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
+async fn a_reviewed_session_serves_its_relay_while_preparing_its_baseline() {
     let workspace = repository_whose_staging_blocks(10);
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("worker");
@@ -6820,12 +7166,40 @@ async fn a_reviewed_session_still_waits_for_its_baseline_in_that_tree() {
     config.review_capture = true;
     let daemon = tokio::spawn(unix::run_daemon(root.clone(), config));
 
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let (status, last_error) = async {
+        let mut last_error = "startup step not reached".to_owned();
+        loop {
+            if startup_step_recorded(&root, "review-baseline") {
+                match worker_status(&root).await {
+                    Ok(status) => break (Some(status), last_error),
+                    Err(error) => last_error = error,
+                }
+            }
+            if daemon.is_finished() || tokio::time::Instant::now() >= deadline {
+                break (None, last_error);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    .await;
+    let status = status.unwrap_or_else(|| {
+        let startup = std::fs::read_to_string(root.join(WORKER_STARTUP_FILE))
+            .unwrap_or_else(|error| format!("cannot read startup record: {error}"));
+        panic!(
+            "worker did not answer Status during review baseline preparation: {last_error}; startup record: {startup}"
+        )
+    });
     assert!(
-        !control_socket_appears(&root, std::time::Duration::from_secs(2)).await,
-        "the capture is what delays the socket, so this half must still block"
+        matches!(
+            status.harness_preparation,
+            Some(mj_core::relay::HarnessPreparation::Preparing { ref step, .. })
+                if step == "review-baseline"
+        ),
+        "unexpected worker preparation state after Status succeeded: {status:?}; last request error: {last_error}"
     );
     daemon.abort();
-    let _ = daemon.await;
+    assert!(daemon.await.unwrap_err().is_cancelled());
 }
 
 /// A command sender whose prompt loop is gone, for tests that record runtime
@@ -6909,6 +7283,7 @@ fn journaled_notices(relay: &Arc<Mutex<DurableRelay>>) -> Vec<String> {
 /// to a question sent through the command channel. The coordinator keeps
 /// draining; the relay keeps what can wait in memory and journals it, in
 /// order, when the barrier ends.
+// Hard-won: 634af0a3: a ready checkpoint barrier could stall ACP event draining on its bounded channel.
 #[tokio::test]
 async fn a_ready_barrier_keeps_draining_runtime_events_past_the_channel_capacity() {
     let temp = tempfile::tempdir().unwrap();

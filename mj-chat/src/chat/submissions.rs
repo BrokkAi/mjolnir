@@ -298,6 +298,7 @@ mod tests {
     }
 
     /// I1-12: the words "Delivery unconfirmed" appear once.
+    // Hard-won: 8bf21ad0: The shipped refusal path repeated the Delivery unconfirmed prefix.
     #[test]
     fn an_unconfirmed_status_does_not_repeat_its_prefix() {
         let mut chat = ChatState::new(&snapshot(), &[]);
@@ -335,6 +336,7 @@ mod tests {
     /// every later turn, and after resume the saved row read "Delivery
     /// unconfirmed". A clear has no user message to reconcile with; the
     /// relay's own "Clearing context…" line and divider are its record.
+    // Hard-won: 1c0dc652: Accepted /clear rows stayed pinned and returned as unconfirmed after resume.
     #[test]
     fn an_accepted_clear_leaves_no_pending_row_or_saved_submission() {
         // The relay's acceptance arrives before the divider.
@@ -375,6 +377,7 @@ mod tests {
     /// I1-12: a refused `/clear` becomes a dated notice, leaves nothing pinned
     /// below later turns or saved with the draft, and keeps the command in
     /// the composer for a retry.
+    // Hard-won: 8bf21ad0: A refused /clear was mislabeled unconfirmed and persisted as a pending row.
     #[test]
     fn a_refused_slash_command_is_a_notice_not_a_pinned_row() {
         let mut chat = ChatState::new(&snapshot(), &[]);

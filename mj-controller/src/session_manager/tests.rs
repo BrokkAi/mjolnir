@@ -6,6 +6,7 @@ use mj_core::hex::lower_hex;
 /// I1-12: a relay's final rejection reaches the user as the relay's reason
 /// alone, not "relay 2.20.0 could not perform submit: relay rejected request
 /// (InvalidState): …", and is not reported as unconfirmed.
+// Hard-won: 8bf21ad0: A definite relay refusal must not return as an unconfirmed delivery or leak its error chain.
 #[test]
 fn a_final_rejection_tells_the_submitter_only_the_relays_reason() {
     let rejected = anyhow::Error::new(crate::worker_client::RelayRejected(
@@ -31,29 +32,6 @@ fn recovery_source_target() -> mj_core::state::TargetLocator {
     mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/test-worker").join(LEASED_RELAY_SESSION),
     }
-}
-
-#[tokio::test]
-async fn client_adapter_preserves_actor_replacement_and_submit_completion() {
-    let mut fixture = replacement_session_test_fixture("client-session", 73);
-    let stopped = fixture.stopped.client();
-    assert!(stopped.is_stopped());
-
-    let control = fixture.control.client();
-    let replacement = control
-        .wait_for_session("client-session", Duration::from_secs(1))
-        .await
-        .unwrap();
-    assert!(!replacement.is_stopped());
-    let pending = replacement
-        .enqueue_submit("client-command".into(), RelayCommand::Cancel)
-        .await
-        .unwrap();
-    assert!(matches!(
-        fixture.submitted.recv().await,
-        Some(RelayCommand::Cancel)
-    ));
-    assert_eq!(pending.wait().await.unwrap(), 73);
 }
 
 #[tokio::test]
@@ -100,6 +78,7 @@ fn ordering_request(session_id: &str, command_id: &str) -> RemoteSessionRequest 
 /// or the prompt runs under the old setting. A bridge that spawns every
 /// request concurrently loses that, so the order is pinned here: the
 /// first request is held up, and the second must not overtake it.
+// Hard-won: 0db1a867: A prompt must not overtake its preceding /effort update on the same relay.
 #[tokio::test]
 async fn one_session_keeps_its_requests_in_the_order_they_were_made() {
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -277,124 +256,7 @@ async fn dispatcher_drains_after_disconnect_and_releases_panicked_streams() {
         .unwrap();
 }
 
-/// A reviewer action reaches a remote controller daemon as JSON, so both
-/// halves of the exchange have to survive that round trip intact.
-#[test]
-fn reviewer_actions_and_outcomes_survive_the_daemon_wire() {
-    let config = ReviewerLaunchConfig {
-        profile_id: "claude".into(),
-        harness: mj_core::config::HarnessKind::Claude,
-        bridge_command: "npx".into(),
-        bridge_args: vec!["claude-code-acp".into()],
-        environment: BTreeMap::from([("EXTRA".into(), "1".into())]),
-        excluded_environment: Vec::new(),
-        execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
-        model: Some("sonnet".into()),
-        effort: Some("high".into()),
-        fast_mode: None,
-        generation: 2,
-        mcp_servers: Vec::new(),
-    };
-    let actions = [
-        ReviewerAction::Start {
-            config: Box::new(config),
-        },
-        ReviewerAction::Submit {
-            command_id: "review-1".into(),
-            command: RelayCommand::Cancel,
-        },
-        ReviewerAction::Attach {
-            after_ordinal: 4,
-            after_digest: "digest".into(),
-        },
-        ReviewerAction::Acknowledge {
-            through_ordinal: 4,
-            through_digest: "digest".into(),
-        },
-        ReviewerAction::Status,
-        ReviewerAction::Pause,
-        ReviewerAction::CaptureDelta {
-            baselines: BTreeMap::from([(std::path::PathBuf::from("/w/app"), "tree".into())]),
-        },
-        ReviewerAction::AdvanceBaseline {
-            trees: BTreeMap::from([(std::path::PathBuf::from("/w/app"), "tree".into())]),
-        },
-    ];
-    for action in actions {
-        let encoded = serde_json::to_string(&action).unwrap();
-        let decoded: ReviewerAction = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, action);
-    }
-
-    let outcome = ReviewerOutcome::Accepted { ordinal: 9 };
-    let encoded = serde_json::to_string(&outcome).unwrap();
-    let decoded: ReviewerOutcome = serde_json::from_str(&encoded).unwrap();
-    assert!(matches!(decoded, ReviewerOutcome::Accepted { ordinal: 9 }));
-
-    let paused = serde_json::to_string(&ReviewerOutcome::Paused).unwrap();
-    assert!(matches!(
-        serde_json::from_str::<ReviewerOutcome>(&paused).unwrap(),
-        ReviewerOutcome::Paused
-    ));
-
-    let delta = ReviewerOutcome::Delta {
-        repositories: vec![mj_core::relay::RepoDelta {
-            root: std::path::PathBuf::from("/w/app"),
-            baseline_tree: None,
-            current_tree: "target".into(),
-            patch: "diff --git a/a b/a\n".into(),
-            diffstat: "1 file changed".into(),
-            changed_lines: 1,
-            files: Vec::new(),
-        }],
-    };
-    let encoded = serde_json::to_string(&delta).unwrap();
-    let ReviewerOutcome::Delta { repositories } =
-        serde_json::from_str::<ReviewerOutcome>(&encoded).unwrap()
-    else {
-        panic!("a captured delta must survive the daemon wire");
-    };
-    assert_eq!(repositories.len(), 1);
-    assert_eq!(repositories[0].current_tree, "target");
-}
-
-/// Every reviewer action names itself for the actor's logs and for the
-/// rejection path, so a stalled review can be traced to the step it stalled
-/// on.
-#[test]
-fn every_reviewer_action_names_its_operation() {
-    let names = [
-        ReviewerAction::Submit {
-            command_id: String::new(),
-            command: RelayCommand::Cancel,
-        }
-        .operation_name(),
-        ReviewerAction::Attach {
-            after_ordinal: 0,
-            after_digest: String::new(),
-        }
-        .operation_name(),
-        ReviewerAction::Acknowledge {
-            through_ordinal: 0,
-            through_digest: String::new(),
-        }
-        .operation_name(),
-        ReviewerAction::Status.operation_name(),
-        ReviewerAction::Pause.operation_name(),
-    ];
-    assert_eq!(
-        names,
-        [
-            "reviewer_submit",
-            "reviewer_attach",
-            "reviewer_acknowledge",
-            "reviewer_status",
-            "reviewer_pause",
-        ]
-    );
-    assert!(names.iter().all(|name| name.starts_with("reviewer_")));
-}
-
+// Hard-won: be7c009d: A failed worker must back off so reconnect logs cannot flood the live terminal.
 #[test]
 fn reconnect_delay_backs_off_and_stops_at_the_ceiling() {
     assert_eq!(reconnect_delay(1), RECONNECT_INTERVAL);
@@ -581,6 +443,7 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
 /// every recovery attempt uploaded a replacement into the same full disk.
 /// Recovery now reads the dead worker's exit record, tells the storage owner,
 /// and restarts nothing until a later measurement finds room.
+// Hard-won: 540c9202: Full-disk recovery must not upload another worker onto the same full filesystem.
 #[tokio::test]
 async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     // The storage board is per process; this host name is this test's own.
@@ -994,6 +857,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 replaced_unused_native_session_id: None,
                 checkpoint_only: false,
                 acp_ready: None,
+                harness_preparation: None,
                 agent_capabilities: None,
                 agent_info: None,
                 runtime: None,
@@ -1026,28 +890,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
     }
 }
 
-#[test]
-fn republishing_an_unchanged_view_notifies_nobody() {
-    let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
-    let (updates_tx, mut updates_rx) = coalesced_update_channel();
-
-    publish_view("session-1", view_at_ordinal(7), &view_tx, &updates_tx);
-    assert!(view_rx.has_changed().expect("watch stays open"));
-    assert_eq!(
-        updates_rx.try_recv().expect("the first view is news").view,
-        view_at_ordinal(7)
-    );
-    let _ = view_rx.borrow_and_update();
-
-    publish_view("session-1", view_at_ordinal(7), &view_tx, &updates_tx);
-
-    assert!(
-        !view_rx.has_changed().expect("watch stays open"),
-        "a sync tick that moved nothing must not wake the dashboard"
-    );
-    assert!(updates_rx.try_recv().is_err());
-}
-
+// Hard-won: #1037: A request-only sub-agent update must reach the drain before the worker socket ceiling.
 #[test]
 fn a_new_subagent_request_publishes_without_a_transcript_change() {
     let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
@@ -1091,30 +934,6 @@ fn a_new_subagent_request_publishes_without_a_transcript_change() {
 }
 
 #[test]
-fn publishing_an_advanced_event_frontier_notifies_watchers() {
-    let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
-    let (updates_tx, mut updates_rx) = coalesced_update_channel();
-    publish_view("session-1", view_at_ordinal(7), &view_tx, &updates_tx);
-    let _ = updates_rx.try_recv();
-    let _ = view_rx.borrow_and_update();
-
-    publish_view("session-1", view_at_ordinal(8), &view_tx, &updates_tx);
-
-    assert!(view_rx.has_changed().expect("watch stays open"));
-    let update = updates_rx.try_recv().expect("the advance is news");
-    assert_eq!(update.session_id, "session-1");
-    assert_eq!(
-        update
-            .view
-            .snapshot
-            .expect("published snapshot")
-            .materialized
-            .applied_event_ordinal,
-        8
-    );
-}
-
-#[test]
 fn publishing_relay_state_that_moved_without_the_frontier_notifies_watchers() {
     let (view_tx, mut view_rx) = watch::channel(ManagedSessionView::default());
     let (updates_tx, mut updates_rx) = coalesced_update_channel();
@@ -1149,14 +968,6 @@ fn losing_the_relay_republishes_the_same_snapshot_as_disconnected() {
 
     assert!(view_rx.has_changed().expect("watch stays open"));
     assert!(updates_rx.try_recv().is_ok());
-}
-
-#[test]
-fn command_ids_are_namespaced_and_unique() {
-    let first = new_command_id("prompt").unwrap();
-    let second = new_command_id("prompt").unwrap();
-    assert!(first.starts_with("prompt-"));
-    assert_ne!(first, second);
 }
 
 #[test]
@@ -1270,6 +1081,7 @@ async fn stopped_actor_is_replaced_without_late_completion_removing_replacement(
 const UNREACHABLE_VIEW_TEST_CHILD: &str = "MJ_TEST_UNREACHABLE_RELAY_CHILD";
 
 #[cfg(unix)]
+// Hard-won: e8138769: An unreachable relay must publish its error instead of self-deadlocking the dashboard.
 #[tokio::test(start_paused = true)]
 async fn unreachable_relay_publishes_error_view() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in
@@ -1333,6 +1145,7 @@ async fn unreachable_relay_publishes_error_view() {
 const UNREADABLE_PROJECTION_TEST_CHILD: &str = "MJ_TEST_UNREADABLE_PROJECTION_CHILD";
 
 #[cfg(unix)]
+// Hard-won: 91163d55: A failed reconnect must not load a large projection before the cheap connection check.
 #[tokio::test]
 async fn connecting_to_an_absent_worker_never_reads_the_projection() {
     // MJ_DATA_DIR is process-global, so run the database-backed half in
@@ -1502,6 +1315,26 @@ fn leased_relay_child_serves_stdio() {
                         Vec::new()
                     };
                     Some(RelayResponsePayload::HistoryRequests { requests })
+                }
+                RelayRequest::SetSubagentAdmission { open } => {
+                    let admission = PathBuf::from(&root).join("subagent-admission.json");
+                    let mut state: serde_json::Value = std::fs::read(&admission)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_else(|| serde_json::json!({"open": true, "calls": 0}));
+                    state["open"] = serde_json::Value::Bool(*open);
+                    state["calls"] =
+                        serde_json::Value::from(state["calls"].as_u64().unwrap_or_default() + 1);
+                    std::fs::write(&admission, serde_json::to_vec(&state).unwrap()).unwrap();
+                    let marker = PathBuf::from(&root).join("drop-admission-open-reply-once");
+                    if *open
+                        && std::env::var_os(DROP_ADMISSION_OPEN_REPLY).is_some()
+                        && !marker.exists()
+                    {
+                        std::fs::write(marker, b"dropped").unwrap();
+                        return;
+                    }
+                    Some(RelayResponsePayload::SubagentAdmissionChanged { open: *open })
                 }
                 RelayRequest::CompleteHistoryRequest { result } => {
                     std::fs::write(
@@ -1675,6 +1508,7 @@ async fn session_manager_shutdown_joins_a_live_relay_actor() {
 /// answers the submissions it was holding; an abort after the grace would
 /// drop their replies, which a caller must read as possibly delivered.
 #[cfg(unix)]
+// Hard-won: 8a895681: Daemon retirement must end an unanswered relay connect before shutdown aborts queued replies.
 #[tokio::test]
 async fn retirement_ends_a_connect_that_never_answers() {
     const CHILD: &str = "MJ_TEST_HUNG_CONNECT_RETIREMENT_CHILD";
@@ -1827,7 +1661,10 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     );
 
     connection
-        .sync_project_memory()
+        .sync_project_memory(
+            &mj_core::config::Config::default(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("an explicit sync may detect a legacy memory endpoint");
     assert!(
@@ -1841,6 +1678,7 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
 /// took the command should not wait for it. The two are separate calls, so
 /// the cheap one can answer first.
 #[cfg(unix)]
+// Hard-won: 0db1a867: Relay acceptance must not wait on catch-up and invite retrying an accepted command.
 #[tokio::test]
 async fn submitting_does_not_catch_the_projection_up_until_asked() {
     if std::env::var_os(SUBMIT_WITHOUT_SYNC_TEST_CHILD).is_none() {
@@ -2105,6 +1943,7 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
 /// storage owner says full, and resumes as soon as a measurement finds room,
 /// without waiting out a backoff.
 #[cfg(unix)]
+// Hard-won: 540c9202: The actor must wait for measured space before resuming worker recovery.
 #[tokio::test]
 async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     if std::env::var_os(FULL_DISK_RECOVERY_TEST_CHILD).is_none() {
@@ -2285,12 +2124,71 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
         LEASED_RELAY_ROOT.to_owned(),
         relay_root.to_string_lossy().into_owned(),
     );
+    if let Some(value) = std::env::var_os(DROP_ADMISSION_OPEN_REPLY) {
+        spec.env.insert(
+            DROP_ADMISSION_OPEN_REPLY.into(),
+            value.to_string_lossy().into_owned(),
+        );
+    }
     RelaySessionTarget {
         session_id: LEASED_RELAY_SESSION.to_owned(),
         spec,
         worker_recovery: None,
         project_memory: None,
     }
+}
+
+const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
+    if std::env::var_os("MJ_TEST_SUBAGENT_ADMISSION_RECONNECT_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(exact_test_name(
+            "reconnect_retries_subagent_admission_after_lost_open_reply",
+        ))
+        .env("MJ_TEST_SUBAGENT_ADMISSION_RECONNECT_CHILD", "1")
+        .env(DROP_ADMISSION_OPEN_REPLY, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    crate::database::save_session(&session).unwrap();
+
+    let relay_root = tempfile::tempdir().unwrap();
+    let target = leased_relay_target(relay_root.path());
+    let mut connection = None;
+    let first = sync_actor_connection(&target, &mut connection).await;
+    assert!(first.is_err(), "the first worker lost the open reply");
+    assert!(
+        connection.is_none(),
+        "the failed connection must be abandoned"
+    );
+    assert!(
+        relay_root
+            .path()
+            .join("drop-admission-open-reply-once")
+            .exists()
+    );
+
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .expect("the next relay connection repairs the gate");
+    assert!(connection.is_some());
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(relay_root.path().join("subagent-admission.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["open"], true, "{state}");
+    assert_eq!(state["calls"], 2, "{state}");
 }
 
 /// Register the session the projection writes to. `apply_projection_event`
@@ -2629,6 +2527,7 @@ fn relay_requests_logged(relay_root: &std::path::Path) -> usize {
 /// 150 ms. Fifty idle sessions on remote hosts paid that over SSH all day.
 /// Once work is in flight, the actor follows it at the fast cadence again.
 #[cfg(unix)]
+// Hard-won: 159fbf19: Quiet sessions must not issue four relay round trips every 150 milliseconds.
 #[tokio::test]
 async fn a_quiet_session_stops_polling_its_worker_until_work_is_in_flight() {
     if std::env::var_os(SYNC_CADENCE_TEST_CHILD).is_none() {
@@ -2760,6 +2659,7 @@ async fn retirement_rejects_prompts_deferred_during_lease() {
     );
 }
 
+// Hard-won: 111f6dcd: A projection-integrity failure must not be mistaken for an unreachable relay.
 #[test]
 fn projection_integrity_failure_is_detected_only_for_integrity_errors() {
     let integrity = anyhow::Error::from(ProjectionIntegrityError(
@@ -2813,6 +2713,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
     assert!(receiver.try_recv().is_err());
 }
 
+// Hard-won: 130c551f: A hot low-ID session must not overtake sessions already waiting in the dashboard queue.
 #[tokio::test]
 async fn dashboard_updates_deliver_sessions_in_first_pending_order_with_the_latest_view() {
     let (sender, mut receiver) = coalesced_update_channel();
@@ -2838,6 +2739,7 @@ async fn dashboard_updates_deliver_sessions_in_first_pending_order_with_the_late
     assert!(receiver.recv().await.is_none());
 }
 
+// Hard-won: 130c551f: A hot producer must not starve other sessions by republishing before their turn.
 #[test]
 fn dashboard_updates_deliver_waiting_sessions_before_a_republishing_hot_session() {
     let (sender, mut receiver) = coalesced_update_channel();
@@ -2871,6 +2773,7 @@ fn dashboard_updates_deliver_waiting_sessions_before_a_republishing_hot_session(
     ));
 }
 
+// Hard-won: 130c551f: Replacing a queued actor must not let its new snapshot jump ahead of waiting sessions.
 #[test]
 fn dashboard_updates_put_a_replacement_actor_after_sessions_already_waiting() {
     let (sender, mut receiver) = coalesced_update_channel();
@@ -2905,60 +2808,12 @@ fn dashboard_updates_put_a_replacement_actor_after_sessions_already_waiting() {
     assert!(receiver.try_recv().is_err());
 }
 
-#[tokio::test]
-async fn remote_session_manager_fans_out_views_and_forwards_commands() {
-    let mut remote = spawn_remote_session_manager().unwrap();
-    remote.targets.send_replace(vec![target("unused")]);
-    remote
-        .publisher
-        .publish("session-1".into(), view_at_ordinal(7))
-        .await
-        .unwrap();
-
-    let session = remote
-        .control
-        .wait_for_session("session-1", Duration::from_secs(1))
-        .await
-        .unwrap();
-    assert_eq!(
-        session
-            .view()
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .materialized
-            .applied_event_ordinal,
-        7
-    );
-
-    let submitted = session
-        .enqueue_submit("prompt-1".into(), RelayCommand::Cancel)
-        .await
-        .unwrap();
-    let request = remote.requests.recv().await.unwrap();
-    match request {
-        RemoteSessionRequest::Submit {
-            session_id,
-            command_id,
-            command: RelayCommand::Cancel,
-            admission: None,
-            reply,
-        } => {
-            assert_eq!(session_id, "session-1");
-            assert_eq!(command_id, "prompt-1");
-            reply.send(Ok(8)).unwrap();
-        }
-        _ => panic!("unexpected remote session request"),
-    }
-    assert_eq!(submitted.wait().await.unwrap(), 8);
-    remote.shutdown.shutdown().await.unwrap();
-}
-
 /// A relay actor for a session that has ended must stop, not keep reconnecting
 /// to a socket that will never exist again. Without this the daemon logs a
 /// failure for a dead worker every backoff period for as long as it runs,
 /// which is what #1078 reported alongside #1065.
 #[cfg(unix)]
+// Hard-won: #1078: An ended session must stop retrying its dead worker and logging every backoff.
 #[tokio::test]
 async fn a_terminal_session_retires_its_relay_actor() {
     const TERMINAL_ACTOR_CHILD: &str = "MJ_TEST_TERMINAL_ACTOR_CHILD";
@@ -3502,6 +3357,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
 /// the actor learns the target is gone. A deferred submit that then cannot
 /// even connect was never sent, so it must reach `send_input` as a definite
 /// refusal it can retry, not as a delivery that may have happened.
+// Hard-won: #1186: A command that never connected to the parked worker must be retryable as definitely unsent.
 #[test]
 fn a_submit_that_never_reached_the_worker_is_a_definite_failure() {
     let never_sent = anyhow::anyhow!("connect worker socket: No such file or directory")

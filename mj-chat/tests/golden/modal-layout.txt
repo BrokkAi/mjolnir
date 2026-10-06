@@ -1,0 +1,106 @@
+=== percentage width and fixed height (90x32) ===
+pane: Rect { x: 20, y: 5, width: 60, height: 20 }
+popup: Rect { x: 26, y: 10, width: 48, height: 10 }
+
+
+
+
+
+
+
+
+
+
+                          ┌percentage width and fixed height─────────────┐
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          └──────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+=== percentage width and height (90x32) ===
+pane: Rect { x: 20, y: 5, width: 60, height: 20 }
+popup: Rect { x: 26, y: 10, width: 48, height: 10 }
+
+
+
+
+
+
+
+
+
+
+                          ┌percentage width and height───────────────────┐
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          │                                              │
+                          └──────────────────────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+=== fixed dimensions (90x32) ===
+pane: Rect { x: 20, y: 5, width: 60, height: 20 }
+popup: Rect { x: 35, y: 10, width: 30, height: 10 }
+
+
+
+
+
+
+
+
+
+
+                                   ┌fixed dimensions────────────┐
+                                   │                            │
+                                   │                            │
+                                   │                            │
+                                   │                            │
+                                   │                            │
+                                   │                            │
+                                   │                            │
+                                   │                            │
+                                   └────────────────────────────┘
+
+
+
+
+
+
+
+
+
+
+
+
+=== end of rendered states ===

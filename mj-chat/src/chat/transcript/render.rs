@@ -231,6 +231,7 @@ pub(crate) fn transcript_lines(chat: &mut ChatState, width: u16) -> Vec<Line<'st
         &mut chat.render_cache,
         width,
         chat.render_mode,
+        chat.tool_display,
         &chat.expanded_tool_calls,
     );
     let mut lines = Vec::new();
@@ -263,7 +264,8 @@ pub(crate) fn empty_transcript_row(loading: bool) -> Line<'static> {
     ))
 }
 
-/// One entry's rows, header included, at `width`.
+/// One entry's rows, header included, at `width`, and how copying each row
+/// gives back its text.
 ///
 /// The reviewer pane draws with this so its conversation looks exactly like
 /// the primary's rather than growing a second renderer.
@@ -271,8 +273,10 @@ pub(crate) fn render_entry_rows(
     entry: &ChatEntry,
     width: usize,
     mode: TranscriptRenderMode,
-) -> Vec<Line<'static>> {
-    render_transcript_entry(entry, width, mode)
+) -> (Vec<Line<'static>>, Vec<RowCopy>) {
+    let mut track = RowTrack::default();
+    let rows = render_entry_tracking(entry, width, mode, ToolView::Summary, Some(&mut track));
+    (rows, track.copies)
 }
 
 pub(crate) fn render_transcript_entry(
@@ -280,7 +284,7 @@ pub(crate) fn render_transcript_entry(
     width: usize,
     mode: TranscriptRenderMode,
 ) -> Vec<Line<'static>> {
-    render_transcript_entry_with_options(entry, width, mode, false)
+    render_transcript_entry_with_options(entry, width, mode, ToolView::Summary)
 }
 
 /// Render a completed tool after the user opens it from a compact Rich row.
@@ -290,29 +294,42 @@ pub(crate) fn render_transcript_entry_expanded(
     entry: &ChatEntry,
     width: usize,
 ) -> Vec<Line<'static>> {
-    render_transcript_entry_with_options(entry, width, TranscriptRenderMode::Rich, true)
+    render_transcript_entry_with_options(
+        entry,
+        width,
+        TranscriptRenderMode::Rich,
+        ToolView::Expanded,
+    )
 }
 
 pub(crate) fn render_transcript_entry_with_options(
     entry: &ChatEntry,
     width: usize,
     mode: TranscriptRenderMode,
-    expanded_tool: bool,
+    tool: ToolView,
 ) -> Vec<Line<'static>> {
-    render_entry_tracking_links(entry, width, mode, expanded_tool, None)
+    render_entry_tracking(entry, width, mode, tool, None)
 }
 
-/// The link cells of one entry rendered with the given options, in the row
-/// coordinates of [`render_transcript_entry_with_options`].
-pub(crate) fn transcript_entry_links(
+/// What rendering one entry with the given options records about its rows,
+/// in the row coordinates of [`render_transcript_entry_with_options`].
+pub(crate) fn track_transcript_entry(
     entry: &ChatEntry,
     width: usize,
     mode: TranscriptRenderMode,
-    expanded_tool: bool,
-) -> Vec<RowLink> {
-    let mut links = Vec::new();
-    render_entry_tracking_links(entry, width, mode, expanded_tool, Some(&mut links));
-    links
+    tool: ToolView,
+) -> RowTrack {
+    let mut track = RowTrack::default();
+    render_entry_tracking(entry, width, mode, tool, Some(&mut track));
+    track
+}
+
+/// What a tracking render records about the rows it draws.
+#[derive(Debug, Default)]
+pub(crate) struct RowTrack {
+    pub links: Vec<RowLink>,
+    /// One per rendered row.
+    pub copies: Vec<RowCopy>,
 }
 
 /// Cells `start..end` of rendered row `row` draw text of a link to `url`.
@@ -324,15 +341,141 @@ pub(crate) struct RowLink {
     pub url: String,
 }
 
-/// Renders one entry, and collects its link cells when `links` is given.
-/// Both callers share this so a link's cells are those of the drawn rows.
-fn render_entry_tracking_links(
+/// How a tool entry presents its call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolView {
+    /// A status header over the call's short summary.
+    Summary,
+    /// Opened by a click: the provider title and every detail.
+    Expanded,
+    /// The status mark and the full call on one row, over at most
+    /// `output_lines` rows of what it printed.
+    Inline { output_lines: usize },
+}
+
+/// A tool call drawn inline: its status mark and full command or title, then
+/// the head and tail of its output under an elbow. Every output row is cut to
+/// the width, so a call never takes more than its header and `output_lines`
+/// rows however long its output lines are.
+fn inline_tool_rows(
+    entry: &ChatEntry,
+    width: usize,
+    output_lines: usize,
+    copies: Option<&mut Vec<RowCopy>>,
+) -> Vec<Line<'static>> {
+    let (glyph, _, status_style) = tool_row_presentation(entry);
+    let presentation = entry.tool_presentation.as_ref();
+    let source = presentation.map_or(entry.text.as_str(), |presentation| &presentation.source);
+    let source = sanitize_terminal_text(source);
+    let mut source_lines = source.lines().filter(|line| !line.trim().is_empty());
+    let mut command = source_lines.next().unwrap_or("").trim().to_owned();
+    if source_lines.next().is_some() {
+        command.push(' ');
+        command.push_str(theme::glyphs().ellipsis);
+    }
+    let mut header = vec![Span::styled(
+        format!("{glyph} "),
+        status_style.add_modifier(Modifier::BOLD),
+    )];
+    if presentation.is_some_and(|presentation| presentation.tool_kind == ToolKind::Execute) {
+        let verb = match entry.tool_status.unwrap_or(ToolStatus::Pending) {
+            ToolStatus::Pending | ToolStatus::Running => "Running ",
+            ToolStatus::Completed | ToolStatus::Failed => "Ran ",
+        };
+        header.push(Span::styled(
+            verb,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+    }
+    header.push(Span::raw(command));
+    let (mut rows, _, header_copies) =
+        wrap_styled_line_for_copy(Line::from(header), width, ROLE_GUTTER_WIDTH);
+
+    let elbow = theme::glyphs().tool_output;
+    let indent = " ".repeat(ROLE_GUTTER_WIDTH);
+    let follow = " ".repeat(display_width(elbow));
+    let text_width = width
+        .saturating_sub(ROLE_GUTTER_WIDTH + display_width(elbow))
+        .max(1);
+    let body_style = entry_visual(entry).body_style;
+    for (index, text) in inline_output(entry, output_lines).into_iter().enumerate() {
+        let lead = if index == 0 { elbow } else { follow.as_str() };
+        let text = truncate_line_to_width(Line::from(Span::styled(text, body_style)), text_width);
+        let mut spans = vec![
+            Span::raw(indent.clone()),
+            Span::styled(lead.to_owned(), theme::muted()),
+        ];
+        spans.extend(text.spans);
+        rows.push(Line::from(spans));
+    }
+    if let Some(copies) = copies {
+        // Output rows are cut to the width, never wrapped.
+        let output_rows = rows.len() - header_copies.len();
+        copies.extend(header_copies);
+        copies.resize(copies.len() + output_rows, RowCopy::default());
+    }
+    rows
+}
+
+/// The rows an inline call shows: its diffstats and output, cut to the first
+/// and last few lines around a count of what was left out. Reads and searches
+/// show no output, as their header already says what they looked at, unless
+/// they failed.
+fn inline_output(entry: &ChatEntry, limit: usize) -> Vec<String> {
+    let explored = entry
+        .tool_presentation
+        .as_ref()
+        .is_some_and(|presentation| {
+            matches!(presentation.tool_kind, ToolKind::Read | ToolKind::Search)
+        });
+    let failed = entry.tool_status == Some(ToolStatus::Failed);
+    let mut lines = entry.tool_diffstats.clone();
+    if failed || !explored {
+        let output = entry.tool_content.join("\n");
+        lines.extend(output.trim_matches('\n').lines().map(str::to_owned));
+    }
+    if lines.len() <= limit {
+        return lines;
+    }
+    if limit == 0 {
+        return Vec::new();
+    }
+    let kept = limit - 1;
+    let head = kept / 2;
+    let tail = kept - head;
+    let omitted = lines.len() - kept;
+    let mut shown = lines[..head].to_vec();
+    shown.push(format!("{} +{omitted} lines", theme::glyphs().ellipsis));
+    shown.extend_from_slice(&lines[lines.len() - tail..]);
+    shown
+}
+
+/// Renders one entry, and records its link cells and row copies when `track`
+/// is given. Every caller shares this so what it records matches the drawn
+/// rows.
+fn render_entry_tracking(
     entry: &ChatEntry,
     width: usize,
     mode: TranscriptRenderMode,
-    expanded_tool: bool,
-    links: Option<&mut Vec<RowLink>>,
+    tool: ToolView,
+    mut track: Option<&mut RowTrack>,
 ) -> Vec<Line<'static>> {
+    if let ToolView::Inline { output_lines } = tool
+        && mode == TranscriptRenderMode::Rich
+        && entry.role == ChatRole::Tool
+    {
+        let mut out = inline_tool_rows(
+            entry,
+            width,
+            output_lines,
+            track.as_mut().map(|track| &mut track.copies),
+        );
+        out.push(Line::from(""));
+        if let Some(track) = track {
+            track.copies.push(RowCopy::default());
+        }
+        return out;
+    }
     let mut out = Vec::new();
     let visual = entry_visual(entry);
     let time = match entry.role {
@@ -357,26 +500,30 @@ fn render_entry_tracking_links(
             theme::muted(),
         ));
     }
-    out.extend(
-        wrap_styled_line(Line::from(header), width, ROLE_GUTTER_WIDTH)
-            .into_iter()
-            .map(|line| {
-                if entry.role == ChatRole::User {
-                    line.style(theme::raised())
-                } else {
-                    line
-                }
-            }),
-    );
+    let (header_rows, _, header_copies) =
+        wrap_styled_line_for_copy(Line::from(header), width, ROLE_GUTTER_WIDTH);
+    out.extend(header_rows.into_iter().map(|line| {
+        if entry.role == ChatRole::User {
+            line.style(theme::raised())
+        } else {
+            line
+        }
+    }));
+    if let Some(track) = track.as_mut() {
+        track.copies.extend(header_copies);
+    }
     let header_rows = out.len();
     out.extend(entry_body_rows_inner(
         entry,
         width,
         mode,
-        expanded_tool,
-        links.map(|links| (links, header_rows)),
+        tool == ToolView::Expanded,
+        track.as_mut().map(|track| (&mut **track, header_rows)),
     ));
     out.push(Line::from(""));
+    if let Some(track) = track {
+        track.copies.push(RowCopy::default());
+    }
     out
 }
 
@@ -399,34 +546,39 @@ pub(crate) fn entry_body_rows_with_options(
     entry_body_rows_inner(entry, width, mode, expanded_tool, None)
 }
 
-/// Body rows, and with `links` the link cells of each row, numbered from the
-/// given first body row.
+/// Body rows, and with `track` what each row records, numbered from the given
+/// first body row.
 fn entry_body_rows_inner(
     entry: &ChatEntry,
     width: usize,
     mode: TranscriptRenderMode,
     expanded_tool: bool,
-    mut links: Option<(&mut Vec<RowLink>, usize)>,
+    mut track: Option<(&mut RowTrack, usize)>,
 ) -> Vec<Line<'static>> {
     let visual = entry_visual(entry);
     let content_width = width.saturating_sub(ROLE_GUTTER_WIDTH).max(1);
     let mut rows = Vec::new();
     for logical in entry_logical_lines(entry, mode, &visual, content_width, expanded_tool) {
-        match links.as_mut() {
-            Some((links, first_row)) if !logical.links.is_empty() => {
-                let (wrapped, sources) = wrap_styled_line_with_sources(
+        match track.as_mut() {
+            Some((track, first_row)) => {
+                let (wrapped, sources, copies) = wrap_styled_line_for_copy(
                     logical.line,
                     content_width,
                     logical.continuation_indent,
                 );
                 for (offset, cells) in sources.iter().enumerate() {
                     collect_row_links(
-                        links,
+                        &mut track.links,
                         *first_row + rows.len() + offset,
                         cells,
                         &logical.links,
                     );
                 }
+                // Each body row is drawn after the role gutter.
+                track.copies.extend(copies.into_iter().map(|copy| RowCopy {
+                    lead: copy.lead + ROLE_GUTTER_WIDTH,
+                    ..copy
+                }));
                 rows.extend(wrapped);
             }
             _ => rows.extend(wrap_styled_line(

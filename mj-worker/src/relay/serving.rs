@@ -42,6 +42,7 @@ mod tests {
         ));
     }
 
+    // Hard-won: 0a278358: protocol 2 only prevented a new controller from attaching to a live v1 worker.
     #[test]
     fn current_range_overlaps_protocol_v1() {
         let v1 = RelayVersionRange { min: 1, max: 1 };
@@ -60,6 +61,7 @@ mod tests {
         assert!(!RelayVersionRange::CURRENT.contains(0));
         assert!(!RelayVersionRange::CURRENT.contains(RELAY_PROTOCOL_VERSION + 1));
         assert!(RelayRequest::Status.supported_at(1));
+        assert_eq!(RelayCommand::Cancel.minimum_protocol(), 1);
         assert!(
             !RelayRequest::RespondElicitation {
                 elicitation_id: String::new(),
@@ -80,6 +82,39 @@ mod tests {
         assert_eq!(stop_background.minimum_protocol(), 9);
         assert!(!stop_background.supported_at(8));
         assert!(stop_background.supported_at(RELAY_PROTOCOL_VERSION));
+    }
+
+    #[test]
+    fn project_memory_replace_is_gated_and_uses_the_relay_wire_shape() {
+        let request = RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica: mj_core::project_memory::TreeVersion("tree-v1".into()),
+            tree: mj_core::project_memory::ProjectMemorySnapshot::default(),
+        };
+        assert_eq!(
+            request.minimum_protocol(),
+            mj_core::relay::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL
+        );
+        assert!(!request.supported_at(mj_core::relay::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL - 1));
+        assert!(request.supported_at(RELAY_PROTOCOL_VERSION));
+
+        let request_json = serde_json::to_value(&request).unwrap();
+        assert_eq!(request_json["method"], "replace_project_memory_tree");
+        assert_eq!(request_json["params"]["expected_replica"], "tree-v1");
+        assert_eq!(
+            serde_json::from_value::<RelayRequest>(request_json).unwrap(),
+            request
+        );
+
+        let response = RelayResponsePayload::ProjectMemoryTreeReplaced {
+            outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+        };
+        let response_json = serde_json::to_value(&response).unwrap();
+        assert_eq!(response_json["type"], "project_memory_tree_replaced");
+        assert_eq!(response_json["data"]["outcome"], "replica_changed");
+        assert_eq!(
+            serde_json::from_value::<RelayResponsePayload>(response_json).unwrap(),
+            response
+        );
     }
 
     #[test]
@@ -104,35 +139,6 @@ mod tests {
                 }
             }
         ));
-    }
-
-    /// The controller decides whether to replace a worker from what hello
-    /// reports, so hello has to carry the build and a worker that was never
-    /// told one has to say so rather than guess.
-    #[test]
-    fn hello_reports_the_worker_build_when_the_worker_knows_it() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-        let hello = |relay: &mut DurableRelay| {
-            let response = relay.handle(RelayRequestEnvelope {
-                request_id: "hello-build".into(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request: RelayRequest::Hello {
-                    controller_version: "current".into(),
-                    supported: RelayVersionRange::CURRENT,
-                },
-            });
-            match response.body {
-                RelayResponseBody::Ok {
-                    payload: RelayResponsePayload::Hello { worker_build, .. },
-                } => worker_build,
-                other => panic!("expected a hello, got {other:?}"),
-            }
-        };
-        assert_eq!(hello(&mut relay), None);
-
-        relay.set_worker_build(Some("a".repeat(64)));
-        assert_eq!(hello(&mut relay), Some("a".repeat(64)));
     }
 
     /// A worker built before the field existed answers hello without it. That

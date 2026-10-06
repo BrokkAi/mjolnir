@@ -1,0 +1,30 @@
+=== first prompt supplies provisional title (session transcript) ===
+Session: fix the flaky resume test
+
+
+=== harness title replaces provisional title (session transcript) ===
+Session: Agent-generated title
+
+
+=== first existing prompt backfills title (session transcript) ===
+Session: original task
+1: original task
+
+=== shell-exit (session transcript) ===
+Session: session-1
+1: Shell · failed (exit 7) · 1234 ms
+$ cargo test -p mj-transcript
+
+stdout:
+2 passed
+
+stderr:
+one expected warning
+
+=== shell-signal (session transcript) ===
+Session: session-1
+1: Shell · signaled (SIGTERM) · 2345 ms
+$ long-running generator
+
+stdout:
+partial output

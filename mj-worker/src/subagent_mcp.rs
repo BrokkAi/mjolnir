@@ -311,7 +311,6 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
             name: mj_core::subagent::SUBAGENT_MCP_SERVER,
             instructions,
             tools,
-            dispatch: crate::mcp_stdio::Dispatch::Concurrent,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
                 call(&socket, harness, role, params, progress)
@@ -582,7 +581,7 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Wait for every child of yours that is not stopped. A child that you closed is not covered, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. A report is returned only once for each finish; a child resumed with send_input can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Entries without a new report have no output. A wait may end before work is done, and another wait is normal. A finished child has parked true when its processes were released; send_input resumes it. A child being closed stays in the wait set while state is \"stopping\" and leaves it when stopped. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
+                "Wait for every child of yours that is not stopped. A child that you closed is not covered for report collection, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. A report is returned only once for each finish; a child resumed with send_input can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Entries without a new report have no output. A wait may end before work is done, and another wait is normal. A finished child has parked true when its processes were released; send_input resumes it. A child being closed may remain as a status-only entry while state is \"stopping\" and leaves the wait result when stopped. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -725,40 +724,6 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_spawn_arguments_fail_before_socket_dispatch() {
-        for role in [SubagentMcpRole::Parent, SubagentMcpRole::FixedParent] {
-            for (name, value) in [
-                ("context", json!("important instructions")),
-                ("files", json!([])),
-            ] {
-                let mut args = json!({"task_name":"task", "instructions":"read src/lib.rs"});
-                args[name] = value;
-                let error = call(
-                    Path::new("missing.sock"),
-                    None,
-                    role,
-                    Some(&json!({"name":"spawn", "arguments":args})),
-                    &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-                )
-                .unwrap_err();
-                assert!(error.to_string().contains("put context and file, symbol, line-range or earlier-report pointers in instructions"), "{error:#}");
-            }
-        }
-        let error = call(
-            Path::new("missing.sock"),
-            None,
-            SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"task", "instructions":" \n "}})),
-            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-        )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("instructions cannot be empty"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
     fn fixed_parent_exposes_no_selector_arguments_and_refuses_hidden_tools_and_overrides() {
         let tools = fixed_tool_definitions(None);
         assert!(!tools.iter().any(|tool| tool["name"] == "list_profiles"));
@@ -795,6 +760,7 @@ mod tests {
     /// #1160: a parent read a child's failed login as the child's report and
     /// gave up on the profile. The tools say what a refused login looks like
     /// and what to do about it.
+    // Hard-won: #1160: a refused provider login was mistaken for a child report.
     #[test]
     fn wait_and_spawn_say_what_a_refused_login_looks_like() {
         let description = |name: &str| {
@@ -815,6 +781,7 @@ mod tests {
     /// #1161: a child that handed back is parked. The parent has to know
     /// that such a child holds no processes, that `send_input` starts it
     /// again and can take a while, and that the cap counts live children.
+    // Hard-won: #1161: idle sub-agent process trees exhausted the container.
     #[test]
     fn the_tools_explain_parked_children_and_the_live_child_limit() {
         let description = |name: &str| {
@@ -851,6 +818,7 @@ mod tests {
         assert_eq!(wait["inputSchema"]["additionalProperties"], false);
     }
 
+    // Hard-won: fcbd178e: the server promised pushed results that only wait delivered.
     #[test]
     fn instructions_collect_results_through_wait_and_never_promise_a_push() {
         assert!(SERVER_INSTRUCTIONS.contains("wait"));
@@ -892,6 +860,7 @@ mod tests {
         );
     }
 
+    // Hard-won: cc7e6a2a: short repeated waits wasted parent context despite the harness ceiling.
     #[test]
     fn wait_description_explains_that_another_wait_is_normal() {
         let wait = tool_definitions(None)
@@ -910,6 +879,7 @@ mod tests {
         );
     }
 
+    // Hard-won: cc7e6a2a: oversized handbacks overwhelmed parent context.
     #[test]
     fn the_child_is_told_the_same_report_rules_everywhere() {
         struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -968,23 +938,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_pending_reply_sends_the_model_to_list_agents_before_a_retry() {
-        let (reply, is_error) = pending_reply("request-1", &SubagentToolAction::ListAgents, None);
-        assert!(!is_error);
-        assert_eq!(reply["request_id"], "request-1");
-        assert_eq!(reply["accepted"], true);
-        let note = reply["note"].as_str().expect("note text");
-        assert!(
-            note.contains("list_agents") && !note.contains("request_key"),
-            "the note must route retries safely: {note}"
-        );
-        assert!(
-            !note.contains("arrive in"),
-            "the note must not promise pushed results: {note}"
-        );
-    }
-
     /// Answer one spawn the way a worker does when the daemon has not
     /// finished it: accepted, no result, and what the worker knows about the
     /// daemon.
@@ -1026,6 +979,7 @@ mod tests {
     /// is told that, that the spawn is saved and may still start, and not to
     /// repeat it.
     #[cfg(unix)]
+    // Hard-won: #1197: a queued spawn ran after the parent had given up.
     #[test]
     fn a_spawn_the_daemon_never_picked_up_names_the_daemon_and_forbids_a_repeat() {
         let (value, is_error) = spawn_answered_by_worker(
@@ -1066,26 +1020,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_list_the_daemon_never_picked_up_asks_for_a_later_call() {
-        let (reply, is_error) = pending_reply(
-            "request-1",
-            &SubagentToolAction::ListAgents,
-            Some(DaemonContact {
-                picked_up: false,
-                last_collected_seconds_ago: None,
-            }),
-        );
-        assert!(is_error);
-        assert!(
-            reply["error"]
-                .as_str()
-                .unwrap()
-                .contains("call it again later"),
-            "{reply}"
-        );
-    }
-
+    // Hard-won: #1037: a lost worker reply left MCP calls blocked forever.
     #[test]
     fn wait_calls_use_the_harness_default_plus_grace() {
         let wait = SubagentToolAction::WaitAgents;
@@ -1104,6 +1039,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: #1037: the shim blocked forever after a lost worker reply.
     #[test]
     fn an_unanswered_call_becomes_a_tool_error_instead_of_hanging() {
         use std::io::{BufReader, Read};
@@ -1251,6 +1187,7 @@ mod tests {
     /// A Claude profile is staged with an allow rule for each tool in
     /// `tool_names`, so a tool listed here and missing there would make Claude
     /// ask a person before running it (R11-1).
+    // Hard-won: 91244ea1: Claude sub-agent handback stalled on an unapproved MCP tool.
     #[test]
     fn each_role_lists_exactly_the_tools_its_harness_is_allowed() {
         let names = |tools: Vec<Value>| {
@@ -1346,49 +1283,6 @@ mod tests {
             request["action"],
             json!({"action": "handback", "params": {"message": "the report"}})
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_wait_request_has_no_params() {
-        use std::io::{BufReader, Read};
-        use std::os::unix::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (sent, received) = std::sync::mpsc::channel::<Value>();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let request_id = request["request_id"].clone();
-            sent.send(request).unwrap();
-            let reply = json!({"accepted": true, "result": {
-                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
-                "message": "{\"status\":\"still_running\",\"agents\":[]}"
-            }});
-            let mut body = serde_json::to_vec(&reply).unwrap();
-            body.push(b'\n');
-            let mut stream = reader.into_inner();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
-            let _ = stream.read(&mut [0u8; 1]);
-        });
-        let (value, is_error) = call_with_budget(
-            &socket,
-            Some(HarnessKind::Codex),
-            SubagentMcpRole::Parent,
-            Some(&json!({"name": "wait", "arguments": {}})),
-            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-            |_| Duration::from_secs(5),
-        )
-        .unwrap();
-        assert!(!is_error, "{value}");
-        let request = received.recv().unwrap();
-        assert_eq!(request["action"], json!({"action": "wait_agents"}));
     }
 
     #[cfg(unix)]
@@ -1533,19 +1427,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn spawn_documents_how_a_working_directory_resolves() {
-        let spawn = tool_definitions(None)
-            .into_iter()
-            .find(|tool| tool["name"] == "spawn")
-            .expect("spawn definition");
-        let description = spawn["inputSchema"]["properties"]["working_directory"]["description"]
-            .as_str()
-            .expect("working_directory description");
-        assert!(description.contains("Absolute"), "{description}");
-        assert!(description.contains("relative"), "{description}");
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_slow_tool_call_does_not_block_a_later_one() {
@@ -1671,6 +1552,7 @@ mod tests {
     /// unconfirmed close must say it is still closing and name the tool that can
     /// observe the child being gone.
     #[cfg(unix)]
+    // Hard-won: #1087: premature close completion let replacement process trees overlap.
     #[test]
     fn an_unconfirmed_close_says_it_is_still_closing_rather_than_accepted() {
         use std::io::{BufReader, Read};
@@ -1717,6 +1599,7 @@ mod tests {
     /// answer is the one a parent may act on. Nothing may manufacture an
     /// "accepted" answer while the close is still outstanding.
     #[cfg(unix)]
+    // Hard-won: #1087: close was reported finished while teardown was still running.
     #[test]
     fn a_close_answers_only_once_mjolnir_confirms_the_child_is_gone() {
         use std::io::{BufReader, Read};
@@ -1775,8 +1658,9 @@ mod tests {
         assert_eq!(value["closed"], true, "{value}");
     }
 
-    /// The parent model has to learn from the tools that a closing child stays
-    /// visible to wait until teardown finishes, and a replacement must wait.
+    /// The parent model has to know a closing child remains a status-only wait
+    /// entry until teardown finishes, and a replacement must wait.
+    // Hard-won: #1087: premature replacement exhausted container process slots.
     #[test]
     fn close_directs_the_model_to_wait_for_a_stopped_child_before_replacing_it() {
         let definitions = tool_definitions(None);
@@ -1802,7 +1686,9 @@ mod tests {
         let wait = description("wait");
         assert!(wait.contains("closed"), "{wait}");
         assert!(
-            wait.contains("\"stopping\"") && wait.contains("leaves it when stopped"),
+            wait.contains("\"stopping\"")
+                && wait.contains("status-only entry")
+                && wait.contains("leaves the wait result when stopped"),
             "{wait}"
         );
     }

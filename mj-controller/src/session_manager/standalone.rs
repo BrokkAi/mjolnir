@@ -346,6 +346,10 @@ impl StandaloneSession {
         Ok(delivered)
     }
 
+    pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {
+        self.client.set_subagent_admission(open).await
+    }
+
     /// Hands one command to the relay and returns the ordinal it accepted it
     /// at, without catching the local projection up to it.
     ///
@@ -532,7 +536,11 @@ impl StandaloneSession {
     /// boundary. Normal relay attachment and polling must never perform this
     /// filesystem work: a degraded target could otherwise turn reconnects
     /// into an unbounded queue of timed-out snapshot writes.
-    pub async fn sync_project_memory(&mut self) -> Result<()> {
+    pub async fn sync_project_memory(
+        &mut self,
+        config: &mj_core::config::Config,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
         let Some(target) = self.project_memory.clone() else {
             return Ok(());
         };
@@ -562,28 +570,55 @@ impl StandaloneSession {
             }
             Err(error) => return Err(error),
         };
-        let canonical_root = target.canonical_root;
-        let session_id = self.materialized.session_id.clone();
-        let (reconciliation, worker_install_needed) = tokio::task::spawn_blocking(move || {
-            let reconciliation = mj_core::project_memory::reconcile_into_canonical(
-                &canonical_root,
-                &baseline,
-                &replica,
-                &session_id,
-            )?;
-            let worker_install_needed =
-                reconciliation.merged != baseline || reconciliation.merged != replica;
-            Ok::<_, anyhow::Error>((reconciliation, worker_install_needed))
-        })
-        .await
-        .context("project memory reconciliation task failed")??;
-        for conflict in &reconciliation.conflicts {
-            tracing::warn!(session_id = self.materialized.session_id, %conflict, "project memory conflict preserved");
+        let resolver = crate::project_memory_merge::UtilityModelConflictResolver::new(config);
+        let sync = crate::project_memory_merge::merge_and_swap_canonical(
+            &target.canonical_root,
+            &baseline,
+            &replica,
+            &resolver,
+            cancel,
+        )
+        .await?;
+        let sync = match sync {
+            crate::project_memory_merge::CanonicalSyncOutcome::Swapped(sync) => sync,
+            crate::project_memory_merge::CanonicalSyncOutcome::AttemptsExhausted { attempts } => {
+                tracing::warn!(
+                    session_id = self.materialized.session_id,
+                    attempts,
+                    "project memory changed during every canonical compare-and-swap attempt; checkpoint will continue"
+                );
+                return Ok(());
+            }
+        };
+        for resolution in &sync.resolutions {
+            tracing::warn!(
+                session_id = self.materialized.session_id,
+                path = %resolution.conflict.path,
+                resolution = resolution.method.as_str(),
+                "project memory conflict resolved"
+            );
+            tracing::debug!(
+                session_id = self.materialized.session_id,
+                path = %resolution.conflict.path,
+                base = ?resolution.conflict.base,
+                canonical = %resolution.conflict.canonical,
+                replica = %resolution.conflict.replica,
+                replica_wins = %resolution.conflict.replica_wins,
+                "project memory conflict source text"
+            );
         }
-        if worker_install_needed {
-            self.client
-                .install_project_memory_snapshot(reconciliation.merged)
-                .await?;
+        let install = crate::project_memory_merge::install_merged_tree(
+            &mut self.client,
+            &baseline,
+            &replica,
+            sync.tree,
+        )
+        .await?;
+        if install == Some(crate::project_memory_merge::WorkerInstallOutcome::ReplicaChanged) {
+            tracing::debug!(
+                session_id = self.materialized.session_id,
+                "worker project-memory replica changed after the snapshot; skipped installing the merged tree"
+            );
         }
         Ok(())
     }
@@ -601,89 +636,4 @@ pub(super) fn projection_integrity_failure(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<ProjectionIntegrityError>().is_some())
-}
-
-/// A stopped actor and the manager that resolves its live replacement.
-///
-/// This fixture and its constructor are compiled unconditionally and hidden
-/// from the documentation because the chat crate's tests need them, and a
-/// `#[cfg(test)]` item is invisible to another crate.
-#[cfg(test)]
-pub(super) struct ReplacementSessionTestFixture {
-    pub(super) stopped: ManagedSessionHandle,
-    pub(super) control: SessionManagerControl,
-    pub(super) submitted: mpsc::UnboundedReceiver<RelayCommand>,
-}
-
-/// A stopped actor and a manager that resolves its live replacement. Chat
-/// tests use this hand-written actor instead of mocking the session manager
-/// protocol.
-#[cfg(test)]
-pub(super) fn replacement_session_test_fixture(
-    session_id: &str,
-    accepted_ordinal: u64,
-) -> ReplacementSessionTestFixture {
-    let (stopped_commands, stopped_commands_rx) = mpsc::channel(1);
-    drop(stopped_commands_rx);
-    let (stopped_releases, stopped_releases_rx) = mpsc::unbounded_channel();
-    drop(stopped_releases_rx);
-    let (stopped_view_tx, stopped_view) = watch::channel(ManagedSessionView::default());
-    drop(stopped_view_tx);
-    let stopped = ManagedSessionHandle {
-        session_id: session_id.to_owned(),
-        commands: stopped_commands,
-        releases: stopped_releases,
-        view: stopped_view,
-    };
-
-    let (commands, mut commands_rx) = mpsc::channel(4);
-    let (releases, _releases_rx) = mpsc::unbounded_channel();
-    let (view_tx, view) = watch::channel(ManagedSessionView::default());
-    let replacement = ManagedSessionHandle {
-        session_id: session_id.to_owned(),
-        commands,
-        releases,
-        view,
-    };
-    let actor_session_id = session_id.to_owned();
-    let (submitted_tx, submitted) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let _view_tx = view_tx;
-        while let Some(command) = commands_rx.recv().await {
-            match command {
-                ActorCommand::Submit { command, reply, .. } => {
-                    // Tests can drop the optional observer when they only
-                    // care about acceptance/reconnection.
-                    let _ = submitted_tx.send(command);
-                    let _ = reply.send(Ok(accepted_ordinal));
-                }
-                ActorCommand::Sync { reply } => {
-                    let _ = reply.send(Ok(()));
-                }
-                command => command.reject(&actor_session_id, "unsupported test operation"),
-            }
-        }
-    });
-
-    let (manager_commands, mut manager_commands_rx) = mpsc::channel(4);
-    let manager_replacement = replacement.clone();
-    tokio::spawn(async move {
-        while let Some(ManagerCommand::Session {
-            session_id: requested,
-            reply,
-        }) = manager_commands_rx.recv().await
-        {
-            let resolved =
-                (requested == manager_replacement.session_id).then(|| manager_replacement.clone());
-            let _ = reply.send(resolved);
-        }
-    });
-    ReplacementSessionTestFixture {
-        stopped,
-        submitted,
-        control: SessionManagerControl {
-            commands: manager_commands,
-            session_cpu: watch::channel(SessionCpuTable::new()).1,
-        },
-    }
 }

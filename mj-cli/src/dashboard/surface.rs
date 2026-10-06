@@ -60,6 +60,8 @@ fn post_system_notification(notification: &mj_tui::Notification) -> Result<()> {
             applescript_string(&title)
         ));
         command
+    } else if cfg!(windows) {
+        windows_toast_command(&title, &notification.body)
     } else {
         let mut command = std::process::Command::new("notify-send");
         command
@@ -78,6 +80,44 @@ fn post_system_notification(notification: &mj_tui::Notification) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Shows a toast through the WinRT notification API. `mj` registers no app
+/// ID of its own, so the toast is posted under the one Windows registers for
+/// PowerShell. The script is passed encoded and the text in the environment,
+/// so neither the command line nor PowerShell ever parses the text.
+const WINDOWS_TOAST_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$toast = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$lines = $toast.GetElementsByTagName('text')
+$null = $lines.Item(0).AppendChild($toast.CreateTextNode($env:MJ_TOAST_TITLE))
+$null = $lines.Item(1).AppendChild($toast.CreateTextNode($env:MJ_TOAST_BODY))
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($toast))
+"#;
+
+fn windows_toast_command(title: &str, body: &str) -> std::process::Command {
+    use base64::Engine as _;
+    // `-EncodedCommand` takes base64 of the script's UTF-16LE text.
+    let script = WINDOWS_TOAST_SCRIPT
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        .arg(base64::engine::general_purpose::STANDARD.encode(script))
+        .env("MJ_TOAST_TITLE", title)
+        .env("MJ_TOAST_BODY", body);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // Without a console of its own, PowerShell cannot change the mode
+        // or title of the console the dashboard is drawing on.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 /// An AppleScript string literal: double quotes and backslashes escaped.
@@ -135,7 +175,7 @@ impl DashboardContext {
             if !splash.finished() {
                 // Nothing behind the splash has been seen, so nothing is
                 // acknowledged as drawn.
-                self.terminal.terminal.draw(|frame| splash.render(frame))?;
+                self.terminal.draw(|frame| splash.render(frame))?;
                 return Ok(());
             }
             self.splash = None;
@@ -157,7 +197,7 @@ impl DashboardContext {
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
-        terminal.terminal.draw(|frame| {
+        terminal.draw(|frame| {
             drawn = render_combined(
                 frame,
                 dashboard,
@@ -470,9 +510,18 @@ mod tests {
         }
     }
 
-    /// The session menu's Copy session ID puts the full ID on both
-    /// clipboards and names its short form on the notice bar. When the
-    /// terminal clipboard refuses it, the notice bar says that instead.
+    #[test]
+    fn ssh_terminal_write_failure_is_reported_without_trying_the_remote_clipboard() {
+        let error = copy_selected_text(
+            "selection",
+            true,
+            |_| panic!("SSH selection must not open the remote desktop clipboard"),
+            |_| anyhow::bail!("terminal write failed"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "terminal write failed");
+    }
+
     #[test]
     fn copying_a_session_id_names_its_short_form_or_the_clipboard_failure() {
         let session_id = "0123456789abcdef";
@@ -514,17 +563,5 @@ mod tests {
             dashboard.notice().as_deref(),
             Some("Copy to the terminal clipboard failed: terminal write failed")
         );
-    }
-
-    #[test]
-    fn ssh_terminal_write_failure_is_reported_without_trying_the_remote_clipboard() {
-        let error = copy_selected_text(
-            "selection",
-            true,
-            |_| panic!("SSH selection must not open the remote desktop clipboard"),
-            |_| anyhow::bail!("terminal write failed"),
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "terminal write failed");
     }
 }

@@ -44,6 +44,7 @@ libc.workspace = true
 rayon.workspace = true
 reedline = { version = "0.51", default-features = false }
 reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"] }
+ring.workspace = true
 rustls.workspace = true
 rusqlite.workspace = true
 sessionwiki.workspace = true
@@ -64,7 +65,7 @@ zip.workspace = true
 anvil-client.workspace = true
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["test-hooks"] }
+mj-core = { workspace = true, features = ["test-hooks", "golden"] }
 # Cross-runtime fixtures stay local; versionless dev dependencies are not published.
 mj-worker = { path = "../mj-worker", package = "brokk-mj-worker" }
 http-body-util = "0.1"

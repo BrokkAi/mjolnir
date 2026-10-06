@@ -34,12 +34,12 @@ pub(in crate::controller) fn apply_claude_setup_token(
 }
 
 /// Kimi's runtime-aware engine cannot infer a runtime identity from an ACP
-/// stdio server. Add Hel's server to the session-private profile instead,
-/// where Kimi's native schema can bind it to the target's local runtime.
-pub(super) fn configure_kimi_project_memory_mcp(
+/// stdio server. Add Hel's history server to the session-private profile
+/// instead, where Kimi's native schema can bind it to the target's local runtime.
+pub(super) fn configure_kimi_history_mcp(
     profile_stage: &Path,
     worker_root: &str,
-    memory: &ProjectMemoryLaunchConfig,
+    history_socket: Option<&Path>,
 ) -> Result<()> {
     let path = profile_stage.join("mcp.json");
     edit_staged_json_object(&path, "staged Kimi MCP configuration", |root| {
@@ -55,14 +55,10 @@ pub(super) fn configure_kimi_project_memory_mcp(
             })?;
 
         let worker = Path::new(worker_root).join("hel");
-        let server = if worker.is_absolute() && memory.root.is_absolute() {
-            let mut args = vec![
-                "worker".to_owned(),
-                "memory-mcp".into(),
-                "--root".into(),
-                memory.root.to_string_lossy().into_owned(),
-            ];
-            if let Some(socket) = &memory.history_socket {
+        let socket_is_absolute = history_socket.is_none_or(|socket| socket.is_absolute());
+        let server = if worker.is_absolute() && socket_is_absolute {
+            let mut args = vec!["worker".to_owned(), "memory-mcp".into()];
+            if let Some(socket) = history_socket {
                 args.extend([
                     "--history-socket".into(),
                     socket.to_string_lossy().into_owned(),
@@ -76,19 +72,22 @@ pub(super) fn configure_kimi_project_memory_mcp(
             })
         } else {
             let worker = worker.to_string_lossy();
-            let memory_root = memory.root.to_string_lossy();
+            let worker_expression = if Path::new(worker.as_ref()).is_absolute() {
+                "\"$1\""
+            } else {
+                "\"$HOME/$1\""
+            };
             let mut args = vec![
                 "-c".to_owned(),
-                "exec \"$HOME/$1\" worker memory-mcp --root \"$HOME/$2\"".into(),
+                format!("exec {worker_expression} worker memory-mcp"),
                 "mj-memory".into(),
                 worker.into_owned(),
-                memory_root.into_owned(),
             ];
-            if let Some(socket) = &memory.history_socket {
+            if let Some(socket) = history_socket {
                 args[1].push_str(if socket.is_absolute() {
-                    " --history-socket \"$3\""
+                    " --history-socket \"$2\""
                 } else {
-                    " --history-socket \"$HOME/$3\""
+                    " --history-socket \"$HOME/$2\""
                 });
                 args.push(socket.to_string_lossy().into_owned());
             }

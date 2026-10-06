@@ -1,0 +1,678 @@
+=== autocomplete labels and blank-name fallback (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╭ values · ↑/↓ select · Tab/Enter accept ──────────────────────────────────────────────────────────╮
+│Model name                                                                                        │
+│m-fallback                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  m-fallback ▾ ─────────────────────────────────────────────────────────────────────────────────╮
+│> /model m                                                                                        │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== advertised value autocomplete (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╭ values · ↑/↓ select · Tab/Enter accept ──────────────────────────────────────────────────────────╮
+│Luna                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> /model lun                                                                                      │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== accepted advertised value (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> /model gpt-5.6-luna                                                                             │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== prompt model chip opens selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│    ╭ model ╮                                                                                     │
+│    │  Auto │                                                                                     │
+│    │✓ Luna │                                                                                     │
+│    │  Terra│                                                                                     │
+╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+
+=== outside click dismisses selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== escape dismisses selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== bare model command selects current value (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│    ╭ model ╮                                                                                     │
+│    │  Auto │                                                                                     │
+│    │✓ Luna │                                                                                     │
+│    │  Terra│                                                                                     │
+╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== completed bare command opens selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│    ╭ model ╮                                                                                     │
+│    │  Auto │                                                                                     │
+│    │✓ Luna │                                                                                     │
+│    │  Terra│                                                                                     │
+╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== filtered selector before applying (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│    ╭ model: terra ╮                                                                              │
+│    │  Terra       │                                                                              │
+╰────╰──────────────╯──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== filtered selector applies selected value (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: SetConfig { key: "model", value: "gpt-5.6-terra" }
+
+=== effort selection stops at final value (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│             ╭ effort ╮                                                                           │
+│             │  low   │                                                                           │
+│             │  medium│                                                                           │
+│             │✓ high  │                                                                           │
+│             │  max   │                                                                           │
+╰─────────────╰────────╯───────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+selection: max
+
+=== effort escape closes without changing current value (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== bare model command without advertised values (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+The agent does not advertise model values; usage: /model <value>
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== selector anchored at prompt chip (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│    ╭ model ╮                                                                                     │
+│    │  Auto │                                                                                     │
+│    │✓ Luna │                                                                                     │
+│    │  Terra│                                                                                     │
+╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== ASCII selector in Midnight theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Darcula theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in High Contrast theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Campbell theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in One Half Dark theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in One Half Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Solarized Dark theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Solarized Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Terminal Dark theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Terminal Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Monochrome theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys

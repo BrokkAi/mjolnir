@@ -166,7 +166,6 @@ impl HostState {
         let generation = slot.generation;
         let epoch = slot.epoch;
         let reviewer = slot.reviewer.clone();
-        let repositories = slot.driver.repository_roots();
         let control = self.control.clone();
         let environment = self.environment.clone();
         let events = self.events.clone();
@@ -179,7 +178,6 @@ impl HostState {
                 &role,
                 &reviewer,
                 generation,
-                &repositories,
             )
             .await;
             let _ = events.send(HostEvent::Step {
@@ -392,25 +390,5 @@ impl HostState {
                 },
             );
         }
-        if role == SUPERVISOR_ROLE
-            && self
-                .reviews
-                .get(&session_id)
-                .is_some_and(|slot| slot.driver.supervisor_running())
-        {
-            self.poll_dispatches(&session_id);
-        }
-    }
-
-    /// Collects the specialist lanes the supervisor asked for through its MCP
-    /// tool. The tool answers the supervisor at once and leaves the request in
-    /// the worker; this is where the host picks it up and launches them.
-    pub(super) fn poll_dispatches(&mut self, session_id: &str) {
-        self.review_step(session_id, ReviewerAction::TakeLaneDispatches, |outcome| {
-            ReviewStep::Dispatches(match outcome {
-                Ok(ReviewerOutcome::LaneDispatches { requests }) => Ok(requests),
-                other => Err(unexpected(other)),
-            })
-        });
     }
 }

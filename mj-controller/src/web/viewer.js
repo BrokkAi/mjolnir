@@ -5559,7 +5559,7 @@ function renderTurnReview(session) {
     return;
   }
   const card = el('section', 'card turn-review');
-  card.append(el('strong', '', `Reviewing this turn (${review.tier})`));
+  card.append(el('strong', '', 'Reviewing this turn'));
   const roles = review.roles || [];
   if (roles.length) {
     const strip = el('p', 'dim turn-review-roles');
@@ -6312,16 +6312,15 @@ function showHelp() {
 function reviewStatusLine(review, open) {
   const enabled = review?.enabled === true;
   const profile = review?.profile;
-  const tier = review?.tier || 'quick';
   let armed;
   if (enabled && profile) {
-    armed = `Reviewing every completed turn with [review] profile ${JSON.stringify(profile)} (${tier} tier)`;
+    armed = `Reviewing every completed turn with [review] profile ${JSON.stringify(profile)}`;
   } else if (enabled) {
-    armed = '[review] enabled = true but no profile is named, so nothing can review';
+    armed = 'Reviewing every completed turn with Auto';
   } else if (profile) {
-    armed = `Automatic review is off; /review reviews one turn with ${JSON.stringify(profile)} (${tier} tier)`;
+    armed = `Automatic review is off; /review reviews one turn with ${JSON.stringify(profile)}`;
   } else {
-    armed = 'Turn review needs a reviewer: set [review] profile in config.toml';
+    armed = 'Automatic review is off; /review uses Auto';
   }
   return open ? `${armed}. A review is open now.` : armed;
 }
@@ -6399,10 +6398,15 @@ async function runLocalCommand(text) {
         setComposerText('');
         return true;
       }
-      if (scope) {
+      if (scope === 'on' || scope === 'off') {
         // Arming review is configuration, not a session gesture.
         error.textContent =
-          'automatic review is configured in config.toml: [review] enabled, tier';
+          'automatic review is configured in config.toml: [review] enabled';
+        setComposerText('');
+        return true;
+      }
+      if (scope) {
+        error.textContent = 'usage: /review [status]';
         setComposerText('');
         return true;
       }

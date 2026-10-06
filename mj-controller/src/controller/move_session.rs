@@ -21,6 +21,11 @@ enum MoveOwnership {
     PendingQueue,
 }
 
+pub(in crate::controller) enum SubagentMutationDrain {
+    Drained,
+    UnsupportedWorkerProtocol(u32),
+}
+
 fn move_ownership() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, MoveOwnership>>
 {
     static OWNER: std::sync::OnceLock<
@@ -507,6 +512,26 @@ impl MoveSourceRelay {
         }
     }
 
+    async fn set_subagent_admission_via_manager(
+        manager: &SessionManagerControl,
+        id: &str,
+        open: bool,
+    ) -> Result<bool> {
+        let handle = manager
+            .wait_for_session(id, std::time::Duration::from_secs(5))
+            .await?;
+        let mut lease = handle.lease_connection().await?;
+        if !(mj_core::relay::RelayRequest::SetSubagentAdmission { open })
+            .supported_at(lease.connection_mut().protocol_version())
+        {
+            lease.release();
+            return Ok(false);
+        }
+        let result = lease.connection_mut().set_subagent_admission(open).await;
+        lease.release();
+        result.map(|()| true)
+    }
+
     /// The source's state as of its last sync, or `None` when it is unreachable.
     pub(in crate::controller) fn snapshot(
         &mut self,
@@ -525,7 +550,7 @@ impl MoveSourceRelay {
         let Some(relay) = self.0.as_mut() else {
             return Ok(None);
         };
-        match relay.connection_mut().sync().await {
+        match relay.sync_snapshot().await {
             Ok(snapshot) => Ok(Some(snapshot)),
             Err(error) if crate::worker_client::RelayTransportDead::marks(&error) => {
                 tracing::warn!(session_id = id, error = %error, "Move will recover the unavailable source without its harness");
@@ -533,6 +558,161 @@ impl MoveSourceRelay {
                 Ok(None)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Close mutation admission at the worker, let its actor continue polling
+    /// accepted requests until they finish, then take the relay back for the
+    /// checkpoint. The worker queue lock is the admission/drain boundary.
+    pub(in crate::controller) async fn drain_subagent_mutations(
+        &mut self,
+        id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<SubagentMutationDrain> {
+        ensure!(
+            self.0.is_some(),
+            "cannot safely drain sub-agent requests because the source worker is unavailable"
+        );
+        let protocol_version = self
+            .0
+            .as_mut()
+            .expect("held source relay checked")
+            .connection_mut()
+            .protocol_version();
+        if !(mj_core::relay::RelayRequest::SetSubagentAdmission { open: false })
+            .supported_at(protocol_version)
+        {
+            return Ok(SubagentMutationDrain::UnsupportedWorkerProtocol(
+                protocol_version,
+            ));
+        }
+        if let Err(error) = self
+            .0
+            .as_mut()
+            .expect("held source relay checked")
+            .connection_mut()
+            .set_subagent_admission(false)
+            .await
+        {
+            // The worker may have persisted the close before its reply was
+            // lost. Drop this connection and make a best-effort idempotent
+            // reopen on the actor's next relay connection.
+            self.release_managed_connection();
+            if let Err(reopen) = self.reopen_subagent_mutations_with_retry(id).await {
+                return Err(error.context(format!(
+                    "could not reopen sub-agent requests after an ambiguous admission close: {reopen:#}"
+                )));
+            }
+            return Err(error);
+        }
+        self.release_managed_connection();
+
+        let drain = async {
+            loop {
+                ensure!(
+                    !executor.cancellation_requested(),
+                    "Move cancelled while waiting for sub-agent requests"
+                );
+                let snapshot = self.sync(id).await?.context(
+                    "source worker became unavailable while draining sub-agent requests",
+                )?;
+                let parent = id.to_owned();
+                let effects_pending = tokio::task::spawn_blocking(move || {
+                    crate::database::has_pending_mutating_delegations(&parent)
+                })
+                .await??;
+                if !subagent_mutations_pending(&snapshot.subagent_requests, effects_pending) {
+                    break;
+                }
+                executor.notify_notice("Waiting for subagent requests to finish");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(error) = drain {
+            if let Err(reopen) = self.reopen_subagent_mutations_with_retry(id).await {
+                return Err(error.context(format!(
+                    "could not reopen sub-agent requests after Move stopped waiting: {reopen:#}"
+                )));
+            }
+            return Err(error);
+        }
+        self.reacquire_managed_connection().await?;
+        if executor.cancellation_requested() {
+            self.reopen_subagent_mutations_with_retry(id).await?;
+            bail!("Move cancelled before source interruption; sub-agent requests reopened");
+        }
+        Ok(SubagentMutationDrain::Drained)
+    }
+
+    pub(in crate::controller) async fn reopen_subagent_mutations(
+        &mut self,
+        id: &str,
+    ) -> Result<()> {
+        self.reopen_subagent_mutations_with_retry(id).await
+    }
+
+    async fn open_subagent_mutations(&mut self) -> Result<()> {
+        self.reacquire_managed_connection().await?;
+        let result = self
+            .0
+            .as_mut()
+            .context("source worker is unavailable")?
+            .connection_mut()
+            .set_subagent_admission(true)
+            .await;
+        self.release_managed_connection();
+        result
+    }
+
+    async fn reopen_subagent_mutations_with_retry(&mut self, id: &str) -> Result<()> {
+        let first_error = match self.open_subagent_mutations().await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        tracing::warn!(
+            session_id = id,
+            error = %first_error,
+            "sub-agent admission reopen failed; retrying on a fresh relay connection"
+        );
+        tokio::task::yield_now().await;
+        match self.open_subagent_mutations().await {
+            Ok(()) => {
+                tracing::info!(
+                    session_id = id,
+                    "reopened sub-agent requests on a replacement relay connection"
+                );
+                Ok(())
+            }
+            Err(retry_error) => {
+                tracing::warn!(
+                    session_id = id,
+                    error = %retry_error,
+                    "could not reopen sub-agent requests on the replacement relay connection"
+                );
+                Err(first_error.context(format!("relay reconnect retry failed: {retry_error:#}")))
+            }
+        }
+    }
+
+    async fn reacquire_managed_connection(&mut self) -> Result<()> {
+        if let Some(super::checkpoint::ControllerRelayLease::Managed { handle, lease }) =
+            self.0.as_mut()
+            && lease.is_none()
+        {
+            *lease = Some(handle.lease_connection().await?);
+        }
+        Ok(())
+    }
+
+    fn release_managed_connection(&mut self) {
+        if let Some(super::checkpoint::ControllerRelayLease::Managed { lease, .. }) =
+            self.0.as_mut()
+            && let Some(lease) = lease.take()
+        {
+            lease.release();
         }
     }
 
@@ -637,9 +817,7 @@ impl Controller {
         {
             ResumePlan::RawToWorkspace => {
                 return Ok(Some(super::worktree::plan_raw_to_workspace(
-                    source,
-                    &self.config,
-                    executor,
+                    source, executor,
                 )?));
             }
             ResumePlan::WorkspaceToRaw => {
@@ -829,10 +1007,6 @@ impl Controller {
         mut selection: MoveSelection,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MovePreparation> {
-        ensure!(
-            selection.profile_id.is_some() || selection.target_template_id.is_some(),
-            "move requires a target or profile selection"
-        );
         let source = self
             .state
             .sessions
@@ -843,6 +1017,29 @@ impl Controller {
             "sub-agent sessions cannot move independently of their parent"
         );
         let previous = crate::database::load_move_operation(&source.id)?;
+        // The sealed selection owns retry defaults. Reconstructing them from
+        // the source can change the destination or lose an explicit policy.
+        if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
+            selection.profile_id = selection
+                .profile_id
+                .or(retained.selection.profile_id.clone());
+            selection.target_template_id = selection
+                .target_template_id
+                .or(retained.selection.target_template_id.clone());
+            selection.subagents = selection.subagents.or(retained.selection.subagents.clone());
+            // Legacy selections omitted an unchanged policy. A viewer may
+            // send that same effective policy explicitly; it changes nothing.
+            if retained.selection.subagents.is_none()
+                && selection.subagents.as_ref()
+                    == Some(&source.subagents.clone().unwrap_or_default())
+            {
+                selection.subagents = None;
+            }
+        }
+        ensure!(
+            selection.profile_id.is_some() || selection.target_template_id.is_some(),
+            "move requires a target or profile selection"
+        );
         ensure!(
             previous
                 .as_ref()
@@ -945,7 +1142,9 @@ impl Controller {
             profile.enabled,
             "destination profile {profile_id:?} is disabled"
         );
-        if let Some(policy) = &selection.subagents {
+        if let Some(policy) = &selection.subagents
+            && policy != &source.subagents.clone().unwrap_or_default()
+        {
             super::profile_config::validate_session_subagent_policy(
                 &self.config,
                 profile_id,
@@ -1039,6 +1238,15 @@ impl Controller {
                 self.state.subagents.contains_key(&source.id),
                 retry,
             );
+        let destination_has_parent_role =
+            parent_tools_enabled(&move_subagent_policy(source, &selection), profile.kind);
+        if in_place
+            && !destination_has_parent_role
+            && let Some(error) =
+                roleless_move_children_error(&live_move_children(&self.state, &source.id))
+        {
+            bail!("{error}; close or finish those children before moving to this harness");
+        }
         let workspace = if in_place {
             None
         } else {
@@ -1275,7 +1483,13 @@ impl Controller {
             source_relay,
         ))
         .await;
-        self.finish_move_result(&mut operation, result, executor)
+        self.finish_move_result_with_subagent_recovery(
+            &mut operation,
+            result,
+            executor,
+            manager,
+        )
+        .await
 
         }).await
     }
@@ -1406,6 +1620,66 @@ impl Controller {
         ))
     }
 
+    async fn finish_move_result_with_subagent_recovery(
+        &mut self,
+        operation: &mut MoveOperation,
+        result: Result<()>,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<MoveOutcome> {
+        let outcome = self.finish_move_result(operation, result, executor)?;
+        if !operation.in_place
+            || !matches!(operation.phase, MovePhase::Failed | MovePhase::Cancelled)
+        {
+            return Ok(outcome);
+        }
+        let session_id = &operation.selection.session_id;
+        let Some(session) = self.state.sessions.get(session_id) else {
+            return Ok(outcome);
+        };
+        if !matches!(
+            session.state,
+            SessionState::Running | SessionState::Disconnected
+        ) || !parent_tools_enabled(
+            &session.subagents.clone().unwrap_or_default(),
+            session.harness_kind,
+        ) {
+            return Ok(outcome);
+        }
+
+        // A failed reply is ambiguous: the worker may already have persisted
+        // `open=true`. Retry through a fresh actor lease once so the retry uses
+        // the next relay connection if the first one was abandoned.
+        for attempt in 1..=2 {
+            match MoveSourceRelay::set_subagent_admission_via_manager(manager, session_id, true)
+                .await
+            {
+                Ok(true) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            session_id,
+                            "reopened sub-agent requests on a replacement relay connection"
+                        );
+                    }
+                    break;
+                }
+                Ok(false) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        attempt,
+                        error = %error,
+                        "could not reopen sub-agent requests after the in-place Move left its source running"
+                    );
+                    if attempt == 1 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
     pub async fn recover_move_managed_controlled(
         &mut self,
         mut operation: MoveOperation,
@@ -1467,6 +1741,47 @@ impl Controller {
                 ));
             }
             match operation.phase {
+                MovePhase::ClosingSource
+                    if operation.in_place
+                        && matches!(
+                            session.state,
+                            SessionState::Running | SessionState::Disconnected
+                        )
+                        && !operation.cancellation_requested =>
+                {
+                    // The phase is durable before the worker admission gate
+                    // closes. If the daemon died before the session reached
+                    // Closing, resume the gate/drain/stop sequence on startup.
+                    let relay = MoveSourceRelay::lease(manager, &id).await?;
+                    return Box::pin(self.execute_move(
+                        &mut operation,
+                        None,
+                        executor,
+                        manager,
+                        relay,
+                    ))
+                    .await;
+                }
+                MovePhase::ClosingSource
+                    if operation.in_place
+                        && matches!(
+                            session.state,
+                            SessionState::Running | SessionState::Disconnected
+                        )
+                        && operation.cancellation_requested =>
+                {
+                    let source = self.state.sessions.get(&id).context("move source is missing")?;
+                    if parent_tools_enabled(
+                        &source.subagents.clone().unwrap_or_default(),
+                        source.harness_kind,
+                    ) {
+                        MoveSourceRelay::set_subagent_admission_via_manager(
+                            manager, &id, true,
+                        )
+                        .await?;
+                    }
+                    bail!("Move was cancelled before source interruption; source retained and sub-agent requests reopened")
+                }
                 MovePhase::Preparing => bail!("Move preparation was interrupted; source retained. Prepare Move again."),
                 MovePhase::ResumingDestination if session.state == SessionState::Running => {
                     // Running is installed only after native readiness and the
@@ -1515,7 +1830,13 @@ impl Controller {
                 _ => bail!("Move requires an explicit retry after the daemon restarted"),
             }
         }.await;
-        self.finish_move_result(&mut operation, result, executor)
+        self.finish_move_result_with_subagent_recovery(
+            &mut operation,
+            result,
+            executor,
+            manager,
+        )
+        .await
 
         }).await
     }
@@ -1789,12 +2110,87 @@ impl Controller {
                 SessionState::Running | SessionState::Disconnected
             ) && operation.destination_target.is_none()
             {
-                executor.before_move_source_stop().await?;
+                let source = self.state.sessions[&id].clone();
+                let source_has_parent_role = parent_tools_enabled(
+                    &source.subagents.clone().unwrap_or_default(),
+                    source.harness_kind,
+                );
+                let destination_has_parent_role = parent_tools_enabled(
+                    &move_subagent_policy(&source, &operation.selection),
+                    operation
+                        .selection
+                        .profile_id
+                        .as_deref()
+                        .and_then(|profile| self.config.profiles.get(profile))
+                        .context("destination profile is missing")?
+                        .kind,
+                );
+                if operation.in_place {
+                    // Persist the phase before closing worker admission. A daemon
+                    // crash from this point can reopen the relay, finish the
+                    // drain, or observe that source sealing already began.
+                    operation.phase = MovePhase::ClosingSource;
+                    operation.updated_at = now();
+                    crate::database::save_move_operation(operation)?;
+                    let mut stopped_subagents_for_legacy_worker = false;
+                    if source_has_parent_role {
+                        if !source_relay.is_held() {
+                            source_relay = MoveSourceRelay::lease(manager, &id).await?;
+                        }
+                        match source_relay.drain_subagent_mutations(&id, executor).await? {
+                            SubagentMutationDrain::Drained => {}
+                            SubagentMutationDrain::UnsupportedWorkerProtocol(version) => {
+                                executor.notify_notice(&format!(
+                                    "The source worker uses relay protocol {version}; protocol 32 is required to safely drain sub-agent requests, so stopping sub-agents before this in-place Move"
+                                ));
+                                executor.before_move_source_stop().await?;
+                                stopped_subagents_for_legacy_worker = true;
+                            }
+                        }
+                    }
+                    if should_stop_move_subagents(true, destination_has_parent_role)
+                        && !stopped_subagents_for_legacy_worker
+                    {
+                        let current = crate::database::load_state()?;
+                        if let Some(error) =
+                            roleless_move_children_error(&live_move_children(&current, &id))
+                        {
+                            if source_has_parent_role {
+                                source_relay
+                                    .reopen_subagent_mutations(&id)
+                                    .await
+                                    .context("could not reopen sub-agent requests after refusing Move")?;
+                            }
+                            bail!("{error}; close or finish those children before moving to this harness");
+                        }
+                        if let Err(error) = executor.before_move_source_stop().await {
+                            if source_has_parent_role {
+                                source_relay
+                                    .reopen_subagent_mutations(&id)
+                                    .await
+                                    .context("could not reopen sub-agent requests after stopping children failed")?;
+                            }
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    // Non-in-place Moves retain their existing child-stop
+                    // behavior before the source checkpoint begins.
+                    executor.before_move_source_stop().await?;
+                }
+                if executor.cancellation_requested() {
+                    if operation.in_place && source_has_parent_role {
+                        source_relay.reopen_subagent_mutations(&id).await?;
+                    }
+                    bail!("Move cancelled before source interruption");
+                }
                 executor.notify_notice("Stopping source");
                 let _timing = MovePhaseTimer::new(&id, "checkpoint and source stop");
-                operation.phase = MovePhase::ClosingSource;
-                operation.updated_at = now();
-                crate::database::save_move_operation(operation)?;
+                if !operation.in_place {
+                    operation.phase = MovePhase::ClosingSource;
+                    operation.updated_at = now();
+                    crate::database::save_move_operation(operation)?;
+                }
                 // An eligible move keeps its environment: the close stops at
                 // the sealed relay and the record keeps its target for
                 // `restore_session_in_place`.
@@ -1803,7 +2199,7 @@ impl Controller {
                 } else {
                     SourceTargetDisposition::Destroy
                 };
-                Box::pin(self.suspend_session_for_move(
+                let suspended = Box::pin(self.suspend_session_for_move(
                     &id,
                     executor,
                     manager,
@@ -1812,7 +2208,27 @@ impl Controller {
                     disposition,
                     std::mem::take(&mut source_relay),
                 ))
-                .await?;
+                .await;
+                if let Err(error) = suspended {
+                    if operation.in_place
+                        && source_has_parent_role
+                        && matches!(
+                            self.state.sessions[&id].state,
+                            SessionState::Running | SessionState::Disconnected
+                        )
+                        && let Err(reopen) = MoveSourceRelay::set_subagent_admission_via_manager(
+                            manager,
+                            &id,
+                            true,
+                        )
+                        .await
+                    {
+                        return Err(error.context(format!(
+                            "could not reopen sub-agent requests after source checkpoint failed: {reopen:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
             }
             // Past the source stop, nothing else needs the source's connection.
             drop(source_relay);
@@ -2018,6 +2434,7 @@ impl Controller {
         &self,
         operation: &MoveOperation,
         preparation: Option<&MovePreparation>,
+        github_token: Option<&str>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
@@ -2039,9 +2456,10 @@ impl Controller {
         if !operation.in_place
             && operation.workspace_transfer.is_none()
             && let super::ResumeRepositorySourcePreflight::RepositoryMoved(mismatch) = self
-                .preflight_resume_repository_sources(
+                .preflight_resume_repository_sources_with_token(
                     id,
                     operation.selection.target_template_id.as_deref().unwrap(),
+                    github_token,
                     executor,
                 )?
         {
@@ -2097,6 +2515,86 @@ fn validate_preserved_configuration(
         );
     }
     Ok(())
+}
+
+fn move_subagent_policy(
+    source: &mj_core::state::SessionRecord,
+    selection: &MoveSelection,
+) -> mj_core::subagent::SubagentPolicy {
+    selection
+        .subagents
+        .clone()
+        .or_else(|| source.subagents.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn parent_tools_enabled(
+    policy: &mj_core::subagent::SubagentPolicy,
+    harness: mj_core::config::HarnessKind,
+) -> bool {
+    policy.for_launch(harness, false).parent_role().is_some()
+}
+
+pub(in crate::controller) fn move_children(
+    state: &mj_core::state::State,
+    parent_session_id: &str,
+) -> Vec<mj_core::subagent::InPlaceSubagent> {
+    state
+        .subagents
+        .values()
+        .filter(|relation| relation.parent_session_id == parent_session_id)
+        .filter_map(|relation| {
+            let child = state.sessions.get(&relation.child_session_id)?;
+            let state = if child.state.has_live_worker() {
+                mj_core::subagent::InPlaceSubagentState::Running
+            } else if child.state == SessionState::Parked {
+                mj_core::subagent::InPlaceSubagentState::Parked
+            } else {
+                return None;
+            };
+            Some(mj_core::subagent::InPlaceSubagent {
+                child_session_id: relation.child_session_id.clone(),
+                task_name: relation.task_name.clone(),
+                state,
+            })
+        })
+        .collect()
+}
+
+fn live_move_children(state: &mj_core::state::State, parent_session_id: &str) -> Vec<String> {
+    move_children(state, parent_session_id)
+        .into_iter()
+        .filter(|child| child.state == mj_core::subagent::InPlaceSubagentState::Running)
+        .map(|child| {
+            format!(
+                "{} (child_session_id {})",
+                child.task_name, child.child_session_id
+            )
+        })
+        .collect()
+}
+
+fn roleless_move_children_error(children: &[String]) -> Option<String> {
+    (!children.is_empty()).then(|| {
+        format!(
+            "cannot in-place Move to a harness without mj-agents parent tools while live sub-agents exist: {}",
+            children.join(", ")
+        )
+    })
+}
+
+fn should_stop_move_subagents(in_place: bool, destination_has_parent_role: bool) -> bool {
+    !in_place || !destination_has_parent_role
+}
+
+fn subagent_mutations_pending(
+    requests: &[mj_core::subagent::SubagentToolRequest],
+    durable_effect_pending: bool,
+) -> bool {
+    durable_effect_pending
+        || requests
+            .iter()
+            .any(|request| request.action.mutates_child_state())
 }
 
 /// Whether this move can replace only the harness inside the source target.

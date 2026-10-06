@@ -1,0 +1,59 @@
+=== focused replacement source (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions                                                                                         │
+│ Create                                                                                  .        │
+│hel ─────  ╭ × Repository history is missing ─────────────────────────────────────────╮           │
+│› ■ ACP p  │Repository: bifrost                                                       │           │
+│  Stopped  │                                                                          │           │
+│  │ No me  │The configured source does not contain checkpoint base b41dc78.           │           │
+│  │        │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │  ─────────╯
+│           │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╮
+│           │                                                                          │           │
+│           │Enter a GitHub origin or absolute local path that contains this history:  │  open.    │
+│           │Source:                                                                   │  ─────────╯
+│           │                                                                          │  ── ▁   ▪ ╮
+│           │Type or paste into Source · Tab moves · Enter checks                      │           │
+│           │                                                                          │  ─────────╯
+│           │  Cancel     Check origin                                                 │  ── ▁   ▪ ╮
+│           ╰──────────────────────────────────────────────────────────────────────────╯  esets    │
+│                                                                                                  │
+│                                                                                                  │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+cursor: (21, 13)
+source field focused: true
+both actions selected: true
+Cancel action focused: false
+
+=== focus moves to origin actions (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions                                                                                         │
+│ Create                                                                                  .        │
+│hel ─────  ╭ × Repository history is missing ─────────────────────────────────────────╮           │
+│› ■ ACP p  │Repository: bifrost                                                       │           │
+│  Stopped  │                                                                          │           │
+│  │ No me  │The configured source does not contain checkpoint base b41dc78.           │           │
+│  │        │Checkpoint origin: https://github.com/BrokkAi/bifrost.git                 │  ─────────╯
+│           │Configured source checked: BrokkAi/bifrost-dev                            │  ─────────╮
+│           │                                                                          │           │
+│           │Enter a GitHub origin or absolute local path that contains this history:  │  open.    │
+│           │Source:                                                                   │  ─────────╯
+│           │                                                                          │  ── ▁   ▪ ╮
+│           │Type or paste into Source · Tab moves · Enter checks                      │           │
+│           │                                                                          │  ─────────╯
+│           │  Cancel     Check origin                                                 │  ── ▁   ▪ ╮
+│           ╰──────────────────────────────────────────────────────────────────────────╯  esets    │
+│                                                                                                  │
+│                                                                                                  │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+cursor: hidden
+source field focused: false
+both actions selected: false
+Cancel action focused: true

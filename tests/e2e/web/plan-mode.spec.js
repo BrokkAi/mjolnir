@@ -2,7 +2,7 @@ const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
 
-test.use({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+test.use({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block', timezoneId: 'UTC' });
 
 const SESSION_ID = 'plan-session';
 
@@ -150,7 +150,7 @@ function fixtureSnapshot(configOptions = [], sessionOverrides = {}) {
     profiles: [{ id: 'codex', harness_kind: 'codex' }],
     targets: [{ id: 'local', kind: 'local', requires_project_directory: false }],
     bundles: [{ id: 'bundle-1', primary_repository: null, repositories: [] }],
-    review_config: { enabled: false, tier: 'quick', profile: null },
+    review_config: { enabled: false, profile: null },
   };
 }
 
@@ -306,6 +306,179 @@ async function waitForActionCount(state, count) {
   await expect.poll(() => state.actions.length).toBe(count);
 }
 
+async function captureConversationState(output, page, label, state, extra = null) {
+  const viewport = page.viewportSize();
+  output.push(`=== ${label} (${viewport.width}x${viewport.height}) ===`);
+  output.push((await page.locator('#app').innerText()).split('\n').map(line => line.trimEnd()).join('\n').trim());
+  const controls = await page.locator('#prompt-text, #send-button, #attach-image, #prompt-settings, #conversation-status, #elicitations input, #elicitations button').evaluateAll(nodes => nodes.map(node => ({
+    id: node.id || null,
+    text: node.innerText?.trim() || node.getAttribute('aria-label') || null,
+    value: 'value' in node ? node.value : null,
+    checked: 'checked' in node ? node.checked : null,
+    visible: node.checkVisibility(),
+    disabled: 'disabled' in node ? node.disabled : null,
+  })));
+  output.push(`controls: ${JSON.stringify(controls)}`);
+  if (state.actions.length) output.push(`action: POST /api/actions ${JSON.stringify(state.actions.map(({ command_id, ...action }) => ({ ...action, command_id: command_id ? '<generated>' : null })))}`);
+  if (extra !== null) output.push(`layout: ${JSON.stringify(extra)}`);
+}
+
+async function conversationLayout(page) {
+  return page.evaluate(() => {
+    const bounds = selector => {
+      const node = document.querySelector(selector);
+      if (!node) return null;
+      const box = node.getBoundingClientRect();
+      return { x: +box.x.toFixed(2), y: +box.y.toFixed(2), width: +box.width.toFixed(2), height: +box.height.toFixed(2) };
+    };
+    const scroll = document.querySelector('#conversation-scroll');
+    const panel = document.querySelector('#elicitations');
+    const summary = document.querySelector('#conversation-side > summary');
+    const subagents = document.querySelector('#subagents-button');
+    const summaryTop = summary?.getBoundingClientRect().top ?? null;
+    const subagentsTop = subagents?.getBoundingClientRect().top ?? null;
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      status: bounds('#conversation-status'),
+      summary: bounds('#conversation-side > summary'),
+      subagents: bounds('#subagents-button'),
+      summaryToSubagents: summaryTop === null || subagentsTop === null ? null : +Math.abs(summaryTop - subagentsTop).toFixed(2),
+      composer: bounds('#prompt-form'),
+      composerText: bounds('#prompt-text'),
+      conversation: bounds('#conversation'),
+      conversationScroll: scroll ? { height: scroll.clientHeight, scrollHeight: scroll.scrollHeight } : null,
+      elicitation: panel ? { height: panel.clientHeight, scrollHeight: panel.scrollHeight, scrollTop: panel.scrollTop } : null,
+      documentWidth: document.documentElement.scrollWidth,
+    };
+  });
+}
+
+test('golden_viewer_conversation', async ({ context }) => {
+  const { assertGolden } = await import('./golden.mjs');
+  const output = [];
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.clock.install({ time: new Date('2030-06-15T15:00:00Z') });
+  const state = await mockViewerApi(page, [], [
+    { key: 'model', label: 'Model', current: 'gpt-5', choices: [{ value: 'gpt-5', name: 'GPT-5' }] },
+    { key: 'effort', label: 'Effort', current: 'xhigh', choices: [{ value: 'high', name: 'High' }] },
+  ], {
+    prompt_images_supported: false,
+    background_tasks: [{ id: 'task-1', command: 'cargo check --package sample', started_at_ms: 1781521020000, can_stop: true }],
+    active_user_shells: [{ id: 'shell-1', command: 'git status --short' }],
+    queued_prompts: [{ id: 'queue-1', text: 'Inspect the recent changes' }],
+  });
+  await captureConversationState(output, page, 'phone conversation and current model settings', state, await conversationLayout(page));
+  await page.locator('#prompt-text').focus();
+  await captureConversationState(output, page, 'focused phone composer hides status and settings', state, await conversationLayout(page));
+  await page.locator('#prompt-text').blur();
+  await page.locator('#prompt-text').fill('A prompt sent from the phone layout test');
+  await captureConversationState(output, page, 'typed phone prompt reveals send controls', state, await conversationLayout(page));
+  await page.locator('#send-button').click();
+  await expect.poll(() => state.actions.length).toBe(1);
+  await expect(page.locator('#pending-submissions')).toContainText('Queued');
+  await expect(page.locator('#send-button')).toBeHidden();
+  await page.evaluate(() => {
+    document.activeElement?.blur();
+    window.scrollTo(0, 0);
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await captureConversationState(output, page, 'phone prompt sent', state, await conversationLayout(page));
+
+  state.snapshot.sessions[0].config_options = [
+    { key: 'model', label: 'Model', current: 'gpt-5-mini', choices: [{ value: 'gpt-5-mini', name: 'GPT-5 mini' }] },
+    { key: 'effort', label: 'Effort', current: 'high', choices: [{ value: 'high', name: 'High' }] },
+  ];
+  let revision = state.snapshotRequests;
+  state.snapshot.revision += 1;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await expect(page.locator('#prompt-settings')).toContainText('GPT-5 mini');
+  await captureConversationState(output, page, 'updated model and effort settings', state, await conversationLayout(page));
+  state.snapshot.sessions[0].config_options = [
+    { key: 'model', label: 'Model', current: null, choices: [] },
+    { key: 'effort', label: 'Effort', current: '', choices: [] },
+  ];
+  revision = state.snapshotRequests;
+  state.snapshot.revision += 1;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await expect(page.locator('#prompt-settings')).toBeHidden();
+  await expect(page.locator('#prompt-settings')).toHaveAttribute('aria-label', 'Current session settings');
+  await captureConversationState(output, page, 'settings removed by refresh', state, await conversationLayout(page));
+
+  await page.locator('#prompt-text').fill('/help');
+  await page.locator('#send-button').click();
+  await expect(page.locator('#conversation-feed')).toContainText('Available commands:');
+  await captureConversationState(output, page, 'help lists Mjolnir and harness commands', state);
+
+  state.snapshot.review_config = { enabled: true, profile: 'reviewer' };
+  state.snapshot.sessions[0].turn_review = null;
+  revision = state.snapshotRequests;
+  state.snapshot.revision += 1;
+  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await page.locator('#prompt-text').fill('/review status');
+  await page.locator('#send-button').click();
+  await expect(page.locator('#conversation-error')).toHaveText(
+    'Reviewing every completed turn with [review] profile "reviewer"',
+  );
+  await captureConversationState(output, page, 'review status describes automatic review', state);
+  await page.close();
+
+  const longPage = await context.newPage();
+  await longPage.setViewportSize({ width: 320, height: 568 });
+  await longPage.clock.install({ time: new Date('2030-06-15T15:00:00Z') });
+  const long = question('long-question', 'Answer these three questions.');
+  long.fields = [0, 1, 2].map(index => ({
+    ...long.fields[0],
+    id: `question_${index}`,
+    title: `Question ${index + 1}`,
+    options: Array.from({ length: 5 }, (_, option) => ({
+      value: String(option),
+      title: `Choice ${index + 1}.${option + 1}`,
+      description: 'An option with enough detail to wrap on a narrow phone.',
+    })),
+  }));
+  const longState = await mockViewerApi(longPage, [long]);
+  await longPage.addStyleTag({ content: '#connection, #jump-to-latest { display: none !important; }' });
+  const panel = longPage.locator('#elicitations');
+  await captureConversationState(output, longPage, 'long phone elicitation form', longState, await conversationLayout(longPage));
+  await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
+  await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
+  const finalChoice = panel.getByRole('radio', { name: /^Choice 3\.5/ });
+  await finalChoice.check();
+  await finalChoice.evaluate(input => input.blur());
+  await panel.getByRole('button', { name: 'Submit all', exact: true }).scrollIntoViewIfNeeded();
+  const longGeometry = await conversationLayout(longPage);
+  await panel.getByRole('button', { name: 'Submit all', exact: true }).click();
+  await waitForActionCount(longState, 1);
+  await expect(panel.locator('.elicitation')).toHaveCount(0);
+  await captureConversationState(output, longPage, 'long phone elicitation answers submitted', longState, longGeometry);
+  await longPage.close();
+
+  const multilinePage = await context.newPage();
+  await multilinePage.setViewportSize({ width: 320, height: 568 });
+  await multilinePage.clock.install({ time: new Date('2030-06-15T15:00:00Z') });
+  const multiline = guidedQuestions('multiline', 1);
+  multiline.fields[0].title = 'How should we handle JPEG support given that our existing linearization differs?\n'
+    + 'A long explanation of the differences. '.repeat(20) + '\nFinal authored line';
+  const multilineState = await mockViewerApi(multilinePage, [multiline]);
+  const legend = multilinePage.locator('#elicitations .elicitation legend');
+  await legend.evaluate(node => node.parentElement.parentElement.scrollTo(0, node.parentElement.parentElement.scrollHeight));
+  const multilineGeometry = await legend.evaluate(node => ({
+    width: +node.getBoundingClientRect().width.toFixed(2),
+    height: +node.getBoundingClientRect().height.toFixed(2),
+    scrollWidth: node.scrollWidth,
+    clientWidth: node.clientWidth,
+    whiteSpace: getComputedStyle(node).whiteSpace,
+  }));
+  await captureConversationState(output, multilinePage, 'multiline phone question remains reachable', multilineState, multilineGeometry);
+  await multilinePage.close();
+
+  assertGolden('viewer_conversation', output.join('\n'));
+});
+
 test('plan command discovers, toggles, sends a request, and retries a rejected action', async ({ page }) => {
   const state = await mockViewerApi(page);
   const prompt = page.locator('#prompt-text');
@@ -358,115 +531,6 @@ test('plan command discovers, toggles, sends a request, and retries a rejected a
   await waitForActionCount(state, 6);
   expect(state.actions[5]).toEqual({ action: 'set-plan-mode', session_id: SESSION_ID, active: false });
   await expect(page.locator('#conversation-state')).not.toContainText('plan');
-});
-
-test('composer renders current model and effort settings and reconciles refresh changes', async ({ page }) => {
-  const state = await mockViewerApi(page, [], [
-    {
-      key: 'model',
-      label: 'Model',
-      current: 'gpt-5',
-      choices: [{ value: 'gpt-5', name: 'GPT-5' }],
-    },
-    {
-      key: 'effort',
-      label: 'Effort',
-      current: 'xhigh',
-      choices: [{ value: 'high', name: 'High' }],
-    },
-  ]);
-  const settings = page.locator('#prompt-settings');
-
-  await expect(settings).toBeVisible();
-  await expect(settings).toContainText('Model:');
-  await expect(settings).toContainText('GPT-5');
-  await expect(settings).toContainText('Effort:');
-  await expect(settings).toContainText('xhigh');
-
-  state.snapshot.sessions[0].config_options = [
-    {
-      key: 'model',
-      label: 'Model',
-      current: 'gpt-5-mini',
-      choices: [{ value: 'gpt-5-mini', name: 'GPT-5 mini' }],
-    },
-    {
-      key: 'effort',
-      label: 'Effort',
-      current: 'high',
-      choices: [{ value: 'high', name: 'High' }],
-    },
-  ];
-  const beforeUpdate = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeUpdate);
-  await expect(settings.locator('.prompt-setting-value').nth(0)).toHaveText('GPT-5 mini');
-  await expect(settings.locator('.prompt-setting-value').nth(1)).toHaveText('High');
-
-  state.snapshot.sessions[0].config_options = [
-    { key: 'model', label: 'Model', current: null, choices: [] },
-    { key: 'effort', label: 'Effort', current: '', choices: [] },
-  ];
-  const beforeRemoval = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeRemoval);
-  await expect(settings).toBeHidden();
-  await expect(settings).toHaveText('');
-});
-
-test('long question forms scroll without pushing answer controls or the composer off the phone', async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 320, height: 568 });
-  const long = question('long-question', 'Answer these three questions.');
-  long.fields = [0, 1, 2].map(index => ({
-    ...long.fields[0], id: `question_${index}`, title: `Question ${index + 1}`,
-    options: Array.from({ length: 5 }, (_, option) => ({
-      value: String(option), title: `Choice ${index + 1}.${option + 1}`,
-      description: 'An option with enough detail to wrap on a narrow phone.',
-    })),
-  }));
-  const state = await mockViewerApi(page, [long]);
-  // The completed fixture event stream produces a reconnect banner and its
-  // unsent welcome row produces a jump button; neither is part of this layout.
-  await page.addStyleTag({ content: '#connection, #jump-to-latest { display: none !important; }' });
-  const panel = page.locator('#elicitations');
-  expect(await panel.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
-  await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
-  await expect(panel.locator('.elicitation-progress')).toContainText('Question 2/3');
-  expect(state.actions).toHaveLength(0);
-  await panel.getByRole('button', { name: 'Answer and next', exact: true }).click();
-  const finalChoice = panel.getByRole('radio', { name: /^Choice 3.5/ });
-  await finalChoice.check();
-  await expect(page.locator('body')).toHaveClass(/elicitation-focused/);
-  await finalChoice.evaluate(input => input.blur());
-  await expect(page.locator('body')).not.toHaveClass(/elicitation-focused/);
-  const restoredGeometry = await page.evaluate(() => {
-    const rect = selector => {
-      const bounds = document.querySelector(selector).getBoundingClientRect();
-      return { top: bounds.top, bottom: bounds.bottom, height: bounds.height };
-    };
-    return {
-      scrollY: window.scrollY,
-      conversation: rect('#conversation'),
-      panel: rect('#elicitations'),
-      composer: rect('#prompt-form'),
-      send: rect('#send-button'),
-    };
-  });
-  await fs.promises.writeFile(
-    testInfo.outputPath('elicitation-phone-restored.json'),
-    JSON.stringify(restoredGeometry, null, 2),
-  );
-  await panel.getByRole('button', { name: 'Submit all', exact: true }).scrollIntoViewIfNeeded();
-  // The phone composer keeps its send controls hidden until someone starts a
-  // prompt; the compact empty form must still remain below the answer panel.
-  await expect(page.locator('#send-button')).toBeHidden();
-  const composer = await page.locator('#prompt-form').boundingBox();
-  expect(composer.y + composer.height).toBeLessThanOrEqual(569);
-  await panel.getByRole('button', { name: 'Submit all', exact: true }).click();
-  await waitForActionCount(state, 1);
-  expect(state.actions[0].response.content).toEqual({ question_0: '0', question_1: '0', question_2: '4' });
 });
 
 test('optional choices start unanswered and can be cleared after selection', async ({ page }) => {
@@ -998,31 +1062,6 @@ test('question replacement resets confirmation even when the request id is reuse
   await expect(card.locator('.elicitation-progress')).toHaveText('Question 1/2 · 2 unanswered');
   await expect(card.getByRole('group')).toHaveAccessibleName('Replacement decision');
   expect(state.actions).toHaveLength(0);
-});
-
-test('multiline prompts wrap on narrow phones and the full question remains reachable', async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 568 });
-  const request = guidedQuestions('multiline', 1);
-  request.fields[0].title = 'How should we handle JPEG support given that our existing linearization differs?\n'
-    + 'A long explanation of the differences. '.repeat(20) + '\nFinal authored line';
-  await mockViewerApi(page, [request]);
-  const card = page.locator('#elicitations .elicitation');
-  const legend = card.locator('legend');
-  await expect(legend).toHaveCSS('white-space', 'pre-wrap');
-  const geometry = await legend.evaluate(node => ({
-    width: node.getBoundingClientRect().width,
-    height: node.getBoundingClientRect().height,
-    scrollWidth: node.scrollWidth,
-    clientWidth: node.clientWidth,
-  }));
-  expect(geometry.width).toBeLessThan(320);
-  expect(geometry.height).toBeGreaterThan(200);
-  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
-  await expect(legend).toContainText('Final authored line');
-  const panel = page.locator('#elicitations');
-  await panel.evaluate(node => { node.scrollTop = node.scrollHeight; });
-  await expect(card.getByRole('button', { name: 'Submit all', exact: true })).toBeInViewport();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
 });
 
 test('keyboard submission accepts false booleans and an empty form sends only once', async ({ page }) => {

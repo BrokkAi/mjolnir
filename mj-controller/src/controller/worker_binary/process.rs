@@ -477,6 +477,7 @@ mod probe_tests {
     /// R8-2 (cli/048): a resume whose worker exited stored the whole probe
     /// as the session's error, 96 lines long. The error keeps one line: the
     /// reason the worker recorded, then the rest of the chain.
+    // Hard-won: 2fd45e3c62e5: a failed resume stored the 96-line worker probe instead of a one-line cause.
     #[test]
     fn a_failure_carrying_a_worker_exit_is_one_line_naming_the_workers_reason() {
         let probe = WorkerProbe {

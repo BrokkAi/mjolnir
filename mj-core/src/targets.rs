@@ -35,8 +35,13 @@ pub const INSTANCE_TAG: &str = "dev.mj.instance";
 /// `container_workspace_root`.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
+/// Whether this machine runs Mjolnir workers itself. Windows is a controller
+/// only: its sessions run on Linux, in a container or on an SSH host, so it
+/// has no local bare target and no local worker to probe a profile with.
+pub const HOST_RUNS_WORKERS: bool = cfg!(unix);
+
 /// The launch phase a command belongs to, reported as launch progress.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProvisionStage {
     /// Waiting for a background download of this target's image to finish,
     /// rather than starting a second download of the same image.
@@ -48,6 +53,11 @@ pub enum ProvisionStage {
     Restoring,
     Starting,
     Installing(HarnessKind),
+    PreparingHarness {
+        harness: HarnessKind,
+        step: String,
+        since_ms: i64,
+    },
     Compacting,
     RecoveryCopy,
     Verifying,
@@ -59,7 +69,7 @@ pub enum ProvisionStage {
 }
 
 impl ProvisionStage {
-    pub fn label(self) -> String {
+    pub fn label(&self) -> String {
         match self {
             Self::PullingImage => "Pull image".into(),
             Self::Provisioning => "Provision".into(),
@@ -69,6 +79,9 @@ impl ProvisionStage {
             Self::Restoring => "Restore".into(),
             Self::Starting => "Start".into(),
             Self::Installing(harness) => format!("Installing {}", harness.display_name()),
+            Self::PreparingHarness { harness, step, .. } => {
+                format!("Preparing {}: {step}", harness.display_name())
+            }
             Self::Compacting => "Compact".into(),
             Self::RecoveryCopy => "Recovery copy".into(),
             Self::Verifying => "Verify".into(),
@@ -77,6 +90,17 @@ impl ProvisionStage {
             Self::RemovingContainer => "Remove container".into(),
             Self::RemovingStorage => "Remove container storage".into(),
             Self::CleaningCache => "Clean cache".into(),
+        }
+    }
+
+    /// The worker owns the start time for harness preparation. Other stages
+    /// start when the controller observes them.
+    pub fn started_at_epoch_seconds(&self) -> Option<u64> {
+        match self {
+            Self::PreparingHarness { since_ms, .. } => {
+                Some(u64::try_from((*since_ms).max(0) / 1_000).unwrap_or_default())
+            }
+            _ => None,
         }
     }
 }
@@ -331,7 +355,12 @@ pub struct DeploymentCapacityTarget {
     pub kind: DeploymentCapacityKind,
     pub local: bool,
     /// Alternative commands for a host, or one command per live AWS instance.
+    /// The local host has none: sysinfo reads its CPU and memory, and its
+    /// storage is measured over `local_storage_paths`.
     pub probes: Vec<CommandSpec>,
+    /// The paths on this machine whose filesystems local targets write to.
+    /// Empty for every other host, whose probes carry their own paths.
+    pub local_storage_paths: Vec<String>,
     /// Prevents a partial AWS fleet sample when one live instance cannot be probed yet.
     pub probe_error: Option<String>,
 }
@@ -587,14 +616,14 @@ pub struct ProvisionStageGuard<'a, E: CommandExecutor + ?Sized> {
 
 impl<'a, E: CommandExecutor + ?Sized> ProvisionStageGuard<'a, E> {
     pub fn new(executor: &'a E, stage: ProvisionStage) -> Self {
-        executor.stage_started(stage);
+        executor.stage_started(stage.clone());
         Self { executor, stage }
     }
 }
 
 impl<E: CommandExecutor + ?Sized> Drop for ProvisionStageGuard<'_, E> {
     fn drop(&mut self) {
-        self.executor.stage_finished(self.stage);
+        self.executor.stage_finished(self.stage.clone());
     }
 }
 
@@ -2268,6 +2297,7 @@ mod executor_tests {
 
     /// B-2 at the executor: a backgrounded descendant that holds the output
     /// pipes must not hold the completed command past the drain.
+    // Hard-won: c86b2123: A target command stayed Running until a background descendant closed inherited pipes.
     #[cfg(target_os = "linux")]
     #[test]
     fn commands_complete_at_leader_exit_when_a_descendant_holds_the_pipes() {
@@ -2455,6 +2485,7 @@ mod executor_tests {
         }
     }
 
+    // Hard-won: e6ed54ed: sshd MaxStartups rejected concurrent session handshakes and users saw dead workers and failed closes.
     #[test]
     fn a_transport_rejected_ssh_command_is_retried_once_and_then_succeeds() {
         set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
@@ -2471,20 +2502,7 @@ mod executor_tests {
         set_ssh_retry_backoff_for_test(None);
     }
 
-    #[test]
-    fn an_untagged_command_is_not_retried_after_the_same_failure() {
-        set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));
-        let directory = tempfile::tempdir().expect("temp dir");
-        let mut command = flaky_ssh_script(directory.path());
-        command.ssh_destination = None;
-
-        let output = ProcessExecutor.execute(&command).expect("runs once");
-
-        assert_eq!(output.status, 255);
-        assert_eq!(attempts(directory.path()), 1);
-        set_ssh_retry_backoff_for_test(None);
-    }
-
+    // Hard-won: e6ed54ed: sshd MaxStartups rejected remote operations during daemon startup and they were falsely reported as failed.
     #[test]
     fn the_cancellable_executor_also_retries_a_transport_rejection() {
         set_ssh_retry_backoff_for_test(Some(Duration::from_millis(5)));

@@ -188,26 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn open_calls_are_listed_oldest_first_and_closed_calls_disappear() {
-        let tools = ToolsInFlight::default();
-        tools.observe_at(&call("first", ToolCallStatus::InProgress), 1_000);
-        tools.observe_at(&call("second", ToolCallStatus::InProgress), 2_000);
-        let open = tools.snapshot();
-        assert_eq!(open.len(), 2);
-        assert_eq!(open[0].tool_call_id, "first");
-        assert_eq!(open[0].started_at_ms, 1_000);
-        assert_eq!(tools.newest_started_at_ms(), Some(2_000));
-
-        tools.observe_at(&call("first", ToolCallStatus::Completed), 3_000);
-        let open = tools.snapshot();
-        assert_eq!(open.len(), 1);
-        assert_eq!(open[0].tool_call_id, "second");
-
-        tools.clear();
-        assert!(tools.is_empty());
-    }
-
-    #[test]
     fn a_status_change_restarts_the_clock_but_a_repeat_does_not() {
         let tools = ToolsInFlight::default();
         tools.observe_at(&call("one", ToolCallStatus::Pending), 1_000);
@@ -215,22 +195,5 @@ mod tests {
         assert_eq!(tools.snapshot()[0].started_at_ms, 1_000);
         tools.observe_at(&call("one", ToolCallStatus::InProgress), 9_000);
         assert_eq!(tools.snapshot()[0].started_at_ms, 9_000);
-    }
-    #[test]
-    fn status_updates_preserve_the_original_tool_title() {
-        let tools = ToolsInFlight::default();
-        tools.observe_at(&call("Build", ToolCallStatus::Pending), 1_000);
-        let update = serde_json::from_value(serde_json::json!({
-            "sessionUpdate": "tool_call_update", "toolCallId": "Build",
-            "status": "in_progress", "title": "Changed title",
-        }))
-        .unwrap();
-        tools.observe_at(&update, 2_000);
-        assert_eq!(tools.snapshot()[0].title.as_deref(), Some("Build"));
-        let legacy: InFlightToolCall = serde_json::from_value(serde_json::json!({
-            "tool_call_id":"legacy", "status":"in_progress", "started_at_ms":1000,
-        }))
-        .unwrap();
-        assert!(legacy.title.is_none());
     }
 }

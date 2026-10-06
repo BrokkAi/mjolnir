@@ -1,0 +1,238 @@
+=== phone conversation and current model settings (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+Tasks 1 · Shells 1 · Queue 1
+Model:
+GPT-5
+Effort:
+xhigh
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Model:\nGPT-5\nEffort:\nxhigh","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":736.45,"width":370,"height":40},"summary":{"x":11,"y":737.45,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":737.45,"composer":{"x":10,"y":780.45,"width":370,"height":90.55},"composerText":{"x":10,"y":813,"width":370,"height":42},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":585,"scrollHeight":585},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== focused phone composer hides status and settings (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+Queue
+controls: [{"id":"conversation-status","text":"Queued prompts (1), Shell commands (1), Background tasks (1)\n              Tasks 1 · Shells 1 · Queue 1\n            \n            \n              Queued prompts\n              1. Inspect the recent changesEditRemove\n              Shell commands\n              $ git status --shortCancel\n              Background tasks\n              $ cargo check --package sample1461d04hStop\n            \n          \n          Subagents · 0/0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Model:GPT-5Effort:xhigh","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":true,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+layout: {"viewport":{"width":390,"height":844},"status":{"x":0,"y":0,"width":0,"height":0},"summary":{"x":0,"y":0,"width":0,"height":0},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":0,"composer":{"x":10,"y":724,"width":370,"height":147},"composerText":{"x":10,"y":733,"width":370,"height":76},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":577,"scrollHeight":577},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== typed phone prompt reveals send controls (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+A prompt sent from the phone layout test
+Queue
+controls: [{"id":"conversation-status","text":"Queued prompts (1), Shell commands (1), Background tasks (1)\n              Tasks 1 · Shells 1 · Queue 1\n            \n            \n              Queued prompts\n              1. Inspect the recent changesEditRemove\n              Shell commands\n              $ git status --shortCancel\n              Background tasks\n              $ cargo check --package sample1461d04hStop\n            \n          \n          Subagents · 0/0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Model:GPT-5Effort:xhigh","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"A prompt sent from the phone layout test","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":true,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+layout: {"viewport":{"width":390,"height":844},"status":{"x":0,"y":0,"width":0,"height":0},"summary":{"x":0,"y":0,"width":0,"height":0},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":0,"composer":{"x":10,"y":724,"width":370,"height":147},"composerText":{"x":10,"y":733,"width":370,"height":76},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":577,"scrollHeight":577},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== phone prompt sent (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+Model:
+GPT-5
+Effort:
+xhigh
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Model:\nGPT-5\nEffort:\nxhigh","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":736.45,"width":370,"height":40},"summary":{"x":11,"y":737.45,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":737.45,"composer":{"x":10,"y":780.45,"width":370,"height":90.55},"composerText":{"x":10,"y":813,"width":370,"height":42},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":585,"scrollHeight":585},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== updated model and effort settings (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+Model:
+GPT-5 mini
+Effort:
+High
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Model:\nGPT-5 mini\nEffort:\nHigh","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":736.45,"width":370,"height":40},"summary":{"x":11,"y":737.45,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":737.45,"composer":{"x":10,"y":780.45,"width":370,"height":90.55},"composerText":{"x":10,"y":813,"width":370,"height":42},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":585,"scrollHeight":585},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== settings removed by refresh (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+layout: {"viewport":{"width":390,"height":844},"status":{"x":10,"y":760,"width":370,"height":40},"summary":{"x":11,"y":761,"width":368,"height":38},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":761,"composer":{"x":10,"y":804,"width":370,"height":67},"composerText":{"x":10,"y":813,"width":370,"height":42},"conversation":{"x":10,"y":117,"width":370,"height":754},"conversationScroll":{"height":609,"scrollHeight":609},"elicitation":{"height":0,"scrollHeight":0,"scrollTop":0},"documentWidth":390}
+=== help lists Mjolnir and harness commands (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+─
+Mjolnir
+Available commands:
+!<command> — run a shell command in this session [mj]
+/help — Show available commands [mj]
+/plan — Toggle plan mode [mj]
+/implement — Leave plan mode and implement [mj]
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+/help
+Show available commands
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+=== review status describes automatic review (390x844) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+You
+
+A prompt sent from the phone layout test
+
+Queued
+Tasks 1 · Shells 1 · Queue 1
+
+Reviewing every completed turn with [review] profile "reviewer"
+controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
+=== long phone elicitation form (320x568) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+Choose an architecture
+
+This answer is needed before the turn can continue.
+
+Answer these three questions.
+
+Question 1/3 · 3 unanswered
+
+Question 1 *
+Pick one, or provide another architecture below.
+Choice 1.1
+An option with enough detail to wrap on a narrow phone.
+Choice 1.2
+An option with enough detail to wrap on a narrow phone.
+Choice 1.3
+An option with enough detail to wrap on a narrow phone.
+Choice 1.4
+An option with enough detail to wrap on a narrow phone.
+Choice 1.5
+An option with enough detail to wrap on a narrow phone.
+Answer and next
+←
+→
+Decline
+Cancel
+controls: [{"id":null,"text":null,"value":"0","checked":true,"visible":true,"disabled":false},{"id":null,"text":null,"value":"1","checked":false,"visible":true,"disabled":false},{"id":null,"text":null,"value":"2","checked":false,"visible":true,"disabled":false},{"id":null,"text":null,"value":"3","checked":false,"visible":true,"disabled":false},{"id":null,"text":null,"value":"4","checked":false,"visible":true,"disabled":false},{"id":null,"text":null,"value":"0","checked":true,"visible":false,"disabled":false},{"id":null,"text":null,"value":"1","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"2","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"3","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"4","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"0","checked":true,"visible":false,"disabled":false},{"id":null,"text":null,"value":"1","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"2","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"3","checked":false,"visible":false,"disabled":false},{"id":null,"text":null,"value":"4","checked":false,"visible":false,"disabled":false},{"id":null,"text":"Answer and next","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"←","value":"","checked":null,"visible":true,"disabled":true},{"id":null,"text":"→","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"Decline","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"Cancel","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"Go back","value":"","checked":null,"visible":false,"disabled":false},{"id":null,"text":"Submit anyway","value":"","checked":null,"visible":false,"disabled":false},{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0/0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+layout: {"viewport":{"width":320,"height":568},"status":{"x":0,"y":0,"width":0,"height":0},"summary":{"x":0,"y":0,"width":0,"height":0},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":0,"composer":{"x":10,"y":439,"width":300,"height":91},"composerText":{"x":10,"y":448,"width":300,"height":66},"conversation":{"x":10,"y":52,"width":300,"height":478},"conversationScroll":{"height":16,"scrollHeight":220},"elicitation":{"height":341,"scrollHeight":1025,"scrollTop":0},"documentWidth":320}
+=== long phone elicitation answers submitted (320x568) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+controls: [{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0/0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+action: POST /api/actions [{"action":"respond-elicitation","session_id":"plan-session","elicitation_id":"long-question","response":{"action":"accept","content":{"question_0":"0","question_1":"0","question_2":"4"}},"command_id":null}]
+layout: {"viewport":{"width":320,"height":568},"status":{"x":0,"y":0,"width":0,"height":0},"summary":{"x":0,"y":0,"width":0,"height":0},"subagents":{"x":0,"y":0,"width":0,"height":0},"summaryToSubagents":0,"composer":{"x":10,"y":439,"width":300,"height":91},"composerText":{"x":10,"y":448,"width":300,"height":66},"conversation":{"x":10,"y":52,"width":300,"height":478},"conversationScroll":{"height":16,"scrollHeight":220},"elicitation":{"height":341,"scrollHeight":1025,"scrollTop":457},"documentWidth":320}
+=== multiline phone question remains reachable (320x568) ===
+Plan mode browser test
+Live
+Earlier messages
+◆
+Agent
+12:00:00 AM
+
+Ready to plan.
+
+New messages ↓
+Choose an architecture
+
+This answer is needed before the turn can continue.
+
+Consider each answer before submitting.
+
+Question 1/1 · 1 unanswered
+
+How should we handle JPEG support given that our existing linearization differs?
+A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences. A long explanation of the differences.
+Final authored line
+Pick one, or provide another architecture below.
+No answer
+Blue
+Blue/green deployment
+Green
+Greenfield deployment
+Submit all
+Decline
+Cancel
+controls: [{"id":null,"text":null,"value":"","checked":false,"visible":true,"disabled":false},{"id":null,"text":null,"value":"blue","checked":true,"visible":true,"disabled":false},{"id":null,"text":null,"value":"green","checked":false,"visible":true,"disabled":false},{"id":null,"text":"Submit all","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"←","value":"","checked":null,"visible":false,"disabled":true},{"id":null,"text":"→","value":"","checked":null,"visible":false,"disabled":true},{"id":null,"text":"Decline","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"Cancel","value":"","checked":null,"visible":true,"disabled":false},{"id":null,"text":"Go back","value":"","checked":null,"visible":false,"disabled":false},{"id":null,"text":"Submit anyway","value":"","checked":null,"visible":false,"disabled":false},{"id":"conversation-status","text":"Shell commands\n              \n            \n            \n              Queued prompts\n              \n              Shell commands\n              \n              Background tasks\n              \n            \n          \n          Subagents · 0/0","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Send","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
+layout: {"width":278,"height":1080,"scrollWidth":278,"clientWidth":278,"whiteSpace":"pre-wrap"}

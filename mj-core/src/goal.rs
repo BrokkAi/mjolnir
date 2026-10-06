@@ -353,6 +353,7 @@ mod tests {
             .unwrap();
         assert!(state.snapshot.is_none());
     }
+    // Hard-won: dc436f0c: Claude bridge 0.84 moved goal metadata and Mjolnir stopped reading it
     #[test]
     fn reads_claude_goal_metadata_under_the_air_extension() {
         // claude-agent-acp 0.84.0 sends goal controls and snapshots only

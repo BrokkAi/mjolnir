@@ -115,6 +115,7 @@ export default defineConfig({
           label: 'Configure',
           items: [
             { label: 'Configuration reference', slug: 'configuration' },
+            { label: 'GitHub App credentials', slug: 'github-app' },
           ],
         },
         {

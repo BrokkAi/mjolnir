@@ -62,7 +62,6 @@ impl ReviewSlot {
         RuntimeReviewView {
             session_id: session_id.to_owned(),
             questions: self.questions().collect(),
-            tier: self.driver.tier(),
             phase: self.driver.phase().clone(),
             roles: self.driver.roles(),
             // A review that needed no reviewer (nothing changed, or only a

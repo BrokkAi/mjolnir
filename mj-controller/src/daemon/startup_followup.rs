@@ -173,6 +173,7 @@ mod tests {
             })
     }
 
+    // Hard-won: 89874f12: the worker rejected colon-delimited startup IDs and retried forever.
     #[test]
     fn startup_step_ids_satisfy_the_worker_relay_identifier_rule() {
         for group in [

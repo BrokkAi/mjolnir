@@ -1,0 +1,850 @@
+=== initial advertised options (1 session card configuration) ===
+[
+  {
+    "key": "model",
+    "label": "model",
+    "current": "sonnet",
+    "choices": [
+      {
+        "value": "sonnet",
+        "name": "Claude Sonnet"
+      },
+      {
+        "value": "opus",
+        "name": "Claude Opus"
+      }
+    ]
+  },
+  {
+    "key": "effort",
+    "label": "effort",
+    "current": "high",
+    "choices": [
+      {
+        "value": "high",
+        "name": "High"
+      },
+      {
+        "value": "max",
+        "name": "Maximum"
+      }
+    ]
+  }
+]
+=== updated advertised options (1 session card configuration) ===
+[
+  {
+    "key": "model",
+    "label": "model",
+    "current": "opus",
+    "choices": [
+      {
+        "value": "sonnet",
+        "name": "Claude Sonnet"
+      },
+      {
+        "value": "opus",
+        "name": "Claude Opus"
+      }
+    ]
+  },
+  {
+    "key": "effort",
+    "label": "effort",
+    "current": "max",
+    "choices": [
+      {
+        "value": "high",
+        "name": "High"
+      },
+      {
+        "value": "max",
+        "name": "Maximum"
+      }
+    ]
+  }
+]
+=== live container session with a second workspace (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "subagent_session_ids": [
+    "child-1"
+  ],
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "running",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": true,
+  "has_checkpoint": false,
+  "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+  "conversation_available": false,
+  "prompt_images_supported": false,
+  "compatible_resume_targets": [
+    "podman"
+  ],
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "live",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "activity_details": {
+    "kind": "idle"
+  },
+  "chat_phase": "idle",
+  "is_idle": true,
+  "activity_state": {
+    "state": "idle"
+  },
+  "activity": "<relative activity clock>",
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    },
+    {
+      "name": "review",
+      "description": "review the finished turn now, or report how review is configured",
+      "source": "mj",
+      "argument": "status"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": false,
+    "prompt": true,
+    "run_shell": true,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": true,
+    "destroy": true,
+    "rename": true,
+    "resume": false,
+    "move_session": true,
+    "set_config": true,
+    "set_plan_mode": false,
+    "change_workspace": true,
+    "container_settings": true,
+    "restart": true,
+    "interrupt_all": false
+  }
+}
+=== only workspace (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "subagent_session_ids": [
+    "child-1"
+  ],
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "running",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": true,
+  "has_checkpoint": false,
+  "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+  "conversation_available": false,
+  "prompt_images_supported": false,
+  "compatible_resume_targets": [
+    "podman"
+  ],
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "live",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "activity_details": {
+    "kind": "idle"
+  },
+  "chat_phase": "idle",
+  "is_idle": true,
+  "activity_state": {
+    "state": "idle"
+  },
+  "activity": "<relative activity clock>",
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    },
+    {
+      "name": "review",
+      "description": "review the finished turn now, or report how review is configured",
+      "source": "mj",
+      "argument": "status"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": false,
+    "prompt": true,
+    "run_shell": true,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": true,
+    "destroy": true,
+    "rename": true,
+    "resume": false,
+    "move_session": true,
+    "set_config": true,
+    "set_plan_mode": false,
+    "change_workspace": false,
+    "container_settings": true,
+    "restart": true,
+    "interrupt_all": false
+  }
+}
+=== turn running in child session (2 session cards) ===
+{
+  "parent": {
+    "subagents": {
+      "mode": "native"
+    },
+    "targeted_turn_control_supported": false,
+    "retry_assessment_pending": false,
+    "id": "session-1",
+    "publication_state": "unknown",
+    "workspace_id": "default",
+    "title": "Phone launch",
+    "subagent_session_ids": [
+      "child-1"
+    ],
+    "harness_kind": "codex",
+    "profile_id": "codex",
+    "bundle_id": "project",
+    "target_id": "podman",
+    "state": "running",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T00:00:00Z",
+    "has_error": true,
+    "has_checkpoint": false,
+    "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+    "conversation_available": false,
+    "prompt_images_supported": false,
+    "compatible_resume_targets": [
+      "podman"
+    ],
+    "project_label": "project",
+    "project_key": "1c8e6dc679624037",
+    "display_location": "podman",
+    "lifecycle": "live",
+    "transitioning": false,
+    "latest_event_ordinal": 0,
+    "activity_details": {
+      "kind": "idle"
+    },
+    "chat_phase": "idle",
+    "is_idle": true,
+    "activity_state": {
+      "state": "idle"
+    },
+    "activity": "<relative activity clock>",
+    "available_commands": [
+      {
+        "name": "help",
+        "description": "show available Mjolnir and agent commands",
+        "source": "mj"
+      },
+      {
+        "name": "detach",
+        "description": "leave the conversation without stopping the worker",
+        "source": "mj"
+      },
+      {
+        "name": "review",
+        "description": "review the finished turn now, or report how review is configured",
+        "source": "mj",
+        "argument": "status"
+      }
+    ],
+    "capabilities": {
+      "clear_context": false,
+      "open": false,
+      "prompt": true,
+      "run_shell": true,
+      "interrupt_turn": false,
+      "cancel_operation": false,
+      "suspend": true,
+      "destroy": true,
+      "rename": true,
+      "resume": false,
+      "move_session": true,
+      "set_config": true,
+      "set_plan_mode": false,
+      "change_workspace": true,
+      "container_settings": true,
+      "restart": true,
+      "interrupt_all": true
+    }
+  },
+  "child": {
+    "subagents": {
+      "mode": "native"
+    },
+    "targeted_turn_control_supported": false,
+    "retry_assessment_pending": false,
+    "id": "child-1",
+    "publication_state": "unknown",
+    "workspace_id": "default",
+    "title": "Phone launch",
+    "subagent_parent_id": "session-1",
+    "subagent_task_name": "piece",
+    "harness_kind": "codex",
+    "profile_id": "codex",
+    "bundle_id": "project",
+    "target_id": "podman",
+    "state": "running",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T00:00:00Z",
+    "has_error": true,
+    "has_checkpoint": false,
+    "configuration_issue": "Session \"child-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+    "conversation_available": false,
+    "prompt_images_supported": false,
+    "compatible_resume_targets": [
+      "podman"
+    ],
+    "project_label": "project",
+    "project_key": "1c8e6dc679624037",
+    "display_location": "podman",
+    "lifecycle": "live",
+    "transitioning": false,
+    "latest_event_ordinal": 0,
+    "activity_details": {
+      "kind": "turn",
+      "turn_started_at_ms": 1000,
+      "step_started_at_ms": 1000
+    },
+    "chat_phase": "running",
+    "is_idle": false,
+    "activity_state": {
+      "state": "turn",
+      "started_at_ms": 1000
+    },
+    "activity": "<relative activity clock>",
+    "available_commands": [
+      {
+        "name": "help",
+        "description": "show available Mjolnir and agent commands",
+        "source": "mj"
+      },
+      {
+        "name": "detach",
+        "description": "leave the conversation without stopping the worker",
+        "source": "mj"
+      },
+      {
+        "name": "review",
+        "description": "review the finished turn now, or report how review is configured",
+        "source": "mj",
+        "argument": "status"
+      }
+    ],
+    "capabilities": {
+      "clear_context": false,
+      "open": false,
+      "prompt": true,
+      "run_shell": true,
+      "interrupt_turn": true,
+      "cancel_operation": false,
+      "suspend": true,
+      "destroy": true,
+      "rename": true,
+      "resume": false,
+      "move_session": true,
+      "set_config": true,
+      "set_plan_mode": false,
+      "change_workspace": true,
+      "container_settings": true,
+      "restart": true,
+      "interrupt_all": true
+    }
+  }
+}
+=== bare target (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "subagent_session_ids": [
+    "child-1"
+  ],
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "running",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": true,
+  "has_checkpoint": false,
+  "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+  "conversation_available": false,
+  "prompt_images_supported": false,
+  "incompatible_resume_targets": [
+    "podman"
+  ],
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "live",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "activity_details": {
+    "kind": "idle"
+  },
+  "chat_phase": "idle",
+  "is_idle": true,
+  "activity_state": {
+    "state": "idle"
+  },
+  "activity": "<relative activity clock>",
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    },
+    {
+      "name": "review",
+      "description": "review the finished turn now, or report how review is configured",
+      "source": "mj",
+      "argument": "status"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": false,
+    "prompt": true,
+    "run_shell": true,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": true,
+    "destroy": true,
+    "rename": true,
+    "resume": false,
+    "move_session": true,
+    "set_config": true,
+    "set_plan_mode": false,
+    "change_workspace": true,
+    "container_settings": false,
+    "restart": true,
+    "interrupt_all": false
+  }
+}
+=== stopped session without recovery copy (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "subagent_session_ids": [
+    "child-1"
+  ],
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "suspended",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": false,
+  "has_checkpoint": false,
+  "conversation_available": false,
+  "prompt_images_supported": false,
+  "incompatible_resume_targets": [
+    "podman"
+  ],
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "suspended",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "activity_details": {
+    "kind": "idle"
+  },
+  "chat_phase": "idle",
+  "is_idle": false,
+  "activity_state": {
+    "state": "idle"
+  },
+  "activity": "<relative activity clock>",
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": false,
+    "prompt": false,
+    "run_shell": false,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": false,
+    "destroy": true,
+    "rename": true,
+    "resume": true,
+    "move_session": false,
+    "set_config": false,
+    "set_plan_mode": false,
+    "change_workspace": true,
+    "container_settings": false,
+    "restart": false,
+    "interrupt_all": false
+  }
+}
+=== last top-level message time (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "running",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": true,
+  "has_checkpoint": false,
+  "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\"; missing target template \"podman\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+  "preview": [
+    "label: line",
+    "label: line",
+    "label: line"
+  ],
+  "conversation_available": true,
+  "prompt_images_supported": false,
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "live",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "last_message_at_ms": 2000,
+  "chat_phase": "idle",
+  "is_idle": false,
+  "activity_state": {
+    "state": "unknown",
+    "last_known": {
+      "state": "idle"
+    }
+  },
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": true,
+    "prompt": false,
+    "run_shell": false,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": true,
+    "destroy": true,
+    "rename": true,
+    "resume": false,
+    "move_session": true,
+    "set_config": false,
+    "set_plan_mode": false,
+    "change_workspace": false,
+    "container_settings": false,
+    "restart": true,
+    "interrupt_all": false
+  },
+  "activity": "<relative activity clock>"
+}
+=== messages without recorded times (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "running",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": true,
+  "has_checkpoint": false,
+  "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\"; missing target template \"podman\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+  "preview": [
+    "label: line",
+    "label: line"
+  ],
+  "conversation_available": true,
+  "prompt_images_supported": false,
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "live",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "chat_phase": "idle",
+  "is_idle": false,
+  "activity_state": {
+    "state": "unknown",
+    "last_known": {
+      "state": "idle"
+    }
+  },
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": true,
+    "prompt": false,
+    "run_shell": false,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": true,
+    "destroy": true,
+    "rename": true,
+    "resume": false,
+    "move_session": true,
+    "set_config": false,
+    "set_plan_mode": false,
+    "change_workspace": false,
+    "container_settings": false,
+    "restart": true,
+    "interrupt_all": false
+  },
+  "activity": "<relative activity clock>"
+}
+=== conversation not available (1 session card) ===
+{
+  "subagents": {
+    "mode": "native"
+  },
+  "targeted_turn_control_supported": false,
+  "retry_assessment_pending": false,
+  "id": "session-1",
+  "publication_state": "unknown",
+  "workspace_id": "default",
+  "title": "Phone launch",
+  "harness_kind": "codex",
+  "profile_id": "codex",
+  "bundle_id": "project",
+  "target_id": "podman",
+  "state": "running",
+  "created_at": "2026-08-14T00:00:00Z",
+  "updated_at": "2026-08-14T00:00:00Z",
+  "has_error": true,
+  "has_checkpoint": false,
+  "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\"; missing target template \"podman\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+  "conversation_available": false,
+  "prompt_images_supported": false,
+  "project_label": "project",
+  "project_key": "1c8e6dc679624037",
+  "display_location": "podman",
+  "lifecycle": "live",
+  "transitioning": false,
+  "latest_event_ordinal": 0,
+  "chat_phase": "idle",
+  "is_idle": false,
+  "activity_state": {
+    "state": "unknown",
+    "last_known": {
+      "state": "idle"
+    }
+  },
+  "available_commands": [
+    {
+      "name": "help",
+      "description": "show available Mjolnir and agent commands",
+      "source": "mj"
+    },
+    {
+      "name": "detach",
+      "description": "leave the conversation without stopping the worker",
+      "source": "mj"
+    }
+  ],
+  "capabilities": {
+    "clear_context": false,
+    "open": false,
+    "prompt": false,
+    "run_shell": false,
+    "interrupt_turn": false,
+    "cancel_operation": false,
+    "suspend": true,
+    "destroy": true,
+    "rename": true,
+    "resume": false,
+    "move_session": true,
+    "set_config": false,
+    "set_plan_mode": false,
+    "change_workspace": false,
+    "container_settings": false,
+    "restart": true,
+    "interrupt_all": false
+  },
+  "activity": "<relative activity clock>"
+}
+=== phone launch before provisioning completes (1 session card and action) ===
+{
+  "session": {
+    "subagents": {
+      "mode": "native"
+    },
+    "targeted_turn_control_supported": false,
+    "retry_assessment_pending": false,
+    "id": "0123456789abcdef0123456789abcdef",
+    "publication_state": "unknown",
+    "workspace_id": "default",
+    "title": "Phone launch",
+    "harness_kind": "codex",
+    "profile_id": "codex",
+    "bundle_id": "project",
+    "target_id": "podman",
+    "state": "provisioning",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T00:00:00Z",
+    "has_error": true,
+    "has_checkpoint": false,
+    "configuration_issue": "Session \"0123456789abcdef0123456789abcdef\" needs configuration repair: missing profile \"codex\"; missing bundle \"project\"; missing target template \"podman\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+    "conversation_available": false,
+    "prompt_images_supported": false,
+    "project_label": "project",
+    "project_key": "1c8e6dc679624037",
+    "display_location": "podman",
+    "lifecycle": "starting",
+    "transitioning": true,
+    "latest_event_ordinal": 0,
+    "chat_phase": "idle",
+    "is_idle": false,
+    "activity_state": {
+      "state": "unknown",
+      "last_known": {
+        "state": "idle"
+      }
+    },
+    "available_commands": [
+      {
+        "name": "help",
+        "description": "show available Mjolnir and agent commands",
+        "source": "mj"
+      },
+      {
+        "name": "detach",
+        "description": "leave the conversation without stopping the worker",
+        "source": "mj"
+      }
+    ],
+    "capabilities": {
+      "clear_context": false,
+      "open": false,
+      "prompt": false,
+      "run_shell": false,
+      "interrupt_turn": false,
+      "cancel_operation": false,
+      "suspend": true,
+      "destroy": true,
+      "rename": false,
+      "resume": false,
+      "move_session": false,
+      "set_config": false,
+      "set_plan_mode": false,
+      "change_workspace": false,
+      "container_settings": false,
+      "restart": true,
+      "interrupt_all": false
+    },
+    "activity": "<relative activity clock>"
+  },
+  "action": {
+    "active": true,
+    "session_id": "0123456789abcdef0123456789abcdef"
+  }
+}

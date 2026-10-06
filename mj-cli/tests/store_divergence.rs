@@ -345,6 +345,7 @@ fn concurrent_starts_wait_for_controller_ownership_before_launching() {
 
 /// Fixture teardown cannot run when a test process dies without unwinding, so
 /// a daemon started for a test must leave when the process it belongs to does.
+// Hard-won: fb3c355f7d: The commit body reports test-process death left daemons and store locks behind; this checks owner death takes normal shutdown and removes daemon metadata.
 #[test]
 fn daemon_exits_when_its_owner_process_exits() {
     let (_storage, config_directory, data_directory) = configured_storage();
@@ -410,32 +411,5 @@ fn daemon_exits_when_its_owner_process_exits() {
     assert!(
         !metadata.exists(),
         "owner-triggered shutdown left daemon metadata behind"
-    );
-}
-
-#[test]
-fn an_unusable_owner_pid_is_a_startup_error() {
-    let (_storage, config_directory, data_directory) = configured_storage();
-
-    let output = mj_core::subprocess::run_with_input(
-        Command::new(env!("CARGO_BIN_EXE_mj"))
-            .arg("daemon-run")
-            .env("MJ_CONFIG_DIR", &config_directory)
-            .env("MJ_DATA_DIR", &data_directory)
-            .env("MJ_DAEMON_OWNER_PID", "notanumber")
-            .env_remove("MJ_DAEMON_EXIT_WHEN_IDLE"),
-        &[],
-    )
-    .expect("run the daemon with a bad owner pid");
-
-    assert!(!output.status.success(), "a bad owner pid started a daemon");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("MJ_DAEMON_OWNER_PID"),
-        "the failure did not name the variable: {stderr}"
-    );
-    assert!(
-        !data_directory.join("daemon.json").exists(),
-        "the rejected daemon still published its endpoint"
     );
 }

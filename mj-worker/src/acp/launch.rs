@@ -10,24 +10,15 @@ pub struct SubagentMcpSocket {
     pub profile_registration: bool,
 }
 
-/// Approval ownership is resolved from the worker root before harness launch.
-/// This is local state, not an extension of the persisted reviewer wire format.
+/// One configured MCP server exposed to the reviewer harness.
 #[derive(Debug, Clone)]
 pub struct ReviewerMcpServer {
     server: mj_core::worker_launch::ReviewMcpServer,
-    auto_approve: bool,
 }
 
 impl ReviewerMcpServer {
-    pub fn new(
-        server: mj_core::worker_launch::ReviewMcpServer,
-        worker_root: &std::path::Path,
-    ) -> Self {
-        let auto_approve = server.is_review_dispatch(&worker_root.join("hel"));
-        Self {
-            server,
-            auto_approve,
-        }
+    pub fn new(server: mj_core::worker_launch::ReviewMcpServer) -> Self {
+        Self { server }
     }
 }
 
@@ -43,9 +34,9 @@ pub struct LaunchSpec {
     pub cwd: PathBuf,
     pub additional_directories: Vec<PathBuf>,
     pub project_memory: Option<ProjectMemoryLaunchConfig>,
-    /// Extra stdio MCP servers this session gets, beyond project memory. A
-    /// turn review's reviewing agents get Bifrost this way; the primary
-    /// session gets none.
+
+    /// Extra stdio MCP servers this session gets beyond project memory.
+    /// Reviewers can receive configured servers here; the primary gets none.
     pub extra_mcp_servers: Vec<ReviewerMcpServer>,
     /// Delegation policy independently controls native tool suppression.
     pub subagent_policy: mj_core::subagent::SubagentPolicy,
@@ -113,7 +104,7 @@ impl LaunchSpec {
     }
 }
 
-pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
+pub(super) fn project_history_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     if spec
         .project_memory
         .as_ref()
@@ -127,20 +118,12 @@ pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     if spec.harness == HarnessKind::Claude && memory.history_socket.is_none() {
         return Vec::new();
     }
-    let mut args = vec![
-        "worker".into(),
-        "memory-mcp".into(),
-        "--root".into(),
-        memory.root.to_string_lossy().into_owned(),
-    ];
+    let mut args = vec!["worker".into(), "memory-mcp".into()];
     if let Some(socket) = &memory.history_socket {
         args.extend([
             "--history-socket".into(),
             socket.to_string_lossy().into_owned(),
         ]);
-    }
-    if spec.harness == HarnessKind::Claude {
-        args.push("--native-notes".into());
     }
     vec![McpServer::Stdio(approve_owned_mcp(
         spec,
@@ -150,7 +133,7 @@ pub(super) fn project_memory_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
 
 pub(super) fn session_request_meta(
     spec: &LaunchSpec,
-    include_project_memory: bool,
+    include_history_tools: bool,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     if spec.harness == HarnessKind::Codex {
         let asking = spec
@@ -213,8 +196,8 @@ pub(super) fn session_request_meta(
     }
     if spec.execution_policy == ExecutionPolicy::ConfiguredApprovals {
         let mut allowed = Vec::new();
-        if include_project_memory {
-            for server in project_memory_mcp(spec) {
+        if include_history_tools {
+            for server in project_history_mcp(spec) {
                 if let McpServer::Stdio(server) = server {
                     allowed.push(format!("mcp__{}__*", server.name));
                 }
@@ -229,12 +212,6 @@ pub(super) fn session_request_meta(
                     .map(|tool| format!("mcp__{}__{tool}", mj_core::subagent::SUBAGENT_MCP_SERVER)),
             );
         }
-        allowed.extend(
-            spec.extra_mcp_servers
-                .iter()
-                .filter(|server| server.auto_approve)
-                .map(|server| format!("mcp__{}__*", server.server.name)),
-        );
         if !allowed.is_empty() {
             options.insert("allowedTools".to_owned(), serde_json::json!(allowed));
         }
@@ -246,7 +223,7 @@ pub(super) fn session_request_meta(
     )]))
 }
 
-/// The reviewing agents' analyzer servers, for harnesses that accept a server
+/// The reviewer's configured MCP servers, for harnesses that accept a server
 /// over ACP. Claude and Kimi read their staged profile instead, which the
 /// controller writes while staging the reviewer.
 pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
@@ -259,11 +236,7 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
                 let server = &entry.server;
                 let registration = McpServerStdio::new(server.name.clone(), server.command.clone())
                     .args(server.args.clone());
-                McpServer::Stdio(if entry.auto_approve {
-                    approve_owned_mcp(spec, registration)
-                } else {
-                    registration
-                })
+                McpServer::Stdio(registration)
             })
             .collect()
     } else {
@@ -309,22 +282,22 @@ fn approve_owned_mcp(spec: &LaunchSpec, server: McpServerStdio) -> McpServerStdi
     }
 }
 
-fn session_mcp(spec: &LaunchSpec, include_project_memory: bool) -> Vec<McpServer> {
+fn session_mcp(spec: &LaunchSpec, include_history_tools: bool) -> Vec<McpServer> {
     let mut servers = extra_mcp(spec);
-    if include_project_memory {
-        servers.extend(project_memory_mcp(spec));
+    if include_history_tools {
+        servers.extend(project_history_mcp(spec));
     }
     servers
 }
 
 pub(super) fn new_session_request(
     spec: &LaunchSpec,
-    include_project_memory: bool,
+    include_history_tools: bool,
 ) -> NewSessionRequest {
     let request = NewSessionRequest::new(spec.cwd.clone())
         .additional_directories(spec.additional_directories.clone())
-        .meta(session_request_meta(spec, include_project_memory));
-    request.mcp_servers(session_mcp(spec, include_project_memory))
+        .meta(session_request_meta(spec, include_history_tools));
+    request.mcp_servers(session_mcp(spec, include_history_tools))
 }
 
 pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> LoadSessionRequest {
@@ -334,7 +307,7 @@ pub(super) fn load_session_request(spec: &LaunchSpec, session_id: SessionId) -> 
         // that opens the session again is a new harness process: Codex builds
         // the resumed thread's MCP set from this request and recovers nothing
         // it was not given (#1085). Replay filtering belongs to the notification
-        // handler; omitting memory here removes its tools after restart.
+        // handler; omitting history here removes its tools after restart.
         .mcp_servers(session_mcp(spec, true))
         .meta(session_request_meta(spec, true))
 }

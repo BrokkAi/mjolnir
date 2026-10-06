@@ -1,5 +1,7 @@
 use super::*;
 use crate::fit_session_name;
+use crate::session_cpu_report::CpuMetric;
+use mj_chat::components::{ButtonColumn, ChoiceList, ColumnSplit, ControlKind, TabStrip};
 
 /// Button labels for a confirmation dialog, ordered Cancel first and the primary
 /// action last. This is the single declaration used by both key handling and
@@ -22,6 +24,10 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
             intent: DismissalIntent::CancelImport,
             ..
         } => &["Keep importing", "Cancel import"],
+        Confirmation::InstallMbx {
+            upgrading: true, ..
+        } => &["Cancel", "Upgrade mbx"],
+        Confirmation::InstallMbx { .. } => &["Cancel", "Install mbx"],
         Confirmation::ConvertRawCheckout { .. } => &["Cancel", "Confirm"],
         Confirmation::DestroyStopped {
             delete_branch_available: true,
@@ -134,6 +140,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::InterruptWork { .. }
             | Confirmation::InterruptAll { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
+            | Confirmation::InstallMbx { .. }
             | Confirmation::ConvertRawCheckout { .. }
     ) {
         0
@@ -526,14 +533,24 @@ pub(crate) fn render_session_cpu_report(
     dialog: &SessionCpuReportDialog,
     surfaces: &mut FrameSurfaces,
 ) {
-    let lines = crate::session_cpu_report::report_lines(dashboard);
-    let popup_height = u16::try_from(lines.len().saturating_add(5).clamp(8, 30)).unwrap_or(30);
+    let metric = dialog.metric.get();
+    let groups = crate::session_cpu_report::report_groups(dashboard, metric);
+    let group_index = super::reconcile_session_cpu_report(dashboard, dialog, &groups);
+    // Sized for the longest machine, so switching tabs never resizes it.
+    let popup_height = u16::try_from(
+        groups
+            .iter()
+            .map(|group| group.lines.len())
+            .max()
+            .map_or(9, |lines| lines.saturating_add(8).clamp(9, 30)),
+    )
+    .unwrap_or(30);
     let popup = centered_modal(frame, surfaces, 80, popup_height, area);
     let inner = popup.inner(ratatui::layout::Margin {
         horizontal: 1,
         vertical: 1,
     });
-    if inner.height < 2 {
+    if inner.height < 4 {
         clear_dialog_form_geometry(&mut dialog.form.borrow_mut());
         return;
     }
@@ -542,29 +559,95 @@ pub(crate) fn render_session_cpu_report(
     let title =
         dismissible_modal_title(&mut form, popup, "CPU by session", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
-    let list_area = Rect::new(
+    let tabs_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    // A blank row parts the tabs from the list.
+    let body_area = Rect::new(
         inner.x,
-        inner.y,
+        inner.y.saturating_add(2),
         inner.width,
-        inner.height.saturating_sub(2),
+        inner.height - 4,
     );
+    let hint_area = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
     let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-    if lines.is_empty() {
+    let check = theme::glyphs().check;
+    let mark = |shown: CpuMetric, label: &str| {
+        if shown == metric {
+            format!("{check} {label}")
+        } else {
+            format!(
+                "{} {label}",
+                " ".repeat(ratatui::text::Span::raw(check).width())
+            )
+        }
+    };
+    let hourly = mark(CpuMetric::Hourly, "Hourly");
+    let recent = mark(CpuMetric::Recent, "Recent");
+    let metric_buttons = [
+        (DialogControl::SessionCpuReportHourly, hourly.as_str(), true),
+        (DialogControl::SessionCpuReportRecent, recent.as_str(), true),
+    ];
+    let ColumnSplit {
+        body: list_area,
+        actions: metric_area,
+    } = ButtonColumn::split(body_area, &metric_buttons);
+    // Padded like a button, so each tab reads as one.
+    let labels = groups
+        .iter()
+        .map(|group| format!("  {}  ", group.tab_label()))
+        .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let selected_tab = group_index.unwrap_or(0);
+    if groups.is_empty() {
+        TabStrip::render_enabled(
+            frame,
+            tabs_area,
+            &label_refs,
+            0,
+            false,
+            &mut form,
+            DialogControl::SessionCpuReportTabs,
+        );
+        form.declare_with_enabled(
+            DialogControl::SessionCpuReportRows,
+            ControlKind::ChoiceList {
+                len: 0,
+                selected: 0,
+            },
+            false,
+        );
         frame.render_widget(
-            Paragraph::new("No live sessions.").style(theme::muted()),
+            Paragraph::new("No active sessions.").style(theme::muted()),
             list_area,
         );
     } else {
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let total = paragraph.line_count(list_area.width.max(1));
-        let max_scroll = total.saturating_sub(usize::from(list_area.height));
-        dialog.max_scroll.set(max_scroll);
-        let scroll = dialog.scroll.min(max_scroll);
-        frame.render_widget(
-            paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        let group = &groups[selected_tab];
+        TabStrip::render(
+            frame,
+            tabs_area,
+            &label_refs,
+            selected_tab,
+            &mut form,
+            DialogControl::SessionCpuReportTabs,
+        );
+        ChoiceList::render_with_rows(
+            frame,
             list_area,
+            &group.lines,
+            dialog.selected_row.get(),
+            &group.row_map,
+            &[],
+            &mut form,
+            DialogControl::SessionCpuReportRows,
         );
     }
+    ButtonColumn::render(frame, metric_area, &metric_buttons, &mut form);
+    if form.focused().is_none() && !groups.is_empty() {
+        form.focus(DialogControl::SessionCpuReportRows);
+    }
+    frame.render_widget(
+        Paragraph::new("←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes").style(theme::muted()),
+        hint_area,
+    );
     Dialog::render_actions(
         frame,
         footer,
@@ -1269,6 +1352,39 @@ pub(crate) fn confirmation_body(
                 Line::raw("Keep importing, or cancel the operation?"),
             ],
         ),
+        Confirmation::InstallMbx {
+            host,
+            upgrading,
+            profile_file,
+            profile_warning,
+            manual_path_line,
+            ..
+        } => {
+            let mut lines = vec![
+                Line::raw(format!(
+                    "This installs the pinned mbx release on {host} and runs `mbx setup --yes`."
+                )),
+                Line::raw(""),
+                Line::raw(format!("It edits `{profile_file}` to add mbx to PATH.")),
+            ];
+            if let Some(warning) = profile_warning {
+                lines.push(Line::raw(""));
+                lines.push(Line::raw(warning.clone()));
+            } else {
+                lines.push(Line::raw("New login shells will pick up the PATH change."));
+            }
+            if let Some(path_line) = manual_path_line {
+                lines.push(Line::raw(path_line.clone()));
+            }
+            (
+                if *upgrading {
+                    " Upgrade mbx? "
+                } else {
+                    " Install mbx? "
+                },
+                lines,
+            )
+        }
         Confirmation::ConvertRawCheckout { preview, .. } => {
             let mut lines = vec![Line::raw(preview.summary_line()), Line::raw("")];
             for warning in preview.warning_lines() {
@@ -1519,6 +1635,7 @@ pub(crate) fn render_confirmation(
         | Confirmation::LaunchFailed { .. }
         | Confirmation::RepairRepositoryRemotes { .. } => 16,
         Confirmation::Dismiss { .. } => 8,
+        Confirmation::InstallMbx { .. } => 12,
         Confirmation::ConvertRawCheckout { .. } => 16,
         Confirmation::CloseFailed { .. } => 12,
         Confirmation::DiscardSinceCheckpoint { .. } => 12,

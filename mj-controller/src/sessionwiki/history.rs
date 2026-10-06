@@ -40,10 +40,22 @@ pub(crate) async fn execute(request: HistoryRequest) -> HistoryResult {
     }
 }
 
-fn resolve(connection: &rusqlite::Connection, id: &str) -> Result<index::SessionRow> {
+fn resolve(
+    connection: &rusqlite::Connection,
+    id: &str,
+    ownership: &super::top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
+) -> Result<index::SessionRow> {
     ensure!(!id.is_empty() && id.len() <= 256, "invalid session id");
     let mut rows = index::resolve(connection, id)?;
     rows.retain(|row| row.session_id.starts_with(id));
+    let mut visible = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !super::top_level::is_child(&row, ownership, cache)? {
+            visible.push(row);
+        }
+    }
+    let mut rows = visible;
     if let Some(position) = rows.iter().position(|row| row.session_id == id) {
         return Ok(rows.remove(position));
     }
@@ -73,7 +85,9 @@ fn query(request: &HistoryRequest) -> Result<Value> {
     );
     let connection = super::open_readonly()?;
     connection.busy_timeout(std::time::Duration::from_secs(2))?;
-    let value = query_in(&connection, request)?;
+    let ownership = super::top_level::current_snapshot()?;
+    let cache = crate::import::NativeScanCache::shared();
+    let value = query_in_with(&connection, request, &ownership, &cache)?;
     Ok(json!({
         "data": value,
         "index_state": super::index_state(),
@@ -82,29 +96,62 @@ fn query(request: &HistoryRequest) -> Result<Value> {
     }))
 }
 
+#[cfg(test)]
 fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Result<Value> {
+    query_in_with(
+        connection,
+        request,
+        &super::top_level::Snapshot::default(),
+        &crate::import::NativeScanCache::new(),
+    )
+}
+
+pub(super) fn query_in_with(
+    connection: &rusqlite::Connection,
+    request: &HistoryRequest,
+    ownership: &super::top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
+) -> Result<Value> {
     use HistoryQuery::*;
     match &request.query {
         SearchSessions {
             query,
             limit: count,
         } => {
-            let rows = super::query_rows(query, limit(*count), &Default::default(), true)?;
+            let rows = super::query_rows_from(
+                connection,
+                query,
+                limit(*count),
+                &Default::default(),
+                true,
+                ownership,
+                cache,
+            )?;
             Ok(json!({"sessions":rows,"limit":limit(*count)}))
         }
         TraceFile { path, limit: count } => {
-            let rows =
-                index::sessions_for_file(connection, &path.replace('\\', "/"), limit(*count))?;
-            Ok(
-                json!({"sessions":rows.into_iter().map(|(row, matched)| json!({"session":row,"matched_path":matched})).collect::<Vec<_>>() }),
-            )
+            let candidates = index::sessions_for_file(
+                connection,
+                &path.replace('\\', "/"),
+                super::MAX_WIKI_LIMIT,
+            )?;
+            let mut rows = Vec::with_capacity(limit(*count));
+            for (row, matched) in candidates {
+                if rows.len() >= limit(*count) {
+                    break;
+                }
+                if !super::top_level::is_child(&row, ownership, cache)? {
+                    rows.push(json!({"session":row,"matched_path":matched}));
+                }
+            }
+            Ok(json!({"sessions":rows}))
         }
         SessionFiles {
             session_id,
             start,
             limit: count,
         } => {
-            let row = resolve(connection, session_id)?;
+            let row = resolve(connection, session_id, ownership, cache)?;
             let files = index::files_for(connection, &row.session_id)?;
             let end = start.saturating_add(limit(*count)).min(files.len());
             Ok(
@@ -119,12 +166,14 @@ fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Resu
                 .blame
                 .as_ref()
                 .context("target did not supply Git blame evidence")?,
+            ownership,
+            cache,
         ),
         GetSessionBrief {
             session_id,
             max_chars,
         } => {
-            let row = resolve(connection, session_id)?;
+            let row = resolve(connection, session_id, ownership, cache)?;
             let session = index::session_from_index(connection, &row)?;
             let text = sessionwiki::commands::brief_markdown(&session, budget(*max_chars), true);
             Ok(
@@ -139,7 +188,7 @@ fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Resu
             limit: count,
             max_chars,
         } => {
-            let row = resolve(connection, session_id)?;
+            let row = resolve(connection, session_id, ownership, cache)?;
             let session = index::session_from_index(connection, &row)?;
             Ok(read_page(
                 &session,
@@ -158,7 +207,7 @@ fn query_in(connection: &rusqlite::Connection, request: &HistoryRequest) -> Resu
             limit: count,
             max_chars,
         } => {
-            let row = resolve(connection, session_id)?;
+            let row = resolve(connection, session_id, ownership, cache)?;
             let session = index::session_from_index(connection, &row)?;
             let found = sessionwiki::grep::grep_session(
                 &session,
@@ -232,6 +281,8 @@ fn read_page(
 fn blame(
     connection: &rusqlite::Connection,
     evidence: &mj_core::history::BlameEvidence,
+    ownership: &super::top_level::Snapshot,
+    cache: &crate::import::NativeScanCache,
 ) -> Result<Value> {
     ensure!(
         evidence.porcelain.len() <= mj_core::history::MAX_BLAME_BYTES,
@@ -240,10 +291,12 @@ fn blame(
     let query = evidence.relative_path.to_string_lossy().replace('\\', "/");
     // sessions_touching uses SQL LIKE; intersect with the literal-path matcher
     // so '%' and '_' in a real file name cannot introduce unrelated candidates.
-    let ids: std::collections::BTreeSet<_> = index::sessions_for_file(connection, &query, 10_000)?
-        .into_iter()
-        .map(|(row, _)| row.session_id)
-        .collect();
+    let mut ids = std::collections::BTreeSet::new();
+    for (row, _) in index::sessions_for_file(connection, &query, 10_000)? {
+        if !super::top_level::is_child(&row, ownership, cache)? {
+            ids.insert(row.session_id);
+        }
+    }
     let candidates: Vec<_> = index::sessions_touching(connection, &query)?
         .into_iter()
         .filter(|candidate| ids.contains(&candidate.session_id))
@@ -378,15 +431,17 @@ mod tests {
         .unwrap();
         assert_eq!(files["files"][0], "/old/target/src/a_%.rs");
         assert_eq!(files["provenance_indexed"], false);
+        let ownership = super::super::top_level::Snapshot::default();
+        let cache = crate::import::NativeScanCache::new();
         assert!(
-            resolve(&connection, "session-")
+            resolve(&connection, "session-", &ownership, &cache)
                 .err()
                 .unwrap()
                 .to_string()
                 .contains("ambiguous")
         );
         assert!(
-            resolve(&connection, "absent")
+            resolve(&connection, "absent", &ownership, &cache)
                 .err()
                 .unwrap()
                 .to_string()
@@ -401,7 +456,7 @@ mod tests {
                 "0".repeat(40)
             ),
         };
-        let result = blame(&connection, &evidence).unwrap();
+        let result = blame(&connection, &evidence, &ownership, &cache).unwrap();
         assert_eq!(result["runs"][0]["status"], "confident");
         assert_eq!(result["runs"][1]["status"], "unattributed");
     }

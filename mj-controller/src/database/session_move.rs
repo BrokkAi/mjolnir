@@ -135,6 +135,27 @@ pub fn load_move_operation(session_id: &str) -> Result<Option<MoveOperation>> {
     load_move_operation_with(&connection, session_id)
 }
 
+/// Whether a durable in-place Move currently owns sub-agent admission closed.
+/// A worker actor uses this before repairing a closed gate on reconnect: an
+/// in-flight Move persists its phase before closing admission, so the durable
+/// row keeps reconnect repair from reopening it prematurely.
+pub fn has_active_in_place_move(session_id: &str) -> Result<bool> {
+    Ok(load_move_operation(session_id)?
+        .as_ref()
+        .is_some_and(move_holds_subagent_gate))
+}
+
+fn move_holds_subagent_gate(operation: &MoveOperation) -> bool {
+    operation.in_place
+        && matches!(
+            operation.phase,
+            mj_core::state::MovePhase::Preparing
+                | mj_core::state::MovePhase::ClosingSource
+                | mj_core::state::MovePhase::ResumingDestination
+                | mj_core::state::MovePhase::StartingQueue
+        )
+}
+
 pub(super) fn load_move_operation_with(
     connection: &Connection,
     session_id: &str,
@@ -482,6 +503,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 04d4b7f0: a completed move naming a removed harness stopped daemon startup.
     #[test]
     fn bulk_load_skips_a_move_intent_whose_harness_no_longer_decodes() {
         let directory = tempfile::tempdir().unwrap();
@@ -561,6 +583,7 @@ mod tests {
         assert!(!legacy.in_place);
     }
 
+    // Hard-won: 61db26ba: close failed on a completed move row after its harness was removed.
     #[test]
     fn per_session_load_treats_an_intent_whose_harness_no_longer_decodes_as_absent() {
         // The stop, checkpoint, recovery, and new-move paths each read the one
@@ -594,6 +617,7 @@ mod tests {
         );
     }
 
+    // Hard-won: c5f1cbad: completed removed-harness move rows wedged daemon startup.
     #[test]
     fn reaping_deletes_a_finished_move_only_once_its_checkpoint_archive_is_gone() {
         let directory = tempfile::tempdir().unwrap();
@@ -717,6 +741,33 @@ mod tests {
         assert!(intent.retains_checkpoint());
         intent.queue_admission_finished = true;
         assert!(!intent.retains_checkpoint());
+    }
+
+    #[test]
+    fn reconnect_repair_preserves_admission_for_active_in_place_moves_only() {
+        let session = super::super::tests::session("move-admission-repair", "project");
+        let mut intent = operation(&session);
+        intent.in_place = true;
+        for phase in [
+            MovePhase::Preparing,
+            MovePhase::ClosingSource,
+            MovePhase::ResumingDestination,
+            MovePhase::StartingQueue,
+        ] {
+            intent.phase = phase;
+            assert!(move_holds_subagent_gate(&intent), "{phase:?}");
+        }
+        for phase in [
+            MovePhase::Completed,
+            MovePhase::Failed,
+            MovePhase::Cancelled,
+        ] {
+            intent.phase = phase;
+            assert!(!move_holds_subagent_gate(&intent), "{phase:?}");
+        }
+        intent.in_place = false;
+        intent.phase = MovePhase::ClosingSource;
+        assert!(!move_holds_subagent_gate(&intent));
     }
 
     #[test]

@@ -330,15 +330,19 @@ impl DashboardState {
             &agent.name,
             &[agent.activity_label(), agent.availability.label()],
         );
+        let tools = mj_chat::chat::ToolDisplay::from_config(&self.config.advanced);
         let Some(pane) = self.native_agents.get_mut(id) else {
             return;
         };
         let block = Block::default().borders(Borders::ALL).title(title);
         let inner = block.inner(transcript_area);
         frame.render_widget(block, transcript_area);
-        let (lines, scroll) =
-            pane.transcript
-                .rich_tail_scrolled(inner.width, inner.height as usize, pane.scroll);
+        let (lines, scroll) = pane.transcript.rich_tail_scrolled(
+            inner.width,
+            inner.height as usize,
+            pane.scroll,
+            tools,
+        );
         pane.scroll = scroll;
         if pane.projection.transcript.is_empty() {
             frame.render_widget(Paragraph::new("No child transcript available yet."), inner);

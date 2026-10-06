@@ -732,219 +732,15 @@ pub(crate) fn render_help(
 mod tests {
     use super::*;
     use crate::Focus;
-    use crate::actions::COMMANDS;
-
     use crate::test_support::{
-        chord, dashboard_with_session, drawn, key, open_new_session_wizard, prefix_key, route,
-        running_session,
+        chord, dashboard_with_session, drawn, key, open_new_session_wizard, open_palette, point,
+        prefix_key, route, running_session,
     };
-
-    fn draw_all(dashboard: &mut DashboardState) -> String {
-        let mut rendered = drawn(dashboard, 200, 50).join("\n");
-        loop {
-            let before = match &dashboard.mode {
-                Mode::Help(overlay) => overlay.scroll,
-                _ => unreachable!(),
-            };
-            dashboard.handle_key(key(KeyCode::PageDown));
-            rendered.push_str(&drawn(dashboard, 200, 50).join("\n"));
-            if matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll == before) {
-                break;
-            }
-        }
-        rendered
-    }
-
-    /// The overlay is the reference for the whole surface, so nothing in the
-    /// registry may be missing from it — including commands that cannot run
-    /// where the user happens to be standing.
-    #[test]
-    fn help_overlay_lists_every_registry_command_with_its_primary_key() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        chord(&mut dashboard, crate::CommandId::Help);
-
-        let rendered = draw_all(&mut dashboard);
-        for spec in COMMANDS {
-            assert!(rendered.contains(spec.label), "missing {}", spec.label);
-            if let Some(label) = dashboard.key_labels(spec.id).first() {
-                assert!(
-                    rendered.contains(label),
-                    "missing key {label} for {}",
-                    spec.label
-                );
-            }
-        }
-        // The overlay leads with the prefix, because every chord below it is
-        // meaningless to a reader who does not know which key starts one.
-        assert!(rendered.contains("prefix: ctrl+b"), "{rendered}");
-        // Launch campaign finding A-2: the prefix is set in Setup now, and
-        // the filter is focused on open, so neither line may send the
-        // reader to config.toml or to a `/` key.
-        assert!(
-            rendered.contains("(change it in Setup → Interface)"),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("config.toml"), "{rendered}");
-        assert!(
-            rendered.contains("shortcuts · Type to search by key, name, or intent"),
-            "{rendered}"
-        );
-        // The palette is a command like any other, so the reference names it
-        // and its key.
-        assert!(rendered.contains("Command palette"), "{rendered}");
-        assert!(rendered.contains("ctrl+b :"), "{rendered}");
-        assert!(rendered.contains("Composer"), "{rendered}");
-        // The one key the prefix took away is still reachable, and says so.
-        assert!(rendered.contains("ctrl+b ctrl+b"), "{rendered}");
-    }
-
-    /// The overlay reads the bindings in force, not the defaults: a rebound
-    /// key must appear where the default one used to, and a command a user
-    /// unbound must say so rather than naming a key that does nothing.
-    #[test]
-    fn help_lists_user_bindings_and_marks_unbound_commands() {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut config = crate::test_support::config();
-        config.keys.prefix = "ctrl+a".to_owned();
-        config.keys.refresh = ["prefix+shift+r", "f5"].into();
-        config.keys.web_viewer = "".into();
-        dashboard.set_config(config);
-        dashboard.focus_sessions();
-        chord(&mut dashboard, crate::CommandId::Help);
-
-        let rendered = draw_all(&mut dashboard);
-        assert!(rendered.contains("prefix: ctrl+a"), "{rendered}");
-        assert!(rendered.contains("ctrl+a ctrl+a"), "{rendered}");
-        assert!(!rendered.contains("ctrl+b ctrl+b"), "{rendered}");
-        assert!(rendered.contains("ctrl+a shift+r / f5"), "{rendered}");
-        assert_eq!(
-            dashboard.key_labels(crate::CommandId::WebViewer),
-            Vec::<String>::new()
-        );
-        let web = rendered
-            .lines()
-            .find(|line| line.contains("Web viewer"))
-            .expect("the web viewer row");
-        assert!(web.contains('—'), "{web}");
-    }
-
-    /// Help opens over whatever is on screen, so a half-filled wizard has to
-    /// survive it. Closing goes back to the wizard, not to the dashboard.
-    #[test]
-    fn help_overlay_returns_to_the_wizard_it_opened_over() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        open_new_session_wizard(&mut dashboard);
-        let wizard = dashboard.mode.clone();
-        assert!(matches!(wizard, Mode::New(_)), "{wizard:?}");
-
-        // The help chord answers over an open wizard, which is the path the
-        // event loop takes rather than the wizard's own key handling.
-        route(&mut dashboard, &[prefix_key(), key(KeyCode::Char('?'))]);
-        assert!(matches!(dashboard.mode, Mode::Help(_)));
-        assert!(dashboard.modal_open());
-
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert_eq!(dashboard.mode, wizard);
-    }
-
-    /// The filter is the only way to find one row in a list this long, so it
-    /// has to match on the key as readily as on the words, and Esc has to put
-    /// the whole list back rather than close the overlay.
-    #[test]
-    fn help_filter_narrows_rows_by_key_or_label_and_esc_clears_it() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        chord(&mut dashboard, crate::CommandId::Help);
-        assert!(
-            drawn(&mut dashboard, 200, 100)
-                .join("\n")
-                .contains("Type to filter")
-        );
-
-        for character in "palette".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
-        assert!(rendered.contains("filter: palette"), "{rendered}");
-        assert!(rendered.contains("Command palette"), "{rendered}");
-        assert!(!rendered.contains("Create session"), "{rendered}");
-        // A group with nothing left in it takes its heading with it.
-        assert!(!rendered.contains("Sessions pane"), "{rendered}");
-
-        // The key column is searchable too, so a reader who remembers the
-        // chord but not the wording still finds the row.
-        for _ in 0.."palette".len() {
-            dashboard.handle_key(key(KeyCode::Backspace));
-        }
-        for character in "ctrl+b q".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
-        assert!(rendered.contains("Detach"), "{rendered}");
-        assert!(!rendered.contains("Command palette"), "{rendered}");
-
-        // Ctrl-U empties the filter without unfocusing it.
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("the help overlay stays open");
-        };
-        assert_eq!(overlay.query, "");
-        assert!(overlay.search_focused);
-
-        // Esc clears the query and keeps typing available.
-        dashboard.handle_key(key(KeyCode::Char('x')));
-        dashboard.handle_key(key(KeyCode::Esc));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("Esc must clear the filter before it closes anything");
-        };
-        assert_eq!(overlay.query, "");
-        assert!(overlay.search_focused);
-        let rendered = drawn(&mut dashboard, 200, 100).join("\n");
-        assert!(rendered.contains("Command palette"), "{rendered}");
-        assert!(rendered.contains("Create session"), "{rendered}");
-        // A second Esc, with nothing to clear, closes as it always did.
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-    }
-
-    /// The filter keeps every printable key as text, so walking the matches
-    /// needs a chord. `ctrl+n` and `ctrl+p` move while `n` and `p` still type,
-    /// the same pairing the command palette already answers.
-    #[test]
-    fn ctrl_n_and_ctrl_p_move_the_help_filter_while_plain_letters_type() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        chord(&mut dashboard, crate::CommandId::Help);
-
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("the help overlay stays open");
-        };
-        assert_eq!(overlay.scroll, 1);
-        assert_eq!(overlay.query, "");
-
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("the help overlay stays open");
-        };
-        assert_eq!(overlay.scroll, 0);
-        assert_eq!(overlay.query, "");
-
-        for character in "np".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("the help overlay stays open");
-        };
-        assert_eq!(overlay.query, "np");
-        assert!(overlay.search_focused);
-    }
 
     /// Scrolling stops once the last line is on screen. A body that already
     /// fits cannot scroll at all: pushing past it used to take the prefix line
     /// and the group heading off the top, leaving one match over blank rows.
+    // Hard-won: a04ad008e6: help scrolled past fitting rows and Esc closed an emptied filter.
     #[test]
     fn help_does_not_scroll_a_body_that_already_fits() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -996,83 +792,6 @@ mod tests {
             "{body} of {lines} rows: {rows:#?}"
         );
         assert_eq!(overlay.scroll, lines - body);
-    }
-
-    /// An empty focused filter must not add an extra Escape before closing.
-    #[test]
-    fn esc_closes_help_when_the_focused_filter_is_empty() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-        chord(&mut dashboard, crate::CommandId::Help);
-        for character in "palette".chars() {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("the help overlay stays open");
-        };
-        assert_eq!(overlay.query, "");
-        assert!(overlay.search_focused, "Ctrl-U keeps the box focused");
-
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-    }
-
-    /// While the filter has focus every printable key is filter text, so the
-    /// keys that close or scroll the overlay must not steal them back.
-    #[test]
-    fn help_closes_on_enter_and_treats_printable_keys_as_filter_text() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus_sessions();
-
-        chord(&mut dashboard, crate::CommandId::Help);
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-
-        chord(&mut dashboard, crate::CommandId::Help);
-        for character in ['?', 'j', 'k'] {
-            dashboard.handle_key(key(KeyCode::Char(character)));
-        }
-        let Mode::Help(overlay) = &dashboard.mode else {
-            panic!("filtering must not close the overlay");
-        };
-        assert_eq!(overlay.query, "?jk");
-        assert_eq!(overlay.scroll, 0);
-
-        // The arrows are not text, so they still scroll while filtering.
-        dashboard.handle_key(key(KeyCode::Backspace));
-        dashboard.handle_key(key(KeyCode::Backspace));
-        dashboard.handle_key(key(KeyCode::Backspace));
-        drawn(&mut dashboard, 200, 20);
-        dashboard.handle_key(key(KeyCode::Down));
-        assert!(
-            matches!(&dashboard.mode, Mode::Help(overlay) if overlay.scroll == 1),
-            "{:?}",
-            dashboard.mode
-        );
-
-        // Enter closes from the filter as well.
-        dashboard.handle_key(key(KeyCode::Enter));
-        assert_eq!(dashboard.mode, Mode::Dashboard);
-    }
-
-    #[test]
-    fn question_mark_opens_help_from_a_pane() {
-        for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
-            let mut dashboard = dashboard_with_session(running_session());
-            dashboard.focus = focus;
-            assert_eq!(
-                dashboard.handle_key(key(KeyCode::Char('?'))),
-                DashboardAction::None
-            );
-            assert!(
-                matches!(dashboard.mode, Mode::Help(_)),
-                "{focus:?} did not open help"
-            );
-            // Another question mark searches for that shortcut.
-            dashboard.handle_key(key(KeyCode::Char('?')));
-            assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query == "?"));
-        }
     }
 
     fn filter(dashboard: &mut DashboardState, query: &str) {
@@ -1134,6 +853,7 @@ mod tests {
     /// Launch campaign finding A-1: a query of several words matches a row
     /// when each word appears somewhere in it, in any order, so "split pane"
     /// finds "Split right" in the Panes group even offline.
+    // Hard-won: 976eb36bce: a multi-word help query failed across separate row fields.
     #[test]
     fn help_filter_matches_each_word_anywhere_in_the_row() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1151,6 +871,7 @@ mod tests {
     /// Launch campaign finding A-3: an unavailability reason is its own
     /// clause, set off from the description and capitalised, the same way
     /// "Not available here." reads.
+    // Hard-won: ddc6a6026d: an unavailability reason ran into the help description.
     #[test]
     fn help_rows_set_unavailability_reasons_apart_from_the_description() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -1268,47 +989,400 @@ mod tests {
         assert_eq!(overlay.drawn_scroll.get(), 0);
     }
 
+    fn append_command_surface(
+        output: &mut String,
+        label: &str,
+        dashboard: &mut DashboardState,
+        width: u16,
+        height: u16,
+    ) {
+        use std::fmt::Write as _;
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} ({width}x{height}) ===").unwrap();
+        output.push_str(&drawn(dashboard, width, height).join("\n"));
+        output.push('\n');
+    }
+
+    fn append_all_help_pages(output: &mut String, label: &str, dashboard: &mut DashboardState) {
+        let mut page = 1;
+        loop {
+            append_command_surface(output, &format!("{label} page {page}"), dashboard, 200, 50);
+            let before = match &dashboard.mode {
+                Mode::Help(overlay) => overlay.scroll,
+                _ => unreachable!("help page render keeps the overlay open"),
+            };
+            dashboard.handle_key(key(KeyCode::PageDown));
+            let after = match &dashboard.mode {
+                Mode::Help(overlay) => overlay.scroll,
+                _ => unreachable!("PageDown keeps help open"),
+            };
+            if after == before {
+                break;
+            }
+            page += 1;
+        }
+    }
+
+    fn click(dashboard: &mut DashboardState, position: (u16, u16)) {
+        for kind in [
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            MouseEventKind::Up(crossterm::event::MouseButton::Left),
+        ] {
+            dashboard.handle_mouse(crossterm::event::MouseEvent {
+                kind,
+                column: position.0,
+                row: position.1,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+    }
+
     #[test]
-    fn help_search_field_accepts_mouse_focus_and_does_not_paste_into_underlying_prompt() {
-        use crate::test_support::point;
-        use crossterm::event::MouseButton;
+    fn golden_tui_command_discovery() {
+        use mj_core::config::KeyAction;
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
         let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_help();
-        dashboard.handle_paste("initial");
-        assert_eq!(dashboard.help_search_request().unwrap().query, "initial");
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        let rows = drawn(&mut dashboard, 120, 35);
+        dashboard.focus_sessions();
+        chord(&mut dashboard, CommandId::Help);
+        append_all_help_pages(&mut output, "default command reference", &mut dashboard);
+
+        writeln!(
+            output,
+            "\n=== action registry mapping (command discovery) ==="
+        )
+        .unwrap();
+        for action in KeyAction::ALL.iter().copied() {
+            let id = crate::keybinds::command_for_action(action);
+            writeln!(
+                output,
+                "{action:?} -> {id:?}: {}",
+                crate::actions::spec(id).label
+            )
+            .unwrap();
+        }
+        for entry in crate::actions::COMMANDS {
+            if let Some(action) = entry.action {
+                writeln!(
+                    output,
+                    "{} -> {:?}",
+                    entry.label,
+                    crate::keybinds::command_for_action(action)
+                )
+                .unwrap();
+            }
+        }
+        for id in [
+            CommandId::OpenSessionSplitRight,
+            CommandId::OpenSessionSplitBelow,
+            CommandId::ClosePane,
+            CommandId::FocusPaneLeft,
+            CommandId::FocusPaneDown,
+            CommandId::FocusPaneUp,
+            CommandId::FocusPaneRight,
+            CommandId::ZoomPane,
+            CommandId::FocusLastPane,
+            CommandId::CycleFocusedPaneSize,
+            CommandId::ResizePaneLeft,
+            CommandId::ResizePaneDown,
+            CommandId::ResizePaneUp,
+            CommandId::ResizePaneRight,
+            CommandId::Workspaces,
+        ] {
+            writeln!(
+                output,
+                "key {}: {:?}",
+                crate::actions::spec(id).label,
+                dashboard.key_labels(id)
+            )
+            .unwrap();
+        }
+        for id in [
+            CommandId::Palette,
+            CommandId::SwitchWorkspace,
+            CommandId::Workspaces,
+            CommandId::NewSessionWizard,
+            CommandId::ResumeDialog,
+            CommandId::RestartSession,
+            CommandId::OpenConfig,
+            CommandId::WebViewer,
+            CommandId::Help,
+        ] {
+            writeln!(
+                output,
+                "palette visibility {}: {}",
+                crate::actions::spec(id).label,
+                if crate::actions::hidden_from_palette(id) {
+                    "hidden"
+                } else {
+                    "listed"
+                }
+            )
+            .unwrap();
+        }
+        writeln!(
+            output,
+            "workspace manager: available={}, prefix-key={}, palette-hidden={}",
+            crate::actions::available(&dashboard, None).contains(&CommandId::Workspaces),
+            dashboard.key_labels(CommandId::Workspaces).join(" / "),
+            crate::actions::hidden_from_palette(CommandId::Workspaces),
+        )
+        .unwrap();
+
+        let mut rebound = dashboard_with_session(running_session());
+        let mut config = crate::test_support::config();
+        config.keys.prefix = "ctrl+a".to_owned();
+        config.keys.refresh = ["prefix+shift+r", "f5"].into();
+        config.keys.web_viewer = "".into();
+        rebound.set_config(config);
+        rebound.focus_sessions();
+        chord(&mut rebound, CommandId::Help);
+        rebound.handle_paste("refresh");
+        append_command_surface(&mut output, "refresh key rebound", &mut rebound, 120, 35);
+        rebound.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        rebound.handle_paste("web viewer");
+        append_command_surface(
+            &mut output,
+            "web viewer binding removed",
+            &mut rebound,
+            120,
+            35,
+        );
+        writeln!(
+            output,
+            "web viewer bound keys: {:?}",
+            rebound.key_labels(CommandId::WebViewer)
+        )
+        .unwrap();
+
+        let mut palette = dashboard_with_session(running_session());
+        palette.focus_sessions();
+        open_palette(&mut palette);
+        append_command_surface(&mut output, "command palette", &mut palette, 120, 30);
+        writeln!(
+            output,
+            "palette entries: {}",
+            match &palette.mode {
+                Mode::Palette(palette) => palette.entries.len(),
+                _ => unreachable!(),
+            }
+        )
+        .unwrap();
+
+        let mut wizard = dashboard_with_session(running_session());
+        wizard.focus_sessions();
+        open_new_session_wizard(&mut wizard);
+        route(&mut wizard, &[prefix_key(), key(KeyCode::Char('?'))]);
+        append_command_surface(
+            &mut output,
+            "help over new-session wizard",
+            &mut wizard,
+            120,
+            40,
+        );
+        wizard.handle_key(key(KeyCode::Esc));
+        append_command_surface(
+            &mut output,
+            "wizard restored after help",
+            &mut wizard,
+            120,
+            40,
+        );
+
+        let mut filtered = dashboard_with_session(running_session());
+        filtered.focus_sessions();
+        chord(&mut filtered, CommandId::Help);
+        for character in "palette".chars() {
+            filtered.handle_key(key(KeyCode::Char(character)));
+        }
+        append_command_surface(
+            &mut output,
+            "help filtered by command name",
+            &mut filtered,
+            200,
+            50,
+        );
+        for _ in 0.."palette".len() {
+            filtered.handle_key(key(KeyCode::Backspace));
+        }
+        for character in "ctrl+b q".chars() {
+            filtered.handle_key(key(KeyCode::Char(character)));
+        }
+        append_command_surface(&mut output, "help filtered by key", &mut filtered, 200, 50);
+        // Ctrl-U empties the focused search field; Esc then returns to the full list.
+        filtered.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        filtered.handle_key(key(KeyCode::Char('x')));
+        filtered.handle_key(key(KeyCode::Esc));
+        append_command_surface(&mut output, "help filter cleared", &mut filtered, 200, 50);
+        filtered.handle_key(key(KeyCode::Esc));
+        append_command_surface(
+            &mut output,
+            "dashboard restored after help",
+            &mut filtered,
+            120,
+            40,
+        );
+
+        let mut navigation = dashboard_with_session(running_session());
+        navigation.focus_sessions();
+        chord(&mut navigation, CommandId::Help);
+        navigation.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        navigation.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        for character in "np".chars() {
+            navigation.handle_key(key(KeyCode::Char(character)));
+        }
+        append_command_surface(
+            &mut output,
+            "Ctrl-N and Ctrl-P with printable search",
+            &mut navigation,
+            200,
+            50,
+        );
+        if let Mode::Help(overlay) = &navigation.mode {
+            writeln!(
+                output,
+                "help filter state: query={:?}; scroll={}",
+                overlay.query, overlay.scroll
+            )
+            .unwrap();
+        }
+
+        let mut enter = dashboard_with_session(running_session());
+        enter.focus_sessions();
+        chord(&mut enter, CommandId::Help);
+        enter.handle_key(key(KeyCode::Enter));
+        append_command_surface(&mut output, "Enter closes empty help", &mut enter, 120, 40);
+        chord(&mut enter, CommandId::Help);
+        for character in "?jk".chars() {
+            enter.handle_key(key(KeyCode::Char(character)));
+        }
+        append_command_surface(
+            &mut output,
+            "printable keys remain in help filter",
+            &mut enter,
+            200,
+            30,
+        );
+        for _ in 0..3 {
+            enter.handle_key(key(KeyCode::Backspace));
+        }
+        enter.handle_key(key(KeyCode::Down));
+        append_command_surface(
+            &mut output,
+            "arrow scrolls the filtered help body",
+            &mut enter,
+            200,
+            20,
+        );
+        enter.handle_key(key(KeyCode::Enter));
+        append_command_surface(
+            &mut output,
+            "Enter closes filtered help",
+            &mut enter,
+            120,
+            40,
+        );
+
+        for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
+            let mut pane = dashboard_with_session(running_session());
+            pane.focus = focus;
+            pane.handle_key(key(KeyCode::Char('?')));
+            pane.handle_key(key(KeyCode::Char('?')));
+            append_command_surface(
+                &mut output,
+                &format!("question-mark help from {focus:?}"),
+                &mut pane,
+                120,
+                35,
+            );
+        }
+
+        let mut over_dialog = dashboard_with_session(running_session());
+        over_dialog.begin_container_edit();
+        over_dialog.begin_help();
+        append_command_surface(
+            &mut output,
+            "help over container editor",
+            &mut over_dialog,
+            120,
+            35,
+        );
+        writeln!(
+            output,
+            "dialog interaction: confirmation-open={}; text-input-focused={}; help owns pointer={}",
+            over_dialog.dialog_confirmation_open(),
+            over_dialog.text_input_focused(),
+            over_dialog.component_handles_mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 60,
+                row: 17,
+                modifiers: KeyModifiers::NONE,
+            })
+        )
+        .unwrap();
+
+        let mut mouse_search = dashboard_with_session(running_session());
+        mouse_search.begin_help();
+        mouse_search.handle_paste("initial");
+        mouse_search.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let rows = drawn(&mut mouse_search, 120, 35);
         let (x, y) = point(&rows, "filter:");
-        for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-        ] {
-            dashboard.handle_mouse(MouseEvent {
-                kind,
-                column: x + 9,
-                row: y,
-                modifiers: KeyModifiers::NONE,
-            });
-        }
-        dashboard.handle_paste("palette");
-        assert_eq!(dashboard.help_search_request().unwrap().query, "palette");
-        let rows = drawn(&mut dashboard, 120, 35);
-        let (column, row) = point(&rows, "Command palette");
-        for kind in [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Up(MouseButton::Left),
-        ] {
-            dashboard.handle_mouse(MouseEvent {
-                kind,
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            });
-        }
-        assert!(matches!(&dashboard.mode, Mode::Help(overlay) if !overlay.search_focused));
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert!(matches!(&dashboard.mode, Mode::Help(overlay) if overlay.query.is_empty()));
-        dashboard.handle_key(key(KeyCode::Esc));
-        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        click(&mut mouse_search, (x + 9, y));
+        mouse_search.handle_paste("palette");
+        append_command_surface(
+            &mut output,
+            "mouse focused help search",
+            &mut mouse_search,
+            120,
+            35,
+        );
+        let rows = drawn(&mut mouse_search, 120, 35);
+        let command_row = point(&rows, "Command palette");
+        click(&mut mouse_search, command_row);
+        append_command_surface(
+            &mut output,
+            "help body takes pointer focus",
+            &mut mouse_search,
+            120,
+            35,
+        );
+        writeln!(
+            output,
+            "help search focus after row click: {}",
+            matches!(&mouse_search.mode, Mode::Help(overlay) if !overlay.search_focused)
+        )
+        .unwrap();
+
+        let mut palette_click = dashboard_with_session(running_session());
+        palette_click.begin_palette();
+        let rows = drawn(&mut palette_click, 120, 35);
+        click(&mut palette_click, point(&rows, "Rename session"));
+        append_command_surface(
+            &mut output,
+            "palette result opens rename",
+            &mut palette_click,
+            120,
+            35,
+        );
+        palette_click.handle_key(key(KeyCode::Esc));
+        open_palette(&mut palette_click);
+        drawn(&mut palette_click, 120, 35);
+        click(&mut palette_click, (0, 0));
+        append_command_surface(
+            &mut output,
+            "outside click dismisses palette",
+            &mut palette_click,
+            120,
+            35,
+        );
+
+        mj_core::golden::assert_platform_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "tui-command-discovery",
+            &output,
+        );
     }
 }

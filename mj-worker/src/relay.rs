@@ -693,6 +693,14 @@ impl DurableRelay {
             .flatten()
     }
 
+    /// The relay-owned turn boundary shared by command promotion, checkpoint
+    /// admission, and background-work accounting. Activity classification
+    /// also presents an in-progress `/clear` as a turn, but that command must
+    /// be allowed to promote itself when the session is otherwise idle.
+    pub(super) fn turn_in_progress(&self) -> bool {
+        self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some()
+    }
+
     pub fn activity_facts(&self) -> mj_core::activity::ActivityFacts {
         let background_commands = self.background_commands().len() + self.native_agent_count();
         self.turn_context

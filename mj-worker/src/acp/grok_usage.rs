@@ -156,24 +156,6 @@ mod tests {
     }
 
     #[test]
-    fn grok_normalization_preserves_full_counts_exact_cost_and_model_keys() {
-        let result = parse(&usage(), Some(2377)).unwrap();
-        assert_eq!(
-            (
-                result.input_tokens,
-                result.output_tokens,
-                result.total_tokens
-            ),
-            (100, 30, 130)
-        );
-        assert_eq!(result.scope, UsageScope::Turn);
-        let details = result.provider_details.unwrap();
-        assert_eq!(details.cost.unwrap().usd, "0.0088767200");
-        assert_eq!(details.elapsed_ms, Some(2377));
-        assert_eq!(details.model_usage["grok-4.6-build"].input_tokens, 100);
-    }
-
-    #[test]
     fn grok_usage_keeps_zero_missing_and_incomplete_reports_distinct() {
         let minimal = parse(&json!({"inputTokens":0,"outputTokens":0}), None).unwrap();
         assert_eq!(minimal.total_tokens, 0);

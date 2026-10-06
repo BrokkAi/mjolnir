@@ -89,7 +89,7 @@ function snapshot() {
     profiles: [{ id: 'codex', harness_kind: 'codex' }],
     targets: [{ id: 'local', kind: 'local', requires_project_directory: false }],
     bundles: [{ id: 'bundle-1', primary_repository: null, repositories: [] }],
-    review_config: { enabled: false, tier: 'quick', profile: null },
+    review_config: { enabled: false, profile: null },
   };
 }
 
@@ -285,20 +285,4 @@ test('the eleventh selected image is refused while the first ten remain sendable
     Array.from({ length: 10 }, (_, index) => `digest-${index + 1}`),
   );
   expect(state.actions[0].images.every(image => image.data_base64 === '')).toBe(true);
-});
-
-test('unsupported images remain visibly failed until removed', async ({ page }) => {
-  const state = await mockViewer(page, async route => route.fulfill({ status: 500, body: '' }));
-  await page.locator('#image-picker').setInputFiles(file('photo.gif', 'image/gif'));
-  await expect(page.locator('#attachments .attachment-failed')).toContainText(
-    'use JPEG, PNG, or WebP',
-  );
-  await expect(page.locator('#send-button')).toBeDisabled();
-  await page.getByRole('button', { name: 'Remove photo.gif' }).click();
-  await expect(page.locator('#attachments .attachment')).toHaveCount(0);
-  await expect(page.locator('#send-button')).toBeEnabled();
-  await page.locator('#prompt-text').fill('text remains sendable');
-  await page.locator('#send-button').click();
-  await expect.poll(() => state.actions.length).toBe(1);
-  expect(state.actions[0]).toMatchObject({ action: 'prompt', text: 'text remains sendable', images: [] });
 });

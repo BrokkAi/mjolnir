@@ -619,6 +619,7 @@ mod tests {
 
     /// A lifecycle operation must be able to preempt the copy that is already
     /// running, not only block the next one.
+    // Hard-won: 608aca1d: a recovery copy blocked pause or delete until its remote command finished
     #[test]
     fn cancelling_a_busy_session_stops_the_copy_in_flight() {
         let gate = Arc::new(RecoveryGate::default());
@@ -668,6 +669,7 @@ mod tests {
 
     /// A copy that was preempted never judged the turn, so the next
     /// observation of that same turn must be allowed to try again.
+    // Hard-won: 608aca1d: cancellation incorrectly recorded an incomplete copy as a handled turn
     #[test]
     fn a_preempted_attempt_leaves_the_turn_retryable() {
         let mut policy = attempted(8);
@@ -684,6 +686,7 @@ mod tests {
     /// says the session had to wait (it was a race, and the work is over when
     /// the next observation says it may start), once a new turn completes, or
     /// after a cooldown that widens while nothing changes.
+    // Hard-won: 7f0d41b9: deferrals retried every second and leaked thousands of staged archives
     #[test]
     fn a_deferred_copy_is_retried_only_after_a_change_or_a_cooldown() {
         // The coordinator knows a deferral by the marker on the error, which
@@ -737,6 +740,7 @@ mod tests {
 
     /// The deferral cooldown never grows past its cap, so a session whose
     /// copies keep standing down is still tried a few times an hour.
+    // Hard-won: 7f0d41b9: repeated deferrals retried every second and accumulated staged archives
     #[test]
     fn repeated_deferrals_back_off_up_to_a_capped_delay() {
         let now = Utc::now();
@@ -766,13 +770,6 @@ mod tests {
         assert!(gate.busy_sessions().is_empty());
     }
 
-    #[test]
-    fn first_completed_idle_turn_is_due() {
-        let mut policy = PolicyState::default();
-        policy.observe_completed_turn(latest_completed_turn_ordinal(&completed(3)));
-        assert!(policy.due(Utc::now()));
-    }
-
     /// A policy whose copy of `turn` has started and not finished.
     fn attempted(turn: u64) -> PolicyState {
         let mut policy = PolicyState::default();
@@ -792,6 +789,13 @@ mod tests {
             created_at: created_at.to_rfc3339(),
             event_frontier,
         }
+    }
+
+    #[test]
+    fn first_completed_idle_turn_is_due() {
+        let mut policy = PolicyState::default();
+        policy.observe_completed_turn(latest_completed_turn_ordinal(&completed(3)));
+        assert!(policy.due(Utc::now()));
     }
 
     /// The checkpoint interval has one definition; the age rule follows it
@@ -817,6 +821,7 @@ mod tests {
     /// An idle session may never complete another turn, so a failed copy has to
     /// become due again on its own - after a cooldown, so a target that keeps
     /// failing is not hammered.
+    // Hard-won: 4e68009d: a failed automatic checkpoint left an idle session uncovered indefinitely
     #[test]
     fn a_failed_boundary_retries_after_a_cooldown() {
         let now = Utc::now();
@@ -830,6 +835,7 @@ mod tests {
 
     /// Consecutive failures widen the wait, so a target that is broken rather
     /// than blipping is probed less and less - but never stops being probed.
+    // Hard-won: 4e68009d: a broken target was retried too often while idle checkpoints remained uncovered
     #[test]
     fn repeated_failures_back_off_up_to_a_capped_delay() {
         let now = Utc::now();

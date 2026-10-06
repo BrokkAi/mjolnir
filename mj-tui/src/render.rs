@@ -124,7 +124,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
 pub(crate) fn render(frame: &mut Frame, dashboard: &mut DashboardState) {
     let mut chats = std::collections::BTreeMap::new();
     let opening = std::collections::BTreeMap::new();
-    crate::combined::render_combined_for_test(frame, dashboard, &mut chats, &opening, false);
+    crate::with_no_color_override_for_test(true, || {
+        crate::combined::render_combined_for_test(frame, dashboard, &mut chats, &opening, false);
+    });
 }
 
 /// The width from which the Sessions sidebar sits beside the conversation.

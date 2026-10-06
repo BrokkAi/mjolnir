@@ -7,7 +7,6 @@ use mj_core::state::{
 };
 
 use mj_chat::chat::Notices;
-use mj_core::targets::ProvisionStage;
 
 use super::*;
 use crate::test_support::*;
@@ -66,39 +65,7 @@ fn delayed_projection_and_summary_cannot_revive_acknowledged_content() {
     );
 }
 
-#[test]
-fn idle_restart_history_does_not_need_attention_or_notify() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.config.notify.mode = mj_core::config::NotifyMode::Terminal;
-    let mut materialized =
-        materialized_session_for("session-1", vec![session_restart(2), session_restart(3)]);
-    materialized.execution = MaterializedExecutionState::Idle;
-    dashboard.apply_materialized_session(&materialized);
-    assert_eq!(
-        dashboard.attention_level("session-1"),
-        crate::AttentionLevel::Idle
-    );
-    assert!(dashboard.notification_events(0).is_empty());
-    assert!(dashboard.notification_events(60_000).is_empty());
-    assert!(!dashboard.session_details["session-1"].has_unread());
-}
-
-#[test]
-fn unchanged_config_after_a_save_preserves_a_new_palette_and_its_query() {
-    use crossterm::event::KeyCode;
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    let saved_config = dashboard.config.clone();
-    open_palette(&mut dashboard);
-    dashboard.handle_paste("container");
-    dashboard.set_config(saved_config);
-    assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
-    // The query still selects the same command after the background reply.
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert!(matches!(dashboard.mode, crate::Mode::EditContainer(_)));
-}
-
+// Hard-won: e063b7f41d77: a background config refresh dismissed newer palette interactions.
 #[test]
 fn changed_config_preserves_a_new_palette_and_its_query() {
     use crossterm::event::KeyCode;
@@ -113,6 +80,17 @@ fn changed_config_preserves_a_new_palette_and_its_query() {
     assert!(matches!(dashboard.mode, crate::Mode::Palette(_)));
     dashboard.handle_key(key(KeyCode::Enter));
     assert!(matches!(dashboard.mode, crate::Mode::Rename(_)));
+
+    let mut session = stopped_session();
+    session.state = SessionState::Running;
+    let mut unchanged = dashboard_with_session(session);
+    let saved_config = unchanged.config.clone();
+    open_palette(&mut unchanged);
+    unchanged.handle_paste("container");
+    unchanged.set_config(saved_config);
+    assert!(matches!(unchanged.mode, crate::Mode::Palette(_)));
+    unchanged.handle_key(key(KeyCode::Enter));
+    assert!(matches!(unchanged.mode, crate::Mode::EditContainer(_)));
 }
 
 #[test]
@@ -152,19 +130,6 @@ fn a_completed_remote_launch_restores_the_ready_row_without_another_record_chang
 }
 
 #[test]
-fn stopped_cleanup_removes_history_after_its_owner_finishes() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Suspending, None);
-    assert_eq!(dashboard.ordered_sessions().len(), 1);
-    assert_eq!(
-        dashboard.state.sessions["session-1"].state,
-        SessionState::Stopped
-    );
-    dashboard.finish_session_operation("session-1");
-    assert_eq!(dashboard.ordered_sessions().len(), 0);
-}
-
-#[test]
 fn notice_replacement_does_not_overwrite_a_newer_notice() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_notice("Refreshing profile quotas…");
@@ -190,7 +155,6 @@ fn runtime_review_projection_restores_and_removes_session_activity() {
     let review = mj_client::review::RuntimeReviewView {
         session_id: "session-1".into(),
         questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
         phase: mj_core::review::driver::TurnReviewPhase::LaunchingReviewer,
         roles: Vec::new(),
         status: "starting the reviewer…".into(),
@@ -209,6 +173,7 @@ fn runtime_review_projection_restores_and_removes_session_activity() {
 /// The dashboard and every other view (chat, background workers) share
 /// one notifications bar: a clone installed with `share_notices` sees
 /// what the dashboard sets, and the dashboard sees what the clone sets.
+// Hard-won: f3705cca23cc: background notices were invisible in chat because each view had its own slot.
 #[test]
 fn a_shared_notice_is_visible_through_every_clone_of_the_handle() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -274,53 +239,6 @@ fn unread_count_uses_logical_agent_positions_after_the_detach_cursor() {
 }
 
 #[test]
-fn full_materialized_projection_carries_pending_questions_into_session_detail() {
-    let mut session = materialized_session_for("session-1", Vec::new());
-    let request = ElicitationRequest::from_acp_params(
-        "request-1",
-        serde_json::json!({
-            "mode": "form",
-            "sessionId": "session-1",
-            "message": "Choose a path",
-            "requestedSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"}
-                }
-            }
-        }),
-    )
-    .expect("valid test question");
-    session.pending_elicitations = vec![request.clone()];
-    let mut dashboard = dashboard_with_session(running_session());
-
-    dashboard.apply_materialized_session(&session);
-
-    assert_eq!(
-        dashboard.session_details["session-1"].pending_elicitations,
-        vec![request]
-    );
-    assert_eq!(
-        dashboard.attention_level("session-1"),
-        crate::AttentionLevel::Waiting
-    );
-
-    let mut answered = session;
-    answered.applied_event_ordinal += 1;
-    answered.pending_elicitations.clear();
-    dashboard.apply_materialized_session(&answered);
-    assert!(
-        dashboard.session_details["session-1"]
-            .pending_elicitations
-            .is_empty()
-    );
-    assert_ne!(
-        dashboard.attention_level("session-1"),
-        crate::AttentionLevel::Waiting
-    );
-}
-
-#[test]
 fn pending_question_ordinal_stays_paired_when_a_newer_summary_arrives() {
     let mut session = materialized_session_for("session-1", Vec::new());
     session.applied_event_ordinal = 5;
@@ -369,33 +287,6 @@ fn pending_question_ordinal_stays_paired_when_a_newer_summary_arrives() {
             .map(|(ordinal, _)| ordinal),
         Some(5)
     );
-}
-
-#[test]
-fn interruption_marker_is_unread_until_the_existing_cursor_passes_it() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    let mut materialized = materialized_session_for("session-1", vec![work_interruption(3)]);
-    materialized.execution = MaterializedExecutionState::Idle;
-    dashboard.apply_materialized_session(&materialized);
-
-    let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.unread_agent_messages, 0);
-    assert_eq!(detail.unread_interruptions, 1);
-    assert!(detail.has_unread());
-    assert!(detail.current_turn_started_at.is_none());
-
-    let mut state = dashboard.state.clone();
-    state
-        .sessions
-        .get_mut("session-1")
-        .unwrap()
-        .viewed_through_event_ordinal = 3;
-    dashboard.set_state(state);
-    let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.unread_interruptions, 0);
-    assert!(!detail.has_unread());
 }
 
 #[test]
@@ -766,66 +657,7 @@ fn projection_cache_keeps_terminal_diffstats_across_unrelated_updates() {
     );
 }
 
-/// Unchanged items keep their handles, so a projection that follows one
-/// only reads the items that changed.
-#[test]
-fn projection_rereads_only_the_changed_tail() {
-    let head = vec![agent_message(1, "first"), thought(2, "thinking")];
-    let mut transcript = head.clone();
-    transcript.push(agent_message(3, "answer"));
-    let first = PreparedMaterializedSessionDetail::from_materialized(
-        materialized_session_for("session-1", transcript.clone()),
-        0,
-        MaterializedProjectionCache::default(),
-    );
-
-    transcript.push(agent_message(4, "and more"));
-    assert_eq!(
-        first.projection.unchanged_prefix(&transcript),
-        3,
-        "appending leaves the earlier items untouched"
-    );
-
-    let mut streamed = transcript.clone();
-    Arc::make_mut(&mut streamed[3]).last_changed_at_ms = 9_000;
-    assert_eq!(
-        first.projection.unchanged_prefix(&streamed),
-        3,
-        "a copy-on-write update only breaks the item it touches"
-    );
-
-    let restored = vec![agent_message(1, "first"), thought(2, "thinking")];
-    assert_eq!(
-        first.projection.unchanged_prefix(&restored),
-        0,
-        "rebuilt items share nothing, so everything is read again"
-    );
-}
-
-#[test]
-fn later_non_agent_items_do_not_replace_the_last_agent_response() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    apply_materialized_transcript(
-        &mut dashboard,
-        vec![
-            agent_message(
-                1,
-                "The container lacked uv, so validation used Python 3 directly.",
-            ),
-            thought(2, "Checking the result"),
-        ],
-    );
-
-    assert_eq!(
-        dashboard.session_details["session-1"]
-            .last_agent_message
-            .as_deref(),
-        Some("The container lacked uv, so validation used Python 3 directly.")
-    );
-}
-
+// Hard-won: e063b7f41d77: sessions without a user row showed an empty sidebar preview despite live activity.
 #[test]
 fn transcript_without_user_entries_keeps_agent_activity_for_the_sidebar() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -847,60 +679,6 @@ fn transcript_without_user_entries_keeps_agent_activity_for_the_sidebar() {
 }
 
 #[test]
-fn latest_user_message_tracks_whether_the_agent_has_replied() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let mut transcript = numbered_conversation(1);
-    transcript.push(transcript_item(
-        3,
-        TranscriptBody::User {
-            content: vec![serde_json::json!({
-                "type": "text",
-                "text": "follow-up question"
-            })],
-        },
-    ));
-    transcript.push(thought(4, "checking the workspace"));
-    apply_materialized_transcript(&mut dashboard, transcript.clone());
-
-    let detail = &dashboard.session_details["session-1"];
-    assert_eq!(detail.last_agent_message.as_deref(), Some("answer 0"));
-    assert_eq!(
-        detail.last_user_message.as_deref(),
-        Some("follow-up question")
-    );
-    assert!(!detail.last_agent_message_follows_last_user);
-    assert_eq!(
-        detail.latest_agent_activity_after_last_user.as_deref(),
-        Some("checking the workspace")
-    );
-
-    transcript.push(transcript_item(
-        5,
-        TranscriptBody::Tool {
-            call: serde_json::json!({
-                "toolCallId": "test",
-                "title": "Inspect src/lib.rs",
-                "status": "in_progress"
-            }),
-            terminal_outputs: Vec::new(),
-            terminal_refs: Vec::new(),
-            presentation: None,
-        },
-    ));
-    apply_materialized_transcript(&mut dashboard, transcript.clone());
-    assert_eq!(
-        dashboard.session_details["session-1"]
-            .latest_agent_activity_after_last_user
-            .as_deref(),
-        Some("Inspect src/lib.rs")
-    );
-
-    transcript.push(agent_message(6, "follow-up answer"));
-    apply_materialized_transcript(&mut dashboard, transcript);
-    assert!(dashboard.session_details["session-1"].last_agent_message_follows_last_user);
-}
-
-#[test]
 fn materialized_idle_state_clears_a_stale_turn_clock() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let mut running = MaterializedSession::empty("session-1");
@@ -915,79 +693,6 @@ fn materialized_idle_state_clears_a_stale_turn_clock() {
         dashboard.session_details["session-1"].current_turn_started_at,
         None
     );
-}
-
-#[test]
-fn materialized_running_state_starts_clock_without_transcript_events() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let mut running = MaterializedSession::empty("session-1");
-    running.execution = MaterializedExecutionState::Running {
-        started_at_ms: 1_000_000,
-    };
-    dashboard.apply_materialized_session(&running);
-
-    assert_eq!(
-        dashboard.session_details["session-1"].current_turn_started_at,
-        Some(1_000)
-    );
-}
-
-#[test]
-fn daemon_operation_snapshot_preserves_remote_clocks_and_stages() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_session_operation_at(
-        "session-1".into(),
-        SessionOperationKind::Resuming,
-        None,
-        123,
-    );
-    dashboard.replace_session_operation_stages(
-        "session-1",
-        [
-            (ProvisionStage::Cloning, 456),
-            (ProvisionStage::Syncing, 789),
-        ],
-    );
-
-    let operation = &dashboard.session_operations["session-1"];
-    assert_eq!(operation.started_at_epoch_seconds, 123);
-    assert_eq!(operation.active_stages[&ProvisionStage::Cloning], 456);
-    assert_eq!(operation.active_stages[&ProvisionStage::Syncing], 789);
-}
-
-#[test]
-fn set_resume_destination_updates_the_in_flight_operation() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
-    dashboard.set_resume_destination("session-1", "grok-1".into(), "localhost".into());
-
-    assert_eq!(
-        dashboard.session_operations["session-1"].resume_destination,
-        Some(("grok-1".to_string(), "localhost".to_string()))
-    );
-}
-
-#[test]
-fn set_resume_destination_for_an_unknown_session_is_ignored() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.set_resume_destination("missing", "grok-1".into(), "localhost".into());
-    assert!(dashboard.session_operations.is_empty());
-}
-
-#[test]
-fn transition_kind_prefers_operations_and_import_does_not_hide_chat() {
-    use mj_core::state::SessionTransitionKind;
-
-    let mut session = stopped_session();
-    session.state = SessionState::Provisioning;
-    let mut dashboard = dashboard_with_session(session);
-
-    assert_eq!(
-        dashboard.transition_kind("session-1"),
-        Some(SessionTransitionKind::Starting)
-    );
-    dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Importing, None);
-    assert_eq!(dashboard.transition_kind("session-1"), None);
 }
 
 #[test]

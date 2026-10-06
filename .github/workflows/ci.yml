@@ -4,7 +4,11 @@ on:
   push:
     branches: [ 'master', 'ci/**' ]
   pull_request: {}
+  # release.yml runs the whole suite on the tagged commit before publishing.
+  workflow_call: {}
 
+# In a call from release.yml, github.workflow is the caller's name and the ref
+# is the tag, so this group is per release and does not cancel branch CI.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true

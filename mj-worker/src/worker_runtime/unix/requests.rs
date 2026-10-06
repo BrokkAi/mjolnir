@@ -61,94 +61,6 @@ pub(crate) async fn handle_request(
     ))
 }
 
-/// Serves the review dispatch socket for as long as the returned guard lives.
-///
-/// One line in, one line out, one connection per call: the supervisor's MCP
-/// server connects, hands over the lanes it wants, and reads the answer. The
-/// socket lives inside the worker root, so nothing outside this container can
-/// reach it, and it is removed when the worker stops.
-pub(crate) fn serve_review_dispatch(
-    root: &std::path::Path,
-    reviewer: Arc<ReviewerSidecar>,
-) -> Result<SocketGuard> {
-    let directory = root.join(crate::worker_runtime::REVIEWER_DIR);
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("create the reviewer directory {}", directory.display()))?;
-    let path = directory.join(mj_core::review::mcp::REVIEW_DISPATCH_SOCKET);
-    // A socket left behind by a previous worker would refuse the bind; the
-    // previous worker is gone, so its socket is stale by definition.
-    let _ = std::fs::remove_file(&path);
-    let listener = bind_unix_listener(&path)
-        .with_context(|| format!("bind the review dispatch socket {}", path.display()))?;
-    listener.set_nonblocking(true).with_context(|| {
-        format!(
-            "set the review dispatch socket {} nonblocking",
-            path.display()
-        )
-    })?;
-    let listener = UnixListener::from_std(listener)
-        .with_context(|| format!("register the review dispatch socket {}", path.display()))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let reviewer = reviewer.clone();
-            tokio::spawn(async move {
-                if let Err(error) = serve_one_review_dispatch(stream, reviewer).await {
-                    // Reported rather than dropped: a supervisor whose
-                    // dispatch was lost would wait for lanes that never run.
-                    tracing::warn!(
-                        error = %format!("{error:#}"),
-                        "a review dispatch could not be answered"
-                    );
-                }
-            });
-        }
-    });
-    Ok(SocketGuard(path))
-}
-
-pub(crate) async fn serve_one_review_dispatch(
-    stream: UnixStream,
-    reviewer: Arc<ReviewerSidecar>,
-) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let (read, mut write) = stream.into_split();
-    let mut reader = tokio::io::BufReader::new(read);
-    let Some(line) = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        read_bounded_line(&mut reader, mj_core::relay::RELAY_COMMAND_BYTE_BUDGET),
-    )
-    .await
-    .context("review dispatch input timed out")??
-    else {
-        return Ok(());
-    };
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-    let reply = match serde_json::from_str::<mj_core::review::lanes::LaneDispatch>(line.trim()) {
-        Ok(dispatch) => reviewer.record_dispatch(dispatch),
-        Err(error) => mj_core::review::lanes::LaneDispatchReply {
-            started: Vec::new(),
-            error: Some(format!("could not read the dispatch: {error}")),
-        },
-    };
-    let mut body = serde_json::to_vec(&reply)?;
-    body.push(b'\n');
-    write
-        .write_all(&body)
-        .await
-        .context("answer a review dispatch")?;
-    write.flush().await.context("flush a review dispatch")
-}
-
 pub(crate) async fn reviewer_response(
     envelope: RelayRequestEnvelope,
     reviewer: Option<&Arc<ReviewerSidecar>>,
@@ -480,6 +392,22 @@ pub(crate) fn apply_project_memory_request(
             replica.install_snapshot(snapshot)?;
             baseline.install_snapshot(snapshot)?;
             Ok(RelayResponsePayload::ProjectMemorySnapshotInstalled)
+        }
+        RelayRequest::ReplaceProjectMemoryTree {
+            expected_replica,
+            tree,
+        } => {
+            let current_replica = replica.snapshot()?;
+            if current_replica.version() != *expected_replica {
+                return Ok(RelayResponsePayload::ProjectMemoryTreeReplaced {
+                    outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+                });
+            }
+            replica.replace_tree(tree)?;
+            baseline.replace_tree(tree)?;
+            Ok(RelayResponsePayload::ProjectMemoryTreeReplaced {
+                outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
+            })
         }
         other => bail!("{} is not a project memory request", other.method_name()),
     }

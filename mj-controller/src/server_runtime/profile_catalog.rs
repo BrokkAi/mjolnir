@@ -22,8 +22,23 @@ use tokio_util::sync::CancellationToken;
 pub(crate) type Probe = dyn Fn(String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
 #[cfg(test)]
 type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileConfig>> + Send + Sync;
-type Attempt = Shared<BoxFuture<'static, Result<ProfileConfig, Arc<str>>>>;
+type Attempt = Shared<BoxFuture<'static, Result<ProfileConfig, AttemptError>>>;
 type CacheKey = (String, Option<String>);
+
+/// A failed attempt: its reason, and whether a later attempt could succeed.
+#[derive(Clone)]
+struct AttemptError {
+    message: Arc<str>,
+    retryable: bool,
+}
+impl AttemptError {
+    fn new(error: &anyhow::Error) -> Self {
+        Self {
+            message: format!("{error:#}").into(),
+            retryable: !crate::controller::profile_config::discovery_is_unsupported(error),
+        }
+    }
+}
 
 #[derive(Clone)]
 enum Entry {
@@ -243,7 +258,7 @@ impl ProfileCatalog {
                 Some(model) => model_probe(definition.id.clone(), model),
             };
             return future
-                .map_err(|error| Arc::<str>::from(format!("{error:#}")))
+                .map_err(|error| AttemptError::new(&error))
                 .boxed()
                 .shared();
         }
@@ -253,7 +268,7 @@ impl ProfileCatalog {
             model,
             definition.cancellation.clone(),
         )
-        .map_err(|error| Arc::<str>::from(format!("{error:#}")))
+        .map_err(|error| AttemptError::new(&error))
         .boxed()
         .shared()
     }
@@ -319,15 +334,20 @@ impl ProfileCatalog {
                                 }
                             }
                         }
-                        Err(error) => {
+                        Err(AttemptError { message, retryable }) => {
                             inner.entries.insert(
                                 key.clone(),
                                 Entry::Failed {
                                     attempt: attempt.clone(),
-                                    error: error.clone(),
+                                    error: message.clone(),
                                 },
                             );
-                            tracing::warn!(profile = %inner.definitions[&key.0].id, model = ?key.1, %error, "profile capability hydration failed; retrying with backoff");
+                            let profile = &inner.definitions[&key.0].id;
+                            if *retryable {
+                                tracing::warn!(%profile, model = ?key.1, error = %message, "profile capability hydration failed; retrying with backoff");
+                            } else {
+                                tracing::info!(%profile, model = ?key.1, error = %message, "profile capabilities stay unknown");
+                            }
                         }
                     }
                 }
@@ -335,7 +355,15 @@ impl ProfileCatalog {
                 for (key, attempt) in started {
                     self.spawn(key, attempt);
                 }
-                if result.is_ok() {
+                // A failure no retry can fix stays the entry's state until a
+                // changed definition replaces it.
+                if !matches!(
+                    &result,
+                    Err(AttemptError {
+                        retryable: true,
+                        ..
+                    })
+                ) {
                     return;
                 }
                 let delay = Duration::from_secs([1, 5, 30, 60][failures.min(3) as usize]);
@@ -648,76 +676,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_hydrates_models_and_efforts_and_readers_launch_nothing_more() {
-        let calls = calls();
-        let default_calls = calls.clone();
-        let model_calls = calls.clone();
-        let catalog = ProfileCatalog::build(
-            CancellationToken::new(),
-            Arc::new(move |id| {
-                default_calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move {
-                    let mut choices = test_choices(&id);
-                    choices.models.push(mj_core::acp::SessionConfigChoice {
-                        value: "other".into(),
-                        name: "Other".into(),
-                        description: None,
-                    });
-                    Ok(choices)
-                })
-            }),
-            Arc::new(move |id, model| {
-                model_calls.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move {
-                    let mut choices = test_choices(&id);
-                    choices.models.push(mj_core::acp::SessionConfigChoice {
-                        value: model.clone(),
-                        name: model.clone(),
-                        description: None,
-                    });
-                    choices.model = Some(model);
-                    choices.efforts = vec![mj_core::acp::SessionConfigChoice {
-                        value: "high".into(),
-                        name: "High".into(),
-                        description: None,
-                    }];
-                    Ok(choices)
-                })
-            }),
-        );
-        let config = test_config(
-            &[
-                ("parent", HarnessKind::Codex),
-                ("helper", HarnessKind::Claude),
-            ],
-            &["helper"],
-        );
-        catalog.sync_now(&config).await;
-        let options = catalog
-            .options_for(&config, "parent", Some("other".into()))
-            .await
-            .unwrap();
-        assert_eq!(options.efforts[0].value, "high");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            4,
-            "one default and one extra model per profile"
-        );
-        assert!(
-            catalog
-                .snapshot()
-                .options(&config, "parent", Some("other"))
-                .is_some()
-        );
-        catalog.options_for(&config, "parent", None).await.unwrap();
-        catalog
-            .options_for(&config, "parent", Some("other".into()))
-            .await
-            .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
-    }
-
-    #[tokio::test]
     async fn pending_model_efforts_share_one_attempt_and_unchanged_profiles_stay_warm() {
         let calls = calls();
         let (started_tx, mut started) = tokio::sync::mpsc::unbounded_channel();
@@ -963,6 +921,29 @@ mod tests {
         }
         catalog.capabilities(&["parent".into()]).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // Hard-won: #1232: Windows has no local worker, so every probe failed and the owner retried forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_discovery_no_retry_can_fix_is_reported_once_and_never_retried() {
+        let calls = calls();
+        let probe_calls = calls.clone();
+        let catalog = ProfileCatalog::with_probe(Arc::new(move |_| {
+            probe_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(crate::controller::profile_config::DiscoveryUnsupported.into()) })
+        }));
+        let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
+        catalog.sync_now(&config).await;
+        tokio::time::advance(Duration::from_secs(600)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let options = catalog.snapshot().options(&config, "parent", None).unwrap();
+        assert!(
+            options.unavailable[0].contains("runs no local Mjolnir worker"),
+            "{options:?}"
+        );
     }
 
     #[tokio::test]

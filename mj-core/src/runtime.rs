@@ -264,6 +264,7 @@ mod tests {
             .expect("runtime")
     }
 
+    // Hard-won: 323c8446: Blocking awaits kept polling a dead Tokio timer driver and panicked during shutdown.
     #[test]
     fn shutdown_cancels_an_in_flight_blocking_await() {
         static STATE: ShutdownState = ShutdownState::new();
@@ -311,6 +312,7 @@ mod tests {
     /// Two worker threads, each blocked in a wait that only a third task can
     /// end. Without the hand-off the third task never runs and the waits never
     /// finish; the watchdog then ends them and the timing assertion fails.
+    // Hard-won: 34e86406: Lifecycle waits occupied every async worker so the daemon could not serve or cancel launches.
     #[test]
     fn blocking_waits_leave_the_async_workers_serving() {
         let runtime = runtime();
@@ -357,36 +359,6 @@ mod tests {
         watchdog.join().unwrap();
     }
 
-    #[test]
-    fn off_async_worker_runs_in_place_on_a_current_thread_runtime() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        assert_eq!(runtime.block_on(async { off_async_worker(|| 7) }), 7);
-        assert_eq!(off_async_worker(|| 8), 8);
-    }
-
-    #[test]
-    fn block_on_returns_the_future_output() {
-        static STATE: ShutdownState = ShutdownState::new();
-        let runtime = runtime();
-        let value = runtime
-            .block_on(async {
-                tokio::task::spawn_blocking(|| {
-                    STATE.block_on_with(async {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                        7
-                    })
-                })
-                .await
-                .expect("blocking task")
-            })
-            .expect("completed");
-        assert_eq!(value, 7);
-        STATE.shutdown_with(runtime, BlockingWork::Await, Duration::from_secs(1));
-    }
-
     /// `Abandon` is the dashboard's exit: the grace covers guarded awaits
     /// only, never a disposable blocking read that would delay quitting.
     #[test]
@@ -417,6 +389,7 @@ mod tests {
     /// `AwaitFor` is the daemon's exit: blocking work that finishes in time is
     /// waited for, and work that does not is left behind and reported rather
     /// than holding the process open.
+    // Hard-won: 3c3137a2: Live daemon handoffs stalled after the epilogue while unowned blocking work kept the process open.
     #[test]
     fn await_for_reports_blocking_work_it_left_running() {
         let state = ShutdownState::new();

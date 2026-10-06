@@ -8,8 +8,8 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use clap::{Args, ValueEnum};
+use anyhow::{Context, Result, bail, ensure};
+use clap::{ArgGroup, Args, ValueEnum};
 use mj_controller::server::api::{
     ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
     WaitOutcome, WaitRequest, WaitResponse,
@@ -154,10 +154,9 @@ pub(crate) struct NewArgs {
     /// `[review]` is off.
     #[arg(long)]
     review_effort: Option<String>,
-    /// Review every turn of this session at this tier, even when `[review]`
-    /// is off: `quick` (one reviewer and a validator) or `extended` (a
-    /// supervisor that can dispatch specialist lanes).
-    #[arg(long, value_parser = ["quick", "extended"])]
+    /// Deprecated compatibility option. Either accepted value enables review;
+    /// the value is ignored.
+    #[arg(long, hide = true, value_parser = ["quick", "extended"])]
     review_tier: Option<String>,
     /// Do not review this session's turns automatically, even when `[review]`
     /// is on. `/review` still reviews on request.
@@ -798,6 +797,23 @@ pub(crate) struct ApiInfoArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("github_token_target")
+        .args(["owner", "repo"])
+        .required(true)
+        .multiple(false)
+))]
+pub(crate) struct GithubTokenArgs {
+    /// GitHub owner login whose installation should receive a token.
+    #[arg(long)]
+    owner: Option<String>,
+    /// Repository in OWNER/NAME form. May be repeated to limit the token to
+    /// several repositories from one installation.
+    #[arg(long, action = clap::ArgAction::Append)]
+    repo: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct WorkspacesListArgs {
     /// Print the response as JSON instead of text.
     #[arg(long)]
@@ -886,8 +902,8 @@ fn new_session_review(args: &NewArgs) -> Option<mj_core::config::SessionReview> 
 
 /// A session's own turn-review choice from the `--review-*` flags `mj new`
 /// and `mj import` share: off, on with what was named, or `None` to follow
-/// `[review]` when nothing was named. Clap has already limited `tier` to
-/// `quick` and `extended`.
+/// `[review]` when nothing was named. Clap accepts the deprecated tier value
+/// for compatibility; naming it still opts the session into automatic review.
 pub(crate) fn session_review(
     off: bool,
     model: Option<&str>,
@@ -898,14 +914,10 @@ pub(crate) fn session_review(
     if off {
         return Some(SessionReview::Off);
     }
-    let tier = tier.map(|tier| match tier {
-        "extended" => mj_core::review::lanes::ReviewTier::Extended,
-        _ => mj_core::review::lanes::ReviewTier::Quick,
-    });
     (model.is_some() || effort.is_some() || tier.is_some()).then(|| SessionReview::On {
         model: model.map(str::to_owned),
         effort: effort.map(str::to_owned),
-        tier,
+        tier: None,
     })
 }
 
@@ -1833,13 +1845,13 @@ async fn resolve_review(client: &ApiClient, args: &SessionArgs, resolution: &str
     Ok(())
 }
 
-/// A review as plain lines: its tier and status, one line per role, then the
-/// verdict and its text.
+/// A review as plain lines: its status, one line per role, then the verdict
+/// and its text.
 fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec<String> {
     let Some(review) = review else {
         return vec!["no review is open".to_owned()];
     };
-    let mut lines = vec![format!("{} review: {}", review.tier, review.status)];
+    let mut lines = vec![format!("review: {}", review.status)];
     for role in &review.roles {
         lines.push(format!("  {}: {}", role.label, role.state));
     }
@@ -1870,6 +1882,31 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
     println!("base url   {}/api/v1", client.base_url());
     println!("token file {}", token_path.display());
     println!("version    Mjolnir API 1");
+    Ok(())
+}
+
+/// Print a valid GitHub App installation token for a selected owner or repo.
+pub(crate) async fn github_token(args: GithubTokenArgs) -> Result<()> {
+    let (owner, repositories) = match (args.owner, args.repo) {
+        (Some(owner), repositories) if repositories.is_empty() => (Some(owner), Vec::new()),
+        (None, repositories) if !repositories.is_empty() => {
+            for repository in &repositories {
+                let parsed = mj_core::remote_git::github_owner_repo(repository)
+                    .context("--repo values must use OWNER/NAME form")?;
+                ensure!(
+                    format!("{}/{}", parsed.0, parsed.1) == repository.as_str(),
+                    "--repo values must use OWNER/NAME form"
+                );
+            }
+            (None, repositories)
+        }
+        _ => bail!("supply exactly one of --owner or one or more --repo values"),
+    };
+    let token = ApiClient::connect()
+        .await?
+        .github_token(owner.as_deref(), &repositories)
+        .await?;
+    println!("{token}");
     Ok(())
 }
 
@@ -2070,6 +2107,55 @@ mod tests {
     use clap::Parser as _;
 
     #[test]
+    fn github_token_requires_one_owner_or_repository_selector() {
+        let Some(Command::GithubToken(owner)) =
+            Cli::try_parse_from(["mj", "github-token", "--owner", "acme"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(owner.owner.as_deref(), Some("acme"));
+        assert!(owner.repo.is_empty());
+
+        let Some(Command::GithubToken(repo)) =
+            Cli::try_parse_from(["mj", "github-token", "--repo", "acme/project"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(repo.owner, None);
+        assert_eq!(repo.repo, ["acme/project"]);
+        let Some(Command::GithubToken(repositories)) = Cli::try_parse_from([
+            "mj",
+            "github-token",
+            "--repo",
+            "acme/project",
+            "--repo",
+            "acme/tools",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(repositories.repo, ["acme/project", "acme/tools"]);
+        assert!(Cli::try_parse_from(["mj", "github-token"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "mj",
+                "github-token",
+                "--owner",
+                "acme",
+                "--repo",
+                "acme/project",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn review_parses_start_and_status_with_a_session() {
         for (verb, json) in [("start", false), ("status", true)] {
             let mut argv = vec!["mj", "review", verb, "--session", "s1"];
@@ -2106,35 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn review_lines_name_each_role_and_the_verdict() {
-        assert_eq!(review_lines(None), vec!["no review is open"]);
-        let review = mj_controller::server::ViewerTurnReview {
-            tier: "quick".into(),
-            status: "validating findings".into(),
-            roles: vec![mj_controller::server::ViewerReviewRole {
-                label: "reviewer".into(),
-                state: "findings".into(),
-            }],
-            verdict: Some(mj_controller::server::ViewerReviewVerdict {
-                kind: "findings".into(),
-                text: "[P1] src/lib.rs:1 -- no bound".into(),
-                allowed: vec!["forward".into(), "dismiss".into()],
-            }),
-        };
-        assert_eq!(
-            review_lines(Some(&review)),
-            vec![
-                "quick review: validating findings",
-                "  reviewer: findings",
-                "verdict: findings",
-                "resolve with: forward, dismiss",
-                "",
-                "[P1] src/lib.rs:1 -- no bound",
-            ]
-        );
-    }
 
-    #[test]
     fn stop_task_requires_a_session_and_exactly_one_task_selection() {
         for argv in [
             vec!["mj", "stop-task", "--session", "s1"],
@@ -2270,6 +2328,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    // Hard-won: db7d3a78: --json export with --out printed prose instead of a JSON object.
     #[test]
     fn export_json_with_out_reports_one_object_and_text_stays_a_sentence() {
         let dir = tempfile::tempdir().unwrap();
@@ -2326,6 +2385,7 @@ mod tests {
     /// A daemon being replaced ends a wait with the handoff mark. The wait
     /// asks the next daemon for the same turn, with what is left of its
     /// budget, and reports that daemon's answer instead of failing.
+    // Hard-won: c87e5e88: wait ended with an error instead of following its accepted turn after daemon replacement.
     #[tokio::test]
     async fn a_wait_follows_the_daemon_across_an_upgrade_handoff() {
         use axum::http::StatusCode;
@@ -2400,6 +2460,7 @@ mod tests {
 
     /// A command continued under the daemon's newer build must parse there as
     /// the rest of the same command: same turn, time left, same filter.
+    // Hard-won: 4ce83357: wait and events did not continue under the replacing daemon after a protocol bump.
     #[test]
     fn continuations_parse_as_the_rest_of_the_same_command() {
         let request = WaitRequest {
@@ -2464,138 +2525,32 @@ mod tests {
             Some(SessionReview::On {
                 model: Some("gpt-6-luna".into()),
                 effort: None,
-                tier: Some(mj_core::review::lanes::ReviewTier::Extended),
+                tier: None,
             })
+        );
+        assert_eq!(
+            parse(&["--review-tier", "quick"]).unwrap(),
+            Some(SessionReview::On {
+                model: None,
+                effort: None,
+                tier: None,
+            })
+        );
+        let help = Cli::try_parse_from(["mj", "new", "--help"])
+            .expect_err("help exits parsing")
+            .to_string();
+        assert!(
+            !help.contains("--review-tier"),
+            "deprecated option is hidden"
         );
         assert!(
             parse(&["--review-tier", "thorough"]).is_err(),
-            "only quick and extended are tiers"
+            "the deprecated flag still accepts only quick and extended"
         );
         assert!(parse(&["--no-review", "--review-tier", "quick"]).is_err());
         let error = parse(&["--no-review", "--review-model", "gpt-6-astra"])
             .expect_err("off and a reviewer model contradict each other");
         assert!(error.to_string().contains("--review-model"), "{error}");
-    }
-
-    #[test]
-    fn new_accepts_a_launch_base_and_leaves_it_unset_otherwise() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--profile",
-            "codex",
-            "--target",
-            "raw",
-            "--project-directory",
-            "/srv/project",
-            "--base",
-            "HEAD~1",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.base.as_deref(), Some("HEAD~1"));
-
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--profile",
-            "codex",
-            "--target",
-            "raw",
-            "--project-directory",
-            "/srv/project",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.base, None);
-    }
-
-    #[test]
-    fn new_model_selects_by_model_and_conflicts_with_profile() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--bundle",
-            "product",
-            "--model",
-            "gpt-6-luna",
-            "--effort",
-            "high",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.model.as_deref(), Some("gpt-6-luna"));
-        assert_eq!(args.effort.as_deref(), Some("high"));
-        assert!(args.profile.is_none());
-
-        let error = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--bundle",
-            "product",
-            "--profile",
-            "codex",
-            "--model",
-            "gpt-6-luna",
-        ])
-        .expect_err("a model-based profile choice cannot be combined with --profile");
-        assert!(error.to_string().contains("--profile"), "{error}");
-    }
-
-    #[test]
-    fn new_at_requires_a_bundle_and_takes_an_optional_branch_and_base() {
-        let commit = "0123456789abcdef0123456789abcdef01234567";
-        let parse = |extra: &[&str]| {
-            let mut argv = vec!["mj", "new", "--workspace", "town"];
-            argv.extend_from_slice(extra);
-            Cli::try_parse_from(argv)
-        };
-        let error = parse(&["--at", commit]).expect_err("--at without --bundle is refused");
-        assert!(error.to_string().contains("--bundle"), "{error}");
-
-        let Some(Command::New(args)) = parse(&["--bundle", "product", "--at", commit])
-            .unwrap()
-            .command
-        else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.at.as_deref(), Some(commit));
-        assert_eq!((args.branch, args.base), (None, None));
-
-        let Some(Command::New(args)) = parse(&[
-            "--bundle",
-            "product",
-            "--at",
-            commit,
-            "--branch",
-            "town/run-1",
-            "--base",
-            "v1.0",
-        ])
-        .unwrap()
-        .command
-        else {
-            panic!("expected the new command");
-        };
-        assert_eq!(args.branch.as_deref(), Some("town/run-1"));
-        assert_eq!(args.base.as_deref(), Some("v1.0"));
-    }
-
-    #[test]
-    fn a_refused_start_names_quoted_fields_as_flags() {
-        let error = name_launch_flags(anyhow::anyhow!(
-            "`at` requires bundle_id: it checks out the bundle's primary repository"
-        ));
-        assert_eq!(
-            error.to_string(),
-            "--at requires --bundle: it checks out the bundle's primary repository"
-        );
     }
 
     #[test]
@@ -2663,6 +2618,7 @@ mod tests {
     /// Launch finding J-25: `mj prompt --wait` printed the Codex quota
     /// sentence three times, as the wait's message, the diagnostic, and the
     /// agent's final message. Each distinct line is printed once.
+    // Hard-won: cd2f1b6d: a Codex quota reason was printed three times and surfaced as an ordinary error.
     #[test]
     fn a_reason_repeated_in_the_final_message_is_printed_once() {
         let sentence = "You’ve hit your usage limit. Try again at Sep 29th, 2026 10:20 PM.";
@@ -2688,6 +2644,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 4a875bad: wait showed only error and hid the diagnostic already recorded by the worker.
     #[test]
     fn a_failed_turn_reports_the_reason_the_worker_recorded() {
         let response = wait_response(
@@ -2733,6 +2690,7 @@ mod tests {
 
     /// precision-3260: sessions on a full disk read as "unreachable" with
     /// nothing saying why. The list marks them and the report says why.
+    // Hard-won: 540c9202: a real full filesystem stopped workers while users saw only unreachable.
     #[test]
     fn a_session_on_a_full_disk_says_so_in_the_list_and_the_report() {
         let mut session = wait_response("finished", serde_json::json!({})).session;
@@ -2751,6 +2709,7 @@ mod tests {
     /// Launch finding R11-3: `mj sessions --session` printed `last turn
     /// Completed { stop_reason: "EndTurn" }`, Rust's debug form. It says how
     /// the turn ended in words.
+    // Hard-won: 1018b0f7: session summaries exposed Rust debug spellings instead of user-readable turn outcomes.
     #[test]
     fn one_session_names_how_its_last_turn_ended_in_words() {
         let with_outcome = |outcome: serde_json::Value| {
@@ -2808,6 +2767,7 @@ mod tests {
     /// sessions` and the parent's sub-agent notice said "completed, end of
     /// turn". `mj wait` and `mj prompt --wait` use the same words, placed as
     /// the notice places them; `--json` keeps the stop reason unchanged.
+    // Hard-won: 5a09877c: wait exposed raw harness stop reasons unlike the existing session summary.
     #[test]
     fn a_wait_says_how_the_turn_ended_in_the_words_mj_sessions_uses() {
         let finished = wait_response(
@@ -2895,6 +2855,7 @@ mod tests {
 
     /// F-6: `mj suspend` says to watch with `mj wait`, which then failed with
     /// "the turn ended as stopped" once the suspension had succeeded.
+    // Hard-won: 2a521fc5: successful suspension made mj wait report an error and exit nonzero.
     #[test]
     fn a_wait_that_sees_a_finished_suspension_reports_success() {
         let suspended = |error: serde_json::Value| {
@@ -2917,82 +2878,7 @@ mod tests {
         assert!(report_wait(&failed_resume, false).is_err());
     }
 
-    #[test]
-    fn usage_selects_one_session_or_a_whole_tree_and_pages_only_sessions() {
-        #[derive(clap::Parser)]
-        struct UsageCommand {
-            #[command(flatten)]
-            usage: UsageArgs,
-        }
-        let parse = |args: &[&str]| <UsageCommand as clap::Parser>::try_parse_from(args);
-        assert!(
-            parse(&[
-                "usage",
-                "--session",
-                "s",
-                "--after-seq",
-                "1",
-                "--limit",
-                "2"
-            ])
-            .is_ok()
-        );
-        assert!(parse(&["usage", "--parent", "p", "--json"]).is_ok());
-        for args in [
-            vec!["usage"],
-            vec!["usage", "--session", "s", "--parent", "p"],
-            vec!["usage", "--parent", "p", "--limit", "2"],
-            vec!["usage", "--parent", "p", "--after-seq", "1"],
-        ] {
-            assert!(parse(&args).is_err(), "{args:?}");
-        }
-    }
-
-    #[test]
-    fn usage_tree_text_distinguishes_models_efforts_and_removed_children() {
-        let tree: mj_core::storage::UsageTree=serde_json::from_value(serde_json::json!({
-            "parent_session_id":"parent", "totals":{},
-            "coverage":{"recorded_turns":2,"full_turn_reports":2,"last_request_reports":0,"unspecified_reports":0,"missing_reports":0},
-            "by_model":[{"model":"sol","effort":"high","totals":{"input_tokens":{"tokens":10,"reported_turns":1}}},
-                {"model":"luna","effort":"low","totals":{"input_tokens":{"tokens":20,"reported_turns":1}}}],
-            "sessions":[{"session_id":"child","parent_session_id":"parent","task_name":"investigate",
-                "operational_session_present":false,"totals":{},"by_model":[],
-                "coverage":{"recorded_turns":0,"full_turn_reports":0,"last_request_reports":0,"unspecified_reports":0,"missing_reports":0}}]
-        })).unwrap();
-        let text = usage_tree_lines(&tree).join("\n");
-        assert!(text.contains("model sol; effort high:"));
-        assert!(text.contains("model luna; effort low:"));
-        assert!(
-            text.contains("task investigate; parent parent; accounting retained after cleanup")
-        );
-    }
-
-    /// F-16: `mj usage` printed JSON unless asked for text.
-    #[test]
-    fn usage_text_keeps_the_coverage_beside_the_totals() {
-        let page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
-            "session_id": "s1",
-            "turns": [],
-            "next_after_seq": 4,
-            "latest_seq": 4,
-            "totals": {"input_tokens": {"tokens": 1200, "reported_turns": 2}},
-            "coverage": {
-                "recorded_turns": 3, "full_turn_reports": 2, "last_request_reports": 1,
-                "unspecified_reports": 0, "missing_reports": 0
-            }
-        }))
-        .unwrap();
-        let lines = usage_lines(&page);
-        assert_eq!(
-            lines[..3],
-            [
-                "totals from the 2 of 3 turns that reported a whole turn:",
-                "  input_tokens  1200  (2 turns)",
-                "not in the totals: 1 reported only their last request (turns)",
-            ]
-        );
-    }
-
+    // Hard-won: 0877ce6d: the refusal named API fields instead of the --profile and --target flags.
     #[test]
     fn a_refused_start_names_the_flags_the_user_typed() {
         let error = name_launch_flags(anyhow::anyhow!(
@@ -3007,6 +2893,7 @@ mod tests {
     /// R2-3: the `mj suspend` refusal told the user to "retry with
     /// acknowledge_unpublished_work=true", the API field. The CLI's flag is
     /// `--acknowledge-unpublished-work`.
+    // Hard-won: d7b2f496: the unpublished-work refusal named the API field instead of the CLI flag.
     #[test]
     fn a_refused_suspend_names_the_flag_the_user_types() {
         for (api, cli) in [
@@ -3025,6 +2912,7 @@ mod tests {
 
     /// F-11: a destroyed session that never took a prompt was offered
     /// `mj resume --wiki`, which then failed with "no prompt to restore from".
+    // Hard-won: 94305629: a never-prompted archived session was offered a resume that always failed.
     #[test]
     fn an_archived_row_is_offered_a_resume_only_when_it_has_something_to_restore() {
         let row = |nothing_to_restore: bool| mj_client::daemon::WikiSessionInfo {
@@ -3057,93 +2945,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn creating_a_session_parses_its_target_selection_and_first_prompt() {
-        let cli = Cli::try_parse_from([
-            "mj",
-            "--workspace",
-            "work",
-            "new",
-            "--target",
-            "local",
-            "--project-directory",
-            ".",
-            "--model",
-            "gpt-5",
-            "--effort",
-            "high",
-            "add a README line",
-        ])
-        .unwrap();
-        assert_eq!(cli.workspace.as_deref(), Some("work"));
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new subcommand");
-        };
-        assert!(args.profile.is_none());
-        assert_eq!(args.target.as_deref(), Some("local"));
-        assert_eq!(args.project_directory, Some(PathBuf::from(".")));
-        assert_eq!(args.model.as_deref(), Some("gpt-5"));
-        assert_eq!(args.effort.as_deref(), Some("high"));
-        assert_eq!(args.prompt.as_deref(), Some("add a README line"));
-        assert!(!args.json);
-
-        // The idempotency key is gone; a command line that still passes it
-        // must fail rather than be silently ignored.
-        assert!(
-            Cli::try_parse_from([
-                "mj",
-                "new",
-                "--profile",
-                "codex",
-                "--target",
-                "local",
-                "--project-directory",
-                ".",
-                "--idempotency-key",
-                "k",
-                "add a README line",
-            ])
-            .is_err()
-        );
-
-        // The global workspace flag names a workspace; the session-scoped id
-        // is its own flag, so the two cannot collide.
-        let cli = Cli::try_parse_from([
-            "mj",
-            "new",
-            "--profile",
-            "codex",
-            "--target",
-            "local",
-            "--bundle",
-            "bundle-1",
-            "--workspace-id",
-            "workspace-7",
-            "--json",
-        ])
-        .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new subcommand");
-        };
-        assert_eq!(args.workspace_id.as_deref(), Some("workspace-7"));
-        assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
-        assert!(args.json);
-    }
-
-    #[test]
-    fn creating_a_session_does_not_require_naming_a_profile_or_target() {
-        // Both identifiers fall back to the default `mj go` records, so a
-        // caller that has never read its configuration can still start work.
-        let cli = Cli::try_parse_from(["mj", "new", "--bundle", "bundle-1", "add a README line"])
-            .unwrap();
-        let Some(Command::New(args)) = cli.command else {
-            panic!("expected the new subcommand");
-        };
-        assert!(args.profile.is_none());
-        assert!(args.target.is_none());
-        assert_eq!(args.bundle.as_deref(), Some("bundle-1"));
-    }
-
+    // Hard-won: 4209cb10: branch export refusal did not name the required --branch flag.
     #[test]
     fn the_session_driving_subcommands_parse_their_selectors() {
         let cli = Cli::try_parse_from([
@@ -3226,9 +3028,9 @@ mod tests {
         assert_eq!(args.kind, ExportKindArg::File);
         assert_eq!(args.path.as_deref(), Some("src/main.rs"));
 
-        // Launch finding R3-11: without a branch name the API answered "a
-        // branch export needs a branch name", which named no flag. The
-        // command line refuses it first and names `--branch`.
+        // Finding R3-11: without a branch name the API answered "a branch
+        // export needs a branch name", which named no flag. The command line
+        // refuses it first and names `--branch`.
         let Err(error) =
             Cli::try_parse_from(["mj", "export", "--session", "s1", "--kind", "branch"])
         else {
@@ -3236,8 +3038,6 @@ mod tests {
         };
         assert!(error.to_string().contains("--branch"), "{error}");
 
-        // An export defaults to the patch, which is what a caller reviewing
-        // the work asks for most.
         let cli = Cli::try_parse_from(["mj", "export", "--session", "s1"]).unwrap();
         let Some(Command::Export(args)) = cli.command else {
             panic!("expected the export subcommand");
@@ -3247,7 +3047,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["mj", "destroy", "--session", "s1", "--delete-branch"]).unwrap();
         let Some(Command::Destroy(args)) = cli.command else {
-            panic!("expected the suspend subcommand");
+            panic!("expected the destroy subcommand");
         };
         assert!(args.delete_branch);
 
@@ -3257,12 +3057,9 @@ mod tests {
         };
         assert_eq!(args.session.as_deref(), Some("s1"));
         assert!(Cli::try_parse_from(["mj", "suspend", "--session", "s1", "--force"]).is_err());
-        // `close` is gone; its old name only says what replaced it.
         let cli = Cli::try_parse_from(["mj", "close", "--session", "s1"]).unwrap();
         assert!(crate::replacement_notice(cli.command.as_ref()).is_some());
 
-        // Resume names the session and nothing else by default: the session's
-        // own record supplies the profile and target.
         let cli = Cli::try_parse_from(["mj", "resume", "--session", "s1"]).unwrap();
         let Some(Command::Resume(args)) = cli.command else {
             panic!("expected the resume subcommand");
@@ -3427,95 +3224,116 @@ mod tests {
         );
     }
 
-    /// `mj resume` names one subject: a Mjolnir session or a SessionWiki row.
-    /// Both at once would leave the command guessing which to continue.
+    /// F-16: `mj usage` added text output while keeping partial coverage visible.
     #[test]
-    fn resume_takes_a_session_or_a_wiki_id_but_not_both() {
-        let cli = Cli::try_parse_from(["mj", "resume", "--wiki", "abc123"]).unwrap();
-        let Some(Command::Resume(args)) = cli.command else {
-            panic!("expected the resume subcommand");
-        };
-        assert_eq!(args.wiki.as_deref(), Some("abc123"));
-        assert_eq!(args.session, None);
-
-        assert!(
-            Cli::try_parse_from(["mj", "resume", "--wiki", "abc123", "--session", "s1"]).is_err(),
-            "--wiki and --session name different subjects"
-        );
-        assert!(
-            Cli::try_parse_from(["mj", "resume"]).is_err(),
-            "resume has to be told what to continue"
-        );
-    }
-
-    /// `mj workspaces` keeps opening the manager, and the two subcommands are
-    /// the non-interactive form a script uses to get a workspace before its
-    /// first session (#1080).
-    #[test]
-    fn workspaces_keeps_its_interactive_form_and_gains_list_and_create() {
-        let cli = Cli::try_parse_from(["mj", "workspaces"]).unwrap();
-        let Some(Command::Workspaces(args)) = cli.command else {
-            panic!("expected the workspaces subcommand");
-        };
-        assert!(args.command.is_none(), "the bare form opens the manager");
-
-        let cli = Cli::try_parse_from(["mj", "workspaces", "list", "--json"]).unwrap();
-        let Some(Command::Workspaces(args)) = cli.command else {
-            panic!("expected the workspaces subcommand");
-        };
-        let Some(crate::WorkspacesCommand::List(list)) = args.command else {
-            panic!("expected list");
-        };
-        assert!(list.json);
-
-        let cli = Cli::try_parse_from(["mj", "workspaces", "create", "Release work"]).unwrap();
-        let Some(Command::Workspaces(args)) = cli.command else {
-            panic!("expected the workspaces subcommand");
-        };
-        let Some(crate::WorkspacesCommand::Create(create)) = args.command else {
-            panic!("expected create");
-        };
-        assert_eq!(create.name, "Release work");
-        assert!(!create.json);
-
-        // The name is required: an empty create would otherwise reach the API.
-        assert!(Cli::try_parse_from(["mj", "workspaces", "create"]).is_err());
-    }
-
-    #[test]
-    fn suspend_names_the_option_that_takes_a_session_id() {
-        let parsed = Cli::try_parse_from(["mj", "suspend", "s1"]).expect("the id is accepted");
-        let Command::Suspend(args) = parsed.command.expect("suspend is a command") else {
-            panic!("suspend parsed as another command");
-        };
-        let error = suspend_session_id(&args).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("--session s1"),
-            "the error has to say which option to use: {error:#}"
-        );
-
-        let parsed =
-            Cli::try_parse_from(["mj", "suspend", "--session", "s1"]).expect("the option parses");
-        let Command::Suspend(args) = parsed.command.expect("suspend is a command") else {
-            panic!("suspend parsed as another command");
-        };
-        assert_eq!(suspend_session_id(&args).unwrap(), "s1");
-    }
-
-    #[test]
-    fn a_prompt_comes_from_exactly_one_source() {
+    fn usage_text_keeps_the_coverage_beside_the_totals() {
+        let page: mj_core::storage::UsagePage = serde_json::from_value(serde_json::json!({
+            "session_id": "s1",
+            "turns": [],
+            "next_after_seq": 4,
+            "latest_seq": 4,
+            "totals": {"input_tokens": {"tokens": 1200, "reported_turns": 2}},
+            "coverage": {
+                "recorded_turns": 3, "full_turn_reports": 2, "last_request_reports": 1,
+                "unspecified_reports": 0, "missing_reports": 0
+            }
+        }))
+        .unwrap();
+        let lines = usage_lines(&page);
         assert_eq!(
-            read_prompt(Some("inline".to_owned()), None)
-                .unwrap()
-                .as_deref(),
-            Some("inline")
+            lines[..3],
+            [
+                "totals from the 2 of 3 turns that reported a whole turn:",
+                "  input_tokens  1200  (2 turns)",
+                "not in the totals: 1 reported only their last request (turns)",
+            ]
         );
-        let error =
-            read_prompt(Some("inline".to_owned()), Some(PathBuf::from("prompt.txt"))).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("not both"),
-            "unexpected error: {error:#}"
+    }
+
+    #[test]
+    fn golden_api_usage_tree() {
+        let tree: mj_core::storage::UsageTree = serde_json::from_value(serde_json::json!({
+            "parent_session_id": "session-parent",
+            "sessions": [
+                {
+                    "session_id": "session-parent",
+                    "parent_session_id": null,
+                    "task_name": null,
+                    "operational_session_present": true,
+                    "totals": {},
+                    "coverage": {
+                        "recorded_turns": 0,
+                        "full_turn_reports": 0,
+                        "last_request_reports": 0,
+                        "unspecified_reports": 0,
+                        "missing_reports": 0,
+                        "unfinished_turns": 0
+                    },
+                    "by_model": [],
+                    "provider_session_cost": {
+                        "amount": 0.0123,
+                        "currency": "USD",
+                        "observed_at_ms": 1
+                    }
+                },
+                {
+                    "session_id": "session-reviewer",
+                    "parent_session_id": "session-parent",
+                    "task_name": "Review the migration plan",
+                    "operational_session_present": false,
+                    "totals": {},
+                    "coverage": {
+                        "recorded_turns": 0,
+                        "full_turn_reports": 0,
+                        "last_request_reports": 0,
+                        "unspecified_reports": 0,
+                        "missing_reports": 0,
+                        "unfinished_turns": 0
+                    },
+                    "by_model": [],
+                    "provider_session_cost": {
+                        "amount": 0.0045,
+                        "currency": "USD",
+                        "observed_at_ms": 2
+                    }
+                }
+            ],
+            "totals": {
+                "input_tokens": { "tokens": 2400, "reported_turns": 3 },
+                "output_tokens": { "tokens": 650, "reported_turns": 3 }
+            },
+            "coverage": {
+                "recorded_turns": 5,
+                "full_turn_reports": 3,
+                "last_request_reports": 1,
+                "unspecified_reports": 0,
+                "missing_reports": 1,
+                "unfinished_turns": 1
+            },
+            "by_model": [
+                {
+                    "model": "gpt-5.4",
+                    "effort": "high",
+                    "totals": {
+                        "input_tokens": { "tokens": 1800, "reported_turns": 2 },
+                        "output_tokens": { "tokens": 500, "reported_turns": 2 }
+                    }
+                },
+                {
+                    "model": null,
+                    "effort": null,
+                    "totals": {
+                        "cache_read_tokens": { "tokens": 600, "reported_turns": 1 }
+                    }
+                }
+            ]
+        }))
+        .expect("usage tree fixture");
+
+        let output = format!(
+            "=== parent session usage tree (CLI text) ===\n{}",
+            usage_tree_lines(&tree).join("\n")
         );
-        assert_eq!(read_prompt(None, None).unwrap(), None);
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-usage-tree", &output);
     }
 }

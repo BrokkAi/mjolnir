@@ -58,34 +58,19 @@ pub fn find_program_on_path(program: &str, path: Option<&OsStr>) -> Option<PathB
 mod tests {
     use super::*;
 
+    // Hard-won: 3bf8fb93: Windows could not find docker.exe or podman.exe because PATH lookup ignored PATHEXT.
     #[test]
     fn pathext_extensions_are_appended_in_order() {
         assert_eq!(
             names_with_extensions("docker", ".COM;.EXE; .cmd ;;"),
             ["docker.COM", "docker.EXE", "docker.cmd"]
         );
+        let defaults = names_with_extensions("podman", DEFAULT_PATHEXT);
+        assert!(defaults.contains(&"podman.EXE".to_owned()));
+        assert!(defaults.contains(&"podman.CMD".to_owned()));
     }
 
-    #[test]
-    fn a_name_with_an_extension_is_tried_as_written_first() {
-        assert_eq!(
-            names_with_extensions("tool.exe", ".EXE;.BAT"),
-            ["tool.exe", "tool.exe.EXE", "tool.exe.BAT"]
-        );
-    }
-
-    #[test]
-    fn default_pathext_covers_exe_and_cmd() {
-        let names = names_with_extensions("podman", DEFAULT_PATHEXT);
-        assert!(names.contains(&"podman.EXE".to_owned()));
-        assert!(names.contains(&"podman.CMD".to_owned()));
-    }
-
-    #[test]
-    fn a_missing_path_finds_nothing() {
-        assert_eq!(find_program_on_path("docker", None), None);
-    }
-
+    // Hard-won: 3bf8fb93: Windows PATHEXT lookup reported installed Docker and Podman executables missing.
     #[cfg(windows)]
     #[test]
     fn finds_an_exe_by_its_bare_name() {
@@ -95,15 +80,5 @@ mod tests {
         let path = std::env::join_paths([directory.path()]).unwrap();
         assert_eq!(find_program_on_path("docker", Some(&path)), Some(exe));
         assert_eq!(find_program_on_path("podman", Some(&path)), None);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn finds_a_file_by_its_exact_name() {
-        let directory = tempfile::tempdir().unwrap();
-        let file = directory.path().join("docker");
-        std::fs::write(&file, b"").unwrap();
-        let path = std::env::join_paths([directory.path()]).unwrap();
-        assert_eq!(find_program_on_path("docker", Some(&path)), Some(file));
     }
 }

@@ -193,6 +193,95 @@ pub async fn run_bounded(
     }
 }
 
+/// Capture a process with byte and time bounds while writing its complete
+/// stdin concurrently. This preserves path arguments on the platform's native
+/// `Command` API and avoids filling either output pipe while a child is still
+/// consuming a large input.
+pub async fn run_bounded_with_input(
+    command: &mut tokio::process::Command,
+    input: &[u8],
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<Output> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().context("start bounded subprocess")?;
+    let group = ProcessGroupGuard::new(child.id());
+
+    async fn read(
+        mut pipe: impl tokio::io::AsyncRead + Unpin,
+        bytes: &mut Vec<u8>,
+        max: usize,
+    ) -> Result<()> {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let count = pipe.read(&mut chunk).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            anyhow::ensure!(bytes.len() <= max, "subprocess output exceeds {max} bytes");
+        }
+    }
+    async fn write_input(mut pipe: impl tokio::io::AsyncWrite + Unpin, input: &[u8]) -> Result<()> {
+        match pipe.write_all(input).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    let stdin = child.stdin.take().context("missing subprocess stdin")?;
+    let stdout = child.stdout.take().context("missing subprocess stdout")?;
+    let stderr = child.stderr.take().context("missing subprocess stderr")?;
+    let (mut stdout_bytes, mut stderr_bytes) = (Vec::new(), Vec::new());
+    let result = tokio::time::timeout(timeout, async {
+        let (status, (), ()) = tokio::try_join!(
+            async { child.wait().await.map_err(anyhow::Error::from) },
+            write_input(stdin, input),
+            async {
+                tokio::try_join!(
+                    read(stdout, &mut stdout_bytes, max_bytes),
+                    read(stderr, &mut stderr_bytes, max_bytes)
+                )
+                .map(|_| ())
+            }
+        )?;
+        Ok::<_, anyhow::Error>(status)
+    })
+    .await;
+    match result {
+        Ok(Ok(status)) => {
+            drop(group);
+            Ok(Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            })
+        }
+        outcome => {
+            drop(group);
+            if let Err(error) = child.start_kill() {
+                tracing::debug!(%error, "bounded subprocess already exited during termination");
+            }
+            child
+                .wait()
+                .await
+                .context("reap terminated bounded subprocess")?;
+            match outcome {
+                Ok(Err(error)) => Err(error),
+                _ => anyhow::bail!("subprocess timed out"),
+            }
+        }
+    }
+}
+
 /// Launch a long-lived background process with no inherited terminal streams.
 ///
 /// The process is genuinely detached: on Unix it is a grandchild reparented to
@@ -231,12 +320,48 @@ pub fn spawn_detached(command: &mut Command, log_path: &Path) -> Result<u32> {
     {
         spawn_detached_unix(command)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt as _;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        disinherit_standard_handles();
+        // A hidden console and a process group of its own, as `setsid` gives
+        // a Unix child its own session: Ctrl-C in the launcher's terminal and
+        // closing it do not reach the child, and the console programs it runs
+        // open no window.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         // Windows has no zombie state: dropping the handle releases it while
         // the process keeps running.
         let child = command.spawn().context("spawn detached child process")?;
         Ok(child.id())
+    }
+}
+
+/// Keep this process's standard handles out of every child that is not
+/// handed them explicitly. Windows passes a child every inheritable handle,
+/// and of a Rust process's handles only the ones it inherited are
+/// inheritable: Rust creates its own non-inheritable and gives each child
+/// inheritable duplicates of exactly its stdio. A detached child that kept
+/// the launcher's stdout pipe would hold it open for its whole life, so a
+/// script reading `mj daemon restart` output would wait for the daemon to
+/// exit. Children given these handles still get them, as duplicates.
+#[cfg(windows)]
+fn disinherit_standard_handles() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle takes no pointers, and SetHandleInformation
+        // only clears a flag on a handle this process holds.
+        unsafe {
+            let handle = GetStdHandle(id);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 }
 
@@ -577,6 +702,7 @@ mod tests {
     /// The leader's exit completes a bounded command; a descendant that keeps
     /// the pipes open is stopped after the drain instead of failing the
     /// command at its timeout.
+    // Hard-won: c86b2123: A completed command stayed Running until a background descendant closed inherited pipes.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn bounded_capture_completes_at_leader_exit_when_a_descendant_holds_the_pipes() {
@@ -643,8 +769,29 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("timed out"));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_input_streams_more_than_one_pipe_buffer_concurrently() {
+        use std::time::Duration;
+        let input = vec![b'x'; 512 * 1024];
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "cat"]);
+        let output = super::run_bounded_with_input(
+            &mut command,
+            &input,
+            600 * 1024,
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
+    }
+    #[cfg(unix)]
     use super::*;
 
+    // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
     #[cfg(unix)]
     #[test]
     fn run_with_input_completes_when_child_echoes_input_larger_than_pipe_buffer() {
@@ -696,13 +843,7 @@ mod tests {
         assert_eq!(output.stdout.len(), 512 * 1024);
     }
 
-    #[test]
-    fn run_with_input_returns_output_for_empty_input() {
-        let mut command = Command::new("true");
-        let output = run_with_input(&mut command, &[]).expect("run_with_input should succeed");
-        assert!(output.status.success());
-    }
-
+    // Hard-won: cd0af915: Dropped detached children stayed zombies and daemon probes treated them as alive.
     #[cfg(unix)]
     #[test]
     fn spawn_detached_leaves_no_zombie_under_a_spawner_that_keeps_running() {
@@ -795,6 +936,7 @@ mod tests {
         signal_process_group(raw_pid, libc::SIGKILL).expect("terminate the detached child group");
     }
 
+    // Hard-won: 99a5e469: An inherited macOS pipe descriptor prevented EOF and hung concurrent daemon upgrades.
     #[cfg(unix)]
     #[test]
     fn spawn_detached_child_keeps_no_descriptor_its_launcher_left_inheritable() {
@@ -885,5 +1027,59 @@ mod tests {
         assert!(group_signal_error_is_ignorable(&denied));
         #[cfg(not(target_os = "macos"))]
         assert!(!group_signal_error_is_ignorable(&denied));
+    }
+
+    // Hard-won: #1235: A detached Windows daemon kept its launcher's stdout pipe, so capturing `mj daemon restart` output hung until the daemon exited.
+    #[cfg(windows)]
+    #[test]
+    fn spawn_detached_child_keeps_no_standard_handle_of_its_launcher() {
+        // This test binary is its own launcher: run with this variable, the
+        // test detaches a long-lived child and exits, as `mj daemon restart`
+        // does, while its stdout is a pipe the outer test reads.
+        const LAUNCHER_LOG: &str = "MJ_TEST_DETACHED_LAUNCHER_LOG";
+        if let Some(log) = std::env::var_os(LAUNCHER_LOG) {
+            let mut child = std::process::Command::new("ping");
+            child.args(["-n", "60", "127.0.0.1"]);
+            let pid = super::spawn_detached(&mut child, std::path::Path::new(&log))
+                .expect("detach the long-lived child");
+            println!("detached={pid}");
+            return;
+        }
+        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::Duration;
+
+        let log_dir = tempfile::tempdir().expect("create log directory");
+        let mut launcher = std::process::Command::new(std::env::current_exe().unwrap());
+        launcher
+            .args([
+                "--exact",
+                "subprocess::tests::spawn_detached_child_keeps_no_standard_handle_of_its_launcher",
+                "--nocapture",
+            ])
+            .env(LAUNCHER_LOG, log_dir.path().join("child.log"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut launcher = launcher.spawn().expect("start the launcher");
+        let mut stdout = launcher.stdout.take().expect("take the launcher's stdout");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = sender.send(stdout.read_to_string(&mut output).map(|_| output));
+        });
+        // The detached child pings for about a minute; EOF must come first.
+        let outcome = receiver.recv_timeout(Duration::from_secs(30));
+        launcher.wait().expect("reap the launcher");
+        let output = outcome
+            .expect("the pipe must reach EOF while the detached child is still running")
+            .expect("read the launcher's output");
+        let pid = output
+            .lines()
+            .find_map(|line| line.strip_prefix("detached="))
+            .unwrap_or_else(|| panic!("the launcher reports its child: {output}"));
+        let mut stop = std::process::Command::new("taskkill");
+        stop.args(["/PID", pid, "/F"]);
+        super::run_with_input(&mut stop, b"").expect("stop the detached child");
     }
 }

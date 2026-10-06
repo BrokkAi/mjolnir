@@ -1,0 +1,280 @@
+=== six quotas and API at a glance (320x568) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+100%
+90% !
+›
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+layout: {"documentWidth":320,"documentHeight":568,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":false,"label":"claude. Week: 100% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":false},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== quota details opened on demand (320x568) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+100%
+90% !
+›
+
+claude
+
+Week
+0% used
+
+resets 12:00 Sep 12
+
+5H
+10% used
+
+on course to run out first
+
+Last refreshed 9:04:11 PM
+
+Refresh
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+layout: {"documentWidth":320,"documentHeight":878,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 100% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":true},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== refreshed quota keeps its details and focus (320x568) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+83%
+90% !
+›
+
+claude
+
+Week
+17% used
+
+resets 12:00 Sep 12
+
+5H
+10% used
+
+on course to run out first
+
+Last refreshed 9:04:11 PM
+
+Refresh
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+layout: {"documentWidth":320,"documentHeight":878,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 83% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":true},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== six quotas and API at a glance (390x844) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+100%
+90% !
+›
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+layout: {"documentWidth":390,"documentHeight":844,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":false,"label":"claude. Week: 100% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":false},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== quota details opened on demand (390x844) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+100%
+90% !
+›
+
+claude
+
+Week
+0% used
+
+resets 12:00 Sep 12
+
+5H
+10% used
+
+on course to run out first
+
+Last refreshed 9:04:11 PM
+
+Refresh
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+layout: {"documentWidth":390,"documentHeight":878,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 100% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":true},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== refreshed quota keeps its details and focus (390x844) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+83%
+90% !
+›
+
+claude
+
+Week
+17% used
+
+resets 12:00 Sep 12
+
+5H
+10% used
+
+on course to run out first
+
+Last refreshed 9:04:11 PM
+
+Refresh
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+layout: {"documentWidth":390,"documentHeight":878,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 83% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":true},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}

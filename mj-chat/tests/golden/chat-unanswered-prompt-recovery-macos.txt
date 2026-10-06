@@ -1,0 +1,82 @@
+=== unanswered prompt appears once and can be restored (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ You                                                                                           ▐│
+│ │ rename the module                                                                             ▐│
+│                                                                                                 ▐│
+│ ─ Mjolnir                                                                                       ▐│
+│ │ Prompt was not answered: the harness ended the turn without answering; check the workspace    ▐│
+│ │ before resending                                                                              ▐│
+│ │ rename the module                                                                             ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+unsent prompt count: 1
+headline: Prompt was not answered
+
+=== Ctrl-Alt-R restores unanswered prompt to composer (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ You                                                                                           ▐│
+│ │ rename the module                                                                             ▐│
+│                                                                                                 ▐│
+│ ─ Mjolnir                                                                                       ▐│
+│ │ Prompt was not answered: the harness ended the turn without answering; check the workspace    ▐│
+│ │ before resending                                                                              ▐│
+│ │ rename the module                                                                             ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+Unsent prompt restored · Enter to retry
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> rename the module                                                                               │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: None
+restored draft: "rename the module"
+
+=== normally completed turn has no restore row (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+unsent prompt count: 0

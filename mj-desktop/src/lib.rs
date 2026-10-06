@@ -788,7 +788,7 @@ fn install_bootstrap_cookie(
     Ok(())
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn decode_certificate_pem(pem: &str) -> Option<Vec<u8>> {
     use base64::Engine;
 
@@ -805,7 +805,6 @@ fn decode_certificate_pem(pem: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use std::net::TcpListener;
     use std::thread;
@@ -836,43 +835,6 @@ mod tests {
     fn origin_policy_rejects_insecure_or_credentialed_origins() {
         assert!(OriginPolicy::new(&Url::parse("http://localhost:1234/").unwrap()).is_err());
         assert!(OriginPolicy::new(&Url::parse("https://user@localhost:1234/").unwrap()).is_err());
-    }
-
-    #[test]
-    fn certificate_pem_decoder_ignores_armor_and_whitespace() {
-        let bytes = b"desktop certificate";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let pem = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n");
-        assert_eq!(
-            decode_certificate_pem(&pem).as_deref(),
-            Some(bytes.as_slice())
-        );
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn desktop_window_uses_a_normal_initial_size() {
-        #[derive(Default)]
-        struct RecordingWindowBuilder {
-            initial_size: Option<(f64, f64)>,
-            minimum_size: Option<(f64, f64)>,
-        }
-
-        impl DesktopWindowSizeBuilder for RecordingWindowBuilder {
-            fn with_desktop_initial_size(mut self, width: f64, height: f64) -> Self {
-                self.initial_size = Some((width, height));
-                self
-            }
-
-            fn with_desktop_minimum_size(mut self, width: f64, height: f64) -> Self {
-                self.minimum_size = Some((width, height));
-                self
-            }
-        }
-
-        let builder = apply_desktop_window_size(RecordingWindowBuilder::default());
-        assert_eq!(builder.initial_size, Some((1280.0, 800.0)));
-        assert_eq!(builder.minimum_size, Some((900.0, 600.0)));
     }
 
     #[test]

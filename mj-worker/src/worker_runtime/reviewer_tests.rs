@@ -25,6 +25,7 @@ use crate::relay::{
 use mj_core::config::{ExecutionPolicy, HarnessKind};
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+const SETTINGS_ROLE: &str = "settings-0000000000000001";
 /// Comfortably over the 64KB pipe buffer, so a payload that only works
 /// because it fits in one buffer fails here.
 const LARGE_BYTES: usize = 200 * 1024;
@@ -334,8 +335,7 @@ impl Fixture {
         self.request_as(None, request).await
     }
 
-    /// Drives one named reviewing role, which is how the extended review tier
-    /// runs its supervisor and lanes beside the default reviewer.
+    /// Drives the optional legacy role field through the reviewer relay.
     async fn request_as(
         &mut self,
         role: Option<&str>,
@@ -366,11 +366,18 @@ impl Fixture {
     /// reads it. Opening a second relay on the same journal would recover it
     /// underneath the live one, so the attach path is the only safe reader.
     async fn reviewer_events(&mut self) -> Vec<RelayEvent> {
+        self.reviewer_events_as(None).await
+    }
+
+    async fn reviewer_events_as(&mut self, role: Option<&str>) -> Vec<RelayEvent> {
         let body = self
-            .request(ReviewerRequest::Attach {
-                after_ordinal: 0,
-                after_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-            })
+            .request_as(
+                role,
+                ReviewerRequest::Attach {
+                    after_ordinal: 0,
+                    after_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
+                },
+            )
             .await;
         match body {
             RelayResponseBody::Ok {
@@ -386,9 +393,18 @@ impl Fixture {
         timeout: Duration,
         ready: impl Fn(&[RelayEvent]) -> bool,
     ) -> Vec<RelayEvent> {
+        self.await_events_as(None, timeout, ready).await
+    }
+
+    async fn await_events_as(
+        &mut self,
+        role: Option<&str>,
+        timeout: Duration,
+        ready: impl Fn(&[RelayEvent]) -> bool,
+    ) -> Vec<RelayEvent> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            let events = self.reviewer_events().await;
+            let events = self.reviewer_events_as(role).await;
             if ready(&events) {
                 return events;
             }
@@ -547,61 +563,42 @@ async fn starting_opens_a_native_session_and_reports_what_the_harness_advertises
 }
 
 #[tokio::test]
-async fn disconnecting_during_start_pauses_only_the_in_flight_role() {
-    let fixture = Fixture::new(true);
+async fn disconnecting_during_start_pauses_only_the_in_flight_named_role() {
+    let mut fixture = Fixture::new(true);
     let directory = fixture.script_directory();
     write_options(&directory, "options.json", &[]);
-    // The default role blocks before it can advertise SessionConfigured. The
-    // named role deliberately has no block marker, proving that cancellation
-    // of one role does not serialize or tear down another role.
-    std::fs::write(directory.join("block-session-default"), b"1").unwrap();
-
-    let (mut client, server) = reviewer_socket(&fixture).await;
-    send_reviewer_request(
-        &mut client,
-        None,
-        ReviewerRequest::Start {
-            config: Box::new(config(0)),
-        },
-    )
-    .await;
-    wait_for_marker(&directory.join("session-blocked-default")).await;
-    let blocked_harness: i32 = std::fs::read_to_string(directory.join("harness-pid-default"))
+    let default = fixture.start(config(0)).await;
+    started_options(&default);
+    let default_pid = std::fs::read_to_string(directory.join("harness-pid-default"))
         .unwrap()
         .trim()
         .parse()
         .unwrap();
 
-    let other = fixture
-        .sidecar
-        .handle(
-            RelayRequestEnvelope {
-                request_id: "other-role".to_owned(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request: RelayRequest::Reviewer {
-                    role: Some("tests".to_owned()),
-                    request: ReviewerRequest::Start {
-                        config: Box::new(config(0)),
-                    },
-                },
-            },
-            Some("tests".to_owned()),
-            ReviewerRequest::Start {
-                config: Box::new(config(0)),
-            },
-        )
-        .await;
-    started_options(&other.body);
-    assert!(
-        process_alive(
-            std::fs::read_to_string(directory.join("harness-pid-tests"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap()
-        ),
-        "another role stays live while the default role is blocked"
-    );
+    // Settings discovery blocks before it can advertise SessionConfigured,
+    // while the default reviewer remains available to turn review.
+    std::fs::write(
+        directory.join(format!("block-session-{SETTINGS_ROLE}")),
+        b"1",
+    )
+    .unwrap();
+
+    let (mut client, server) = reviewer_socket(&fixture).await;
+    send_reviewer_request(
+        &mut client,
+        Some(SETTINGS_ROLE),
+        ReviewerRequest::Start {
+            config: Box::new(config(0)),
+        },
+    )
+    .await;
+    wait_for_marker(&directory.join(format!("session-blocked-{SETTINGS_ROLE}"))).await;
+    let blocked_harness: i32 =
+        std::fs::read_to_string(directory.join(format!("harness-pid-{SETTINGS_ROLE}")))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
 
     drop(client);
     let _ = tokio::time::timeout(Duration::from_secs(5), server)
@@ -613,31 +610,29 @@ async fn disconnecting_during_start_pauses_only_the_in_flight_role() {
         }
     })
     .await
-    .expect("disconnecting a blocked start must reap the partial harness");
+    .expect("disconnecting a blocked named role must reap its partial harness");
+    assert!(
+        process_alive(default_pid),
+        "the default reviewer remains live"
+    );
 
-    // The independent role is still reusable after the default role's socket
-    // disconnect caused its partial launch to be paused.
-    let other_again = fixture
-        .sidecar
-        .handle(
-            RelayRequestEnvelope {
-                request_id: "other-role-again".to_owned(),
-                protocol_version: RELAY_PROTOCOL_VERSION,
-                request: RelayRequest::Reviewer {
-                    role: Some("tests".to_owned()),
-                    request: ReviewerRequest::Start {
-                        config: Box::new(config(0)),
-                    },
-                },
-            },
-            Some("tests".to_owned()),
+    std::fs::remove_file(directory.join(format!("block-session-{SETTINGS_ROLE}"))).unwrap();
+    let restarted = fixture
+        .request_as(
+            Some(SETTINGS_ROLE),
             ReviewerRequest::Start {
                 config: Box::new(config(0)),
             },
         )
         .await;
-    let (_, reused) = started_options(&other_again.body);
-    assert!(reused, "the unrelated role was not torn down");
+    started_options(&restarted);
+    let settings_pid =
+        std::fs::read_to_string(directory.join(format!("harness-pid-{SETTINGS_ROLE}")))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+    assert!(process_alive(settings_pid));
     fixture.sidecar.pause_all().await;
 }
 
@@ -1243,24 +1238,6 @@ fn the_plain_relay_refuses_reviewer_requests() {
     );
 }
 
-#[test]
-fn a_running_reviewer_is_reused_only_for_the_same_profile_and_generation() {
-    let base = config(0);
-    assert!(base.reusable_for(&config(0)));
-    assert!(!base.reusable_for(&config(1)));
-
-    let mut other_profile = config(0);
-    other_profile.profile_id = "another".into();
-    assert!(!base.reusable_for(&other_profile));
-
-    // Model and effort are applied on the live session, so they never force a
-    // restart that would throw the reviewer's conversation away.
-    let mut configured = config(0);
-    configured.model = Some("deep".into());
-    configured.effort = Some("high".into());
-    assert!(base.reusable_for(&configured));
-}
-
 /// Whether `pid` still names a live process.
 fn process_alive(pid: i32) -> bool {
     // SAFETY: signal 0 performs the permission and existence check only; it
@@ -1291,13 +1268,6 @@ fn collected_agent_text(events: &[RelayEvent]) -> String {
         .collect()
 }
 
-/// The unused import guard: the sidecar's coordinator lives in `unix`, and a
-/// test build that cannot see it would silently stop covering the real one.
-#[test]
-fn the_sidecar_uses_the_worker_relay_coordinator() {
-    let _ = unix::ACP_EVENT_CHANNEL_CAPACITY;
-}
-
 #[tokio::test]
 async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
     let mut fixture = Fixture::new(true);
@@ -1306,6 +1276,16 @@ async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
     let earlier = fixture.worker_root.join("reviewer/runtime-profile");
     std::fs::create_dir_all(&earlier).unwrap();
     std::fs::write(earlier.join("config.toml"), b"earlier\n").unwrap();
+    // The bridge answers each guardian selection with the options it leaves.
+    let mut options = crate::acp::tests::muse_policy_options();
+    let directory = fixture.script_directory();
+    std::fs::write(directory.join("options.json"), options.to_string()).unwrap();
+    for (key, value) in [("approval_mode", "promptUnmatched"), ("auto_review", "on")] {
+        let params = serde_json::json!({"configId": key, "value": value});
+        crate::acp::tests::select_option(&mut options, &params);
+        let name = format!("options-{value}.json");
+        std::fs::write(directory.join(name), options.to_string()).unwrap();
+    }
     let mut muse = config(0);
     muse.harness = HarnessKind::Muse;
     let body = fixture.start(muse).await;
@@ -1342,251 +1322,6 @@ async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
 }
 
 #[tokio::test]
-async fn two_review_roles_run_side_by_side_with_their_own_homes_and_journals() {
-    let mut fixture = Fixture::new(true);
-    // A file in the staged profile proves each role gets a copy rather than a
-    // shared directory: a second harness writing its session files into the
-    // first one's home would corrupt both.
-    std::fs::write(fixture.profile_home.join("credentials"), b"token\n").unwrap();
-
-    let body = fixture.start(config(0)).await;
-    let (_, reused) = started_options(&body);
-    assert!(!reused, "the default role starts its own harness");
-    assert!(
-        fixture
-            .worker_root
-            .join("reviewer")
-            .join("runtime-profile")
-            .join("credentials")
-            .exists(),
-        "the default role runs from a private copy of the staged profile"
-    );
-
-    let body = fixture
-        .request_as(
-            Some("tests"),
-            ReviewerRequest::Start {
-                config: Box::new(config(0)),
-            },
-        )
-        .await;
-    let (_, reused) = started_options(&body);
-    assert!(!reused, "a lane is a different harness, not a reused one");
-
-    let lane_home = fixture
-        .worker_root
-        .join("reviewer")
-        .join("roles")
-        .join("tests")
-        .join("profile");
-    assert!(
-        lane_home.join("credentials").exists(),
-        "a lane runs from its own copy of the staged profile"
-    );
-    assert_ne!(
-        lane_home, fixture.profile_home,
-        "the lane's home is not the staged profile itself"
-    );
-    assert!(
-        fixture
-            .worker_root
-            .join("reviewer")
-            .join("roles")
-            .join("tests")
-            .join("relay-journal")
-            .exists()
-            || fixture
-                .worker_root
-                .join("reviewer")
-                .join("roles")
-                .join("tests")
-                .join("relay-state.json")
-                .exists(),
-        "the lane journals into its own directory: {:?}",
-        std::fs::read_dir(
-            fixture
-                .worker_root
-                .join("reviewer")
-                .join("roles")
-                .join("tests")
-        )
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect::<Vec<_>>()
-    );
-
-    // Each role answers its own prompts, and one role's transcript never
-    // appears in another's journal.
-    let accepted = fixture
-        .request(ReviewerRequest::Submit {
-            command_id: "review-default".to_owned(),
-            command: RelayCommand::Prompt {
-                prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-                    agent_client_protocol::schema::v1::TextContent::new("default role"),
-                )],
-            },
-        })
-        .await;
-    assert!(matches!(accepted, RelayResponseBody::Ok { .. }));
-    let accepted = fixture
-        .request_as(
-            Some("tests"),
-            ReviewerRequest::Submit {
-                command_id: "review-lane".to_owned(),
-                command: RelayCommand::Prompt {
-                    prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-                        agent_client_protocol::schema::v1::TextContent::new("lane role"),
-                    )],
-                },
-            },
-        )
-        .await;
-    assert!(matches!(accepted, RelayResponseBody::Ok { .. }));
-
-    let lane_events = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let body = fixture
-                .request_as(
-                    Some("tests"),
-                    ReviewerRequest::Attach {
-                        after_ordinal: 0,
-                        after_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
-                    },
-                )
-                .await;
-            let RelayResponseBody::Ok {
-                payload: RelayResponsePayload::Attached { events, .. },
-            } = body
-            else {
-                panic!("attach answers with a page of events");
-            };
-            if events.iter().any(|event| {
-                matches!(
-                    &event.observation,
-                    RelayObservation::CommandCompleted { command_id, .. }
-                        if command_id == "review-lane"
-                )
-            }) {
-                break events;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("the lane answers its own prompt");
-    assert!(
-        !lane_events.iter().any(|event| {
-            matches!(
-                &event.observation,
-                RelayObservation::CommandCompleted { command_id, .. }
-                    if command_id == "review-default"
-            )
-        }),
-        "the default role's turn stays out of the lane's journal"
-    );
-
-    fixture.sidecar.pause_all().await;
-}
-
-/// The supervisor's dispatch tool runs as a separate process and reaches its
-/// worker over a socket, so the two halves are exercised together here rather
-/// than each against a stand-in for the other.
-#[tokio::test]
-async fn the_dispatch_socket_records_what_the_supervisor_asks_for() {
-    use mj_core::review::lanes::{LaneDispatch, ReviewSubagentRequest};
-
-    let temp = tempfile::tempdir().unwrap();
-    let worker_root = temp.path().join("worker");
-    std::fs::create_dir_all(&worker_root).unwrap();
-    let sidecar = std::sync::Arc::new(ReviewerSidecar::new(
-        ReviewerPlacement {
-            target_environment: Default::default(),
-            worker_root: worker_root.clone(),
-            session_id: SESSION_ID.to_owned(),
-            cwd: temp.path().to_path_buf(),
-            additional_directories: Vec::new(),
-            worker_executable: PathBuf::from("/bin/false"),
-            harness_runtime: mj_core::worker_launch::HarnessRuntimePolicy::Ambient,
-            review_capture: true,
-            untracked_at_start: Default::default(),
-        },
-        Arc::new(std::sync::Mutex::new(
-            crate::relay::DurableRelay::open(temp.path().join("primary-relay"), SESSION_ID, "test")
-                .unwrap(),
-        )),
-    ));
-    let _guard = unix::serve_review_dispatch(&worker_root, sidecar.clone()).unwrap();
-    let socket = worker_root
-        .join("reviewer")
-        .join(mj_core::review::mcp::REVIEW_DISPATCH_SOCKET);
-
-    let dispatch = LaneDispatch {
-        reviewers: vec![
-            ReviewSubagentRequest {
-                agent_type: "tests".to_owned(),
-                hypothesis: "the new test cannot fail for the reason it claims".to_owned(),
-            },
-            ReviewSubagentRequest {
-                agent_type: "error_handling".to_owned(),
-                hypothesis: "the retry may swallow cancellation".to_owned(),
-            },
-        ],
-    };
-    let socket_for_call = socket.clone();
-    let dispatch_for_call = dispatch.clone();
-    let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(&socket_for_call, &dispatch_for_call)
-    })
-    .await
-    .unwrap()
-    .expect("the worker answers a dispatch");
-    assert_eq!(reply.started, vec!["tests", "error_handling"]);
-    assert_eq!(reply.error, None);
-
-    // A lane already asked for is not queued twice: its report is still
-    // coming, and a second copy would double the container's load.
-    let socket_for_call = socket.clone();
-    let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(&socket_for_call, &dispatch)
-    })
-    .await
-    .unwrap()
-    .expect("the worker answers a repeat dispatch");
-    assert!(reply.started.is_empty());
-
-    // The controller collects the queue once, and it is empty afterwards.
-    let collected = sidecar.take_dispatches();
-    assert_eq!(collected.len(), 2);
-    assert_eq!(collected[0].agent_type, "tests");
-    assert!(sidecar.take_dispatches().is_empty());
-
-    // An invalid dispatch is refused with a message the supervisor can act on.
-    let socket_for_call = socket.clone();
-    let reply = tokio::task::spawn_blocking(move || {
-        crate::review::mcp::send_dispatch(
-            &socket_for_call,
-            &LaneDispatch {
-                reviewers: vec![ReviewSubagentRequest {
-                    agent_type: "not_a_lane".to_owned(),
-                    hypothesis: "there is no such specialist".to_owned(),
-                }],
-            },
-        )
-    })
-    .await
-    .unwrap()
-    .expect("the worker answers an invalid dispatch");
-    assert!(reply.started.is_empty());
-    assert!(
-        reply
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("advertised roster")),
-        "unexpected reply {reply:?}"
-    );
-}
-
-#[tokio::test]
 async fn stale_preparation_cleanup_does_not_stop_a_replacement_reviewer() {
     let mut fixture = Fixture::new(true);
     fixture.stage_generation(10);
@@ -1608,6 +1343,147 @@ async fn stale_preparation_cleanup_does_not_stop_a_replacement_reviewer() {
         !process_alive(pid),
         "the owning generation can stop its reviewer"
     );
+}
+
+#[tokio::test]
+
+async fn settings_role_runs_with_its_own_home_journal_and_lifecycle() {
+    let mut fixture = Fixture::new(true);
+    std::fs::write(fixture.profile_home.join("credentials"), b"token\n").unwrap();
+    write_options(&fixture.script_directory(), "options.json", &[]);
+
+    let default = fixture.start(config(0)).await;
+    assert!(!started_options(&default).1);
+    let default_pid: i32 = std::fs::read_to_string(fixture.marker("harness-pid-default"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let settings = fixture
+        .request_as(
+            Some(SETTINGS_ROLE),
+            ReviewerRequest::Start {
+                config: Box::new(config(0)),
+            },
+        )
+        .await;
+    assert!(!started_options(&settings).1);
+    let settings_pid: i32 =
+        std::fs::read_to_string(fixture.marker(&format!("harness-pid-{SETTINGS_ROLE}")))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+    let default_home = fixture.worker_root.join("reviewer/runtime-profile");
+    let settings_home = fixture
+        .worker_root
+        .join("reviewer/roles")
+        .join(SETTINGS_ROLE)
+        .join("profile");
+    assert!(default_home.join("credentials").is_file());
+    assert!(settings_home.join("credentials").is_file());
+    assert_ne!(default_home, settings_home);
+    assert!(process_alive(default_pid));
+    assert!(process_alive(settings_pid));
+
+    for role in [None, Some(SETTINGS_ROLE)] {
+        let body = fixture.request_as(role, ReviewerRequest::Status).await;
+        assert!(
+            matches!(
+                body,
+                RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::Status(_)
+                }
+            ),
+            "status should be available for role {role:?}: {body:?}"
+        );
+    }
+
+    for (role, command_id, prompt) in [
+        (None, "review-default", "default role"),
+        (Some(SETTINGS_ROLE), "review-settings", "settings role"),
+    ] {
+        let body = fixture
+            .request_as(
+                role,
+                ReviewerRequest::Submit {
+                    command_id: command_id.to_owned(),
+                    command: RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+                            agent_client_protocol::schema::v1::TextContent::new(prompt),
+                        )],
+                    },
+                },
+            )
+            .await;
+        assert!(matches!(body, RelayResponseBody::Ok { .. }), "{body:?}");
+    }
+
+    let settings_events = fixture
+        .await_events_as(Some(SETTINGS_ROLE), Duration::from_secs(10), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    &event.observation,
+                    RelayObservation::CommandCompleted { command_id, .. }
+                        if command_id == "review-settings"
+                )
+            })
+        })
+        .await;
+    assert!(settings_events.iter().all(|event| {
+        !matches!(
+            &event.observation,
+            RelayObservation::CommandCompleted { command_id, .. }
+                if command_id == "review-default"
+        )
+    }));
+    let default_events = fixture
+        .await_events(Duration::from_secs(10), |events| {
+            events.iter().any(|event| {
+                matches!(
+                    &event.observation,
+                    RelayObservation::CommandCompleted { command_id, .. }
+                        if command_id == "review-default"
+                )
+            })
+        })
+        .await;
+    assert!(default_events.iter().all(|event| {
+        !matches!(
+            &event.observation,
+            RelayObservation::CommandCompleted { command_id, .. }
+                if command_id == "review-settings"
+        )
+    }));
+
+    let paused = fixture
+        .request_as(Some(SETTINGS_ROLE), ReviewerRequest::Pause)
+        .await;
+    assert!(matches!(
+        paused,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewerPaused
+        }
+    ));
+    assert!(!process_alive(settings_pid));
+    assert!(
+        process_alive(default_pid),
+        "pausing settings keeps turn review live"
+    );
+    let default_status = fixture.request(ReviewerRequest::Status).await;
+    assert!(matches!(
+        default_status,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Status(_)
+        }
+    ));
+    assert_eq!(
+        fixture.sidecar.known_roles(),
+        ["reviewer".to_owned(), SETTINGS_ROLE.to_owned()]
+    );
+    fixture.sidecar.pause_all().await;
 }
 
 #[tokio::test]
@@ -1654,6 +1530,7 @@ async fn reviewer_fast_mode_is_applied_when_advertised_and_optional_otherwise() 
 }
 
 #[tokio::test]
+
 async fn disconnected_preparation_keeps_the_role_until_its_blocking_copy_finishes() {
     let mut fixture = Fixture::new(true);
     std::fs::write(fixture.profile_home.join("identity"), b"old profile").unwrap();

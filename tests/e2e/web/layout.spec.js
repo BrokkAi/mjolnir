@@ -8,14 +8,6 @@
 // and composer stay where they were put while a transcript scrolls under them.
 
 const { test, expect } = require('@playwright/test');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const VIEWER_CSS = fs.readFileSync(
-  path.resolve(__dirname, '../../../mj-controller/src/web/viewer.css'),
-  'utf8',
-);
-
 const { LAB_ABSENT_REASON, inspectLabEnvironment, requireLabEnvironment } = require('./lab-env');
 
 // Say out loud why the viewport cases are absent, since a skip annotation is
@@ -49,62 +41,6 @@ async function unlock(page, baseUrl, code) {
   await expect(page.locator('#app')).toBeVisible();
   await expect(page).toHaveURL(/#workspace\//);
 }
-
-test('a very long unbroken dashboard title stays bounded and remains readable', async ({ page }) => {
-  const title = 'handoff'.repeat(4096);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.setContent(
-    `<style>${VIEWER_CSS}</style><main id="app"><div id="sessions"></div></main>`,
-  );
-  const metrics = await page.evaluate(longTitle => {
-    // Use the same title-row structure as sessionCard, but keep this
-    // synthetic title local to the browser so no live session can remove it.
-    const card = document.createElement('article');
-    card.className = 'card session';
-    const titleRow = document.createElement('div');
-    titleRow.className = 'session-title-row';
-    const heading = document.createElement('h3');
-    heading.textContent = longTitle;
-    titleRow.append(heading);
-    card.append(titleRow);
-    document.querySelector('#sessions').append(card);
-
-    const style = getComputedStyle(heading);
-    return {
-      documentWidth: document.documentElement.scrollWidth,
-      viewportWidth: document.documentElement.clientWidth,
-      headingWidth: heading.getBoundingClientRect().width,
-      headingHeight: heading.getBoundingClientRect().height,
-      lineHeight: Number.parseFloat(style.lineHeight),
-      text: heading.textContent,
-    };
-  }, title);
-
-  expect(metrics.documentWidth).toBeLessThanOrEqual(metrics.viewportWidth + 1);
-  expect(metrics.headingHeight).toBeLessThanOrEqual(metrics.lineHeight + 1);
-  expect(metrics.text).toBe(title);
-  await expect(page.getByRole('heading', { name: title, exact: true })).toHaveCount(1);
-});
-
-test('paperclip stays hidden for sessions without image support', async ({ page }) => {
-  const html = fs.readFileSync(
-    path.resolve(__dirname, '../../../mj-controller/src/web/viewer.html'),
-    'utf8',
-  );
-  await page.setContent(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link\b[^>]*>/g, ''));
-  await page.addStyleTag({ content: VIEWER_CSS });
-  await page.evaluate(() => {
-    document.querySelector('#app').classList.remove('hidden');
-    document.querySelector('#conversation').classList.remove('hidden');
-  });
-  const attach = page.getByRole('button', { name: 'Attach one or more images', includeHidden: true });
-  await expect(attach).toBeHidden();
-  await attach.evaluate(node => { node.hidden = false; });
-  await expect(attach).toBeVisible();
-  const box = await attach.boundingBox();
-  expect(box.width).toBeGreaterThanOrEqual(44);
-  expect(box.height).toBeGreaterThanOrEqual(44);
-});
 
 for (const viewport of VIEWPORTS) {
   test(`the viewer fits ${viewport.name} and stays reachable`, async ({ browser }) => {

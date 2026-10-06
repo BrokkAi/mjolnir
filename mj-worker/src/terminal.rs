@@ -628,6 +628,7 @@ mod tests {
     /// client terminal, so a reused id attaches the new command's output to
     /// a tool call from before the restart.
     #[cfg(unix)]
+    // Hard-won: 69fc70a7: terminal IDs were reused across Kimi connection restarts.
     #[tokio::test]
     async fn a_new_connection_never_reuses_an_earlier_connections_terminal_id() {
         let (events, _received) = mpsc::channel(16);
@@ -721,35 +722,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn display_command_unwraps_an_interpreter_script() {
-        let spawn = TerminalSpawn {
-            command: "/bin/bash".into(),
-            args: vec!["-c".into(), "cargo mutants --in-diff diff".into()],
-            env: Vec::new(),
-            cwd: PathBuf::from("/workspace"),
-            output_byte_limit: 1024,
-        };
-
-        assert_eq!(spawn.display_command(), "cargo mutants --in-diff diff");
-    }
-
-    #[test]
-    fn display_command_preserves_a_non_interpreter_invocation() {
-        let spawn = TerminalSpawn {
-            command: "/usr/bin/cargo".into(),
-            args: vec!["test".into(), "--workspace".into()],
-            env: Vec::new(),
-            cwd: PathBuf::from("/workspace"),
-            output_byte_limit: 1024,
-        };
-
-        assert_eq!(
-            spawn.display_command(),
-            "/usr/bin/cargo 'test' '--workspace'"
-        );
-    }
-
     /// Register a terminal whose supervisor never finishes. Its exit is already
     /// published, so teardown signals no process group: the PID is never used.
     fn register_stuck_terminal(registry: &TerminalRegistry, terminal_id: &str) {
@@ -801,51 +773,5 @@ mod tests {
                 "every stuck terminal must still be reported: {reported:?}"
             );
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_reports_a_supervisor_that_finished() {
-        let registry = TerminalRegistry::new().unwrap();
-        let (events, mut reports) = mpsc::channel(16);
-        register_stuck_terminal(&registry, "stuck");
-        let (_exit, exit_rx) = watch::channel(Some(TerminalExit::default()));
-        registry
-            .terminals
-            .lock()
-            .expect("terminal registry lock poisoned")
-            .insert(
-                "finished".to_owned(),
-                TerminalEntry {
-                    group: ProcessGroup {
-                        pid: i32::MAX,
-                        exit: exit_rx.clone(),
-                    },
-                    buffer: Arc::new(Mutex::new(TerminalBuffer::new(1024))),
-                    exit: exit_rx,
-                    supervisor: tokio::spawn(async {}),
-                },
-            );
-
-        registry.shutdown(&events).await;
-
-        let mut reported = Vec::new();
-        while let Ok(RuntimeEvent::Warning { message }) = reports.try_recv() {
-            reported.push(message);
-        }
-        assert_eq!(
-            reported.len(),
-            1,
-            "a supervisor that finished is not a failure: {reported:?}"
-        );
-        assert!(reported[0].contains("stuck did not finish"), "{reported:?}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_killed_child_reports_its_signal_by_name() {
-        assert_eq!(signal_name(libc::SIGKILL), "SIGKILL");
-        assert_eq!(signal_name(libc::SIGTERM), "SIGTERM");
-        // An exotic signal keeps its number rather than being renamed.
-        assert_eq!(signal_name(64), "SIG64");
     }
 }

@@ -161,8 +161,8 @@ impl DashboardState {
     }
 
     fn session_cpu_signature(&self) -> Vec<DisplayedClock> {
-        if matches!(self.mode, Mode::SessionCpuReport(_)) {
-            return crate::session_cpu_report::report_lines(self)
+        if let Mode::SessionCpuReport(dialog) = &self.mode {
+            return crate::session_cpu_report::report_lines(self, dialog.metric.get())
                 .into_iter()
                 .enumerate()
                 .map(|(index, line)| DisplayedClock {
@@ -297,7 +297,7 @@ impl DashboardState {
         let Mode::ResumeDialog(dialog) = &self.mode else {
             return Vec::new();
         };
-        let now = chrono::Local::now();
+        let now = crate::resume::display_now();
         let offset = dialog
             .form
             .borrow()

@@ -71,6 +71,42 @@ pub mod tile_layout;
 mod welcome;
 mod widgets;
 mod wizards;
+
+#[cfg(test)]
+thread_local! {
+    static NO_COLOR_OVERRIDE_FOR_TESTS: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Use the host value in production and a scoped fixed value in golden renders.
+pub(crate) fn no_color_requested() -> bool {
+    #[cfg(test)]
+    if let Some(no_color) = NO_COLOR_OVERRIDE_FOR_TESTS.with(Cell::get) {
+        return no_color;
+    }
+
+    mj_chat::theme::no_color_requested()
+}
+
+#[cfg(test)]
+pub(crate) fn with_no_color_override_for_test<R>(no_color: bool, run: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NO_COLOR_OVERRIDE_FOR_TESTS.with(|value| value.set(self.0));
+        }
+    }
+
+    let previous = NO_COLOR_OVERRIDE_FOR_TESTS.with(|value| value.replace(Some(no_color)));
+    let _restore = Restore(previous);
+    run()
+}
+
+#[cfg(test)]
+pub(crate) fn pin_no_color_override_for_test(no_color: bool) {
+    NO_COLOR_OVERRIDE_FOR_TESTS.with(|value| value.set(Some(no_color)));
+}
+
 pub(crate) mod workspaces;
 
 #[cfg(test)]
@@ -176,6 +212,10 @@ pub(crate) const DASHBOARD_PANE_COUNT: usize = 3;
 /// Maximum gap between two left clicks on the same session row for the pair
 /// to count as a double click.
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+/// Stands in for the build on the workspace pane in tests and the committed
+/// documentation screenshots, so goldens and captures do not change with
+/// every release and nobody reads them as a claim about the running version.
+const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +350,13 @@ pub enum DashboardAction {
     PreviewBuildCache {
         generation: u64,
         key: serde_json::Value,
+        machine: Box<mj_core::config::Machine>,
+    },
+    /// Install the controller-pinned mbx release on a machine's container host.
+    InstallMbx {
+        generation: u64,
+        key: serde_json::Value,
+        machine_id: String,
         machine: Box<mj_core::config::Machine>,
     },
     /// Measure how much disk Mjolnir's session copies use, and how much an
@@ -855,11 +902,8 @@ pub struct DashboardState {
     /// The daemon storage owner's verdict per target host. The daemon is the
     /// only judge of a full disk; this surface shows what it says.
     pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
-    /// The build stamped on the workspace pane, as `v2.11.0`. It is a field
-    /// rather than the compiled constant so the documentation capture can pin
-    /// a placeholder: those screenshots are committed, and a version read from
-    /// the binary would make every one of them wrong the moment the next
-    /// release goes out.
+    /// The build stamped on the workspace pane, as `v2.11.0`. Tests render
+    /// [`TEST_VERSION_LABEL`] instead.
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
@@ -892,6 +936,9 @@ pub struct DashboardState {
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
     pub(crate) navigation_session: Option<String>,
+    /// When a workspace switch was requested for a child, open its parent's
+    /// Sub-agents view before restoring `navigation_session`.
+    pub(crate) navigation_subagent_parent: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
     /// arrangement underneath is untouched, so unzooming puts every pane back
@@ -1150,7 +1197,12 @@ impl DashboardState {
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             target_storage: Vec::new(),
-            version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
+            version_label: if cfg!(test) {
+                TEST_VERSION_LABEL
+            } else {
+                concat!("v", env!("CARGO_PKG_VERSION"))
+            }
+            .to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
             project_directory_checks: BTreeMap::new(),
@@ -1170,6 +1222,7 @@ impl DashboardState {
             pin_ids: BTreeMap::new(),
 
             navigation_session: None,
+            navigation_subagent_parent: None,
             pane_menu: None,
             conversation_zoomed: false,
             opening_session: None,

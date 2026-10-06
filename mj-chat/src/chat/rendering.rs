@@ -34,15 +34,9 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
 /// Renders the microphone chip that belongs to the prompt's top border.
 pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Line<'static> {
     let style = if voice_active {
-        Style::default()
-            .fg(theme::palette().background)
-            .bg(theme::palette().error)
-            .add_modifier(Modifier::BOLD)
+        theme::filled(theme::palette().error).add_modifier(Modifier::BOLD)
     } else if voice_available {
-        Style::default()
-            .fg(theme::palette().background)
-            .bg(theme::palette().accent)
-            .add_modifier(Modifier::BOLD)
+        theme::filled(theme::palette().accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(theme::palette().muted)
@@ -677,7 +671,18 @@ pub fn wrap_styled_line(
     width: usize,
     continuation_indent: usize,
 ) -> Vec<Line<'static>> {
-    wrap_line(line, width, continuation_indent, None)
+    wrap_line(line, width, continuation_indent, None, None)
+}
+
+/// How copying one rendered row gives back the text it was drawn from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RowCopy {
+    /// Leading cells that only decorate the row, such as a role gutter or a
+    /// wrap indent.
+    pub(crate) lead: usize,
+    /// On a row that wrapping split from the row above, the text the break
+    /// removed between them: a space, or nothing where a word was cut.
+    pub(crate) joins: Option<&'static str>,
 }
 
 /// For each wrapped row, the index of the source span drawn in each cell, or
@@ -692,8 +697,27 @@ pub(super) fn wrap_styled_line_with_sources(
     continuation_indent: usize,
 ) -> (Vec<Line<'static>>, CellSources) {
     let mut sources = Vec::new();
-    let rows = wrap_line(line, width, continuation_indent, Some(&mut sources));
+    let rows = wrap_line(line, width, continuation_indent, Some(&mut sources), None);
     (rows, sources)
+}
+
+/// Wrap `line` exactly as [`wrap_styled_line`] does, and also report its cell
+/// sources and how copying each row gives back the line's text.
+pub(super) fn wrap_styled_line_for_copy(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+) -> (Vec<Line<'static>>, CellSources, Vec<RowCopy>) {
+    let mut sources = Vec::new();
+    let mut copies = Vec::new();
+    let rows = wrap_line(
+        line,
+        width,
+        continuation_indent,
+        Some(&mut sources),
+        Some(&mut copies),
+    );
+    (rows, sources, copies)
 }
 
 fn wrap_line(
@@ -701,10 +725,14 @@ fn wrap_line(
     width: usize,
     continuation_indent: usize,
     mut sources: Option<&mut CellSources>,
+    mut copies: Option<&mut Vec<RowCopy>>,
 ) -> Vec<Line<'static>> {
     let span_count = line.spans.len();
     let mut rows = Vec::new();
-    wrap_graphemes(&line, width, continuation_indent, |buffer, row| {
+    wrap_graphemes(&line, width, continuation_indent, |buffer, row, copy| {
+        if let Some(copies) = copies.as_mut() {
+            copies.push(copy);
+        }
         if let Some(sources) = sources.as_mut() {
             // Style indexes past the line's spans belong to the indent.
             sources.push(
@@ -732,7 +760,7 @@ pub(crate) fn wrap_styled_line_until(
     continuation_indent: usize,
     mut emit: impl FnMut(Line<'static>) -> ControlFlow<()>,
 ) {
-    wrap_graphemes(&line, width, continuation_indent, |buffer, row| {
+    wrap_graphemes(&line, width, continuation_indent, |buffer, row, _| {
         emit(buffer.line(row))
     });
 }
@@ -851,6 +879,8 @@ struct RowFill {
     current: Vec<Grapheme>,
     current_width: usize,
     emitted: usize,
+    /// Whether the latest break dropped whitespace, rather than cutting a word.
+    broke_at_space: bool,
 }
 
 impl RowFill {
@@ -858,10 +888,19 @@ impl RowFill {
     fn finish_row(
         &mut self,
         buffer: &StyledBuffer,
-        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme], RowCopy) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
+        // Every row after a line's first is one that wrapping split off.
+        let copy = if self.emitted == 0 {
+            RowCopy::default()
+        } else {
+            RowCopy {
+                lead: self.continuation_indent,
+                joins: Some(if self.broke_at_space { " " } else { "" }),
+            }
+        };
         self.emitted += 1;
-        let flow = emit(buffer, &self.current);
+        let flow = emit(buffer, &self.current, copy);
         self.current.clear();
         flow
     }
@@ -879,7 +918,7 @@ impl RowFill {
         &mut self,
         token: &[Grapheme],
         buffer: &StyledBuffer,
-        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme], RowCopy) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         let token_width: usize = token
             .iter()
@@ -894,11 +933,13 @@ impl RowFill {
             if !self.current.is_empty() {
                 self.finish_row(buffer, emit)?;
             }
+            self.broke_at_space = true;
             self.start_continuation();
         } else if token_width + self.continuation_indent <= self.width {
             if self.current.len() > self.continuation_indent {
-                trim_trailing_whitespace(&mut self.current);
+                let trimmed = trim_trailing_whitespace(&mut self.current);
                 self.finish_row(buffer, emit)?;
+                self.broke_at_space = trimmed;
             }
             self.start_continuation();
             self.current.extend_from_slice(token);
@@ -907,8 +948,9 @@ impl RowFill {
             for grapheme in token {
                 let grapheme_width = usize::from(grapheme.width);
                 if self.current_width + grapheme_width > self.width && !self.current.is_empty() {
-                    trim_trailing_whitespace(&mut self.current);
+                    let trimmed = trim_trailing_whitespace(&mut self.current);
                     self.finish_row(buffer, emit)?;
+                    self.broke_at_space = trimmed;
                     self.start_continuation();
                 }
                 self.current.push(*grapheme);
@@ -924,7 +966,7 @@ fn wrap_graphemes(
     line: &Line<'static>,
     width: usize,
     continuation_indent: usize,
-    mut emit: impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+    mut emit: impl FnMut(&StyledBuffer, &[Grapheme], RowCopy) -> ControlFlow<()>,
 ) {
     let width = width.max(1);
     let continuation_indent = continuation_indent.min(width.saturating_sub(1));
@@ -936,6 +978,7 @@ fn wrap_graphemes(
         current: Vec::new(),
         current_width: 0,
         emitted: 0,
+        broke_at_space: false,
     };
     // Rows are filled a run of whitespace or non-whitespace graphemes at a
     // time, each run as soon as the next one begins.
@@ -962,10 +1005,13 @@ fn wrap_graphemes(
     }
 }
 
-fn trim_trailing_whitespace(graphemes: &mut Vec<Grapheme>) {
+/// Drops trailing whitespace, reporting whether there was any.
+fn trim_trailing_whitespace(graphemes: &mut Vec<Grapheme>) -> bool {
+    let len = graphemes.len();
     while graphemes.last().is_some_and(|grapheme| grapheme.whitespace) {
         graphemes.pop();
     }
+    graphemes.len() < len
 }
 
 pub(super) fn display_width(text: &str) -> usize {
@@ -1072,44 +1118,6 @@ mod tests {
             .collect()
     }
 
-    /// Stopping early gives the same first rows as wrapping the whole line,
-    /// styles and continuation indents included.
-    #[test]
-    fn wrapping_until_a_row_count_gives_the_first_rows_of_the_whole_wrap() {
-        let mut spans = Vec::new();
-        for index in 0..400 {
-            spans.push(Span::styled(
-                format!("word{index} "),
-                Style::default().fg(if index % 2 == 0 {
-                    Color::Yellow
-                } else {
-                    Color::Blue
-                }),
-            ));
-            spans.push(Span::raw("漢字 "));
-            if index % 50 == 0 {
-                spans.push(Span::raw("x".repeat(70)));
-            }
-        }
-        let line = Line::from(spans);
-        for (width, indent) in [(1, 0), (9, 2), (40, 4), (80, 0)] {
-            let whole = wrap_styled_line(line.clone(), width, indent);
-            assert!(whole.len() > 10, "the line wraps to many rows");
-            for wanted in [1, 2, 5, whole.len(), whole.len() + 3] {
-                let mut rows = Vec::new();
-                wrap_styled_line_until(line.clone(), width, indent, |row| {
-                    rows.push(row);
-                    if rows.len() >= wanted {
-                        ControlFlow::Break(())
-                    } else {
-                        ControlFlow::Continue(())
-                    }
-                });
-                assert_eq!(rows, whole[..wanted.min(whole.len())], "{width} {indent}");
-            }
-        }
-    }
-
     #[test]
     fn sanitizer_removes_terminal_controls_and_normalizes_carriage_returns() {
         assert_eq!(
@@ -1118,6 +1126,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 6c06003: OSC window-title payloads leaked into rendered transcripts
     #[test]
     fn sanitizer_consumes_osc_payloads_and_two_byte_escapes() {
         // A build tool setting the window title, terminated by BEL and by ST.
@@ -1143,6 +1152,33 @@ mod tests {
         assert_eq!(sanitize_terminal_text(&"\x1b]".repeat(50_000)), "");
     }
 
+    /// Each row after a line's first says what its break removed, so copying
+    /// can join the rows back: a space between words, nothing inside a word.
+    #[test]
+    fn wrapped_rows_record_what_each_break_removed() {
+        let (rows, _, copies) =
+            wrap_styled_line_for_copy(Line::from("alpha beta abcdefghijkl"), 8, 2);
+        assert_eq!(text(&rows), ["alpha", "  beta a", "  bcdefg", "  hijkl"]);
+        assert_eq!(
+            copies,
+            [
+                RowCopy::default(),
+                RowCopy {
+                    lead: 2,
+                    joins: Some(" ")
+                },
+                RowCopy {
+                    lead: 2,
+                    joins: Some("")
+                },
+                RowCopy {
+                    lead: 2,
+                    joins: Some("")
+                },
+            ]
+        );
+    }
+
     #[test]
     fn grapheme_wrapper_never_splits_joined_or_combining_characters() {
         let wrapped = wrap_styled_line(Line::from("a 👩‍💻 e\u{301} ｶﾞ z"), 4, 0);
@@ -1151,97 +1187,205 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("e\u{301}")));
         assert!(rendered.iter().any(|line| line.contains("ｶﾞ")));
     }
+    fn append_rendered_markdown(
+        output: &mut String,
+        label: &str,
+        buffer: &ratatui::buffer::Buffer,
+        details: &[String],
+    ) {
+        use std::fmt::Write as _;
+
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(
+            output,
+            "=== {label} ({}x{}) ===",
+            buffer.area.width, buffer.area.height
+        )
+        .expect("write state label");
+        output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+        output.push('\n');
+        for detail in details {
+            writeln!(output, "{detail}").expect("write state detail");
+        }
+    }
+
+    fn draw_markdown_lines(lines: Vec<Line<'static>>, width: u16) -> ratatui::buffer::Buffer {
+        let height = u16::try_from(lines.len().max(1)).expect("bounded markdown rows");
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .expect("markdown terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines)),
+                    frame.area(),
+                );
+            })
+            .expect("draw markdown lines");
+        terminal.backend().buffer().clone()
+    }
+
+    fn markdown_style_details(lines: &[LogicalLine]) -> Vec<String> {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(row, logical)| {
+                let spans = logical
+                    .line
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        format!(
+                            "{:?}:fg={:?}:mod={:?}",
+                            span.content, span.style.fg, span.style.add_modifier
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if spans.is_empty() {
+                    format!("row {row} styles: <empty>")
+                } else {
+                    format!("row {row} styles: {spans}")
+                }
+            })
+            .collect()
+    }
+
+    fn rendered_span_styles(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.style.fg))
+            .fold(Vec::new(), |mut colors, color| {
+                if colors.last() != Some(&color) {
+                    colors.push(color);
+                }
+                colors
+            })
+            .into_iter()
+            .map(|color| format!("{color:?}"))
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    }
 
     #[test]
-    fn plain_and_styled_text_wrap_identically_including_long_paths() {
+    fn golden_transcript_markdown_render() {
+        let mut output = String::new();
+
+        let parsed = markdown_lines(
+            "# Heading\n\n- **bold** and `code`\n\n```rust\nfn main() {}",
+            Style::default(),
+            Style::default().fg(theme::palette().success),
+            40,
+        );
+        let details = markdown_style_details(&parsed);
+        let lines = parsed.into_iter().map(|line| line.line).collect();
+        let buffer = draw_markdown_lines(lines, 40);
+        append_rendered_markdown(
+            &mut output,
+            "heading list and incomplete fenced code",
+            &buffer,
+            &details,
+        );
+
+        let parsed = markdown_lines(
+            "| Name | Description |\n| --- | --- |\n| alpha | a long explanation |",
+            Style::default(),
+            Style::default(),
+            18,
+        );
+        let details = markdown_style_details(&parsed);
+        let lines = parsed.into_iter().map(|line| line.line).collect();
+        let buffer = draw_markdown_lines(lines, 32);
+        append_rendered_markdown(
+            &mut output,
+            "narrow-width table fallback records",
+            &buffer,
+            &details,
+        );
+
+        let parsed = markdown_lines(
+            "| Name | Score |\n| :--- | ---: |\n| alpha | 7 |",
+            Style::default(),
+            Style::default(),
+            40,
+        );
+        let details = markdown_style_details(&parsed);
+        let lines = parsed.into_iter().map(|line| line.line).collect();
+        let buffer = draw_markdown_lines(lines, 40);
+        append_rendered_markdown(
+            &mut output,
+            "aligned Markdown table and header rule",
+            &buffer,
+            &details,
+        );
+
         let prefix = "bifrost2 · 2 repositories ";
-        let path = "/tmp/claude-1000/-home-jonathan-Projects-bifrost2/9275cf63-2d14-4cd5-ad2a-5ec29e36c468/scratchpad/replay";
+        let path = "/workspace/project/run-1000/session-9275cf63/scratchpad/replay-with-a-long-stable-name";
         let plain = Line::raw(format!("{prefix}{path}"));
         let styled = Line::from(vec![
             Span::styled(prefix, Style::default().fg(Color::Yellow)),
             Span::styled(path, Style::default().fg(Color::Blue)),
         ]);
         for width in [1, 12, 40, 80] {
-            let rows = wrap_styled_line(plain.clone(), width, 0);
+            let plain_rows = wrap_styled_line(plain.clone(), width, 0);
+            let plain_buffer = draw_markdown_lines(plain_rows.clone(), width as u16);
+            append_rendered_markdown(
+                &mut output,
+                &format!("plain long path wrap at width {width}"),
+                &plain_buffer,
+                &[format!("rows={}", plain_rows.len())],
+            );
+
             let (styled_rows, sources) = wrap_styled_line_with_sources(styled.clone(), width, 0);
-            assert_eq!(text(&rows), text(&styled_rows), "width {width}");
-            assert!(rows.iter().all(|row| row.width() <= width));
-            let actual = text(&rows).join("");
-            assert!(actual.ends_with(path), "{actual}");
-            for (row, source) in styled_rows.iter().zip(sources) {
-                assert_eq!(row.width(), source.len());
-                for span in &row.spans {
-                    assert!(matches!(span.style.fg, Some(Color::Yellow | Color::Blue)));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn markdown_parser_handles_styles_lists_and_incomplete_fences() {
-        let lines = markdown_lines(
-            "# Heading\n\n- **bold** and `code`\n\n```rust\nfn main() {}",
-            Style::default(),
-            Style::default().fg(theme::palette().success),
-            40,
-        );
-        let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
-        assert_eq!(
-            text(&rendered).join("\n"),
-            "# Heading\n\n• bold and code\n\ncode · rust\nfn main() {}"
-        );
-    }
-
-    #[test]
-    fn narrow_markdown_table_falls_back_to_records() {
-        let lines = markdown_lines(
-            "| Name | Description |\n| --- | --- |\n| alpha | a long explanation |",
-            Style::default(),
-            Style::default(),
-            18,
-        );
-        let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
-        assert_eq!(
-            text(&rendered),
-            ["Name: alpha", "Description: a long explanation"]
-        );
-    }
-
-    #[test]
-    fn markdown_table_aligns_columns_and_draws_a_header_rule() {
-        let lines = markdown_lines(
-            "| Name | Score |\n| :--- | ---: |\n| alpha | 7 |",
-            Style::default(),
-            Style::default(),
-            40,
-        );
-        let rendered = lines.into_iter().map(|line| line.line).collect::<Vec<_>>();
-
-        assert_eq!(
-            text(&rendered),
-            [" Name     Score ", "───────  ───────", " alpha        7 ",]
-        );
-        assert!(
-            rendered[0]
-                .spans
+            let source_alignment = styled_rows
                 .iter()
-                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
-        );
-    }
+                .zip(&sources)
+                .all(|(row, source)| row.width() == source.len());
+            let details = vec![
+                format!(
+                    "rows={} source rows={} widths aligned={source_alignment}",
+                    styled_rows.len(),
+                    sources.len()
+                ),
+                format!("style runs={}", rendered_span_styles(&styled_rows)),
+            ];
+            let styled_buffer = draw_markdown_lines(styled_rows, width as u16);
+            append_rendered_markdown(
+                &mut output,
+                &format!("styled long path wrap at width {width}"),
+                &styled_buffer,
+                &details,
+            );
+        }
 
-    #[test]
-    fn ellipses_remove_cutoff_whitespace_and_punctuation() {
-        assert_eq!(truncate_to_width("alpha, beta", 7), "alpha…");
-
-        let line = Line::from(vec![
+        let plain = truncate_to_width("alpha, beta", 7);
+        let styled = Line::from(vec![
             Span::styled("alpha,", Style::default().fg(theme::palette().error)),
             Span::styled(" beta", Style::default().fg(Color::Blue)),
         ]);
-        let truncated = truncate_line_to_width(line, 7);
-        assert_eq!(text(std::slice::from_ref(&truncated)), ["alpha…"]);
-        assert_eq!(
-            truncated.spans.last().and_then(|span| span.style.fg),
-            Some(Color::Blue)
+        let truncated = truncate_line_to_width(styled, 7);
+        let plain_buffer = draw_markdown_lines(vec![Line::raw(plain)], 7);
+        append_rendered_markdown(
+            &mut output,
+            "ellipsis trims cutoff punctuation and whitespace",
+            &plain_buffer,
+            &[],
+        );
+        let style = truncated.spans.last().and_then(|span| span.style.fg);
+        let truncated_buffer = draw_markdown_lines(vec![truncated], 7);
+        append_rendered_markdown(
+            &mut output,
+            "styled ellipsis preserves its trailing span style",
+            &truncated_buffer,
+            &[format!("ellipsis fg={style:?}")],
+        );
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "transcript-markdown-render",
+            &output,
         );
     }
 
@@ -1274,6 +1418,7 @@ mod tests {
 
     /// The ASCII set reaches the composer's border, where the microphone was
     /// the last glyph a console without UTF-8 could not draw.
+    // Hard-won: 57f76ac: ASCII mode still rendered the microphone button as Unicode
     #[test]
     fn the_ascii_microphone_button_is_plain_text() {
         theme::with_symbols(mj_core::config::SymbolSet::Ascii, || {

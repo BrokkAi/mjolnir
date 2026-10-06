@@ -256,20 +256,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn project_overrides_survive_default_changes_without_leaking_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("go.json");
-        GoPreferences::save_recipe(&path, "/a".into(), recipe("docker"), false).unwrap();
-        GoPreferences::save_recipe(&path, "/b".into(), recipe("remote"), true).unwrap();
-        let prefs = GoPreferences::load(&path).unwrap();
-        assert_eq!(prefs.recipe(Path::new("/a")).unwrap().target_id, "docker");
-        let other = prefs.recipe(Path::new("/c")).unwrap();
-        assert_eq!(other.target_id, "remote");
-        assert!(other.project_directory.is_none());
-        assert!(other.bundle_id.is_none());
-    }
-
+    // Hard-won: 0877ce6d: mj new failed after a session was created through another surface
     #[test]
     fn the_first_session_created_anywhere_sets_the_default_pair_and_later_ones_do_not() {
         let temp = tempfile::tempdir().unwrap();

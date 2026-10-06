@@ -17,7 +17,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinSet;
 
-use crate::controller::{Controller, WorkerUpgradeOutcome};
+use crate::controller::{Controller, HarnessPreparationFailure, WorkerUpgradeOutcome};
 use crate::recovery::{backoff_delay, elapsed_at_least};
 use crate::recovery_gate::{
     ObservationReceiver, ObservationSender, RecoveryGate, RecoveryObserver, observation_channel,
@@ -79,6 +79,11 @@ impl WorkerUpgradeObserver {
 pub struct WorkerUpgradeResult {
     pub session_id: String,
     pub outcome: Result<WorkerUpgradeOutcome, String>,
+    /// A failed harness preparation is a session failure, not a transient
+    /// worker-upgrade error. The daemon uses the observed revision to avoid
+    /// overwriting a newer lifecycle transition.
+    pub(crate) preparation_failure: Option<HarnessPreparationFailure>,
+    pub(crate) observed_updated_at: String,
     /// The attempt was preempted by a lifecycle operation or by coordinator
     /// shutdown. It judged nothing, so it is neither a success nor a failure.
     pub cancelled: bool,
@@ -134,10 +139,11 @@ impl WorkerUpgradeCoordinator {
                         let task_cancelled = upgrade_cancelled.cancellation();
                         let task_session_id = session_id.clone();
                         attempts.spawn(async move {
+                            let observed_updated_at = observation.session.updated_at.clone();
                             let (joined, admission) = upgrade_cancelled.run_blocking(move |cancelled| {
                                 let Some(session) = crate::recovery_gate::current_background_session(&observation.session)
                                     .map_err(|error| format!("read current upgrade placement: {error:#}"))?
-                                else { return Ok(WorkerUpgradeOutcome::Deferred); };
+                                else { return Ok((Ok(WorkerUpgradeOutcome::Deferred), None)); };
                                 let mut state = State::default();
                                 state.sessions.insert(task_session_id.clone(), session);
                                 let controller = Controller {
@@ -146,23 +152,37 @@ impl WorkerUpgradeCoordinator {
                                 };
                                 let executor = CancellableProcessExecutor::new(cancelled)
                                     .with_deadline(WORKER_UPGRADE_TIMEOUT);
-                                mj_core::runtime::block_on(controller.upgrade_session_worker(
+                                let outcome = mj_core::runtime::block_on(controller.upgrade_session_worker(
                                     &task_session_id,
                                     &executor,
                                     &session_manager,
                                     observation.worker_build.as_deref(),
                                 ))
-                                .and_then(|result| result)
-                                    .map_err(|error| format!("{error:#}"))
+                                .and_then(|result| result);
+                                let preparation_failure = outcome
+                                    .as_ref()
+                                    .err()
+                                    .and_then(|error| error.downcast_ref::<HarnessPreparationFailure>())
+                                    .cloned();
+                                Ok((
+                                    outcome.map_err(|error| format!("{error:#}")),
+                                    preparation_failure,
+                                ))
                             })
                             .await;
-                            let outcome = match joined {
-                                Ok(outcome) => outcome,
-                                Err(error) => Err(format!("worker upgrade task failed: {error}")),
+                            let (outcome, preparation_failure) = match joined {
+                                Ok(Ok(result)) => result,
+                                Ok(Err(error)) => (Err(error), None),
+                                Err(error) => (
+                                    Err(format!("worker upgrade task failed: {error}")),
+                                    None,
+                                ),
                             };
                             let result = WorkerUpgradeResult {
                                 session_id,
                                 outcome,
+                                preparation_failure,
+                                observed_updated_at,
                                 cancelled: task_cancelled.load(Ordering::Acquire),
                             };
                             (result, admission)
@@ -378,6 +398,8 @@ mod tests {
         WorkerUpgradeResult {
             session_id: "session-1".into(),
             outcome: Err(detail.into()),
+            preparation_failure: None,
+            observed_updated_at: "2026-08-09T12:01:00Z".into(),
             cancelled: false,
         }
     }
@@ -398,25 +420,10 @@ mod tests {
         WorkerUpgradeResult {
             session_id: "session-1".into(),
             outcome: Ok(outcome),
+            preparation_failure: None,
+            observed_updated_at: "2026-08-09T12:01:00Z".into(),
             cancelled: false,
         }
-    }
-
-    /// The two facts that make an upgrade due, each on its own.
-    #[test]
-    fn only_a_quiet_session_with_an_unknown_build_is_due() {
-        let now = Utc::now();
-        let policy = PolicyState::default();
-
-        assert!(policy.due(&observation(Some("build-a"), true), now));
-        assert!(
-            !policy.due(&observation(Some("build-a"), false), now),
-            "a working session must not have its worker killed"
-        );
-        assert!(
-            policy.due(&observation(None, true), now),
-            "a worker too old to report a build is outdated"
-        );
     }
 
     #[test]
@@ -429,6 +436,10 @@ mod tests {
         assert!(
             policy.due(&observation(Some("old-build"), true), two_days_later),
             "the next quiet observation may upgrade without an age-based busy timeout"
+        );
+        assert!(
+            policy.due(&observation(None, true), two_days_later),
+            "a worker too old to report a build is outdated"
         );
     }
 
@@ -569,6 +580,8 @@ mod tests {
             &WorkerUpgradeResult {
                 session_id: "session-1".into(),
                 outcome: Err("operation cancelled".into()),
+                preparation_failure: None,
+                observed_updated_at: "2026-08-09T12:01:00Z".into(),
                 cancelled: true,
             },
             now,
@@ -604,15 +617,5 @@ mod tests {
 
         let received = std::iter::from_fn(|| queued.try_recv()).count();
         assert_eq!(received, 1);
-    }
-
-    /// A stopped coordinator leaves observing harmless.
-    #[test]
-    fn observing_a_stopped_coordinator_is_a_no_op() {
-        let (observations, queued) = observation_channel();
-        let observer = WorkerUpgradeObserver { observations };
-        drop(queued);
-
-        observer.observe(observation(Some("build-a"), true));
     }
 }

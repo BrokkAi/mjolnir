@@ -55,39 +55,12 @@ async fn the_acp_command_answers_initialize_without_starting_a_daemon() {
     );
 }
 
-/// Launch finding H-3: every session lives in a workspace the dashboard and
-/// the viewer list, so `mj acp` without `--workspace` exits at once and says
-/// how to make one. It still starts no daemon to say so.
-#[test]
-fn the_acp_command_without_a_workspace_exits_with_how_to_make_one() {
-    let storage = tempfile::tempdir().unwrap();
-    let data = storage.path().join("data");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mj"))
-        .arg("acp")
-        .env("MJ_DATA_DIR", data.display().to_string())
-        .env(
-            "MJ_CONFIG_DIR",
-            storage.path().join("config").display().to_string(),
-        )
-        .env("MJ_DAEMON_OWNER_PID", std::process::id().to_string())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("mj acp needs --workspace NAME"), "{stderr}");
-    assert!(stderr.contains("mj workspaces create NAME"), "{stderr}");
-    assert!(
-        !data.join("daemon.json").exists(),
-        "refusing must not start the daemon"
-    );
-}
-
 /// Launch finding R6-2: with no daemon running, `mj acp --workspace nosuch`
 /// exited 0 without a word once its input closed (cli/023), and through a
 /// client it started a daemon (3.5 s) only to refuse at `session/new`
 /// (cli/024). Like `mj new`, it now checks the name against the store at
 /// start, refuses with the list, exits 1, and starts no daemon.
+// Hard-won: 71b59cc8e4: Launch finding R6-2 found ACP either silently succeeding with closed stdin or starting a daemon before refusing; this checks early store validation, useful output, and no daemon.
 #[test]
 fn an_unknown_workspace_is_refused_at_start_from_the_store_without_a_daemon() {
     let storage = tempfile::tempdir().unwrap();

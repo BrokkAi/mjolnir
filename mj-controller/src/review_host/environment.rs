@@ -35,8 +35,6 @@ pub trait ReviewEnvironment: Send + Sync {
         session_id: &str,
         profile: &str,
         generation: u64,
-        mcp_servers: &[mj_core::worker_launch::ReviewMcpServer],
-        dispatch_tool: bool,
     ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String>;
 
     /// How far this session has been reviewed. Blocking: it reads the
@@ -133,13 +131,12 @@ impl ReviewEnvironment for ControllerEnvironment {
         Result<mj_core::review::settings::ResolvedReviewSettings, String>,
     > {
         Box::pin(async move {
-            let specialists = config.tier == ReviewTier::Extended;
             let offered = self
                 .catalog
                 .as_ref()
                 .and_then(|catalog| catalog.get())
                 .map(|catalog| catalog.snapshot());
-            crate::review_selection::resolve(handle, Some(config), specialists, cancelled, offered)
+            crate::review_selection::resolve(handle, Some(config), cancelled, offered)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })
@@ -150,19 +147,11 @@ impl ReviewEnvironment for ControllerEnvironment {
         session_id: &str,
         profile: &str,
         generation: u64,
-        mcp_servers: &[mj_core::worker_launch::ReviewMcpServer],
-        dispatch_tool: bool,
     ) -> Result<mj_core::worker_launch::ReviewerLaunchConfig, String> {
         let controller =
             crate::controller::Controller::load().map_err(|error| format!("{error:#}"))?;
         controller
-            .stage_reviewer_profile_with_mcp(
-                session_id,
-                profile,
-                generation,
-                mcp_servers,
-                dispatch_tool,
-            )
+            .stage_reviewer_profile(session_id, profile, generation)
             .map_err(|error| format!("{error:#}"))
     }
 

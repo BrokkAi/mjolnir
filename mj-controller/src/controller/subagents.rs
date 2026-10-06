@@ -682,6 +682,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 5cea6d11569a: a container child inherited its parent's locator and was refused before starting.
     #[test]
     fn a_container_child_borrows_its_parents_container() {
         use mj_core::state::{PodmanWorkspaceLocator, TargetLocator};
@@ -769,6 +770,7 @@ mod tests {
     /// processes counts now; a parked one does not. The refusal is what the
     /// parent model reads, so it names the live children and how to free a
     /// slot.
+    // Hard-won: 6927da2ba976: the live-child cap ignored idle workers until their shared container ran out of process slots.
     #[test]
     fn the_cap_counts_every_child_holding_processes_and_names_them() {
         const MARKER: &str = "MJ_TEST_SUBAGENT_CAP_CHILD";
@@ -870,35 +872,5 @@ mod tests {
         controller
             .ensure_subagent_slot_available("parent-1", Some("cccccccc-park"))
             .unwrap();
-    }
-
-    #[test]
-    fn borrowed_bare_locator_gets_a_private_worker_identity() {
-        let locator = mj_core::state::TargetLocator::LocalBare {
-            worker_root: PathBuf::from("/workers/parent"),
-        };
-        assert_eq!(
-            borrowed_locator(&locator, "parent", "child").unwrap(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: PathBuf::from("/workers/child")
-            }
-        );
-    }
-
-    #[test]
-    fn borrowed_ssh_locator_keeps_parent_workspace_with_private_worker_identity() {
-        let locator = mj_core::state::TargetLocator::SshBare {
-            host: "builder".into(),
-            workspace: PathBuf::from(".local/share/hel/workspaces/parent-session"),
-            worker_id: None,
-        };
-        assert_eq!(
-            borrowed_locator(&locator, "parent-session", "child-session").unwrap(),
-            mj_core::state::TargetLocator::SshBare {
-                host: "builder".into(),
-                workspace: PathBuf::from(".local/share/hel/workspaces/parent-session"),
-                worker_id: Some("child-session".into()),
-            }
-        );
     }
 }

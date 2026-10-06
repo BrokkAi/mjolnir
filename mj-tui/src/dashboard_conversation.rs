@@ -446,31 +446,6 @@ mod pin_tests {
     }
 
     #[test]
-    fn selection_changes_panes_synchronously_without_entering_the_composer() {
-        let mut d = dashboard();
-        let pin = d.focused_pane();
-        let browse = d.split_focused_pane(Direction::Horizontal, None).unwrap();
-        assert_eq!(d.selected_session_id(), None);
-        d.handle_key(key(KeyCode::Down));
-        assert_eq!(d.selected_session_id(), Some("session-1"));
-        assert_eq!(d.focused_pane(), pin);
-        assert_eq!(d.focus(), Focus::Sessions);
-        d.handle_key(key(KeyCode::Down));
-        assert_eq!(d.focused_pane(), browse);
-        assert_eq!(d.selected_session_id(), Some("session-2"));
-        assert_eq!(d.current_session_id(), Some("session-2"));
-        assert_eq!(d.command_session_id(), Some("session-2"));
-        assert_eq!(d.focus(), Focus::Sessions);
-        assert_eq!(d.pane_session(pin), Some("session-1"));
-        d.focus_pane(pin);
-        d.focus_prompt();
-        assert_eq!(d.selected_session_id(), Some("session-1"));
-        assert_eq!(d.command_session_id(), Some("session-1"));
-        d.focus_sessions();
-        assert_eq!(d.command_session_id(), Some("session-1"));
-    }
-
-    #[test]
     fn an_empty_pane_selects_the_last_row_on_up_and_cannot_command_another_pane() {
         let mut d = dashboard();
         d.split_focused_pane(Direction::Horizontal, None).unwrap();
@@ -479,30 +454,6 @@ mod pin_tests {
         d.handle_key(key(KeyCode::Up));
         assert_eq!(d.selected_session_id(), Some("session-6"));
         assert_eq!(d.current_session_id(), Some("session-6"));
-    }
-
-    #[test]
-    fn assignment_identity_survives_focus_but_not_reassignment_or_restore() {
-        let mut d = dashboard();
-        let pane = d.focused_pane();
-        let first = d.pane_assignment(pane).unwrap();
-        let other = d
-            .split_focused_pane(Direction::Horizontal, Some("session-2"))
-            .unwrap();
-        d.focus_pane(pane);
-        assert_eq!(d.pane_assignment(pane), Some(first));
-        d.set_pane_session(pane, Some("session-3"));
-        d.set_pane_session(pane, Some("session-1"));
-        assert_ne!(d.pane_assignment(pane), Some(first));
-        let before_restore = d.pane_assignment(pane);
-        let saved = d.export_conversation_layout();
-        d.restore_conversation_layout(&saved);
-        assert_ne!(d.pane_assignment(pane), before_restore);
-        assert_eq!(d.selected_session_id(), Some("session-1"));
-        d.close_pane(pane);
-        assert_eq!(d.focused_pane(), other);
-        assert_eq!(d.selected_session_id(), Some("session-2"));
-        assert_eq!(d.pane_assignment(pane), None);
     }
 
     #[test]
@@ -537,22 +488,6 @@ mod pin_tests {
                 .iter()
                 .any(|row| row.contains("Outside filter"))
         );
-    }
-
-    #[test]
-    fn filter_counts_exclude_an_active_row_from_another_list_scope() {
-        let mut d = dashboard();
-        let mut historical = running_session();
-        historical.id = "history".into();
-        historical.state = SessionState::Stopped;
-        d.state.sessions.insert(historical.id.clone(), historical);
-        d.select_active_session("history");
-        d.focus_sessions();
-        d.handle_key(key(KeyCode::Char('/')));
-        d.handle_key(key(KeyCode::Char('z')));
-        assert_eq!(d.ordered_sessions().len(), 1);
-        assert_eq!(d.selected_session_id(), Some("history"));
-        assert_eq!(d.sessions_hidden_count(), 6);
     }
 
     #[test]

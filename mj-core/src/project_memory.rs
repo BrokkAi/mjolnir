@@ -1,25 +1,22 @@
 //! Project-scoped persistent memory shared across harnesses.
 //!
-//! A server instance is bound to exactly one project replica. Model-facing
-//! paths are virtual absolute paths rooted at that replica; controller and
-//! target filesystem paths never cross the MCP boundary.
+//! Each session works with a private replica that the controller synchronizes
+//! with the canonical project memory tree.
 
 use crate::hex::lower_hex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
 
-use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Utc};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use similar::{DiffTag, TextDiff};
 
 pub const MEMORY_INDEX: &str = "MEMORY.md";
 pub const MAX_DOCUMENT_BYTES: usize = 100 * 1024;
 pub const MAX_VIRTUAL_PATH_BYTES: usize = 1024;
-pub const LIST_PAGE_SIZE: usize = 50;
 pub const STARTUP_INDEX_LINES: usize = 200;
 pub const STARTUP_INDEX_BYTES: usize = 25 * 1024;
 pub const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
@@ -36,10 +33,530 @@ impl ProjectMemorySnapshot {
     }
 }
 
+/// Version of a whole memory tree: a hash over its sorted paths and contents.
+/// Two trees have the same version exactly when they hold the same files.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TreeVersion(pub String);
+
+impl ProjectMemorySnapshot {
+    pub fn version(&self) -> TreeVersion {
+        let mut hash = Sha256::new();
+        hash.update(b"mj-project-memory-tree-v1\0");
+        hash.update((self.files.len() as u64).to_be_bytes());
+        for (path, content) in &self.files {
+            hash.update((path.len() as u64).to_be_bytes());
+            hash.update(path.as_bytes());
+            hash.update((content.len() as u64).to_be_bytes());
+            hash.update(content.as_bytes());
+        }
+        TreeVersion(lower_hex(hash.finalize()))
+    }
+}
+
+/// One file where both sides changed the same lines, so the line merge could
+/// not decide. `replica_wins` is the line merge with the replica's text in
+/// every conflicting block; `TreeMerge::tree` already holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryReconciliation {
-    pub merged: ProjectMemorySnapshot,
-    pub conflicts: Vec<String>,
+pub struct ConflictedFile {
+    pub path: String,
+    pub base: Option<String>,
+    pub canonical: String,
+    pub replica: String,
+    pub replica_wins: String,
+}
+
+/// Result of a three-way tree merge. `tree` is always complete and clean: a
+/// caller that cannot resolve `conflicts` better can store it as is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeMerge {
+    pub tree: ProjectMemorySnapshot,
+    pub conflicts: Vec<ConflictedFile>,
+}
+
+/// Merge a session replica into the canonical tree relative to the baseline
+/// the replica was seeded from, line by line within each file.
+pub fn merge_trees(
+    base: &ProjectMemorySnapshot,
+    canonical: &ProjectMemorySnapshot,
+    replica: &ProjectMemorySnapshot,
+) -> TreeMerge {
+    let paths = base
+        .files
+        .keys()
+        .chain(canonical.files.keys())
+        .chain(replica.files.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut tree = ProjectMemorySnapshot::default();
+    let mut conflicts = Vec::new();
+
+    for path in paths {
+        let base_content = base.files.get(&path);
+        let canonical_content = canonical.files.get(&path);
+        let replica_content = replica.files.get(&path);
+        let merged = if canonical_content == replica_content {
+            canonical_content.cloned()
+        } else if base_content == canonical_content {
+            replica_content.cloned()
+        } else if base_content == replica_content {
+            canonical_content.cloned()
+        } else {
+            match (base_content, canonical_content, replica_content) {
+                (None, Some(canonical_text), Some(replica_text)) => {
+                    conflicts.push(ConflictedFile {
+                        path: path.clone(),
+                        base: None,
+                        canonical: canonical_text.clone(),
+                        replica: replica_text.clone(),
+                        replica_wins: replica_text.clone(),
+                    });
+                    Some(replica_text.clone())
+                }
+                (Some(_), None, Some(replica_text)) => Some(replica_text.clone()),
+                (Some(_), Some(canonical_text), None) => Some(canonical_text.clone()),
+                (Some(base_text), Some(canonical_text), Some(replica_text)) => {
+                    let (replica_wins, conflicted) =
+                        merge_file_lines(base_text, canonical_text, replica_text);
+                    if conflicted {
+                        conflicts.push(ConflictedFile {
+                            path: path.clone(),
+                            base: Some(base_text.clone()),
+                            canonical: canonical_text.clone(),
+                            replica: replica_text.clone(),
+                            replica_wins: replica_wins.clone(),
+                        });
+                    }
+                    Some(replica_wins)
+                }
+                // These cases are covered by the unchanged-side rules above.
+                (None, None, None)
+                | (None, None, Some(_))
+                | (None, Some(_), None)
+                | (Some(_), None, None) => None,
+            }
+        };
+
+        if let Some(content) = merged.filter(|content| !content.trim().is_empty()) {
+            tree.files.insert(path, content);
+        }
+    }
+
+    resolve_path_collisions(&mut tree, replica);
+    TreeMerge { tree, conflicts }
+}
+
+/// A file/descendant collision cannot be installed as a tree. Keep the
+/// colliding path present in the replica; if both or neither are present,
+/// retain the ancestor as a deterministic tie-break.
+fn resolve_path_collisions(tree: &mut ProjectMemorySnapshot, replica: &ProjectMemorySnapshot) {
+    let mut retained = BTreeSet::new();
+    for path in tree.files.keys() {
+        let Some(ancestor) = first_retained_ancestor(path, &retained) else {
+            retained.insert(path.clone());
+            continue;
+        };
+
+        let ancestor_is_replica = replica.files.contains_key(&ancestor);
+        let path_is_replica = replica.files.contains_key(path);
+        if path_is_replica && !ancestor_is_replica {
+            retained.remove(&ancestor);
+            retained.insert(path.clone());
+        }
+    }
+    tree.files.retain(|path, _| retained.contains(path));
+}
+
+fn first_retained_ancestor(path: &str, retained: &BTreeSet<String>) -> Option<String> {
+    let mut end = path.len();
+    while let Some(separator) = path[..end].rfind('/') {
+        if separator == 0 {
+            break;
+        }
+        let ancestor = &path[..separator];
+        if retained.contains(ancestor) {
+            return retained.get(ancestor).cloned();
+        }
+        end = separator;
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct LineEdit {
+    old: std::ops::Range<usize>,
+    replacement: std::ops::Range<usize>,
+}
+
+fn line_edits(base: &[&str], side: &[&str]) -> Vec<LineEdit> {
+    let diff = TextDiff::from_slices(base, side);
+    let mut edits = Vec::new();
+    let mut pending: Option<LineEdit> = None;
+    for op in diff.ops() {
+        if op.tag() == DiffTag::Equal {
+            if let Some(edit) = pending.take() {
+                edits.push(edit);
+            }
+            continue;
+        }
+
+        let old = op.old_range();
+        let replacement = op.new_range();
+        if let Some(edit) = &mut pending {
+            edit.old.end = old.end;
+            edit.replacement.end = replacement.end;
+        } else {
+            pending = Some(LineEdit { old, replacement });
+        }
+    }
+    if let Some(edit) = pending {
+        edits.push(edit);
+    }
+    edits
+}
+
+fn edits_overlap(left: &LineEdit, right: &LineEdit) -> bool {
+    let left_insert = left.old.is_empty();
+    let right_insert = right.old.is_empty();
+    match (left_insert, right_insert) {
+        (true, true) => left.old.start == right.old.start,
+        (true, false) => right.old.start < left.old.start && left.old.start < right.old.end,
+        (false, true) => left.old.start < right.old.start && right.old.start < left.old.end,
+        (false, false) => left.old.start < right.old.end && right.old.start < left.old.end,
+    }
+}
+
+fn edit_overlaps_region(edit: &LineEdit, start: usize, end: usize) -> bool {
+    if edit.old.is_empty() {
+        start < edit.old.start && edit.old.start < end
+    } else {
+        edit.old.start < end && edit.old.end > start
+    }
+}
+
+fn apply_region_edits<'a>(
+    base: &[&'a str],
+    side: &[&'a str],
+    edits: &[LineEdit],
+    start: usize,
+    end: usize,
+) -> Vec<&'a str> {
+    let mut output = Vec::new();
+    let mut cursor = start;
+    for edit in edits {
+        output.extend_from_slice(&base[cursor..edit.old.start]);
+        output.extend_from_slice(&side[edit.replacement.clone()]);
+        cursor = edit.old.end;
+    }
+    output.extend_from_slice(&base[cursor..end]);
+    output
+}
+
+fn side_line_offset(base_position: usize, edits: &[LineEdit], edit_count: usize) -> usize {
+    let mut output_position = 0;
+    let mut base_position_before = 0;
+    for edit in &edits[..edit_count] {
+        output_position += edit.old.start - base_position_before;
+        output_position += edit.replacement.len();
+        base_position_before = edit.old.end;
+    }
+    output_position + base_position - base_position_before
+}
+
+fn split_shared_boundary_insertions(
+    edits: &mut Vec<LineEdit>,
+    side: &[&str],
+    other_edits: &[LineEdit],
+    other_side: &[&str],
+) {
+    let mut insertions = Vec::new();
+    for insertion in other_edits.iter().filter(|edit| edit.old.is_empty()) {
+        let insertion_text = &other_side[insertion.replacement.clone()];
+        for edit in edits.iter_mut().filter(|edit| !edit.old.is_empty()) {
+            let extra_lines = edit.replacement.len().saturating_sub(edit.old.len());
+            if insertion_text.is_empty() || extra_lines < insertion_text.len() {
+                continue;
+            }
+
+            if edit.old.end == insertion.old.start {
+                let split_at = edit.replacement.end - insertion_text.len();
+                if &side[split_at..edit.replacement.end] == insertion_text
+                    && split_at - edit.replacement.start >= edit.old.len()
+                {
+                    insertions.push(LineEdit {
+                        old: insertion.old.start..insertion.old.start,
+                        replacement: split_at..edit.replacement.end,
+                    });
+                    edit.replacement.end = split_at;
+                    break;
+                }
+            }
+
+            if edit.old.start == insertion.old.start {
+                let split_at = edit.replacement.start + insertion_text.len();
+                if &side[edit.replacement.start..split_at] == insertion_text
+                    && edit.replacement.end - split_at >= edit.old.len()
+                {
+                    insertions.push(LineEdit {
+                        old: insertion.old.start..insertion.old.start,
+                        replacement: edit.replacement.start..split_at,
+                    });
+                    edit.replacement.start = split_at;
+                    break;
+                }
+            }
+        }
+    }
+    edits.extend(insertions);
+    edits.sort_by_key(|edit| (edit.old.start, edit.old.end));
+}
+
+fn merge_file_lines(base_text: &str, canonical_text: &str, replica_text: &str) -> (String, bool) {
+    let base_text = line_merge_input(base_text);
+    let canonical_text = line_merge_input(canonical_text);
+    let replica_text = line_merge_input(replica_text);
+    let base = base_text.split_inclusive('\n').collect::<Vec<_>>();
+    let canonical = canonical_text.split_inclusive('\n').collect::<Vec<_>>();
+    let replica = replica_text.split_inclusive('\n').collect::<Vec<_>>();
+    let mut canonical_edits = line_edits(&base, &canonical);
+    let mut replica_edits = line_edits(&base, &replica);
+    split_shared_boundary_insertions(&mut canonical_edits, &canonical, &replica_edits, &replica);
+    split_shared_boundary_insertions(&mut replica_edits, &replica, &canonical_edits, &canonical);
+    let mut canonical_index = 0;
+    let mut replica_index = 0;
+    let mut base_cursor = 0;
+    let mut output = Vec::new();
+    let mut conflicted = false;
+
+    while canonical_index < canonical_edits.len() || replica_index < replica_edits.len() {
+        let canonical_edit = canonical_edits.get(canonical_index);
+        let replica_edit = replica_edits.get(replica_index);
+
+        if let (Some(canonical_edit), Some(replica_edit)) = (canonical_edit, replica_edit)
+            && canonical_edit.old.is_empty()
+            && replica_edit.old.is_empty()
+            && canonical_edit.old.start == replica_edit.old.start
+        {
+            output.extend_from_slice(&base[base_cursor..canonical_edit.old.start]);
+            let canonical_insert = &canonical[canonical_edit.replacement.clone()];
+            let replica_insert = &replica[replica_edit.replacement.clone()];
+            output.extend_from_slice(canonical_insert);
+            if canonical_insert != replica_insert {
+                output.extend_from_slice(replica_insert);
+            }
+            base_cursor = canonical_edit.old.start;
+            canonical_index += 1;
+            replica_index += 1;
+            continue;
+        }
+
+        if let (Some(canonical_edit), Some(replica_edit)) = (canonical_edit, replica_edit)
+            && canonical_edit.old.start == replica_edit.old.start
+            && (canonical_edit.old.is_empty() || replica_edit.old.is_empty())
+        {
+            let (edit, side, next_index) = if canonical_edit.old.is_empty() {
+                (canonical_edit, &canonical, &mut canonical_index)
+            } else {
+                (replica_edit, &replica, &mut replica_index)
+            };
+            output.extend_from_slice(&base[base_cursor..edit.old.start]);
+            output.extend_from_slice(&side[edit.replacement.clone()]);
+            base_cursor = edit.old.end;
+            *next_index += 1;
+            continue;
+        }
+
+        let overlaps = match (canonical_edit, replica_edit) {
+            (Some(canonical_edit), Some(replica_edit)) => {
+                edits_overlap(canonical_edit, replica_edit)
+            }
+            _ => false,
+        };
+        if !overlaps {
+            let take_canonical = match (canonical_edit, replica_edit) {
+                (Some(canonical_edit), Some(replica_edit)) => {
+                    canonical_edit.old.start < replica_edit.old.start
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => unreachable!(),
+            };
+            let (edit, side, index) = if take_canonical {
+                (canonical_edit.unwrap(), &canonical, &mut canonical_index)
+            } else {
+                (replica_edit.unwrap(), &replica, &mut replica_index)
+            };
+            output.extend_from_slice(&base[base_cursor..edit.old.start]);
+            output.extend_from_slice(&side[edit.replacement.clone()]);
+            base_cursor = edit.old.end;
+            *index += 1;
+            continue;
+        }
+
+        let canonical_edit = canonical_edit.unwrap();
+        let replica_edit = replica_edit.unwrap();
+        let start = canonical_edit.old.start.min(replica_edit.old.start);
+        let mut end = canonical_edit.old.end.max(replica_edit.old.end);
+        let mut canonical_end = canonical_index;
+        let mut replica_end = replica_index;
+
+        loop {
+            let previous = (canonical_end, replica_end, end);
+            while canonical_end < canonical_edits.len()
+                && edit_overlaps_region(&canonical_edits[canonical_end], start, end)
+            {
+                end = end.max(canonical_edits[canonical_end].old.end);
+                canonical_end += 1;
+            }
+            while replica_end < replica_edits.len()
+                && edit_overlaps_region(&replica_edits[replica_end], start, end)
+            {
+                end = end.max(replica_edits[replica_end].old.end);
+                replica_end += 1;
+            }
+            if previous == (canonical_end, replica_end, end) {
+                break;
+            }
+        }
+
+        let canonical_region = apply_region_edits(
+            &base,
+            &canonical,
+            &canonical_edits[canonical_index..canonical_end],
+            start,
+            end,
+        );
+        let replica_region = apply_region_edits(
+            &base,
+            &replica,
+            &replica_edits[replica_index..replica_end],
+            start,
+            end,
+        );
+        let base_region = &base[start..end];
+        output.extend_from_slice(&base[base_cursor..start]);
+
+        if canonical_region == replica_region {
+            output.extend_from_slice(&canonical_region);
+        } else if canonical_region == base_region {
+            output.extend_from_slice(&replica_region);
+        } else if replica_region == base_region {
+            output.extend_from_slice(&canonical_region);
+        } else if canonical_region.len() == base_region.len()
+            && replica_region.len() == base_region.len()
+        {
+            let canonical_modified = frontmatter_modified_lines(&canonical);
+            let replica_modified = frontmatter_modified_lines(&replica);
+            let canonical_line_start = side_line_offset(start, &canonical_edits, canonical_index);
+            let replica_line_start = side_line_offset(start, &replica_edits, replica_index);
+            for offset in 0..base_region.len() {
+                let base_line = base_region[offset];
+                let canonical_line = canonical_region[offset];
+                let replica_line = replica_region[offset];
+                let canonical_line_index = canonical_line_start + offset;
+                let replica_line_index = replica_line_start + offset;
+                if canonical_line == replica_line {
+                    output.push(canonical_line);
+                } else if canonical_line == base_line
+                    || (replica_line != base_line
+                        && canonical_modified[canonical_line_index]
+                        && replica_modified[replica_line_index])
+                {
+                    output.push(replica_line);
+                } else if replica_line == base_line {
+                    output.push(canonical_line);
+                } else {
+                    output.push(replica_line);
+                    conflicted = true;
+                }
+            }
+        } else {
+            output.extend_from_slice(&replica_region);
+            conflicted = true;
+        }
+
+        base_cursor = end;
+        canonical_index = canonical_end;
+        replica_index = replica_end;
+    }
+
+    output.extend_from_slice(&base[base_cursor..]);
+    (output.concat(), conflicted)
+}
+
+fn line_merge_input(text: &str) -> String {
+    if text.is_empty() || text.ends_with('\n') {
+        text.to_owned()
+    } else {
+        format!("{text}\n")
+    }
+}
+
+fn frontmatter_modified_lines(lines: &[&str]) -> Vec<bool> {
+    let mut modified = vec![false; lines.len()];
+    if lines.first().is_none_or(|line| line.trim() != "---") {
+        return modified;
+    }
+    for (index, line) in lines.iter().enumerate().skip(1) {
+        if line.trim() == "---" {
+            break;
+        }
+        let Some((key, _)) = line.trim_start().split_once(':') else {
+            continue;
+        };
+        modified[index] = key.trim() == "modified";
+    }
+    modified
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapOutcome {
+    Swapped,
+    /// The canonical tree no longer has the expected version. Read and merge again.
+    Changed,
+}
+
+/// Read the canonical tree, following project-merge redirects.
+pub fn read_canonical(canonical_root: &Path) -> Result<ProjectMemorySnapshot> {
+    let root = resolve_canonical_root(canonical_root)?;
+    ProjectMemoryStore::new(root).snapshot()
+}
+
+/// Replace the canonical tree with `tree` only if it still has `expected`.
+/// The per-project lock is held only for the compare and the write.
+pub fn swap_canonical(
+    canonical_root: &Path,
+    expected: &TreeVersion,
+    tree: &ProjectMemorySnapshot,
+) -> Result<SwapOutcome> {
+    let mut locks = MEMORY_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .expect("project memory lock registry poisoned");
+    let canonical_root = resolve_canonical_root(canonical_root)?;
+    let lock = locks
+        .entry(canonical_root.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().expect("project memory lock poisoned");
+    drop(locks);
+
+    let store = ProjectMemoryStore::new(canonical_root);
+    let current = store.snapshot()?;
+    if current.version() != expected.clone() {
+        return Ok(SwapOutcome::Changed);
+    }
+    store.replace_tree(tree)?;
+    Ok(SwapOutcome::Swapped)
+}
+
+/// Worker answer to a whole-tree replace request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicaReplaceOutcome {
+    Replaced,
+    /// The replica changed after the controller read it; nothing was written.
+    ReplicaChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,164 +738,6 @@ impl ProjectMemoryStore {
         &self.root
     }
 
-    pub fn list(&self, path_prefix: Option<&str>, cursor: Option<&str>) -> MemoryListResult {
-        match self.try_list(path_prefix, cursor) {
-            Ok(result) => result,
-            Err(error) => MemoryListResult::failed(error),
-        }
-    }
-
-    fn try_list(
-        &self,
-        path_prefix: Option<&str>,
-        cursor: Option<&str>,
-    ) -> Result<MemoryListResult> {
-        let prefix = path_prefix.unwrap_or("/");
-        let relative = validate_virtual_path(prefix, true)?;
-        let start = self.root.join(&relative);
-        reject_symlink_path(&self.root, &relative, true)?;
-
-        let mut entries = Vec::new();
-        if start.is_file() {
-            entries.push(memory_entry(&self.root, &start)?);
-        } else if start.is_dir() {
-            collect_entries(&self.root, &start, &mut entries)?;
-        } else if start.exists() {
-            bail!("memory path is not a regular file or directory");
-        }
-        entries.sort_by(|left, right| left.path.cmp(&right.path));
-        if let Some(cursor) = cursor {
-            validate_virtual_path(cursor, false)?;
-            entries.retain(|entry| entry.path.as_str() > cursor);
-        }
-        let remaining = entries.len().saturating_sub(LIST_PAGE_SIZE);
-        entries.truncate(LIST_PAGE_SIZE);
-        Ok(MemoryListResult {
-            outcome: MemoryListOutcome::Ok,
-            entries: Some(entries),
-            remaining: Some(remaining),
-            reason: None,
-            message: None,
-        })
-    }
-
-    pub fn read(&self, path: &str) -> MemoryReadResult {
-        match self.try_read(path) {
-            Ok(result) => result,
-            Err(error) => MemoryReadResult::failed(path, error),
-        }
-    }
-
-    fn try_read(&self, path: &str) -> Result<MemoryReadResult> {
-        let relative = validate_virtual_path(path, false)?;
-        reject_symlink_path(&self.root, &relative, false)?;
-        let host_path = self.root.join(relative);
-        let metadata = match fs::metadata(&host_path) {
-            Ok(metadata) if metadata.is_file() => metadata,
-            Ok(_) => bail!("memory path is not a regular file"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(MemoryReadResult::not_found(path));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let bytes = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-        if bytes > MAX_DOCUMENT_BYTES {
-            return Ok(MemoryReadResult::refused(
-                path,
-                "too_large",
-                format!("{path:?} is {bytes} bytes, over the {MAX_DOCUMENT_BYTES}-byte read cap"),
-            ));
-        }
-        let content = fs::read_to_string(&host_path)
-            .with_context(|| format!("read memory document {}", host_path.display()))?;
-        Ok(MemoryReadResult {
-            outcome: MemoryReadOutcome::Ok,
-            path: path.to_owned(),
-            content: Some(content.clone()),
-            updated_at: modified_at(&metadata),
-            version: Some(content_version(&content)),
-            reason: None,
-            message: None,
-        })
-    }
-
-    pub fn write(&self, request: MemoryWriteRequest) -> MemoryWriteResult {
-        match self.try_write(request) {
-            Ok(result) => result,
-            Err(error) => MemoryWriteResult::failed(error),
-        }
-    }
-
-    fn try_write(&self, request: MemoryWriteRequest) -> Result<MemoryWriteResult> {
-        let relative = validate_virtual_path(&request.path, false)?;
-        reject_symlink_path(&self.root, &relative, true)?;
-        let content = normalize_content(&request.content);
-        let bytes = content.len();
-        if content.trim().is_empty() {
-            return Ok(MemoryWriteResult::refused(
-                request.path,
-                "empty_content",
-                "empty or whitespace-only content is rejected",
-            ));
-        }
-        if bytes > MAX_DOCUMENT_BYTES {
-            return Ok(MemoryWriteResult::refused(
-                request.path,
-                "too_large",
-                format!(
-                    "content is {bytes} bytes; a memory document is capped at {MAX_DOCUMENT_BYTES} bytes"
-                ),
-            ));
-        }
-
-        let host_path = self.root.join(&relative);
-        let existing = match fs::read_to_string(&host_path) {
-            Ok(content) => Some(content),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-        let requested_version = request.if_version.trim();
-        match (existing.as_ref(), requested_version) {
-            (None, "" | "new") => {}
-            (None, _) => {
-                return Ok(MemoryWriteResult::missing(request.path));
-            }
-            (Some(current), "" | "new") => {
-                return Ok(MemoryWriteResult::conflict(request.path, current));
-            }
-            (Some(current), expected) if content_version(current) != expected => {
-                return Ok(MemoryWriteResult::conflict(request.path, current));
-            }
-            (Some(_), _) => {}
-        }
-
-        if let Some(parent) = host_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create memory directory {}", parent.display()))?;
-        }
-        crate::config::atomic_write(&host_path, content.as_bytes())
-            .with_context(|| format!("write memory document {}", host_path.display()))?;
-        let op = if existing.is_some() {
-            MemoryWriteOperation::Updated
-        } else {
-            MemoryWriteOperation::Created
-        };
-        let message = (relative == Path::new(MEMORY_INDEX))
-            .then(|| startup_index_warning(&content))
-            .flatten();
-        Ok(MemoryWriteResult {
-            outcome: MemoryWriteOutcome::Ok,
-            path: request.path,
-            version: Some(content_version(&content)),
-            bytes: Some(bytes),
-            op: Some(op),
-            current_version: None,
-            current_content: None,
-            reason: None,
-            message,
-        })
-    }
-
     pub fn startup_index(&self) -> Result<Option<String>> {
         let path = self.root.join(MEMORY_INDEX);
         let content = match fs::read_to_string(&path) {
@@ -404,7 +763,7 @@ impl ProjectMemoryStore {
                 entry.path
             );
             ensure_snapshot_budget(&mut total, entry.bytes)?;
-            let relative = validate_virtual_path(&entry.path, false)?;
+            let relative = validate_virtual_path(&entry.path)?;
             let content = fs::read_to_string(self.root.join(relative))
                 .with_context(|| format!("read memory snapshot document {}", entry.path))?;
             ensure_snapshot_budget(&mut total, content.len().saturating_sub(entry.bytes))?;
@@ -413,14 +772,14 @@ impl ProjectMemoryStore {
         Ok(ProjectMemorySnapshot { files })
     }
 
-    /// Apply a reconciled snapshot. Memory has no delete operation, so this
-    /// only creates or replaces documents and cannot erase a concurrent file.
+    /// Apply documents from a legacy relay snapshot. This stays additive so an
+    /// older controller cannot delete documents it does not know to sync.
     pub fn install_snapshot(&self, snapshot: &ProjectMemorySnapshot) -> Result<bool> {
         let mut total = 0_usize;
         let mut changed = false;
         for (path, content) in &snapshot.files {
             ensure_snapshot_budget(&mut total, content.len())?;
-            let relative = validate_virtual_path(path, false)?;
+            let relative = validate_virtual_path(path)?;
             reject_symlink_path(&self.root, &relative, true)?;
             ensure_snapshot_document(content)?;
             let destination = self.root.join(relative);
@@ -442,6 +801,130 @@ impl ProjectMemoryStore {
         }
         Ok(changed)
     }
+
+    /// Make the directory hold exactly `tree`: write changed documents and
+    /// delete documents that `tree` omits. Returns whether anything changed.
+    pub fn replace_tree(&self, tree: &ProjectMemorySnapshot) -> Result<bool> {
+        let mut total = 0_usize;
+        let mut desired = BTreeMap::<String, (PathBuf, &str)>::new();
+        let mut relative_paths = BTreeSet::new();
+        for (path, content) in &tree.files {
+            ensure_snapshot_budget(&mut total, content.len())?;
+            let relative = validate_virtual_path(path)?;
+            reject_symlink_path(&self.root, &relative, true)?;
+            ensure_snapshot_document(content)?;
+            anyhow::ensure!(
+                relative_paths.insert(relative.clone()),
+                "project memory snapshot contains duplicate paths"
+            );
+            desired.insert(path.clone(), (relative, content));
+        }
+        for relative in &relative_paths {
+            let mut parent = relative.parent();
+            while let Some(path) = parent {
+                anyhow::ensure!(
+                    !relative_paths.contains(path),
+                    "project memory snapshot contains both a document and its parent"
+                );
+                parent = path.parent();
+            }
+        }
+
+        reject_symlink_path(&self.root, Path::new(""), true)?;
+        if let Ok(metadata) = fs::symlink_metadata(&self.root) {
+            anyhow::ensure!(metadata.is_dir(), "project memory root is not a directory");
+        }
+        let current = self.snapshot()?;
+        let mut changed = false;
+
+        for path in current.files.keys() {
+            if desired.contains_key(path) || path == "/memory-redirect.json" {
+                continue;
+            }
+            let relative = validate_virtual_path(path)?;
+            reject_symlink_path(&self.root, &relative, false)?;
+            let file = self.root.join(relative);
+            match fs::remove_file(&file) {
+                Ok(()) => changed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("delete memory document {}", file.display()));
+                }
+            }
+        }
+
+        prune_empty_memory_directories(&self.root, &mut changed)?;
+
+        for (path, (relative, content)) in desired {
+            if path == "/memory-redirect.json"
+                || current
+                    .files
+                    .get(&path)
+                    .is_some_and(|existing| existing == content)
+            {
+                continue;
+            }
+            reject_symlink_path(&self.root, &relative, true)?;
+            let destination = self.root.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create memory directory {}", parent.display()))?;
+            }
+            crate::config::atomic_write(&destination, content.as_bytes())
+                .with_context(|| format!("write memory document {}", destination.display()))?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+}
+
+fn prune_empty_memory_directories(root: &Path, changed: &mut bool) -> Result<()> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let mut directories = Vec::new();
+    collect_visible_directories(root, root, &mut directories)?;
+    for directory in directories {
+        match fs::remove_dir(&directory) {
+            Ok(()) => *changed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let mut entries = fs::read_dir(&directory)
+                    .with_context(|| format!("inspect memory directory {}", directory.display()))?;
+                if entries.next().transpose()?.is_none() {
+                    return Err(error).with_context(|| {
+                        format!("remove empty memory directory {}", directory.display())
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_visible_directories(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("list memory directory {}", directory.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink()
+            || entry.file_name().to_string_lossy().starts_with('.')
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
+        let path = entry.path();
+        collect_visible_directories(root, &path, output)?;
+        if path != root {
+            output.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn ensure_snapshot_budget(total: &mut usize, bytes: usize) -> Result<()> {
@@ -465,61 +948,6 @@ fn ensure_snapshot_document(content: &str) -> Result<()> {
         "project memory snapshot contains an empty document"
     );
     Ok(())
-}
-
-/// Reconcile one isolated session replica against the baseline it was seeded
-/// from and the latest controller copy. Concurrent edits to different files
-/// merge directly. A same-file conflict preserves both versions in a normal,
-/// discoverable document instead of guessing or silently choosing one.
-pub fn reconcile_snapshots(
-    baseline: &ProjectMemorySnapshot,
-    canonical: &ProjectMemorySnapshot,
-    replica: &ProjectMemorySnapshot,
-    session_id: &str,
-) -> MemoryReconciliation {
-    let mut paths = baseline
-        .files
-        .keys()
-        .chain(canonical.files.keys())
-        .chain(replica.files.keys())
-        .cloned()
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    let mut merged = BTreeMap::new();
-    let mut conflicts = Vec::new();
-    for path in paths {
-        let base = baseline.files.get(&path);
-        let current = canonical.files.get(&path);
-        let local = replica.files.get(&path);
-        let chosen = if local == base {
-            current
-        } else if current == base || current == local {
-            local
-        } else {
-            if let (Some(current), Some(local)) = (current, local) {
-                let conflict_path = conflict_path(&path, session_id, current, local);
-                let heading = format!(
-                    "<!-- Concurrent project-memory edit of {path:?} from session {session_id:?}. The controller version remains at the original path. -->\n\n"
-                );
-                let body = if heading.len() + local.len() <= MAX_DOCUMENT_BYTES {
-                    format!("{heading}{local}")
-                } else {
-                    local.clone()
-                };
-                merged.insert(conflict_path.clone(), body);
-                conflicts.push(conflict_path);
-            }
-            current.or(local)
-        };
-        if let Some(content) = chosen {
-            merged.insert(path, content.clone());
-        }
-    }
-    MemoryReconciliation {
-        merged: ProjectMemorySnapshot { files: merged },
-        conflicts,
-    }
 }
 
 static MEMORY_LOCKS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -573,18 +1001,22 @@ pub fn merge_canonical_stores(old: &Path, new: &Path) -> Result<Vec<String>> {
         .entry(new.clone())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone();
-    let _old_guard = old_lock.lock().expect("project memory lock poisoned");
-    let _new_guard = new_lock.lock().expect("project memory lock poisoned");
+    let (_first_guard, _second_guard) = if old < new {
+        (
+            old_lock.lock().expect("project memory lock poisoned"),
+            new_lock.lock().expect("project memory lock poisoned"),
+        )
+    } else {
+        (
+            new_lock.lock().expect("project memory lock poisoned"),
+            old_lock.lock().expect("project memory lock poisoned"),
+        )
+    };
     let old_snapshot = ProjectMemoryStore::new(&old).snapshot()?;
     let new_store = ProjectMemoryStore::new(&new);
     let current = new_store.snapshot()?;
-    let merged = reconcile_snapshots(
-        &ProjectMemorySnapshot::default(),
-        &current,
-        &old_snapshot,
-        "project-merge",
-    );
-    new_store.install_snapshot(&merged.merged)?;
+    let merged = merge_trees(&ProjectMemorySnapshot::default(), &current, &old_snapshot);
+    new_store.replace_tree(&merged.tree)?;
     let parent = old
         .parent()
         .context("old memory project directory is missing")?;
@@ -594,257 +1026,11 @@ pub fn merge_canonical_stores(old: &Path, new: &Path) -> Result<Vec<String>> {
         &serde_json::to_vec(&new)?,
     )?;
     drop(locks);
-    Ok(merged.conflicts)
-}
-
-/// Atomically reconcile one replica with the controller copy relative to its
-/// session baseline. The per-project lock prevents two session actors from
-/// reading the same canonical generation and then overwriting one another.
-pub fn reconcile_into_canonical(
-    canonical_root: &Path,
-    baseline: &ProjectMemorySnapshot,
-    replica: &ProjectMemorySnapshot,
-    session_id: &str,
-) -> Result<MemoryReconciliation> {
-    let mut locks = MEMORY_LOCKS
-        .get_or_init(Default::default)
-        .lock()
-        .expect("project memory lock registry poisoned");
-    let canonical_root = resolve_canonical_root(canonical_root)?;
-    let lock = locks
-        .entry(canonical_root.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone();
-    let _guard = lock.lock().expect("project memory lock poisoned");
-    drop(locks);
-    let store = ProjectMemoryStore::new(&canonical_root);
-    let canonical = store.snapshot()?;
-    let reconciliation = reconcile_snapshots(baseline, &canonical, replica, session_id);
-    if reconciliation.merged != canonical {
-        store.install_snapshot(&reconciliation.merged)?;
-    }
-    Ok(reconciliation)
-}
-
-fn conflict_path(path: &str, session_id: &str, current: &str, local: &str) -> String {
-    let digest = Sha256::digest([path.as_bytes(), current.as_bytes(), local.as_bytes()].concat());
-    let session = session_id
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
-        .take(48)
-        .collect::<String>();
-    format!("/conflicts/{session}-{}.md", &lower_hex(digest)[..16])
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryListOutcome {
-    Ok,
-    Refused,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryListEntry {
-    pub path: String,
-    pub bytes: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryListResult {
-    pub outcome: MemoryListOutcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entries: Option<Vec<MemoryListEntry>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remaining: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl MemoryListResult {
-    fn failed(error: anyhow::Error) -> Self {
-        Self {
-            outcome: MemoryListOutcome::Failed,
-            entries: None,
-            remaining: None,
-            reason: Some("invalid_or_unavailable".into()),
-            message: Some(format!("{error:#}")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryReadOutcome {
-    Ok,
-    NotFound,
-    Refused,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryReadResult {
-    pub outcome: MemoryReadOutcome,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl MemoryReadResult {
-    fn not_found(path: &str) -> Self {
-        Self {
-            outcome: MemoryReadOutcome::NotFound,
-            path: path.into(),
-            content: None,
-            updated_at: None,
-            version: None,
-            reason: Some("not_found".into()),
-            message: None,
-        }
-    }
-
-    fn refused(path: &str, reason: &str, message: String) -> Self {
-        Self {
-            outcome: MemoryReadOutcome::Refused,
-            path: path.into(),
-            content: None,
-            updated_at: None,
-            version: None,
-            reason: Some(reason.into()),
-            message: Some(message),
-        }
-    }
-
-    fn failed(path: &str, error: anyhow::Error) -> Self {
-        Self {
-            outcome: MemoryReadOutcome::Failed,
-            path: path.into(),
-            content: None,
-            updated_at: None,
-            version: None,
-            reason: Some("invalid_or_unavailable".into()),
-            message: Some(format!("{error:#}")),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryWriteRequest {
-    pub path: String,
-    pub content: String,
-    pub if_version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryWriteOutcome {
-    Ok,
-    Conflict,
-    Missing,
-    Refused,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryWriteOperation {
-    Created,
-    Updated,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryWriteResult {
-    pub outcome: MemoryWriteOutcome,
-    pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bytes: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub op: Option<MemoryWriteOperation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl MemoryWriteResult {
-    fn conflict(path: String, current: &str) -> Self {
-        Self {
-            outcome: MemoryWriteOutcome::Conflict,
-            path,
-            version: None,
-            bytes: None,
-            op: None,
-            current_version: Some(content_version(current)),
-            current_content: Some(current.into()),
-            reason: Some("conflict".into()),
-            message: Some("the document changed; reconcile with currentContent and retry".into()),
-        }
-    }
-
-    fn missing(path: String) -> Self {
-        Self {
-            outcome: MemoryWriteOutcome::Missing,
-            path,
-            version: None,
-            bytes: None,
-            op: None,
-            current_version: None,
-            current_content: None,
-            reason: Some("not_found".into()),
-            message: Some("the document does not exist; pass if_version=new to create it".into()),
-        }
-    }
-
-    fn refused(path: String, reason: &str, message: impl Into<String>) -> Self {
-        Self {
-            outcome: MemoryWriteOutcome::Refused,
-            path,
-            version: None,
-            bytes: None,
-            op: None,
-            current_version: None,
-            current_content: None,
-            reason: Some(reason.into()),
-            message: Some(message.into()),
-        }
-    }
-
-    fn failed(error: anyhow::Error) -> Self {
-        Self {
-            outcome: MemoryWriteOutcome::Failed,
-            path: String::new(),
-            version: None,
-            bytes: None,
-            op: None,
-            current_version: None,
-            current_content: None,
-            reason: Some("invalid_or_unavailable".into()),
-            message: Some(format!("{error:#}")),
-        }
-    }
+    Ok(merged
+        .conflicts
+        .into_iter()
+        .map(|conflict| conflict.path)
+        .collect())
 }
 
 pub fn truncate_startup_index(content: &str) -> String {
@@ -871,7 +1057,7 @@ pub fn truncate_startup_index(content: &str) -> String {
     output
 }
 
-pub const MEMORY_GUIDANCE: &str = "Persistent memory is background context for the current Mjolnir project; current user instructions take precedence. Verify claims against the working tree and current environment before relying on them. Save only new, reusable lessons or decisions, with date and scope for changeable facts or coordination constraints. Prefer concise notes and repository-relative links to authoritative plans or documentation over copied progress logs, test transcripts, or commit inventories. Avoid temporary worker paths; describe how to discover the current environment instead. Keep /MEMORY.md a concise index of descriptive links, preserving unrelated entries when updating it. Read only notes relevant to the current task; reuse context already loaded unless freshness or an update requires another read. Paths are implicit to this project.";
+pub const MEMORY_GUIDANCE: &str = "Persistent project memory is background context; verify it against current instructions and code. Keep one fact per Markdown file with frontmatter for name, description, and metadata.type. Add a one-line pointer to each file in MEMORY.md, update existing notes instead of duplicating them, and delete notes that are wrong.";
 
 pub fn startup_prompt_context(
     store: &ProjectMemoryStore,
@@ -881,17 +1067,17 @@ pub fn startup_prompt_context(
     let mut context = vec![
         "<mj-project-memory>".to_owned(),
         MEMORY_GUIDANCE.to_owned(),
-        "Use list, read, and write to maintain it. write replaces a whole document and requires the version returned by read, or new when creating.".to_owned(),
+        format!("Project memory directory: {}", store.root().display()),
     ];
     if repository_roots.len() > 1 {
-        context.push("This is a multi-root project. Bundle-wide memories live at the root; intentionally root-specific memories may live under /roots/<repository-id>/. Workspace roots:".into());
+        context.push("For this multi-root project, keep bundle-wide memories at the memory directory root and intentionally repository-specific notes under roots/<repository-id>/. Workspace roots:".into());
         context.extend(
             repository_roots
                 .iter()
                 .map(|(id, root)| format!("- {id}: {}", root.display())),
         );
     }
-    context.push("<memory-index path=\"/MEMORY.md\">".into());
+    context.push("<memory-index path=\"MEMORY.md\">".into());
     if index.is_empty() {
         context.push("(empty)".into());
     } else {
@@ -902,15 +1088,6 @@ pub fn startup_prompt_context(
     Ok(context.join("\n"))
 }
 
-fn startup_index_warning(content: &str) -> Option<String> {
-    let lines = content.lines().count();
-    (lines > STARTUP_INDEX_LINES || content.len() > STARTUP_INDEX_BYTES).then(|| {
-        format!(
-            "write succeeded, but new sessions load only the first {STARTUP_INDEX_LINES} lines or {STARTUP_INDEX_BYTES} bytes of {MEMORY_INDEX}"
-        )
-    })
-}
-
 fn floor_char_boundary(text: &str, maximum: usize) -> usize {
     let mut boundary = maximum.min(text.len());
     while boundary > 0 && !text.is_char_boundary(boundary) {
@@ -919,40 +1096,7 @@ fn floor_char_boundary(text: &str, maximum: usize) -> usize {
     boundary
 }
 
-fn content_version(content: &str) -> String {
-    lower_hex(Sha256::digest(content.as_bytes()))[..12].to_owned()
-}
-
-fn normalize_content(content: &str) -> String {
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-    normalized
-        .chars()
-        .filter_map(|character| {
-            if is_format_character(character) {
-                None
-            } else if character.is_control() && !matches!(character, '\n' | '\t') {
-                Some('\u{fffd}')
-            } else {
-                Some(character)
-            }
-        })
-        .collect()
-}
-
-fn is_format_character(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00ad}'
-            | '\u{061c}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{feff}'
-    )
-}
-
-fn validate_virtual_path(path: &str, root_allowed: bool) -> Result<PathBuf> {
+fn validate_virtual_path(path: &str) -> Result<PathBuf> {
     if path.len() > MAX_VIRTUAL_PATH_BYTES {
         bail!("memory path exceeds {MAX_VIRTUAL_PATH_BYTES} bytes");
     }
@@ -960,9 +1104,7 @@ fn validate_virtual_path(path: &str, root_allowed: bool) -> Result<PathBuf> {
         bail!("memory path must be a safe virtual absolute path");
     }
     if path == "/" {
-        return root_allowed
-            .then(PathBuf::new)
-            .ok_or_else(|| anyhow!("memory document path cannot be the root"));
+        bail!("memory document path cannot be the root");
     }
     let mut relative = PathBuf::new();
     for component in Path::new(path).components() {
@@ -1009,7 +1151,12 @@ fn reject_symlink_path(root: &Path, relative: &Path, missing_allowed: bool) -> R
     Ok(())
 }
 
-fn collect_entries(root: &Path, directory: &Path, output: &mut Vec<MemoryListEntry>) -> Result<()> {
+struct MemoryFileEntry {
+    path: String,
+    bytes: usize,
+}
+
+fn collect_entries(root: &Path, directory: &Path, output: &mut Vec<MemoryFileEntry>) -> Result<()> {
     for entry in fs::read_dir(directory)
         .with_context(|| format!("list memory directory {}", directory.display()))?
     {
@@ -1024,52 +1171,192 @@ fn collect_entries(root: &Path, directory: &Path, output: &mut Vec<MemoryListEnt
             }
             collect_entries(root, &entry.path(), output)?;
         } else if metadata.is_file() && !entry.file_name().to_string_lossy().starts_with('.') {
-            output.push(memory_entry(root, &entry.path())?);
+            output.push(snapshot_entry(root, &entry.path())?);
         }
     }
     Ok(())
 }
 
-fn memory_entry(root: &Path, path: &Path) -> Result<MemoryListEntry> {
+fn snapshot_entry(root: &Path, path: &Path) -> Result<MemoryFileEntry> {
     let metadata = fs::metadata(path)?;
     let relative = path.strip_prefix(root)?;
     let rendered = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
-    Ok(MemoryListEntry {
+    Ok(MemoryFileEntry {
         path: rendered,
         bytes: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
-        updated_at: modified_at(&metadata),
     })
-}
-
-fn modified_at(metadata: &fs::Metadata) -> Option<String> {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .and_then(|duration| {
-            DateTime::<Utc>::from_timestamp(
-                i64::try_from(duration.as_secs()).ok()?,
-                duration.subsec_nanos(),
-            )
-        })
-        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn write(
-        store: &ProjectMemoryStore,
-        path: &str,
-        content: &str,
-        version: &str,
-    ) -> MemoryWriteResult {
-        store.write(MemoryWriteRequest {
-            path: path.into(),
-            content: content.into(),
-            if_version: version.into(),
-        })
+    fn file_snapshot(content: Option<&str>) -> ProjectMemorySnapshot {
+        ProjectMemorySnapshot {
+            files: content
+                .map(|content| BTreeMap::from([("/memory.md".into(), content.into())]))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn merge_file(base: Option<&str>, canonical: Option<&str>, replica: Option<&str>) -> TreeMerge {
+        merge_trees(
+            &file_snapshot(base),
+            &file_snapshot(canonical),
+            &file_snapshot(replica),
+        )
+    }
+
+    fn seed_file(store: &ProjectMemoryStore, path: &str, content: &str) {
+        let relative = validate_virtual_path(path).unwrap();
+        let file = store.root.join(relative);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, content).unwrap();
+    }
+
+    #[test]
+    fn tree_versions_distinguish_trees_and_path_content_boundaries() {
+        let first = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/a".into(), "bc".into())]),
+        };
+        let second = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/ab".into(), "c".into())]),
+        };
+        let third = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/a".into(), "bd".into())]),
+        };
+        assert_ne!(first.version(), second.version());
+        assert_ne!(first.version(), third.version());
+        assert_eq!(first.version(), first.clone().version());
+    }
+
+    // Hard-won: 2753a110: appending lines lost the canonical append when the base lacked a final newline.
+    #[test]
+    fn merge_trees_keeps_appends_when_base_has_no_final_newline() {
+        let merged = merge_file(Some("base"), Some("base\ncanonical"), Some("base\nreplica"));
+        assert_eq!(
+            merged.tree.files["/memory.md"],
+            "base\ncanonical\nreplica\n"
+        );
+        assert!(merged.conflicts.is_empty());
+    }
+
+    /// Two sessions edit the same memory file concurrently. Each row is
+    /// (name, base, canonical, replica, merged, conflicted).
+    #[test]
+    fn merge_trees_combines_concurrent_session_edits() {
+        type Case = (
+            &'static str,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<&'static str>,
+            bool,
+        );
+        let cases: [Case; 6] = [
+            (
+                "both sessions append a pointer line",
+                Some("a\n"),
+                Some("a\nc\n"),
+                Some("a\nr\n"),
+                Some("a\nc\nr\n"),
+                false,
+            ),
+            (
+                "edits to separate lines both survive",
+                Some("1\n2\n3\n4\n5\n"),
+                Some("X\n2\n3\n4\n5\n"),
+                Some("1\n2\n3\n4\nY\n"),
+                Some("X\n2\n3\n4\nY\n"),
+                false,
+            ),
+            (
+                "a deletion syncs",
+                Some("a\n"),
+                Some("a\n"),
+                None,
+                None,
+                false,
+            ),
+            (
+                "a canonical edit beats a replica deletion",
+                Some("a\n"),
+                Some("b\n"),
+                None,
+                Some("b\n"),
+                false,
+            ),
+            (
+                "a replica edit beats a canonical deletion",
+                Some("a\n"),
+                None,
+                Some("b\n"),
+                Some("b\n"),
+                false,
+            ),
+            (
+                "the replica wins a same-line conflict",
+                Some("a\nb\nc\n"),
+                Some("a\nC\nc\n"),
+                Some("a\nR\nc\n"),
+                Some("a\nR\nc\n"),
+                true,
+            ),
+        ];
+        for (name, base, canonical, replica, expected, conflicted) in cases {
+            let merged = merge_file(base, canonical, replica);
+            assert_eq!(
+                merged.tree.files.get("/memory.md").map(String::as_str),
+                expected,
+                "{name}"
+            );
+            assert_eq!(!merged.conflicts.is_empty(), conflicted, "{name}");
+            if let Some(conflict) = merged.conflicts.first() {
+                assert_eq!(Some(conflict.replica_wins.as_str()), expected, "{name}");
+            }
+        }
+    }
+
+    // Hard-won: 2753a110: a merged file and its descendant made the tree impossible to install.
+    #[test]
+    fn merge_trees_keep_replica_paths_for_file_descendant_collisions() {
+        let snapshot = |files: &[(&str, &str)]| ProjectMemorySnapshot {
+            files: files
+                .iter()
+                .map(|(path, content)| (path.to_string(), content.to_string()))
+                .collect(),
+        };
+        let cases = [
+            (
+                snapshot(&[]),
+                snapshot(&[("/a", "canonical parent")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+            ),
+            (
+                snapshot(&[]),
+                snapshot(&[("/a/b.md", "canonical child")]),
+                snapshot(&[("/a", "replica parent")]),
+                snapshot(&[("/a", "replica parent")]),
+            ),
+            (
+                snapshot(&[("/a", "base parent"), ("/a/b.md", "base child")]),
+                snapshot(&[("/a", "canonical parent")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+                snapshot(&[("/a/b.md", "replica child")]),
+            ),
+        ];
+
+        for (base, canonical, replica, expected) in cases {
+            let merged = merge_trees(&base, &canonical, &replica);
+            assert_eq!(merged.tree, expected);
+            assert!(merged.conflicts.is_empty());
+
+            let directory = tempfile::tempdir().unwrap();
+            let store = ProjectMemoryStore::new(directory.path());
+            assert!(store.replace_tree(&merged.tree).unwrap());
+            assert_eq!(store.snapshot().unwrap(), expected);
+        }
     }
 
     #[test]
@@ -1089,63 +1376,6 @@ mod tests {
     }
 
     #[test]
-    fn write_uses_compare_and_swap_and_returns_current_content_on_conflict() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        let created = write(&store, "/MEMORY.md", "first\n", "new");
-        assert_eq!(created.outcome, MemoryWriteOutcome::Ok);
-        let version = created.version.unwrap();
-
-        let updated = write(&store, "/MEMORY.md", "second\n", &version);
-        assert_eq!(updated.outcome, MemoryWriteOutcome::Ok);
-        let conflict = write(&store, "/MEMORY.md", "stale\n", &version);
-        assert_eq!(conflict.outcome, MemoryWriteOutcome::Conflict);
-        assert_eq!(conflict.current_content.as_deref(), Some("second\n"));
-    }
-
-    #[test]
-    fn list_is_sorted_paginated_and_root_scoped() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        for index in (0..55).rev() {
-            let path = format!("/topics/{index:02}.md");
-            assert_eq!(
-                write(&store, &path, "note", "new").outcome,
-                MemoryWriteOutcome::Ok
-            );
-        }
-        let first = store.list(Some("/topics"), None);
-        let entries = first.entries.unwrap();
-        assert_eq!(entries.len(), LIST_PAGE_SIZE);
-        assert_eq!(first.remaining, Some(5));
-        assert_eq!(entries[0].path, "/topics/00.md");
-        let second = store.list(Some("/topics"), Some(&entries.last().unwrap().path));
-        assert_eq!(second.entries.unwrap().len(), 5);
-    }
-
-    #[test]
-    fn unsafe_paths_and_symlinks_are_never_followed() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        assert_eq!(
-            write(&store, "/../outside.md", "no", "new").outcome,
-            MemoryWriteOutcome::Failed
-        );
-        assert_eq!(
-            write(&store, "/.env", "TOKEN=secret", "new").outcome,
-            MemoryWriteOutcome::Failed
-        );
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink("/tmp", directory.path().join("escape")).unwrap();
-            assert_eq!(
-                write(&store, "/escape/no.md", "no", "new").outcome,
-                MemoryWriteOutcome::Failed
-            );
-        }
-    }
-
-    #[test]
     fn startup_index_honors_both_limits_without_splitting_utf8() {
         let many_lines = (0..250).map(|_| "memory").collect::<Vec<_>>().join("\n");
         assert_eq!(truncate_startup_index(&many_lines).lines().count(), 200);
@@ -1156,110 +1386,86 @@ mod tests {
     }
 
     #[test]
-    fn memory_document_round_trip_exceeds_pipe_buffer_size() {
+    fn replace_tree_leaves_hidden_files_redirect_metadata_and_root_alone() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProjectMemoryStore::new(directory.path());
-        let content = "x".repeat(70 * 1024);
-        let result = write(&store, "/large.md", &content, "new");
-        assert_eq!(result.outcome, MemoryWriteOutcome::Ok);
+        seed_file(&store, "/visible.md", "remove");
+        fs::write(directory.path().join(".private.md"), "private").unwrap();
+        fs::create_dir_all(directory.path().join(".private-dir")).unwrap();
+        fs::write(directory.path().join(".private-dir/keep.md"), "private").unwrap();
+        fs::write(directory.path().join("memory-redirect.json"), "redirect").unwrap();
+
+        assert!(
+            store
+                .replace_tree(&ProjectMemorySnapshot::default())
+                .unwrap()
+        );
+        assert!(directory.path().is_dir());
+        assert!(!directory.path().join("visible.md").exists());
         assert_eq!(
-            store.read("/large.md").content.as_deref(),
-            Some(content.as_str())
+            fs::read_to_string(directory.path().join(".private.md")).unwrap(),
+            "private"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".private-dir/keep.md")).unwrap(),
+            "private"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("memory-redirect.json")).unwrap(),
+            "redirect"
         );
     }
 
     #[test]
-    fn startup_context_explains_multi_root_mapping_without_a_store_selector() {
+    fn replace_tree_validates_the_entire_tree_before_deleting() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProjectMemoryStore::new(directory.path());
-        write(&store, "/MEMORY.md", "# Known facts\n", "new");
-        let roots = BTreeMap::from([
-            ("api".into(), PathBuf::from("/workspace/api")),
-            ("web".into(), PathBuf::from("/workspace/web")),
-        ]);
-        let context = startup_prompt_context(&store, &roots).unwrap();
-        assert!(context.contains("/roots/<repository-id>/"));
-        assert!(context.contains("- api: /workspace/api"));
-        assert!(context.contains("# Known facts"));
-        assert!(!context.contains("store selector"));
-        assert!(!context.contains("store_id"));
+        seed_file(&store, "/existing.md", "keep");
+        let invalid = ProjectMemorySnapshot {
+            files: BTreeMap::from([
+                ("/valid.md".into(), "valid".into()),
+                ("/../invalid.md".into(), "invalid".into()),
+            ]),
+        };
+
+        assert!(store.replace_tree(&invalid).is_err());
+        assert_eq!(store.snapshot().unwrap().files["/existing.md"], "keep");
+        assert!(!directory.path().join("valid.md").exists());
     }
 
     #[test]
-    fn three_way_reconciliation_merges_independent_files_and_preserves_conflicts() {
-        let baseline = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/MEMORY.md".into(), "base index".into()),
-                ("/shared.md".into(), "base shared".into()),
-            ]),
-        };
-        let canonical = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/MEMORY.md".into(), "controller index".into()),
-                ("/shared.md".into(), "controller shared".into()),
-                ("/controller-only.md".into(), "controller".into()),
-            ]),
-        };
-        let replica = ProjectMemorySnapshot {
-            files: BTreeMap::from([
-                ("/MEMORY.md".into(), "base index".into()),
-                ("/shared.md".into(), "session shared".into()),
-                ("/session-only.md".into(), "session".into()),
-            ]),
-        };
-        let reconciled = reconcile_snapshots(&baseline, &canonical, &replica, "session-1");
-        assert_eq!(
-            reconciled
-                .merged
-                .files
-                .get("/MEMORY.md")
-                .map(String::as_str),
-            Some("controller index")
-        );
-        assert_eq!(
-            reconciled
-                .merged
-                .files
-                .get("/session-only.md")
-                .map(String::as_str),
-            Some("session")
-        );
-        assert_eq!(reconciled.conflicts.len(), 1);
-        assert!(reconciled.conflicts[0].starts_with("/conflicts/session-1-"));
-        assert_eq!(
-            reconciled
-                .merged
-                .files
-                .get("/shared.md")
-                .map(String::as_str),
-            Some("controller shared")
-        );
-        assert!(reconciled.merged.files[&reconciled.conflicts[0]].contains("session shared"));
-    }
-
-    #[test]
-    fn snapshot_install_never_deletes_documents_missing_from_the_snapshot() {
+    fn swap_canonical_reports_a_changed_version_without_writing() {
         let directory = tempfile::tempdir().unwrap();
-        let store = ProjectMemoryStore::new(directory.path());
-        write(&store, "/old.md", "keep", "new");
-        let changed = store
+        let root = directory.path().join("project/memory");
+        let store = ProjectMemoryStore::new(&root);
+        store
             .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/new.md".into(), "new".into())]),
+                files: BTreeMap::from([("/memory.md".into(), "read version".into())]),
             })
             .unwrap();
-        assert!(changed);
-        assert_eq!(store.read("/old.md").content.as_deref(), Some("keep"));
-        assert_eq!(store.read("/new.md").content.as_deref(), Some("new"));
-
-        let changed = store
+        let expected = read_canonical(&root).unwrap().version();
+        store
             .install_snapshot(&ProjectMemorySnapshot {
-                files: BTreeMap::from([("/new.md".into(), "new".into())]),
+                files: BTreeMap::from([("/memory.md".into(), "changed later".into())]),
             })
             .unwrap();
-        assert!(!changed, "an identical snapshot must not rewrite its files");
+        let replacement = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/replacement.md".into(), "must not write".into())]),
+        };
+
+        assert_eq!(
+            swap_canonical(&root, &expected, &replacement).unwrap(),
+            SwapOutcome::Changed
+        );
+        assert_eq!(
+            read_canonical(&root).unwrap().files["/memory.md"],
+            "changed later"
+        );
+        assert!(!root.join("replacement.md").exists());
     }
+
     #[test]
-    fn project_merge_redirects_stale_syncs_and_preserves_conflicting_documents() {
+    fn project_merge_redirects_stale_canonical_swaps() {
         let directory = tempfile::tempdir().unwrap();
         let old = directory.path().join("old/memory");
         let new = directory.path().join("new/memory");
@@ -1273,9 +1479,17 @@ mod tests {
             .install_snapshot(&snapshot("new project facts"))
             .unwrap();
         let conflicts = merge_canonical_stores(&old, &new).unwrap();
-        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts, vec!["/MEMORY.md"]);
         assert_eq!(resolve_canonical_root(&old).unwrap(), new);
         assert!(merge_canonical_stores(&old, &new).unwrap().is_empty());
+        let migrated = ProjectMemoryStore::new(&new).snapshot().unwrap();
+        assert_eq!(migrated.files["/MEMORY.md"], "old project facts");
+        assert!(
+            !migrated
+                .files
+                .keys()
+                .any(|path| path.starts_with("/conflicts/"))
+        );
         let stale_baseline = snapshot("old project facts");
         let stale_replica = ProjectMemorySnapshot {
             files: BTreeMap::from([
@@ -1283,20 +1497,20 @@ mod tests {
                 ("/late.md".into(), "accepted by old worker".into()),
             ]),
         };
-        reconcile_into_canonical(&old, &stale_baseline, &stale_replica, "old-worker").unwrap();
-        let result = ProjectMemoryStore::new(&new).snapshot().unwrap();
-        assert_eq!(result.files["/late.md"], "accepted by old worker");
-        assert!(
-            result
-                .files
-                .values()
-                .any(|content| content.contains("old project facts"))
+        let current = read_canonical(&old).unwrap();
+        let stale_merge = merge_trees(&stale_baseline, &current, &stale_replica);
+        assert_eq!(
+            swap_canonical(&old, &current.version(), &stale_merge.tree).unwrap(),
+            SwapOutcome::Swapped
         );
+        let result = read_canonical(&old).unwrap();
+        assert_eq!(result.files["/late.md"], "accepted by old worker");
+        assert_eq!(result.files["/MEMORY.md"], "old project facts");
         assert!(
-            result
+            !result
                 .files
-                .values()
-                .any(|content| content.contains("new project facts"))
+                .keys()
+                .any(|path| path.starts_with("/conflicts/"))
         );
         assert!(
             !ProjectMemoryStore::new(&old)

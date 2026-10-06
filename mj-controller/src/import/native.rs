@@ -40,6 +40,12 @@ impl NativeScanCache {
         Self::default()
     }
 
+    /// The cache shared by index discovery and Mjolnir's SessionWiki reads.
+    pub(crate) fn shared() -> Self {
+        static CACHE: std::sync::OnceLock<NativeScanCache> = std::sync::OnceLock::new();
+        CACHE.get_or_init(Self::new).clone()
+    }
+
     /// How many files this cache has actually parsed, for tests and diagnostics.
     pub fn parsed_files(&self) -> u64 {
         self.lock().parsed_files
@@ -211,6 +217,9 @@ pub fn locate_native_session(
             let located = locate_grok_session(home, selection)?;
             (located.native_session_id, located.session_path)
         }
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
+        ),
     };
     Ok(LocatedNativeSession {
         native_session_id,
@@ -234,6 +243,9 @@ pub fn native_session_id_from_path(harness: HarnessKind, path: &Path) -> Option<
         HarnessKind::Codex => codex_rollout_id_from_path(path).map(str::to_owned),
         HarnessKind::Kimi | HarnessKind::Grok => path.file_name()?.to_str().map(str::to_owned),
         HarnessKind::Muse => path.parent()?.file_name()?.to_str().map(str::to_owned),
+        // OpenCode sessions live in SQLite rows, not files, so no transcript
+        // path carries their id.
+        HarnessKind::OpenCode => None,
     }
 }
 
@@ -277,6 +289,9 @@ pub fn list_native_session_sources(
             })
             .collect(),
         HarnessKind::Muse => muse::list_sources(&mj_checkpoint::native::muse_sessions_root(home)?)?,
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
+        ),
         other => bail!("{other:?} keeps one session per file; there is nothing to enumerate"),
     };
     Ok(sources)
@@ -306,6 +321,9 @@ pub fn read_native_transcript(
         HarnessKind::Claude => read_claude_transcript(source_path),
         HarnessKind::Kimi => read_kimi_transcript(source_path),
         HarnessKind::Grok => read_grok_transcript(source_path),
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot import them yet"
+        ),
     }
 }
 
@@ -382,5 +400,8 @@ pub fn scan_native_sessions(
             });
             forward(progress.scanned, progress.total, session);
         }),
+        HarnessKind::OpenCode => bail!(
+            "OpenCode keeps its sessions in a SQLite database; Mjolnir cannot enumerate them yet"
+        ),
     }
 }

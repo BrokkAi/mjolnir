@@ -1,0 +1,500 @@
+action: None
+
+=== target actions (120x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                                                                                                   │
+│                                                                                                                      │
+│                ╭ × Target actions ──────────────────────────────────────────────────────────────────╮                │
+│                │podman                   local Podman                                               │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │Up/Down selects target · Tab selects action · Esc closes                            │  ──────────────╮
+│                │  Rename     Test     Settings                                                      │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
+│                                                                                                        ──────────────╯
+│                                                                                                        ─────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+action: TestTarget { target_id: "podman" }
+
+=== target test result (120x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                                                                                                   │
+│                                                                                                                      │
+│                ╭ × Target actions ──────────────────────────────────────────────────────────────────╮                │
+│                │podman                   local Podman                                               │                │
+│                │                                                                                    │                │
+│                │podman: ready                                                                       │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │Up/Down selects target · Tab selects action · Esc closes                            │  ──────────────╮
+│                │  Rename     Test     Settings                                                      │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
+│                                                                                                        ──────────────╯
+│                                                                                                        ─────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+
+=== target ID editor (120x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                       ╭ × Rename target ID ──────────────────────────────────────────────────╮                       │
+│                       │Current target ID: podman                                             │                       │
+│                       │                                                                      │                       │
+│                       │podman                                                                │                       │
+│                       │                                                                      │                       │
+│                       │                                                                      │                       │
+│                       │  Cancel     Save                                                     │  ─────────────────────╯
+│                       ╰──────────────────────────────────────────────────────────────────────╯  ─────────────────────╮
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+
+=== edited target ID (120x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                       ╭ × Rename target ID ──────────────────────────────────────────────────╮                       │
+│                       │Current target ID: podman                                             │                       │
+│                       │                                                                      │                       │
+│                       │podman-v2                                                             │                       │
+│                       │                                                                      │                       │
+│                       │                                                                      │                       │
+│                       │  Cancel     Save                                                     │  ─────────────────────╯
+│                       ╰──────────────────────────────────────────────────────────────────────╯  ─────────────────────╮
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+action: RenameTarget { old_id: "podman", new_id: "podman-v2" }
+action: None
+action: None
+
+=== cancelled target ID editor returns to actions (120x34) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                               ✦  M J O L N I R                               │
+│  │ No messages yet                   ││                                                                              │
+│  │                                                                                                                   │
+│                                                                                                                      │
+│                ╭ × Target actions ──────────────────────────────────────────────────────────────────╮                │
+│                │podman                   local Podman                                               │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │Up/Down selects target · Tab selects action · Esc closes                            │  ──────────────╮
+│                │  Rename     Test     Settings                                                      │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
+│                                                                                                        ──────────────╯
+│                                                                                                        ─────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · : palette · ? keys
+action: ProbeGitStatus { session_id: "session-1" }
+
+=== changed files while the checkout probe is pending (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
+│hel ───                                                                                           │
+│› · ACP                                                                                           │
+│  Idle   ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮         │
+│  │ No   │Reading the checkout…                                                         │         │
+│  │      │                                                                              │  ───────╯
+│         │                                                                              │  ───────╮
+│         │                                                                              │         │
+│         │                                                                              │  en.    │
+│         │                                                                              │  ───────╯
+│         │  Refresh (r)     Close                                                       │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                           ───────╯
+│                                                                                            ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+
+=== changed files first page (100x24) ===
+╭ Worksp                                                                                       ⋯───╮
+│ defaul                                                                                           │
+╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮         │
+╭ Sessio  │⎇ feature/dialogs ↑3 ↓1 ±36   36 files · +666 −630                            │         │
+│ Create  │                                                                              │         │
+│hel ───  │modified src/module-00.rs         +1 −0                                       │         │
+│› · ACP  │modified src/module-01.rs         +2 −1                                      ▐│         │
+│  Idle   │modified src/module-02.rs         +3 −2                                      ▐│         │
+│  │ No   │modified src/module-03.rs         +4 −3                                      ▐│         │
+│  │      │modified src/module-04.rs         +5 −4                                      ▐│  ───────╯
+│         │modified src/module-05.rs         +6 −5                                      ││  ───────╮
+│         │modified src/module-06.rs         +7 −6                                      ││         │
+│         │modified src/module-07.rs         +8 −7                                      ││  en.    │
+│         │modified src/module-08.rs         +9 −8                                      ││  ───────╯
+│         │modified src/module-09.rs        +10 −9                                      ││   ▁   ▪ ╮
+│         │modified src/module-10.rs       +11 −10                                      ││         │
+│         │modified src/module-11.rs       +12 −11                                      ││  ───────╯
+│         │modified src/module-12.rs       +13 −12                                      ││   ▁   ▪ ╮
+│         │modified src/module-13.rs       +14 −13                                       │  ets    │
+│         │                                                                              │         │
+│         │  Refresh (r)     Close                                                       │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+╰───────                                                                                    ───────╯
+Enter op                                                                                    keys
+
+=== changed files after paging down (100x24) ===
+╭ Worksp                                                                                       ⋯───╮
+│ defaul                                                                                           │
+╰───────  ╭ × Changed files · ACP pretty name ───────────────────────────────────────────╮         │
+╭ Sessio  │⎇ feature/dialogs ↑3 ↓1 ±36   36 files · +666 −630                            │         │
+│ Create  │                                                                              │         │
+│hel ───  │modified src/module-10.rs       +11 −10                                       │         │
+│› · ACP  │modified src/module-11.rs       +12 −11                                      ││         │
+│  Idle   │modified src/module-12.rs       +13 −12                                      ││         │
+│  │ No   │modified src/module-13.rs       +14 −13                                      ││         │
+│  │      │modified src/module-14.rs       +15 −14                                      ▐│  ───────╯
+│         │modified src/module-15.rs       +16 −15                                      ▐│  ───────╮
+│         │modified src/module-16.rs       +17 −16                                      ▐│         │
+│         │modified src/module-17.rs       +18 −17                                      ▐│  en.    │
+│         │modified src/module-18.rs       +19 −18                                      ││  ───────╯
+│         │modified src/module-19.rs       +20 −19                                      ││   ▁   ▪ ╮
+│         │modified src/module-20.rs       +21 −20                                      ││         │
+│         │modified src/module-21.rs       +22 −21                                      ││  ───────╯
+│         │modified src/module-22.rs       +23 −22                                      ││   ▁   ▪ ╮
+│         │modified src/module-23.rs       +24 −23                                       │  ets    │
+│         │                                                                              │         │
+│         │  Refresh (r)     Close                                                       │         │
+│         ╰──────────────────────────────────────────────────────────────────────────────╯         │
+╰───────                                                                                    ───────╯
+Enter op                                                                                    keys
+action: ProbeGitStatus { session_id: "session-1" }
+action: None
+
+=== dashboard after closing changed files (100x24) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                     ✦  M J O L N I R                     │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││        Select a session to open its conversation.        │
+│hel ──────────────────────────────────││                                                          │
+│› · ACP pretty name  ⎇ featu…logs ◇ ⋯ ││                                                          │
+│  Idle  podman  codex-1               ││                                                          │
+│  │ No messages yet                   ││                                                          │
+│  │                                   │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────╮
+│                                      ││No conversation open.                                     │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.    │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                           │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+
+=== command palette search for recent messages (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                     ✦  M J O L N I R                     │
+│hel ──────────────────────────────────││                                                          │
+│› · ACP pretty name               ◇ ⋯ ││        Select a session to open its conversation.        │
+│  Idle  podman  codex-1               ││                                                          │
+│  │ No mess                                                                                       │
+│  │                                                                                               │
+│             ╭ × ✦ Commands ───────────────────────────────────────────── 1 command ╮             │
+│             │Recent messages                                                       │             │
+│             │  Anywhere  ────────────────────────────────────────────────────────  │             │
+│             │› Recent messages                                                     │  ───────────╯
+│             │Show the last notices the footer reported, newest first, including fai│  ───────────╮
+│             │  Run                                                                 │             │
+│             ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────╯  o open.    │
+│                                                                                       ───────────╯
+│                                                                                       ──── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                           │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+12 failures · latest: Build step 11 failed: the remote worker could not start its checkout or load t
+action: None
+
+=== recent messages (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ × Recent messages ───────────────────────────────────────────────────────────╮         │
+│› · ACP  ????? ago Build step 11 failed: the remote worker could not start its checkout or│         │
+│  Idle   │load the requested profile                                                    │         │
+│  │ No   ????? ago Build step 10 failed: the remote worker could not start its checkout or│         │
+│  │      │load the requested profile                                                    │         │
+│         ????? ago Build step 09 failed: the remote worker could not start its checkout or│         │
+│         │load the requested profile                                                    │         │
+│         ????? ago Build step 08 failed: the remote worker could not start its checkout or│         │
+│         │load the requested profile                                                    │  ───────╯
+│         ????? ago Build step 07 failed: the remote worker could not start its checkout or│  ───────╮
+│         │load the requested profile                                                    │         │
+│         ????? ago Build step 06 failed: the remote worker could not start its checkout or│  en.    │
+│         │load the requested profile                                                    │  ───────╯
+│         ????? ago Build step 05 failed: the remote worker could not start its checkout or│   ▁   ▪ ╮
+│         │                                                                              │         │
+│         │  Close                                                                       │  ───────╯
+│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▪ ╮
+│                                                                                           ets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+12 failures · latest: Build step 11 failed: the remote worker could not start its checkout or load t
+
+=== recent messages after paging down (100x28) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessio                                                                                           │
+│ Create                                                                                           │
+│hel ───  ╭ × Recent messages ───────────────────────────────────────────────────────────╮         │
+│› · ACP  ????? ago Build step 06 failed: the remote worker could not start its checkout or│         │
+│  Idle   │load the requested profile                                                    │         │
+│  │ No   ????? ago Build step 05 failed: the remote worker could not start its checkout or│         │
+│  │      │load the requested profile                                                    │         │
+│         ????? ago Build step 04 failed: the remote worker could not start its checkout or│         │
+│         │load the requested profile                                                    │         │
+│         ????? ago Build step 03 failed: the remote worker could not start its checkout or│         │
+│         │load the requested profile                                                    │  ───────╯
+│         ????? ago Build step 02 failed: the remote worker could not start its checkout or│  ───────╮
+│         │load the requested profile                                                    │         │
+│         ????? ago Build step 01 failed: the remote worker could not start its checkout or│  en.    │
+│         │load the requested profile                                                    │  ───────╯
+│         ????? ago Build step 00 failed: the remote worker could not start its checkout or│   ▁   ▪ ╮
+│         │                                                                              │         │
+│         │  Close                                                                       │  ───────╯
+│         ╰──────────────────────────────────────────────────────────────────────────────╯   ▁   ▪ ╮
+│                                                                                           ets    │
+│                                                                                                  │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+12 failures · latest: Build step 11 failed: the remote worker could not start its checkout or load t
+action: None
+
+=== command palette search for CPU by session (120x36) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│  · CPU session 06            11% ◇ ⋯ ││                                                                              │
+│  Idle  podman [5]  codex-1           ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│  · CPU session 07            11% ◇ ⋯ ▐│                  Select a session to open its conversation.                  │
+│  Idle  podman [6]  codex-1           ▐│                                                                              │
+│  │ No message                                                                                                        │
+│  │                                                                                                                   │
+│                ╭ × ✦ Commands ─────────────────────────────────────────────────────────── 1 command ╮                │
+│  · CPU sessio  │CPU by session                                                                      │                │
+│  Idle  podman  │  Anywhere  ──────────────────────────────────────────────────────────────────────  │                │
+│  │ No message  │› CPU by session                                                                    │                │
+│  │             │Show live sessions grouped by machine, with each session's CPU share over about the │                │
+│                │  Run                                                                               │                │
+│  · CPU sessio  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
+│  Idle  podman                                                                                          ──────────────╯
+│  │ No message                                                                                          ──────────────╮
+│  │                                   ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│› · ACP pretty name           23% ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
+│  Idle  podman [9]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│  │ No messages yet                   ││  Host / fleet  Targets  In Use                                               │
+│  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│  · CPU session 10            11% ◇ ⋯ ││            Harness      Weekly      Resets  5H Resets                        │
+│  Idle  podman [10]  codex-1          ││  claude-1  Claude Code  refreshing…                                          │
+│  │ No messages yet                   ││  codex-1   Codex        refreshing…                                          │
+│  │                                   ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+action: None
+
+=== CPU by session (120x36) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰─────────                                                                                                             │
+╭ Sessions  ╭ × CPU by session ────────────────────────────────────────────────────────────────────────────╮           │
+│ Create    │  podman · 171% hourly                                                                        │           │
+│  · CPU s  │                                                                                              │           │
+│  Idle  p  │  ACP pretty name  [codex-1]  18% hourly                                            ✓ Hourly  │           │
+│  │ No me  │                                                                                      Recent  │           │
+│  │        │  CPU session 18  [codex-1]  9.8% hourly                                                      │           │
+│           │                                                                                              │           │
+│  · CPU s  │  CPU session 17  [codex-1]  9.7% hourly                                                      │           │
+│  Idle  p  │                                                                                              │           │
+│  │ No me  │  CPU session 16  [codex-1]  9.6% hourly                                                      │           │
+│  │        │                                                                                              │           │
+│           │  CPU session 15  [codex-1]  9.5% hourly                                                      │           │
+│  · CPU s  │                                                                                              │           │
+│  Idle  p  │  CPU session 14  [codex-1]  9.4% hourly                                                      │           │
+│  │ No me  │                                                                                              │           │
+│  │        │  CPU session 13  [codex-1]  9.3% hourly                                                      │           │
+│           │                                                                                              │           │
+│  · CPU s  │  CPU session 12  [codex-1]  9.2% hourly                                                      │           │
+│  Idle  p  │                                                                                              │  ─────────╯
+│  │ No me  │  CPU session 11  [codex-1]  9.1% hourly                                                      │  ─────────╮
+│  │        │                                                                                              │           │
+│           │  CPU session 10  [codex-1]  9.0% hourly                                                      │           │
+│› · ACP p  │                                                                                              │  ─────────╯
+│  Idle  p  │  CPU session 09  [codex-1]  8.9% hourly                                                      │  ── ▁   ▪ ╮
+│  │ No me  │                                                                                              │           │
+│  │        │  CPU session 08  [codex-1]  8.8% hourly                                                      │  ─────────╯
+│           │                                                                                              │  ── ▁   ▪ ╮
+│  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
+│  Idle  p  │  Close                                                                                       │           │
+│  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│  │                                                                                                                   │
+╰─────────                                                                                                    ─────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+
+=== CPU by session after paging down (120x36) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                              │
+╰─────────                                                                                                             │
+╭ Sessions  ╭ × CPU by session ────────────────────────────────────────────────────────────────────────────╮           │
+│ Create    │  podman · 171% hourly                                                                        │           │
+│  · CPU s  │                                                                                              │           │
+│  Idle  p  │  CPU session 15  [codex-1]  9.5% hourly                                            ✓ Hourly  │           │
+│  │ No me  │                                                                                      Recent  │           │
+│  │        │  CPU session 14  [codex-1]  9.4% hourly                                                      │           │
+│           │                                                                                              │           │
+│  · CPU s  │  CPU session 13  [codex-1]  9.3% hourly                                                      │           │
+│  Idle  p  │                                                                                              │           │
+│  │ No me  │  CPU session 12  [codex-1]  9.2% hourly                                                      │           │
+│  │        │                                                                                              │           │
+│           │  CPU session 11  [codex-1]  9.1% hourly                                                      │           │
+│  · CPU s  │                                                                                              │           │
+│  Idle  p  │  CPU session 10  [codex-1]  9.0% hourly                                                      │           │
+│  │ No me  │                                                                                              │           │
+│  │        │  CPU session 09  [codex-1]  8.9% hourly                                                      │           │
+│           │                                                                                              │           │
+│  · CPU s  │  CPU session 08  [codex-1]  8.8% hourly                                                      │           │
+│  Idle  p  │                                                                                              │  ─────────╯
+│  │ No me  │  CPU session 07  [codex-1]  8.7% hourly                                                      │  ─────────╮
+│  │        │                                                                                              │           │
+│           │  CPU session 06  [codex-1]  8.6% hourly                                                      │           │
+│› · ACP p  │                                                                                              │  ─────────╯
+│  Idle  p  │  CPU session 05  [codex-1]  8.5% hourly                                                      │  ── ▁   ▪ ╮
+│  │ No me  │                                                                                              │           │
+│  │        │  CPU session 04  [codex-1]  8.4% hourly                                                      │  ─────────╯
+│           │                                                                                              │  ── ▁   ▪ ╮
+│  · CPU s  │←/→ tabs · ↑/↓ sessions · Enter opens · Esc closes                                            │           │
+│  Idle  p  │  Close                                                                                       │           │
+│  │ No me  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│  │                                                                                                                   │
+╰─────────                                                                                                    ─────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+action: None

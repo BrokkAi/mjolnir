@@ -1,0 +1,60 @@
+=== case-insensitive query with user and assistant hits (2 preview blocks) ===
+{
+  "blocks": [
+    {
+      "role": "user",
+      "text": "Make the Tests green",
+      "hits": [
+        [
+          9,
+          14
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    },
+    {
+      "role": "assistant",
+      "text": "the tests are green now",
+      "hits": [
+        [
+          4,
+          9
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}
+=== query found only in tool output (0 preview blocks) ===
+{
+  "blocks": [],
+  "omitted_after": 0
+}
+=== tool context beside an assistant hit (2 preview blocks) ===
+{
+  "blocks": [
+    {
+      "role": "tool",
+      "text": "cargo build --needle",
+      "hits": [],
+      "omitted_before": 1,
+      "truncated": false
+    },
+    {
+      "role": "assistant",
+      "text": "it builds",
+      "hits": [
+        [
+          3,
+          9
+        ]
+      ],
+      "omitted_before": 0,
+      "truncated": false
+    }
+  ],
+  "omitted_after": 0
+}

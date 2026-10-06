@@ -1,162 +1,238 @@
-//! Interpret reviewer replies conservatively.
+//! Parse, classify and render the Codex review JSON output.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 use super::{SYNTHESIS_LIMIT, bound_tail};
 pub use mj_core::review::verdict::*;
 
-/// Classify a supervisor's reply.
-///
-/// Some models explain their clean verdict before emitting the required
-/// sentinel, so a final sentinel line counts as clean unless the reply also
-/// contains a canonical priority marker. A priority marker records a review
-/// issue and must therefore produce a findings verdict, whether it is P0 or P3.
+/// The JSON result returned by Codex's `/review` prompt.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewOutput {
+    pub findings: Vec<ReviewFinding>,
+    pub overall_correctness: String,
+    pub overall_explanation: String,
+    pub overall_confidence_score: f32,
+}
+
+/// One structured finding from a review.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewFinding {
+    pub title: String,
+    pub body: String,
+    pub confidence_score: f32,
+    /// The rubric allows `null` or an omitted priority.
+    pub priority: Option<i32>,
+    pub code_location: CodeLocation,
+}
+
+/// Location associated with a finding.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodeLocation {
+    pub absolute_file_path: PathBuf,
+    pub line_range: LineRange,
+}
+
+/// Inclusive line range associated with a finding.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Parsed output plus whether it came from structured JSON rather than the
+/// conservative raw-text fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedReviewOutput {
+    pub output: ReviewOutput,
+    pub structured: bool,
+}
+
+/// Parse a ReviewOutput from a text blob, accepting JSON wrapped in prose or
+/// fences just as Codex's `parse_review_output_event` does.
 #[must_use]
-pub fn synthesis_verdict(text: &str) -> ReviewVerdict {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return ReviewVerdict::Failed {
-            reason: "the review supervisor returned an empty synthesis".to_string(),
+pub fn parse_review_output_event(text: &str) -> ParsedReviewOutput {
+    if let Ok(output) = serde_json::from_str::<ReviewOutput>(text) {
+        return ParsedReviewOutput {
+            output,
+            structured: true,
         };
     }
-    let lines = trimmed
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let has_priority_marker = has_priority_marker(&lines);
-    let ends_with_clean_sentinel = lines.last().is_some_and(|line| {
-        line.trim_matches('*')
-            .trim()
-            .eq_ignore_ascii_case(CLEAN_SENTINEL)
-    });
-    if ends_with_clean_sentinel && !has_priority_marker {
+    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}'))
+        && start < end
+        && let Some(slice) = text.get(start..=end)
+        && let Ok(output) = serde_json::from_str::<ReviewOutput>(slice)
+    {
+        return ParsedReviewOutput {
+            output,
+            structured: true,
+        };
+    }
+    ParsedReviewOutput {
+        output: ReviewOutput {
+            overall_explanation: text.to_string(),
+            ..ReviewOutput::default()
+        },
+        structured: false,
+    }
+}
+
+/// Classify a nonblank reviewer reply. A structured empty findings array is
+/// clean; unstructured text remains a finding so malformed output is visible.
+#[must_use]
+pub fn review_output_verdict(text: &str) -> ReviewVerdict {
+    if text.trim().is_empty() {
+        return ReviewVerdict::Failed {
+            reason: "the reviewer returned an empty report".to_string(),
+        };
+    }
+    let parsed = parse_review_output_event(text);
+    if parsed.structured && parsed.output.findings.is_empty() {
         return ReviewVerdict::Clean;
     }
-    let synthesis = bound_tail(trimmed, SYNTHESIS_LIMIT, "synthesis");
+    let rendered = render_review_output_text(&parsed.output);
     ReviewVerdict::Findings {
-        synthesis,
+        synthesis: bound_tail(&rendered, SYNTHESIS_LIMIT, "review output"),
         evidence: ReviewPassEvidence::default(),
     }
 }
 
-/// Whether a lane -- or the quick tier's sole reviewer -- reported nothing
-/// worth acting on. Conservative in the same direction as
-/// [`synthesis_verdict`]: a reply carrying any priority marker, or one that
-/// does not end in the clean sentinel, counts as findings rather than
-/// releasing the turn unchecked.
-#[must_use]
-pub fn lane_report_is_clean(text: &str) -> bool {
-    let lines = text
-        .trim()
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    let ends_clean = lines.last().is_some_and(|line| {
-        line.trim_matches('*')
-            .trim()
-            .eq_ignore_ascii_case(LANE_CLEAN_SENTINEL)
-    });
-    ends_clean && !has_priority_marker(&lines)
+fn format_location(finding: &ReviewFinding) -> String {
+    let path = finding.code_location.absolute_file_path.display();
+    let start = finding.code_location.line_range.start;
+    let end = finding.code_location.line_range.end;
+    format!("{path}:{start}-{end}")
 }
 
-fn has_priority_marker(lines: &[&str]) -> bool {
-    lines.iter().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        ["[p0]", "[p1]", "[p2]", "[p3]"]
-            .iter()
-            .any(|marker| lower.contains(marker))
-    })
+/// Render Codex's plain-text findings block.
+#[must_use]
+pub fn format_review_findings_block(findings: &[ReviewFinding]) -> String {
+    let mut lines = vec![String::new()];
+    lines.push(if findings.len() > 1 {
+        "Full review comments:".to_string()
+    } else {
+        "Review comment:".to_string()
+    });
+    for finding in findings {
+        lines.push(String::new());
+        lines.push(format!(
+            "- {} — {}",
+            finding.title,
+            format_location(finding)
+        ));
+        for body_line in finding.body.lines() {
+            lines.push(format!("  {body_line}"));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Render an explanation and the findings in Codex's review format.
+#[must_use]
+pub fn render_review_output_text(output: &ReviewOutput) -> String {
+    let mut sections = Vec::new();
+    let explanation = output.overall_explanation.trim();
+    if !explanation.is_empty() {
+        sections.push(explanation.to_string());
+    }
+    if !output.findings.is_empty() {
+        let findings = format_review_findings_block(&output.findings);
+        let trimmed = findings.trim();
+        if !trimmed.is_empty() {
+            sections.push(trimmed.to_string());
+        }
+    }
+    if sections.is_empty() {
+        "Reviewer failed to output a response.".to_string()
+    } else {
+        sections.join("\n\n")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const FINDING_JSON: &str = r#"{
+        "findings":[{
+            "title":"[P1] Preserve the request",
+            "body":"A retry can lose the accepted request.",
+            "confidence_score":0.96,
+            "priority":1,
+            "code_location":{
+                "absolute_file_path":"/workspace/src/lib.rs",
+                "line_range":{"start":4,"end":7}
+            }
+        }],
+        "overall_correctness":"patch is incorrect",
+        "overall_explanation":"The retry path drops the request."
+    }"#;
+
     #[test]
-    fn quick_reviewer_report_is_clean_only_without_findings() {
-        assert!(lane_report_is_clean(LANE_CLEAN_SENTINEL));
-        assert!(lane_report_is_clean("\n  no FINDINGS.  \n"));
-        assert!(lane_report_is_clean("**No findings.**"));
-        assert!(!lane_report_is_clean("   \n "));
-        assert!(!lane_report_is_clean(
-            "[P2] src/a.rs:1 -- stale comment (evidence: source-reviewed)"
-        ));
-        // A sentinel that trails real findings is contradictory output; keep
-        // the conservative direction and treat it as findings.
-        assert!(!lane_report_is_clean(
-            "[P0] src/a.rs:1 -- swallowed error (evidence: source-reviewed)\nNo findings."
-        ));
-        // Prose without a sentinel is not a clean result either.
-        assert!(!lane_report_is_clean(
-            "I reviewed the diff and everything looked reasonable to me."
-        ));
+    fn parses_pure_json_and_defaults_omitted_fields() {
+        let parsed = parse_review_output_event(r#"{"findings":[],"overall_explanation":"clean"}"#);
+        assert!(parsed.structured);
+        assert!(parsed.output.findings.is_empty());
+        assert_eq!(parsed.output.overall_explanation, "clean");
+        assert_eq!(parsed.output.overall_confidence_score, 0.0);
+        let partial = parse_review_output_event(r#"{"findings":[{"title":"partial"}]}"#);
+        assert!(partial.structured);
+        assert_eq!(partial.output.findings[0].body, "");
+        assert_eq!(partial.output.findings[0].code_location.line_range.start, 0);
+        let null_priority =
+            parse_review_output_event(r#"{"findings":[{"title":"t","priority":null}]}"#);
+        assert!(null_priority.structured);
+        assert_eq!(null_priority.output.findings[0].priority, None);
     }
 
     #[test]
-    fn synthesis_verdict_classification() {
-        assert!(matches!(
-            synthesis_verdict("   \n  "),
-            ReviewVerdict::Failed { .. }
-        ));
-        assert_eq!(synthesis_verdict(CLEAN_SENTINEL), ReviewVerdict::Clean);
+    fn parses_json_wrapped_in_prose_or_fences() {
+        for text in [
+            format!("Review complete:\n{FINDING_JSON}"),
+            format!("```json\n{FINDING_JSON}\n```"),
+        ] {
+            let parsed = parse_review_output_event(&text);
+            assert!(parsed.structured, "{text}");
+            assert_eq!(parsed.output.findings.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_structured_empty_findings_array_is_clean() {
         assert_eq!(
-            synthesis_verdict("\n\n  no MATERIAL findings.   \n"),
+            review_output_verdict(r#"{"findings":[],"overall_explanation":"Looks good."}"#),
             ReviewVerdict::Clean
         );
-        assert_eq!(
-            synthesis_verdict(
-                "I inspected the changed paths and vetted the reviewer reports. Nothing actionable survived.\n\nNo material findings."
-            ),
-            ReviewVerdict::Clean,
-            "harmless rationale before the final clean sentinel must not trigger correction"
-        );
-        assert!(matches!(
-            synthesis_verdict("[P1] src/a.rs:1 -- broken\n\nNo material findings."),
-            ReviewVerdict::Findings { .. }
-        ));
-        assert!(matches!(
-            synthesis_verdict("No material findings.\n\nAdditional rationale after the verdict."),
-            ReviewVerdict::Findings { .. }
-        ));
-        assert_eq!(
-            synthesis_verdict("Inspected the changed paths.\n\n**No material findings.**"),
-            ReviewVerdict::Clean,
-            "Markdown emphasis around the final sentinel must not trigger correction"
-        );
-        assert!(matches!(
-            synthesis_verdict(
-                "Review summary:\n- [P2] src/a.rs:2 -- still broken\n\nNo material findings."
-            ),
-            ReviewVerdict::Findings { .. }
-        ));
-        assert!(matches!(
-            synthesis_verdict("[P3] src/a.rs:1 -- optional cleanup"),
-            ReviewVerdict::Findings { .. }
-        ));
-        assert!(matches!(
-            synthesis_verdict("[P2] src/a.rs:1 -- minor\n[P1] src/b.rs:2 -- broken"),
-            ReviewVerdict::Findings { .. }
-        ));
-
-        let oversize = format!("[P0] src/a.rs:1 -- {}", "x".repeat(SYNTHESIS_LIMIT * 2));
-        let ReviewVerdict::Findings { synthesis, .. } = synthesis_verdict(&oversize) else {
-            panic!("oversize findings must classify as findings");
-        };
-        assert!(synthesis.len() <= SYNTHESIS_LIMIT);
-        assert!(synthesis.starts_with("[P0] src/a.rs:1"));
-        assert!(synthesis.contains("[synthesis truncated]"));
     }
 
     #[test]
-    fn a_lane_outcome_describes_itself_for_the_coverage_packet() {
-        assert_eq!(LaneOutcome::Completed.describe(), "completed");
-        assert_eq!(LaneOutcome::Cancelled.describe(), "cancelled");
+    fn unparseable_text_is_preserved_as_findings() {
+        let raw = "I could not produce JSON, but this change looks risky.";
+        assert!(matches!(
+            review_output_verdict(raw),
+            ReviewVerdict::Findings { synthesis, .. } if synthesis == raw
+        ));
+    }
+
+    #[test]
+    fn blank_text_fails_the_review() {
+        assert!(matches!(
+            review_output_verdict(" \n\t"),
+            ReviewVerdict::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn renders_a_review_output_snapshot() {
+        let parsed = parse_review_output_event(FINDING_JSON);
         assert_eq!(
-            LaneOutcome::Failed {
-                reason: "harness exited".to_string()
-            }
-            .describe(),
-            "failed: harness exited"
+            render_review_output_text(&parsed.output),
+            "The retry path drops the request.\n\nReview comment:\n\n- [P1] Preserve the request — /workspace/src/lib.rs:4-7\n  A retry can lose the accepted request."
         );
     }
 }

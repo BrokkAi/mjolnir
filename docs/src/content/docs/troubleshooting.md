@@ -150,7 +150,7 @@ the session; an already running worker does not continuously reread shell
 startup files. Bare sessions on this machine, SSH, and EC2 do not launch an ambient harness from
 this path: they use the exact Mjolnir-managed version, while `PATH` supplies its
 installer prerequisites. These targets require Node.js 22 and npm for Codex
-and Claude, curl and Bash for Kimi and Grok, or curl and tar for Muse. Install prerequisites
+and Claude, curl and Bash for Kimi and Grok, or curl and tar for Muse and OpenCode. Install prerequisites
 on the host yourself; Mjolnir never invokes sudo for harness setup.
 
 Container images must expose required tools on their ordinary image `PATH`.

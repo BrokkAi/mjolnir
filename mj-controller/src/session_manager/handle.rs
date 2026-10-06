@@ -277,9 +277,8 @@ impl ManagedSessionHandle {
         self.reviewer_as(None, action).await
     }
 
-    /// Drive one reviewing role. `None` is the default role, which is the one
-    /// plan review uses; a turn review in the extended tier names its
-    /// supervisor, its intent analyst, and each specialist lane.
+    /// Drive one isolated reviewer role. `None` selects the default role
+    /// shared by plan and turn review; settings discovery uses a named role.
     pub async fn reviewer_as(
         &self,
         role: Option<String>,
@@ -319,6 +318,18 @@ impl ManagedSessionHandle {
         }
     }
 
+    /// Replace the worker's token on its actor-owned relay connection. This
+    /// keeps export from opening a second connection while a turn is active.
+    pub async fn install_github_token(&self, token: String) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.run_on_connection(Box::new(InstallGithubTokenJob { token, reply }))
+            .await;
+        response
+            .await
+            .context("GitHub token refresh did not receive a relay result")?
+            .map_err(anyhow::Error::msg)
+    }
+
     pub async fn lease_connection(&self) -> Result<ManagedSessionLease> {
         self.lease_connection_for(None).await
     }
@@ -354,6 +365,37 @@ impl ManagedSessionHandle {
             connection: Some(connection),
             releases: self.releases.clone(),
         })
+    }
+}
+
+struct InstallGithubTokenJob {
+    token: String,
+    reply: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+impl RelayConnectionJob for InstallGithubTokenJob {
+    fn run<'a>(self: Box<Self>, client: &'a mut RelayClient) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let expected = mj_core::credentials::GithubTokenSnapshot::of(&self.token);
+            let result = client
+                .install_github_token(&self.token)
+                .await
+                .and_then(|installed| {
+                    anyhow::ensure!(
+                        installed == expected,
+                        "worker GitHub token fingerprint did not match after install"
+                    );
+                    Ok(())
+                })
+                .map_err(|error| format!("{error:#}"));
+            if self.reply.send(result).is_err() {
+                tracing::debug!("GitHub token refresh result receiver was dropped");
+            }
+        })
+    }
+
+    fn refuse(self: Box<Self>, error: anyhow::Error) {
+        let _ = self.reply.send(Err(format!("{error:#}")));
     }
 }
 

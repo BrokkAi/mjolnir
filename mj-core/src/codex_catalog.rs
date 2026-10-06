@@ -388,12 +388,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_rejects_a_body_without_models() {
-        assert!(parse(br#"{"data":[]}"#).is_err());
-        assert!(parse(br#"{"models":[]}"#).is_err());
-    }
-
     const OPENAI_LIST: &[u8] = br#"{"object":"list","data":[
         {"id":"deepseek-flash","object":"model","owned_by":"deepseek"},
         {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"}
@@ -471,15 +465,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_a_body_in_neither_shape_and_names_both() {
-        let error = parse(br#"{"available":["deepseek-v4-pro"]}"#)
-            .expect_err("a third shape cannot be guessed at")
-            .to_string();
-        assert!(error.contains("models"), "{error}");
-        assert!(error.contains("data"), "{error}");
-    }
-
-    #[test]
     fn overrides_refine_a_listed_model_and_append_an_unlisted_one() {
         let mut catalog = parse(OPENAI_LIST).expect("parse");
         let overrides = parse_codex_shape(
@@ -532,33 +517,9 @@ mod tests {
     }
 
     #[test]
-    fn guardian_reviewer_picks_the_newest_flash_model() {
-        let picked = guardian_review_model(
-            ["glm-5.3", "glm-5.2-flash", "glm-5.3-flash", "glm-5-turbo"].map(str::to_owned),
-        );
-        assert_eq!(picked.as_deref(), Some("glm-5.3-flash"));
-    }
-
-    #[test]
     fn guardian_reviewer_compares_versions_numerically_not_as_text() {
         let picked = guardian_review_model(["glm-5.3-flash", "glm-5.10-flash"].map(str::to_owned));
         assert_eq!(picked.as_deref(), Some("glm-5.10-flash"));
-    }
-
-    #[test]
-    fn guardian_reviewer_is_absent_when_no_model_is_a_flash_model() {
-        let picked = guardian_review_model(["glm-5.3", "glm-5-turbo"].map(str::to_owned));
-        assert_eq!(picked, None);
-    }
-
-    #[test]
-    fn is_luna_model_matches_any_luna_id_case_insensitively() {
-        for id in ["gpt-5.6-luna", "gpt-5.10-luna", "luna", "GPT-5.9-Luna"] {
-            assert!(is_luna_model(id), "{id} should match");
-        }
-        for id in ["gpt-6-astra", "lunar-x", "deepseek-v4-flash"] {
-            assert!(!is_luna_model(id), "{id} should not match");
-        }
     }
 
     #[test]

@@ -564,10 +564,10 @@ pub(super) fn container_run_args(
     let temporary_volume = temporary_volume_argument(name, additional_mounts);
     if !temporary_volume.is_empty() {
         match engine {
-            "podman" => args.extend([
-                "--volume".to_owned(),
-                format!("{temporary_volume}:/tmp:rw,nocopy"),
-            ]),
+            // No `nocopy`: Podman passes it to the OCI runtime as bind-mount
+            // data, which runc rejects. The volume is new, so copy-up is
+            // harmless, and `start_container` resets /tmp ownership and mode.
+            "podman" => args.extend(["--volume".to_owned(), format!("{temporary_volume}:/tmp:rw")]),
             "docker" => args.extend([
                 "--mount".to_owned(),
                 format!("type=volume,source={temporary_volume},target=/tmp,volume-nocopy"),
@@ -707,6 +707,7 @@ mod pids_limit_tests {
     /// worker, an ACP supervisor and a harness process that all size their thread
     /// pools to the host. The engine default of 2048 fits about two sessions, so
     /// Mjolnir asks for room for the concurrency it allows (#1065).
+    // Hard-won: #1065: Concurrent child launches must have more than the engine’s default process slots.
     #[test]
     fn a_session_container_asks_for_more_processes_than_the_engine_default() {
         for engine in ["podman", "docker"] {

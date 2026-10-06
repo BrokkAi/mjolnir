@@ -1,0 +1,31 @@
+=== scratch repository excluded from workspace (120x30) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› ■ ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Stopped                                                                                                             │
+│  │ No mess                                                                                                           │
+│  │          ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
+│             │These scratch repositories are under temporary directories and stay out of the workspace:│              │
+│             │/tmp/mj-golden-scratch                                                                   │              │
+│             │                                                                                         │              │
+│             │This import uses an isolated workspace.                                                  │              │
+│             │                                                                                         │              │
+│             │                                                                                         │  ────────────╯
+│             │                                                                                         │  ────────────╮
+│             │                                                                                         │              │
+│             │                                                                                         │              │
+│             │  Cancel     Continue                                                                    │  ────────────╯
+│             ╰─────────────────────────────────────────────────────────────────────────────────────────╯  ───── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                          ────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys

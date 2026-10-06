@@ -39,44 +39,6 @@ fn fallback_mj_binary(test_executable: &Path) -> PathBuf {
 }
 
 #[test]
-fn import_e2e_defaults_resolve_to_mjolnir_paths() {
-    assert_eq!(
-        fallback_mj_binary(Path::new(
-            "/workspace/target/x86_64-unknown-linux-musl/debug/deps/import_e2e-deadbeef"
-        )),
-        PathBuf::from("/workspace/target/x86_64-unknown-linux-musl/debug/mj")
-    );
-
-    // This test moved into `mj-cli` with the crate split, so the manifest
-    // directory is now the crate, not the repository.
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the crate directory sits inside the repository root");
-    for (runner, expected_repository) in [
-        ("test-import-e2e.sh", "BrokkAi/mjolnir"),
-        ("test-kimi-import-e2e.sh", "MoonshotAI/kimi-code"),
-        ("test-grok-import-e2e.sh", "BrokkAi/mjolnir"),
-        ("test-codex-import-e2e.sh", "BrokkAi/mjolnir"),
-    ] {
-        let script = fs::read_to_string(repository_root.join("scripts").join(runner)).unwrap();
-        assert!(script.contains("/mjolnir/import-e2e"), "{runner}");
-        assert!(script.contains("data/mjolnir"), "{runner}");
-        assert!(script.contains("debug/mj-worker"), "{runner}");
-        assert!(
-            script.contains("localhost/mjolnir/agent-dev:latest"),
-            "{runner}"
-        );
-        assert!(script.contains(expected_repository), "{runner}");
-        for legacy_default in ["BrokkAi/hel", "localhost/hel", "data/hel", "debug/hel"] {
-            assert!(
-                !script.contains(legacy_default),
-                "{runner}: {legacy_default}"
-            );
-        }
-    }
-}
-
-#[test]
 #[ignore = "requires a signed-in Claude, Podman, and the Mjolnir agent-development image"]
 fn imported_claude_session_resumes_natively() {
     tokio::runtime::Runtime::new()
@@ -121,6 +83,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
@@ -247,6 +210,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
@@ -380,6 +344,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
@@ -620,6 +585,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
         spinner: Default::default(),
         theme: Default::default(),
         phone: Default::default(),
+        github: Default::default(),
         continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),

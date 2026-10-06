@@ -10,8 +10,8 @@ use mj_core::relay::{FileLineChange, RepoDelta};
 use mj_review::delta::RawDiffSummary;
 #[cfg(test)]
 use mj_review::delta::{captured_trees, has_changes};
-use mj_review::{LANE_DIFF_LIMIT, bound_review_section};
-use std::collections::BTreeMap;
+use mj_review::{REVIEW_CAPTURE_DIFF_LIMIT, bound_review_section};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -39,16 +39,27 @@ pub fn capture_repository_deltas(
             .filter(|tree| tree_exists(git, root, tree))
             .cloned()
             .or_else(|| pinned_review_baseline(git, root));
-        // Capture only what this turn could have changed. The tracked changes
-        // come straight from `git status`; an untracked path counts when it is
-        // new since the session started, or when its size or modification time
-        // moved. Everything else is carried over from the baseline tree
-        // without being read.
+        // Capture tracked changes and untracked paths that are new or changed
+        // since the session started. A completed review can put untracked files
+        // in its baseline tree, so carry forward those that still exist too;
+        // otherwise they would look deleted because this capture starts from
+        // HEAD. Untracked files from session start that never entered a
+        // baseline remain out of the capture.
         let state = read_workspace_state(git, root)?;
         let empty = Vec::new();
         let start = untracked_at_start.get(root).unwrap_or(&empty);
         let mut changed = state.dirty_tracked.clone();
         changed.extend(changed_untracked(start, &state.untracked));
+        if let Some(baseline) = &baseline {
+            let baseline_paths = tree_paths(git, root, baseline)?;
+            changed.extend(
+                state
+                    .untracked
+                    .iter()
+                    .filter(|entry| baseline_paths.contains(&entry.path))
+                    .map(|entry| entry.path.clone()),
+            );
+        }
         // The capture starts from HEAD, not from the baseline tree, so a turn
         // that committed its work is still visible: HEAD has moved, and the
         // diff against the baseline shows the commit. Starting from the
@@ -74,13 +85,49 @@ pub fn capture_repository_deltas(
             root: root.clone(),
             baseline_tree: baseline,
             current_tree: current,
-            patch: bound_review_section(&patch, LANE_DIFF_LIMIT, "workspace diff"),
+            patch: bound_review_section(&patch, REVIEW_CAPTURE_DIFF_LIMIT, "workspace diff"),
             diffstat: summary.diffstat(),
             changed_lines: summary.changed_line_count(),
             files,
         });
     }
     Ok(deltas)
+}
+
+/// Paths already represented in a review baseline tree.
+fn tree_paths(
+    git: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+) -> Result<BTreeSet<PathBuf>> {
+    let output = git
+        .run(
+            repository,
+            &mj_checkpoint::archive::GitCommand {
+                arguments: vec![
+                    "ls-tree".into(),
+                    "-r".into(),
+                    "--name-only".into(),
+                    "-z".into(),
+                    tree.into(),
+                ],
+                stdin: Vec::new(),
+                env: Vec::new(),
+            },
+        )
+        .with_context(|| format!("list paths in review baseline {tree}"))?;
+    anyhow::ensure!(
+        output.status == 0,
+        "listing paths in review baseline {tree} failed with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| PathBuf::from(String::from_utf8_lossy(path).into_owned()))
+        .collect())
 }
 
 /// Reads `git diff --numstat -z -M` output: `added\tdeleted\tpath\0` per file,
@@ -343,12 +390,14 @@ mod capture_tests {
     /// prompt whose diff was cut short still names it.
     #[test]
     fn a_capture_counts_new_renamed_and_binary_files() {
+        assert!(parse_numstat(b"").is_empty());
         let temp = repository();
         std::fs::write(
             temp.path().join("moved.rs"),
             "fn one() {}\nfn two() {}\nfn three() {}\nfn four() {}\n",
         )
         .unwrap();
+        std::fs::write(temp.path().join("old name.rs"), "fn named() {}\n").unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-qm", "more"]);
         let roots = vec![temp.path().to_path_buf()];
@@ -357,6 +406,7 @@ mod capture_tests {
                 .unwrap(),
         );
         git(temp.path(), &["mv", "moved.rs", "renamed.rs"]);
+        git(temp.path(), &["mv", "old name.rs", "new name.rs"]);
         std::fs::write(temp.path().join("logo.bin"), [0u8, 1, 2, 0, 255]).unwrap();
         std::fs::write(temp.path().join("new.rs"), "fn new() {}\nfn other() {}\n").unwrap();
         let deltas =
@@ -372,6 +422,13 @@ mod capture_tests {
                     ..Default::default()
                 },
                 FileLineChange {
+                    path: "new name.rs".into(),
+                    old_path: Some("old name.rs".into()),
+                    insertions: 0,
+                    deletions: 0,
+                    ..Default::default()
+                },
+                FileLineChange {
                     path: "new.rs".into(),
                     insertions: 2,
                     ..Default::default()
@@ -383,35 +440,6 @@ mod capture_tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn numstat_records_are_read_with_renames_and_binaries() {
-        let output = b"3\t1\tsrc/lib.rs\0-\t-\tlogo.png\x002\t0\t\0old name.rs\0new name.rs\0";
-        assert_eq!(
-            parse_numstat(output),
-            vec![
-                FileLineChange {
-                    path: "src/lib.rs".into(),
-                    insertions: 3,
-                    deletions: 1,
-                    ..Default::default()
-                },
-                FileLineChange {
-                    path: "logo.png".into(),
-                    binary: true,
-                    ..Default::default()
-                },
-                FileLineChange {
-                    path: "new name.rs".into(),
-                    old_path: Some("old name.rs".into()),
-                    insertions: 2,
-                    deletions: 0,
-                    binary: false,
-                },
-            ]
-        );
-        assert!(parse_numstat(b"").is_empty());
     }
 
     #[test]
@@ -613,6 +641,7 @@ mod capture_tests {
     /// of the working tree. This is #1065: a workspace with hundreds of
     /// thousands of untracked files made every session start read, hash and
     /// store every one of them before the worker could be reached.
+    // Hard-won: b3457c71: capturing a session baseline staged and hashed hundreds of thousands of unrelated files.
     #[test]
     fn a_startup_baseline_does_not_read_untracked_files_it_was_not_asked_about() {
         let temp = repository();
@@ -639,6 +668,7 @@ mod capture_tests {
 
     /// A review captures what the turn changed and nothing else, so the same
     /// untouched untracked files stay unread at review time too.
+    // Hard-won: b3457c71: review capture cost grew with all untracked workspace files instead of turn changes.
     #[test]
     fn a_review_capture_costs_the_turns_changes_and_not_the_tree() {
         let temp = repository();
@@ -693,6 +723,68 @@ mod capture_tests {
             !deltas[0].patch.contains("already.txt"),
             "{}",
             deltas[0].patch
+        );
+    }
+
+    #[test]
+    fn a_review_carries_unchanged_untracked_files_from_its_baseline() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        let first_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("a.py"), "first version\n").unwrap();
+        std::fs::write(temp.path().join("b.py"), "unchanged\n").unwrap();
+        let first =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start).unwrap();
+        assert!(first[0].patch.contains("a.py"), "{}", first[0].patch);
+        assert!(first[0].patch.contains("b.py"), "{}", first[0].patch);
+        let baselines = captured_trees(&first);
+        advance_baselines(&SystemGit, &baselines).unwrap();
+        let second_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("a.py"), "a revised version\n").unwrap();
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start).unwrap();
+
+        assert!(second[0].patch.contains("a revised version"));
+        assert!(!second[0].patch.contains("b.py"), "{}", second[0].patch);
+        assert_eq!(
+            second[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.py"]
+        );
+    }
+
+    #[test]
+    fn a_review_reports_an_untracked_file_removed_since_its_baseline() {
+        let temp = repository();
+        let roots = vec![temp.path().to_path_buf()];
+        let first_start = initialize_review_baselines(&SystemGit, &roots).unwrap();
+
+        std::fs::write(temp.path().join("a.py"), "unchanged\n").unwrap();
+        std::fs::write(temp.path().join("b.py"), "to be removed\n").unwrap();
+        let first =
+            capture_repository_deltas(&SystemGit, &roots, &BTreeMap::new(), &first_start).unwrap();
+        let baselines = captured_trees(&first);
+        advance_baselines(&SystemGit, &baselines).unwrap();
+        let second_start = read_untracked_at_start(&SystemGit, &roots).unwrap();
+
+        std::fs::remove_file(temp.path().join("b.py")).unwrap();
+        let second =
+            capture_repository_deltas(&SystemGit, &roots, &baselines, &second_start).unwrap();
+
+        assert!(second[0].patch.contains("b.py"), "{}", second[0].patch);
+        assert!(!second[0].patch.contains("a.py"), "{}", second[0].patch);
+        assert_eq!(
+            second[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b.py"]
         );
     }
 }
@@ -827,12 +919,23 @@ pub const WORKSPACE_STATE_TIMEOUT: Duration = Duration::from_secs(120);
 /// deadline it becomes a refusal the user can act on.
 pub struct BoundedGit {
     timeout: Duration,
+    executor: mj_core::targets::CancellableProcessExecutor,
 }
 
 impl BoundedGit {
     #[must_use]
-    pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            timeout,
+            executor: mj_core::targets::CancellableProcessExecutor::new(std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            )),
+        }
+    }
+
+    #[must_use]
+    pub fn cancellation_guard(&self) -> mj_core::targets::ProcessCancellationGuard {
+        self.executor.cancel_on_drop()
     }
 }
 
@@ -860,10 +963,19 @@ impl GitCommandRunner for BoundedGit {
                 value.to_string_lossy().into_owned(),
             );
         }
-        let output = mj_core::targets::CommandExecutor::execute(
-            &mj_core::targets::BoundedProcessExecutor::new(self.timeout),
-            &spec,
-        )?;
+        let executor = self.executor.clone().with_deadline(self.timeout);
+        let output =
+            mj_core::targets::CommandExecutor::execute(&executor, &spec).map_err(|error| {
+                if executor.is_cancelled() && !self.executor.is_cancelled() {
+                    anyhow::Error::new(mj_core::targets::CommandTimedOut {
+                        program: spec.program.clone(),
+                        purpose: spec.purpose.clone(),
+                        timeout: self.timeout,
+                    })
+                } else {
+                    error
+                }
+            })?;
         Ok(mj_checkpoint::archive::GitOutput {
             status: output.status,
             stdout: output.stdout,

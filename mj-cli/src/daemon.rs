@@ -1063,29 +1063,17 @@ async fn stop_daemon(metadata: &DaemonMetadata) -> Result<()> {
     signal_daemon(metadata).await
 }
 
+/// Stop the daemon `metadata` names after it did not answer a protocol
+/// stop: SIGTERM on Unix, which every supported daemon handles as graceful
+/// cancellation. Windows has no SIGTERM, and the daemon has no console to
+/// receive Ctrl-Break, so it is terminated; its state is in the store and
+/// its workers keep running, so the next daemon recovers it as after a crash.
 async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
     #[cfg(unix)]
     {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes(
-            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(metadata.pid)]),
-            true,
-        );
-        // The PID comes from the owner-only metadata file; the argv check
-        // guards against PID recycling, not against other Mjolnir builds — old
-        // daemons are exactly what this function exists to retire.
-        let Some(process) = system.process(sysinfo::Pid::from_u32(metadata.pid)) else {
+        if !daemon_still_runs(metadata.pid)? {
             return Ok(());
-        };
-        let is_hel_daemon = process
-            .cmd()
-            .get(1)
-            .is_some_and(|argument| argument.to_str() == Some("daemon-run"));
-        ensure!(
-            is_hel_daemon,
-            "refusing to signal PID {} because it does not look like a Mjolnir daemon (`mj daemon-run`)",
-            metadata.pid
-        );
+        }
         // SAFETY: the PID comes from owner-only daemon metadata and SIGTERM is
         // handled as graceful cancellation by every supported daemon.
         let result = unsafe { libc::kill(metadata.pid as libc::pid_t, libc::SIGTERM) };
@@ -1095,19 +1083,75 @@ async fn signal_daemon(metadata: &DaemonMetadata) -> Result<()> {
                 return Err(error).context("stop superseded Mjolnir daemon");
             }
         }
-        wait_for_exit(metadata.pid).await.with_context(|| {
-            format!(
-                "superseded Mjolnir daemon {} was signalled but was still running after {}s",
-                metadata.pid,
-                STOP_TIMEOUT.as_secs()
-            )
-        })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = metadata;
-        bail!("stop the incompatible Mjolnir daemon, then retry")
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // Windows does not reuse a PID while a handle to its process is
+        // open, so the process checked below is the one terminated.
+        // SAFETY: OpenProcess takes no pointers; a null handle is checked.
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, metadata.pid) };
+        if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            // Gone already, or not ours to stop.
+            if !daemon_still_runs(metadata.pid)? {
+                return Ok(());
+            }
+            return Err(error).context("open superseded Mjolnir daemon");
+        }
+        struct Handle(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for Handle {
+            fn drop(&mut self) {
+                // SAFETY: the handle came from OpenProcess and is closed once.
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+        let handle = Handle(handle);
+        if !daemon_still_runs(metadata.pid)? {
+            return Ok(());
+        }
+        // SAFETY: the handle is open with PROCESS_TERMINATE.
+        if unsafe { TerminateProcess(handle.0, 1) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("stop superseded Mjolnir daemon");
+        }
     }
+    wait_for_exit(metadata.pid).await.with_context(|| {
+        format!(
+            "superseded Mjolnir daemon {} was stopped but was still running after {}s",
+            metadata.pid,
+            STOP_TIMEOUT.as_secs()
+        )
+    })
+}
+
+/// Whether `pid` still runs: true when it runs `mj daemon-run`, false when
+/// it is gone, and an error for any other process. The PID comes from the
+/// owner-only metadata file; the argv check guards against PID recycling,
+/// not against other Mjolnir builds — old daemons are exactly what a restart
+/// retires.
+fn daemon_still_runs(pid: u32) -> Result<bool> {
+    let process_id = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    // The command line is read only when the refresh asks for it.
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[process_id]),
+        true,
+        sysinfo::ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always),
+    );
+    let Some(process) = system.process(process_id) else {
+        return Ok(false);
+    };
+    ensure!(
+        process
+            .cmd()
+            .get(1)
+            .is_some_and(|argument| argument == "daemon-run"),
+        "refusing to stop PID {pid} because it does not look like a Mjolnir daemon (`mj daemon-run`)"
+    );
+    Ok(true)
 }
 
 /// What the keep-alive last saw when it refreshed this client's presence.
@@ -1503,6 +1547,7 @@ mod tests {
     /// `connect_or_start`, which is how a daemon stopped by a restart came
     /// back on the attached client's older build before the restart could
     /// start its own.
+    // Hard-won: cbbc2e0d: the unattended keep-alive restarted a daemon from a stale client executable.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one() {
@@ -1544,6 +1589,7 @@ mod tests {
             "the keep-alive must never start a daemon"
         );
     }
+    // Hard-won: 2be31d67: restart stopped the old daemon before discovering the replacement config was invalid.
     #[test]
     fn a_configuration_the_new_daemon_cannot_read_refuses_the_replacement() {
         let directory = tempfile::tempdir().unwrap();
@@ -1564,6 +1610,7 @@ mod tests {
         assert!(error.contains("was not restarted"), "{error}");
     }
 
+    // Hard-won: 871a4d9b: an unusable profile credential prevented a replacement that should leave other profiles available.
     #[test]
     fn a_profile_that_cannot_start_does_not_refuse_the_replacement() {
         // The reported failure: a Codex home that authenticates with an API key
@@ -1639,6 +1686,7 @@ mod tests {
             }
         );
     }
+    // Hard-won: ef16209e: restart reported success after another client relaunched the old executable.
     #[test]
     fn a_restart_onto_another_build_fails_and_names_both_executables() {
         let error = restart_verdict(
@@ -1657,6 +1705,7 @@ mod tests {
         assert!(error.contains("(/checkout/target/debug/mj)"), "{error}");
         assert!(error.contains("mj daemon restart"), "{error}");
     }
+    // Hard-won: b7ced524: startup was reported failed after eight seconds while the live daemon was still initializing.
     #[tokio::test(start_paused = true)]
     async fn slow_startup_is_awaited_rather_than_reported_as_a_failure() {
         use std::cell::Cell;

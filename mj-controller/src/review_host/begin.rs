@@ -67,7 +67,6 @@ impl HostState {
             return;
         }
         let config = (self.config)(&session_id);
-        let tier = config.tier;
         let control = self.control.clone();
         let events = self.events.clone();
         let prepare_session = session_id.clone();
@@ -82,15 +81,8 @@ impl HostState {
         self.preparing.insert(session_id.clone());
         self.publish(&session_id);
         tokio::spawn(async move {
-            let prepared = prepare(
-                &control,
-                &environment,
-                &prepare_session,
-                config,
-                tier,
-                cancelled,
-            )
-            .await;
+            let prepared =
+                prepare(&control, &environment, &prepare_session, config, cancelled).await;
             let _ = events.send(HostEvent::Prepared {
                 session_id: prepare_session,
                 manual,

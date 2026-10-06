@@ -19,7 +19,7 @@ mj
 Two words come up on every screen:
 
 - A **profile** is one coding-agent account: which agent (Claude Code, Codex,
-  Kimi Code, Grok Build, or Muse Code) and the home directory that holds its
+  Kimi Code, Grok Build, Muse Code, or OpenCode) and the home directory that holds its
   sign-in.
 - A **target** is where the session runs: this machine directly (`localhost`),
   a local container, an SSH host, or an EC2 instance.
@@ -60,8 +60,8 @@ found, the welcome reports the missing profile. To fix this:
    own instructions. For example, Claude Code: `npm install -g
    @anthropic-ai/claude-code`, then run `claude`. Codex: `npm install -g
    @openai/codex`, then run `codex login`. Signing in creates the agent's home
-   directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`, or
-   `~/.config/muse`).
+   directory (`~/.claude`, `~/.codex`, `~/.kimi-code`, `~/.grok`,
+   `~/.config/muse`, or `~/.config/opencode`).
 2. Open Settings (`prefix+s`), choose **Agent Profiles**, and choose **Detect
    profiles**, or run `mj setup` again.
 

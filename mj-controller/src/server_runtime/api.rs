@@ -2555,6 +2555,48 @@ impl SubagentBackend for ApiBackend {
         }))
     }
 
+    fn validate_github_bundle(
+        &self,
+        bundle_id: String,
+    ) -> BoxFuture<'_, Result<(), crate::controller::GithubBundleSelectionError>> {
+        Box::pin(async move {
+            let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
+                .await
+                .map_err(|error| {
+                    crate::controller::GithubBundleSelectionError::Provider(anyhow!(
+                        "configuration load task failed: {error}"
+                    ))
+                })?
+                .map_err(crate::controller::GithubBundleSelectionError::Provider)?;
+            crate::controller::config_only_controller(config)
+                .validate_github_bundle_installations(&bundle_id)
+                .await
+        })
+    }
+
+    fn github_token(
+        &self,
+        owner: Option<String>,
+        repositories: Vec<(String, String)>,
+    ) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
+                .await
+                .context("GitHub token configuration task failed")??;
+            let app = config.github.app.as_ref().ok_or_else(|| {
+                anyhow!(
+                    "GitHub App credentials are not configured; set [github.app] in config.toml"
+                )
+            })?;
+            let provider = crate::controller::GithubAppTokenProvider::shared(app)?;
+            match owner {
+                Some(owner) if repositories.is_empty() => provider.token_for_owner(&owner).await,
+                Some(_) => anyhow::bail!("choose an owner or repositories, not both"),
+                None => provider.token_for_repositories(&repositories).await,
+            }
+        })
+    }
+
     fn subagent_report(
         &self,
         session_id: String,
@@ -2956,6 +2998,25 @@ impl SubagentBackend for ApiBackend {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
             self.require_idle_turn(&session_id).await?;
+            let target = self
+                .exports
+                .session_record(&session_id)
+                .and_then(|record| record.target);
+            if target.as_ref().is_some_and(|target| {
+                !matches!(target, mj_core::state::TargetLocator::LocalBare { .. })
+            }) && let Some(token) =
+                crate::controller::github_app_token_for_session(session_id.clone())
+                    .await
+                    .map_err(ExportError::Failed)?
+            {
+                self.sessions
+                    .session(session_id.clone())
+                    .await
+                    .map_err(ExportError::Failed)?
+                    .install_github_token(token)
+                    .await
+                    .map_err(ExportError::Failed)?;
+            }
             let layout = export_layout(session_id.clone()).await?;
             let repository = agent_working_directory(&layout)?;
             let arguments = vec![

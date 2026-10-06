@@ -1278,6 +1278,13 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons do not know the `opencode` harness. They skip
+    // such a session when loading state, and the next full state save deletes
+    // it, so the compatibility floor rises with the new harness kind.
+    if version < 74 {
+        migrate_opencode_harness_kind(connection)?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1361,6 +1368,74 @@ fn migrate_parked_session_state(connection: &Connection) -> Result<()> {
     let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
     migration.context("migrate the sessions state constraint for parked sub-agents")?;
     restored.context("restore foreign key enforcement after the parked-state migration")?;
+    Ok(())
+}
+
+/// Migration 74: admit `'opencode'` in the harness-kind constraints of
+/// `sessions` and `hidden_native_sessions`, the way migrations 27 (Muse) and
+/// 32 (ZCode) admitted their kinds. SQLite cannot widen a CHECK constraint in
+/// place, so each table is rebuilt from its stored definition, which keeps
+/// every column and trigger later migrations added.
+///
+/// Breaking: older daemons skip a session whose harness they do not know when
+/// loading state, and their next full state save deletes it.
+fn migrate_opencode_harness_kind(connection: &Connection) -> Result<()> {
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        for table in ["sessions", "hidden_native_sessions"] {
+            let sql: String = transaction.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            let (_, definition) = sql
+                .split_once('(')
+                .context("missing harness table definition")?;
+            if definition.contains("'opencode')") {
+                continue;
+            }
+            ensure!(
+                definition.contains("'zcode')"),
+                "unexpected {table} harness constraint"
+            );
+            let definition = definition.replace("'zcode')", "'zcode','opencode')");
+            let objects: Vec<String> = transaction
+                .prepare(
+                    "SELECT sql FROM sqlite_schema WHERE tbl_name=?1
+                     AND type IN ('index','trigger') AND sql IS NOT NULL",
+                )?
+                .query_map([table], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE {table}_opencode_v74 ({definition};
+                 INSERT INTO {table}_opencode_v74 SELECT * FROM {table};
+                 DROP TABLE {table};
+                 ALTER TABLE {table}_opencode_v74 RENAME TO {table};"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+        }
+        ensure!(
+            !transaction
+                .prepare("PRAGMA foreign_key_check")?
+                .exists([])?,
+            "foreign key violation in OpenCode migration"
+        );
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 74
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (74, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 74;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration.context("migrate OpenCode harness constraints")?;
+    restored.context("restore foreign key enforcement after OpenCode migration")?;
     Ok(())
 }
 
@@ -1715,7 +1790,7 @@ mod reader_tests {
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(71));
+        assert_eq!(state.minimum_compatible, Some(74));
         assert!(state.ensure_supported_by(70).is_err());
         let preserved: String = upgraded
             .query_row(
@@ -1972,8 +2047,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 71 adds durable EC2 Move ownership.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 71;
+    /// `SCHEMA_VERSION`. Migration 74 adds the OpenCode harness kind.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 74;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

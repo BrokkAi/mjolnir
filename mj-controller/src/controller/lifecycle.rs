@@ -329,7 +329,19 @@ impl Controller {
         if let Some((operation, preparation)) = move_intent {
             // The source is still behind an unsealed barrier. A destination
             // preflight error must release it and leave its processes alive.
-            if let Err(error) = self.validate_move_checkpoint(operation, preparation, executor) {
+            let validation = match self
+                .github_token_for_repository_preflight(session_id)
+                .await
+            {
+                Ok(token) => self.validate_move_checkpoint(
+                    operation,
+                    preparation,
+                    token.as_deref(),
+                    executor,
+                ),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = validation {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
                 record.state = previous.state;
                 record.last_error = Some(format!("{error:#}"));
@@ -676,6 +688,27 @@ impl Controller {
             observed_updated_at,
             crate::database::save_lifecycle_session,
         )
+    }
+
+    /// Persist a worker-reported harness failure from an async lifecycle
+    /// method that only has a shared controller reference. The revision check
+    /// still belongs to the controller loaded from the current store.
+    pub(crate) async fn persist_harness_preparation_failure(
+        &self,
+        session_id: &str,
+        cause: &str,
+        observed_updated_at: &str,
+    ) -> Result<()> {
+        let session_id = session_id.to_owned();
+        let cause = cause.to_owned();
+        let observed_updated_at = observed_updated_at.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut controller = Controller::load()?;
+            controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
+        })
+        .await
+        .context("record harness preparation failure task panicked")??;
+        Ok(())
     }
 
     fn fail_unready_session_with(

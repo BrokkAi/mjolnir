@@ -92,12 +92,6 @@ impl HostState {
                 let requests = match self.reviews.get_mut(&session_id) {
                     Some(slot) => match result {
                         Ok(()) => slot.driver.role_started(&role),
-                        // A lane that cannot start is a coverage gap the
-                        // supervisor is told about; any other role failing to
-                        // start fails the review.
-                        Err(error) if mj_review::lanes::lane_by_id(&role).is_some() => {
-                            slot.driver.lane_failed(&role, error)
-                        }
                         Err(error)
                             if matches!(
                                 slot.driver.phase(),
@@ -159,38 +153,6 @@ impl HostState {
                 self.run(&session_id, requests);
             }
             ReviewStep::RoleEvents { role, result } => self.role_events(session_id, role, result),
-            ReviewStep::Dispatches(result) => {
-                let requests = match result {
-                    Ok(requests) => self
-                        .reviews
-                        .get_mut(&session_id)
-                        .map(|slot| slot.driver.lanes_dispatched(requests))
-                        .unwrap_or_default(),
-                    // A dropped dispatch would leave the supervisor waiting for
-                    // lanes that never run, so it fails the review rather than
-                    // stalling it.
-                    Err(error) => {
-                        if self.reviews.get(&session_id).is_some_and(|slot| {
-                            matches!(slot.driver.phase(), TurnReviewPhase::Forwarding { .. })
-                        }) {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                %error,
-                                "ignoring a late lane dispatch result during primary handoff"
-                            );
-                            return;
-                        }
-                        self.fail(
-                            &session_id,
-                            format!(
-                                "the review could not collect the supervisor's specialists: {error}"
-                            ),
-                        );
-                        return;
-                    }
-                };
-                self.run(&session_id, requests);
-            }
         }
     }
 

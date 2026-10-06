@@ -217,6 +217,42 @@ impl RuntimeState {
         }
     }
 
+    /// Persist a worker-reported preparation failure against the session
+    /// revision observed by the upgrade coordinator. Lifecycle work that has
+    /// since changed that revision remains the owner of the outcome.
+    pub(super) async fn fail_harness_preparation(
+        &self,
+        session_id: String,
+        failure: crate::controller::HarnessPreparationFailure,
+        observed_updated_at: String,
+    ) {
+        let cause = failure.to_string();
+        let applied = blocking({
+            let session_id = session_id.clone();
+            let cause = cause.clone();
+            move || {
+                let mut controller = Controller::load()?;
+                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
+            }
+        })
+        .await;
+        match applied {
+            Ok(true) => {
+                if let Err(error) = self.reload_controller().await {
+                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after harness preparation failed");
+                }
+                self.push_notice(&session_id, cause);
+                self.publish_revision();
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %session_id,
+                error = format!("{error:#}"),
+                "could not record worker-reported harness preparation failure"
+            ),
+        }
+    }
+
     pub(super) async fn publish_session(
         &self,
         session_id: String,

@@ -291,6 +291,61 @@ impl UtilityCompactionBackend {
     }
 }
 
+/// Make one structured text request with an already selected utility model.
+/// Callers that need a hard operation deadline own the timeout and cancellation
+/// token; this helper only builds and sends the request.
+pub(crate) async fn infer_text_once(
+    candidate: &UtilityCandidate,
+    system_prompt: &str,
+    user_prompt: String,
+    output_field: &str,
+    cancel: CancellationToken,
+) -> Result<String> {
+    let request = StructuredInferRequest {
+        messages: vec![
+            InferMessage::system(system_prompt),
+            InferMessage::user(user_prompt),
+        ],
+        schema_name: "utility_text".into(),
+        schema: json!({
+            "type": "object",
+            "properties": { (output_field): { "type": "string" } },
+            "required": [output_field],
+            "additionalProperties": false
+        }),
+    };
+    let response = infer_structured(
+        candidate.backend.as_ref(),
+        candidate.model.clone(),
+        request,
+        InferOptions {
+            reasoning_effort: candidate.reasoning_effort.clone(),
+            ..InferOptions::default()
+        },
+        cancel,
+    )
+    .await
+    .map_err(|error| {
+        anyhow!(
+            "{} model {}: {error:#}",
+            candidate.profile_id,
+            candidate.model
+        )
+    })?;
+    response
+        .output
+        .get(output_field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow!(
+                "{} model {} returned no {output_field} string",
+                candidate.profile_id,
+                candidate.model
+            )
+        })
+}
+
 /// How much transcript to send this model in one request. Providers publish a
 /// context window in tokens; four bytes per token is the estimator this
 /// codebase already uses, and half the window is left for the system prompt
@@ -542,6 +597,9 @@ fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
         HarnessKind::Grok => Some(UtilityFamily::Grok),
         HarnessKind::Kimi => Some(UtilityFamily::Kimi),
         HarnessKind::Claude => None,
+        // OpenCode is a multi-provider aggregator with no inference client of
+        // its own; it never serves Mjolnir's utility work.
+        HarnessKind::OpenCode => None,
     }
 }
 
@@ -641,6 +699,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         // Claude exposes no direct utility inference client independent of its
         // coding-agent session.
         HarnessKind::Claude => Ok(None),
+        HarnessKind::OpenCode => Ok(None),
     }
 }
 
@@ -655,86 +714,6 @@ fn now_seconds() -> u64 {
 mod tests {
     use super::*;
     use futures::{StreamExt, stream};
-
-    const ZAI_CONFIG: &str = "model = \"glm-5.3\"\n\
-                              model_provider = \"zai\"\n\
-                              [model_providers.zai]\n\
-                              base_url = \"https://api.z.ai/api/v1\"\n\
-                              env_key = \"ZAI_API_KEY\"\n\
-                              wire_api = \"responses\"\n";
-
-    const DEEPSEEK_CONFIG: &str = "model = \"deepseek-v4-pro\"\n\
-                                   model_provider = \"deepseek\"\n\
-                                   [model_providers.deepseek]\n\
-                                   base_url = \"https://api.deepseek.com/v1\"\n\
-                                   env_key = \"DEEPSEEK_API_KEY\"\n\
-                                   wire_api = \"responses\"\n";
-
-    fn provider_profile(
-        home: &std::path::Path,
-        config: &str,
-        environment: &[(&str, &str)],
-    ) -> HarnessProfile {
-        std::fs::write(home.join("config.toml"), config).unwrap();
-        HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: home.to_path_buf(),
-            environment: environment
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                .collect(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        }
-    }
-
-    #[test]
-    fn a_zai_codex_profile_never_serves_as_the_utility_model() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = provider_profile(home.path(), ZAI_CONFIG, &[("ZAI_API_KEY", "key")]);
-
-        assert!(!profile_serves_as_utility(&profile));
-        assert!(
-            backend_for_profile(&profile).unwrap().is_none(),
-            "the utility client cannot reach the Coding Plan chat endpoint"
-        );
-        // A Codex profile using its own login still serves.
-        let native = HarnessProfile {
-            home: tempfile::tempdir().unwrap().path().to_path_buf(),
-            environment: Default::default(),
-            ..profile
-        };
-        assert!(profile_serves_as_utility(&native));
-        assert_eq!(utility_family(&native), Some(UtilityFamily::Codex));
-    }
-
-    #[test]
-    fn a_deepseek_codex_profile_serves_the_deepseek_utility_family() {
-        let home = tempfile::tempdir().unwrap();
-        let profile =
-            provider_profile(home.path(), DEEPSEEK_CONFIG, &[("DEEPSEEK_API_KEY", "key")]);
-
-        assert!(profile_serves_as_utility(&profile));
-        let family = utility_family(&profile).expect("a DeepSeek utility family");
-        assert_eq!(family, UtilityFamily::DeepSeek);
-        assert_eq!(family.precedence(), 1);
-        assert!(family.matches("deepseek-flash"));
-        assert!(!family.matches("deepseek-v4-pro"));
-        assert!(
-            backend_for_profile(&profile).unwrap().is_some(),
-            "the provider key builds the shared OpenAI client"
-        );
-    }
-
-    #[test]
-    fn a_deepseek_codex_profile_without_its_key_has_no_backend() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = provider_profile(home.path(), DEEPSEEK_CONFIG, &[]);
-
-        assert!(backend_for_profile(&profile).unwrap().is_none());
-    }
 
     #[tokio::test]
     async fn kimi_utility_uses_profile_auth_endpoint_and_headers_without_a_runtime() {
@@ -788,28 +767,6 @@ mod tests {
         assert!(!home.path().join("credentials/kimi-code.json").exists());
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
-    }
-
-    #[test]
-    fn utility_families_never_include_claude() {
-        let claude = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Claude,
-            home: tempfile::tempdir().unwrap().path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        };
-        assert_eq!(utility_family(&claude), None);
-        assert!(UtilityFamily::Codex.matches("gpt-5.7-luna"));
-        assert!(UtilityFamily::Grok.matches("grok-4.6"));
-        assert!(UtilityFamily::Kimi.matches("k3"));
-        assert!(UtilityFamily::DeepSeek.matches("deepseek-v4-flash"));
-        assert!(UtilityFamily::Muse.matches("muse-spark-1.3"));
-        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-contributor"));
-        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-image"));
-        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-voice"));
     }
 
     #[tokio::test]

@@ -1,0 +1,817 @@
+=== tool status labels and emphasis (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ • Tool · waiting                                                            ▐│
+│ │ pending command                                                           ▐│
+│                                                                             ▐│
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+completed command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
+pending command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 163))
+running command style: header=Some(Rgb(232, 189, 123)), body=None
+failed command style: header=Some(Rgb(244, 154, 165)), body=None
+
+=== only completed command has a click target (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│                                                                             ▐│
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+tool click targets: [2, 2, 2]
+
+=== completed command expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│                                                                             ▐│
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+expanded tools: {2}
+
+=== thought text does not expand tools (60x24) ===
+╭ Conversation ────────────────────────────────────────────╮
+│ ○ Thinking                                              ▐│
+│ │ thinking about tools                                  ▐│
+│                                                         ▐│
+│ ✓ Tool · done                                           ▐│
+│ │ first-command, second-command                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
+expanded tools: {}
+
+=== execute pending (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ • Tool · waiting                                                                                ▐│
+│ │ git add && cargo test | cat                                                                   ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== execute running (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                                                ▐│
+│ │ git add && cargo test | cat                                                                   ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== execute completed (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                                                   ▐│
+│ │ git add && cargo test | cat                                                                   ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== raw keeps provider title (100x24) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                                                   ▐│
+│ │ Bash                                                                                          ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== clean fallback terminal in rich mode (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== clean fallback terminal in raw mode (80x24) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ cargo build                                                               ▐│
+│ │ cargo build finished                                                      ▐│
+│ │ exited 0                                                                  ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== unclaimed live terminal (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ cargo mutants --in-diff diff                                              ▐│
+│ │ Running · 0s                                                              ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                               │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== live terminal removed after exit (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                   ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                               │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== older tool groups collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+╰──────────────────────────────────╯
+ctrl+b then : palette · ? keys
+
+=== older group expanded (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older provider title          ▐│
+│ │ older tool details            ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-companion               ▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+╰──────────────────────────────────╯
+ctrl+b then : palette · ? keys
+expanded tools: {2}
+
+=== older group collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+╰──────────────────────────────────╯
+ctrl+b then : palette · ? keys
+expanded tools: {}
+
+=== newer tool groups collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+╰──────────────────────────────────╯
+ctrl+b then : palette · ? keys
+
+=== newer group expanded (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer provider title          ▐│
+│ │ newer tool details            ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-companion               ▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+╰──────────────────────────────────╯
+ctrl+b then : palette · ? keys
+expanded tools: {6}
+
+=== newer group collapsed (36x48) ===
+╭ Conversation ────────────────────╮
+│ ○ Thinking                      ▐│
+│ │ older thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ older-command, older-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ older response                ▐│
+│                                 ▐│
+│ ○ Thinking                      ▐│
+│ │ newer thought with enough     ▐│
+│ │ words to wrap across several  ▐│
+│ │ rows                          ▐│
+│                                 ▐│
+│ ✓ Tool · done                   ▐│
+│ │ newer-command, newer-companion▐│
+│                                 ▐│
+│ ● Agent                         ▐│
+│ │ newer response                ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+│                                 ▐│
+╰──────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────╮
+│> Message the agent, or / for     │
+│  commands                        │
+╰──────────────────────────────────╯
+ctrl+b then : palette · ? keys
+expanded tools: {}
+
+=== wrapped summary member expands from continuation row (30x24) ===
+╭ Conversation ──────────────╮
+│ ✓ Tool · done             ▐│
+│ │ first command with a    ▐│
+│ │ long argument           ▐│
+│                           ▐│
+│ ✓ Tool · done             ▐│
+│ │ second command with a   ▐│
+│ │ long argument           ▐│
+│                           ▐│
+│ ✓ Tool · done             ▐│
+│ │ third command with a    ▐│
+│ │ long argument           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭ 🎙︎ ─────────────────────────╮
+│> Message the agent, or /   │
+│  for commands              │
+╰────────────────────────────╯
+ctrl+b then : palette · ? keys
+second member hitboxes: 3
+expanded tools: {2}
+
+=== tool call status update (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ read                                                                      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== raw markdown markers (30x24) ===
+╭ Conversation · raw source ─╮
+│ ● Agent                   ▐│
+│ │ **bold**                ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭ 🎙︎ ─────────────────────────╮
+│> Message the agent, or /   │
+│  for commands              │
+╰────────────────────────────╯
+ctrl+b then : palette · ? keys
+
+=== inline tool calls (80x36) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ○ Thinking                                                                  ▐│
+│ │ first thought                                                             ▐│
+│                                                                             ▐│
+│ ✓ Ran cargo test -p brokk-mj-chat --lib                                     ▐│
+│   └ running 12 tests                                                        ▐│
+│     test case_1 ... ok                                                      ▐│
+│     … +9 lines                                                              ▐│
+│     test result: ok. 12 passed                                              ▐│
+│     exited 0                                                                ▐│
+│                                                                             ▐│
+│ ○ Thinking                                                                  ▐│
+│ │ second thought                                                            ▐│
+│                                                                             ▐│
+│ ✓ Read src/lib.rs                                                           ▐│
+│                                                                             ▐│
+│ ✓ Edit src/lib.rs                                                           ▐│
+│   └ src/lib.rs +3 -1                                                        ▐│
+│                                                                             ▐│
+│ × Ran cat missing.txt                                                       ▐│
+│   └ cat: missing.txt: No such file or directory xxxxxxxxxxxxxxxxxxxxxxxxxxx…▐│
+│     exited 1                                                                ▐│
+│                                                                             ▐│
+│ ● Running sleep 30 && echo done                                             ▐│
+│   └ waiting                                                                 ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== inline call expanded (80x36) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ │ running 12 tests                                                          ││
+│ │ test case_1 ... ok                                                        ││
+│ │ test case_2 ... ok                                                        ││
+│ │ test case_3 ... ok                                                        ││
+│ │ test case_4 ... ok                                                        ││
+│ │ test case_5 ... ok                                                        ▐│
+│ │ test case_6 ... ok                                                        ▐│
+│ │ test case_7 ... ok                                                        ▐│
+│ │ test case_8 ... ok                                                        ▐│
+│ │ test case_9 ... ok                                                        ▐│
+│ │ test case_10 ... ok                                                       ▐│
+│ │ test result: ok. 12 passed                                                ▐│
+│ │ exited 0                                                                  ▐│
+│                                                                             ▐│
+│ ○ Thinking                                                                  ▐│
+│ │ second thought                                                            ▐│
+│                                                                             ▐│
+│ ✓ Read src/lib.rs                                                           ▐│
+│                                                                             ▐│
+│ ✓ Edit src/lib.rs                                                           ▐│
+│   └ src/lib.rs +3 -1                                                        ▐│
+│                                                                             ▐│
+│ × Ran cat missing.txt                                                       ▐│
+│   └ cat: missing.txt: No such file or directory xxxxxxxxxxxxxxxxxxxxxxxxxxx…▐│
+│     exited 1                                                                ▐│
+│                                                                             ▐│
+│ ● Running sleep 30 && echo done                                             ▐│
+│   └ waiting                                                                 ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+expanded tools: {2}
+
+=== inline with one output line and ASCII symbols (80x36) ===
++ Conversation ----------------------------------------------------------------+
+| o Thinking                                                                  #|
+| | first thought                                                             #|
+|                                                                             #|
+| x Ran cargo test -p brokk-mj-chat --lib                                     #|
+|   `- .. +13 lines                                                           #|
+|                                                                             #|
+| o Thinking                                                                  #|
+| | second thought                                                            #|
+|                                                                             #|
+| x Read src/lib.rs                                                           #|
+|                                                                             #|
+| x Edit src/lib.rs                                                           #|
+|   `- src/lib.rs +3 -1                                                       #|
+|                                                                             #|
+| x Ran cat missing.txt                                                       #|
+|   `- .. +2 lines                                                            #|
+|                                                                             #|
+| * Running sleep 30 && echo done                                             #|
+|   `- waiting                                                                #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
+|                                                                             #|
++------------------------------------------------------------------------------+
++ mic -------------------------------------------------------------------------+
+|> Message the agent, or / for commands                                        |
+|                                                                              |
++--------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send | ctrl+b then : palette - ? keys

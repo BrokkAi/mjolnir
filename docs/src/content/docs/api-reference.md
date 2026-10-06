@@ -100,6 +100,22 @@ match on.
 
 ## Routes
 
+### Get a GitHub App installation token
+
+```text
+GET /api/v1/github-token?owner=acme
+GET /api/v1/github-token?repo=acme/project&repo=acme/tools
+```
+
+The authenticated daemon client receives a currently valid installation token
+for the configured GitHub App. An owner selects its installation and returns
+an installation-wide token. Repeated `repo=OWNER/NAME` values discover one
+installation and limit the token to those repositories. The response is
+`{ "token": "..." }`; treat it as a secret and never log or persist it. The
+route returns an error when no App is configured.
+The [`mj github-token`](/cli-reference/#github-app-token) command wraps this
+route.
+
 ### List workspaces
 
 ```text
@@ -709,7 +725,6 @@ it, or `"review": null` when none is open:
 {
   "session_id": "0123abcd…",
   "review": {
-    "tier": "quick",
     "status": "sending findings to the primary agent…",
     "roles": [{ "label": "reviewer", "state": "findings" }],
     "verdict": {

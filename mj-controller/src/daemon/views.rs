@@ -184,7 +184,7 @@ impl RuntimeState {
                 active_stages: active
                     .active_stages
                     .iter()
-                    .map(|(stage, (_, started_at))| (*stage, *started_at))
+                    .map(|(stage, (_, started_at))| (stage.clone(), *started_at))
                     .collect(),
                 resume_destination: active.resume_destination.clone(),
                 notice: active.notice.clone(),
@@ -444,10 +444,13 @@ impl RuntimeState {
                 return;
             }
             if active {
+                let started_at = stage
+                    .started_at_epoch_seconds()
+                    .unwrap_or_else(epoch_seconds);
                 let entry = operation
                     .active_stages
                     .entry(stage)
-                    .or_insert_with(|| (0, epoch_seconds()));
+                    .or_insert_with(|| (0, started_at));
                 entry.0 += 1;
                 entry.0 == 1
             } else {

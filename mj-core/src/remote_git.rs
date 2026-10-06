@@ -316,11 +316,11 @@ fn expand_github_source(source: &str) -> Result<String> {
     let shorthand = !source.contains("://")
         && !source.contains('@')
         && !source.contains(':')
-        && source.split('/').count() == 2
-        && source.split('/').all(|part| !part.is_empty());
+        && source.contains('/');
     let expanded = if shorthand {
-        let path = source.strip_suffix(".git").unwrap_or(source);
-        format!("https://github.com/{path}.git")
+        let (owner, repository) = github_owner_repo(source)
+            .with_context(|| format!("invalid GitHub owner/repository {source:?}"))?;
+        format!("https://github.com/{owner}/{repository}.git")
     } else {
         source.to_owned()
     };
@@ -331,6 +331,70 @@ fn expand_github_source(source: &str) -> Result<String> {
         )
     })?;
     Ok(expanded)
+}
+
+/// Return the GitHub owner and repository named by a supported GitHub source.
+///
+/// This accepts the same HTTPS, SSH, and `owner/repository` spellings as
+/// [`resolve_repository`]. Other Git hosts return `None`.
+pub fn github_owner_repo(source: &str) -> Option<(String, String)> {
+    let source = source.trim();
+    let path = if !source.contains("://") {
+        if let Some((authority, path)) = source.split_once(':') {
+            let host = authority.rsplit('@').next()?;
+            if !matches!(
+                host.to_ascii_lowercase().as_str(),
+                "github.com" | "ssh.github.com"
+            ) {
+                return None;
+            }
+            if authority.contains('@')
+                && authority
+                    .rsplit_once('@')
+                    .is_none_or(|(user, _)| user != "git")
+            {
+                return None;
+            }
+            path.to_owned()
+        } else if !source.contains('@') {
+            source.to_owned()
+        } else {
+            return None;
+        }
+    } else {
+        let url = Url::parse(source).ok()?;
+        let host = url.host_str()?.to_ascii_lowercase();
+        let github_host = match (url.scheme(), host.as_str()) {
+            ("http" | "https" | "git", "github.com") => true,
+            ("ssh", "github.com") => true,
+            ("ssh", "ssh.github.com") => url.port() == Some(443),
+            _ => false,
+        };
+        if !github_host || url.query().is_some() || url.fragment().is_some() {
+            return None;
+        }
+        url.path().strip_prefix('/')?.to_owned()
+    };
+    let path = path.strip_suffix(".git").unwrap_or(&path);
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repository = parts.next()?;
+    if parts.next().is_some()
+        || !crate::config::valid_github_owner_login(owner)
+        || !valid_github_repository_name(repository)
+    {
+        return None;
+    }
+    Some((owner.to_owned(), repository.to_owned()))
+}
+
+fn valid_github_repository_name(repository: &str) -> bool {
+    !repository.is_empty()
+        && repository.len() <= 100
+        && !matches!(repository, "." | "..")
+        && repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn network_git_output(output: &CommandOutput) -> Result<(Option<String>, Option<String>)> {
@@ -430,9 +494,37 @@ mod tests {
             destination: "repo".into(),
             git_ref: None,
         };
-        let source = resolve_repository(&repository, &NoopExecutor).unwrap();
+        let source = resolve_repository(&repository, &crate::targets::ProcessExecutor).unwrap();
         assert_eq!(source.fetch_url, "https://github.com/BrokkAi/hel.git");
         assert_eq!(source.push_urls, ["https://github.com/BrokkAi/hel.git"]);
+    }
+
+    #[test]
+    fn github_owner_repo_understands_supported_remote_spellings() {
+        for source in [
+            "acme/widget",
+            "acme/widget.git",
+            "github.com:acme/widget",
+            "git@github.com:acme/widget.git",
+            "https://github.com/acme/widget.git",
+            "ssh://git@github.com/acme/widget.git",
+            "ssh://git@ssh.github.com:443/acme/widget.git",
+        ] {
+            assert_eq!(
+                github_owner_repo(source),
+                Some(("acme".into(), "widget".into())),
+                "source {source:?}"
+            );
+        }
+        assert_eq!(
+            github_owner_repo("https://gitlab.com/acme/widget.git"),
+            None
+        );
+        assert_eq!(
+            github_owner_repo("ssh://git@ssh.github.com/acme/widget"),
+            None
+        );
+        assert_eq!(github_owner_repo("acme/widget/child"), None);
     }
 
     #[test]
@@ -487,13 +579,5 @@ mod tests {
             display_url("git@github.com:org/repo.git"),
             "github.com:org/repo.git"
         );
-    }
-
-    struct NoopExecutor;
-
-    impl CommandExecutor for NoopExecutor {
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            bail!("unexpected command")
-        }
     }
 }

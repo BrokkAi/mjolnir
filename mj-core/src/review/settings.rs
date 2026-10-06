@@ -38,15 +38,6 @@ impl ReviewProvider {
             Self::Other => None,
         }
     }
-
-    pub fn specialist_policy(self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Self::Codex => Some(("luna", "xhigh")),
-            Self::Claude => Some(("sonnet", "xhigh")),
-            Self::DeepSeek => Some(("flash", "high")),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,7 +53,6 @@ pub struct ResolvedReviewSettings {
     pub profile: String,
     pub generation: u64,
     pub main: ReviewModelSettings,
-    pub specialist: ReviewModelSettings,
     pub automatic: bool,
     pub same_provider: bool,
 }
@@ -133,15 +123,6 @@ pub fn can_review(config: &crate::config::Config) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn families_match_namespaced_k_series_and_natural_versions() {
-        assert!(model_matches_family("kimi-code/k3", "k-series"));
-        assert!(model_matches_family("k4-preview", "k-series"));
-        assert!(!model_matches_family("kimi-latest", "k-series"));
-        assert!(!model_matches_family("gpt-6-astral", "astra"));
-        assert!(model_matches_family("gpt-6-astra", "astra"));
-        assert!(model_version_cmp("gpt-5.10-luna", "gpt-5.9-luna").is_gt());
-    }
     #[test]
     fn deepseek_identity_and_auto_eligibility_follow_provider_not_harness() {
         let home = tempfile::tempdir().unwrap();

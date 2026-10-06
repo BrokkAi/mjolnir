@@ -130,6 +130,7 @@ mod tests {
         .context("record_api_activities")
     }
 
+    // Hard-won: 3c668c3d: one SQLITE_BUSY recorder failure terminated the native API server.
     #[tokio::test]
     async fn recorder_retries_the_same_diff_after_a_failure_and_keeps_running() {
         let (sender, receiver) = tokio::sync::watch::channel(snapshot(&[]));

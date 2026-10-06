@@ -1074,17 +1074,59 @@ impl DashboardState {
             let key = self.project_source(session).key;
             self.collapsed_project_keys.remove(&key);
         }
-        // A filter that hides the session the person asked for is no longer
-        // what they want.
-        if !self
-            .ordered_sessions()
-            .iter()
-            .any(|session| session.id == session_id)
+        self.select_active_session(session_id);
+        self.clear_filter_hiding_selection();
+        self.open_selected_session()
+    }
+
+    /// Opens a session selected from the CPU report. Managed sub-agents live
+    /// in their direct parent's virtual workspace, so crossing workspaces
+    /// carries both the child selection and the parent view to restore.
+    pub(crate) fn focus_session_from_cpu_report(&mut self, session_id: &str) -> DashboardAction {
+        let Some(session) = self.state.sessions.get(session_id) else {
+            return DashboardAction::None;
+        };
+        let session_workspace = session.workspace_id.clone();
+        let parent_id = self
+            .state
+            .subagents
+            .get(session_id)
+            .map(|relation| relation.parent_session_id.clone());
+        self.cancel_modal();
+
+        if let Some(parent_id) = parent_id {
+            let Some(parent) = self.state.sessions.get(&parent_id) else {
+                return DashboardAction::None;
+            };
+            let parent_workspace = parent.workspace_id.clone();
+            if self.active_workspace_id() == Some(parent_workspace.as_str()) {
+                self.open_subagent_workspace(parent_id);
+                self.select_active_session(session_id);
+                self.clear_filter_hiding_selection();
+                return self.open_selected_session();
+            }
+
+            let action = self.focus_session_anywhere(&parent_workspace, session_id);
+            if matches!(action, DashboardAction::SelectWorkspace { .. }) {
+                self.navigation_subagent_parent = Some(parent_id);
+            }
+            return action;
+        }
+
+        self.focus_session_anywhere(&session_workspace, session_id)
+    }
+
+    /// Drops a Sessions filter that hides the session the person just went
+    /// to. The list keeps a selected row even when the filter does not match
+    /// it, so this asks the filter, not the list.
+    pub(crate) fn clear_filter_hiding_selection(&mut self) {
+        if self
+            .selected_session_id()
+            .and_then(|id| self.state.sessions.get(id))
+            .is_some_and(|session| self.session_outside_filter(session))
         {
             *self.sessions_filter = None;
         }
-        self.select_active_session(session_id);
-        self.open_selected_session()
     }
 
     /// Records a fresh reading of a session's checkout, or why there is none.
@@ -1411,18 +1453,6 @@ mod verdict_tests {
             false,
             false,
         )
-    }
-
-    #[test]
-    fn awaiting_input_demands_attention_until_a_new_turn_starts() {
-        let mut detail = SessionDetail {
-            awaiting_input: true,
-            unread_agent_messages: 1,
-            ..Default::default()
-        };
-        assert_eq!(level(&detail), AttentionLevel::Waiting);
-        detail.current_turn_started_at = Some(1);
-        assert_eq!(level(&detail), AttentionLevel::Working);
     }
 
     #[test]

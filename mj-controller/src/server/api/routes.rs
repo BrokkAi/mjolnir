@@ -7,6 +7,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             get(native_agent_history),
         )
         .route("/events", get(events::events))
+        .route("/github-token", get(github_token))
         .route("/profiles/{profile_id}/config", get(profile_config))
         .route(
             "/profiles/{profile_id}/subagent-options",

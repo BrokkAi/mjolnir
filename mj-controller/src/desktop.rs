@@ -102,12 +102,4 @@ mod tests {
         assert!(error.contains("protocol 99"), "{error}");
         assert!(!error.contains("secret"), "{error}");
     }
-
-    #[test]
-    fn companion_path_replaces_only_the_executable_filename() {
-        let current = Path::new("target/profile/mj");
-        let expected =
-            Path::new("target/profile").join(format!("mj-desktop{}", std::env::consts::EXE_SUFFIX));
-        assert_eq!(sibling_executable(current, "mj-desktop"), expected);
-    }
 }

@@ -69,47 +69,19 @@ pub(super) async fn launch_role(
     role: &str,
     reviewer: &ReviewerIdentity,
     generation: u64,
-    repositories: &[PathBuf],
 ) -> Result<(), String> {
-    // A specialist lane's analyzers are its identity, so it gets the `slopcop`
-    // set as well as navigation; every other role navigates and reads rather
-    // than running analyzers.
-    let lane = mj_review::lanes::lane_by_id(role).is_some();
-    let mcp_servers = mj_review::bifrost::review_mcp_servers(
-        repositories,
-        if lane {
-            mj_review::lanes::LANE_BIFROST_TOOLSET
-        } else {
-            mj_review::lanes::SUPERVISOR_BIFROST_TOOLSET
-        },
-    );
-    // Only the supervisor may launch specialists.
-    let dispatch_tool = role == SUPERVISOR_ROLE;
     let staged = {
         let session_id = session_id.to_owned();
         let profile = reviewer.profile.clone();
         let environment = environment.clone();
-        tokio::task::spawn_blocking(move || {
-            environment.stage(
-                &session_id,
-                &profile,
-                generation,
-                &mcp_servers,
-                dispatch_tool,
-            )
-        })
-        .await
-        .map_err(|error| format!("staging the reviewer stopped: {error}"))??
+        tokio::task::spawn_blocking(move || environment.stage(&session_id, &profile, generation))
+            .await
+            .map_err(|error| format!("staging the reviewer stopped: {error}"))??
     };
     let mut config = staged;
-    let model = if lane {
-        &reviewer.specialist
-    } else {
-        &reviewer.main
-    };
-    config.model = model.model.clone();
-    config.effort = model.effort.clone();
-    config.fast_mode = model.fast_mode.then_some(true);
+    config.model = reviewer.main.model.clone();
+    config.effort = reviewer.main.effort.clone();
+    config.fast_mode = reviewer.main.fast_mode.then_some(true);
     match reviewer_action(
         control,
         session_id,
@@ -131,7 +103,6 @@ pub(super) async fn prepare(
     environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
     config: ReviewConfig,
-    tier: ReviewTier,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Prepared, StartRefusal> {
     // A sub-agent's changes are reviewed through its parent's turn. Asking
@@ -251,7 +222,6 @@ pub(super) async fn prepare(
             state,
             // No reviewer process starts for a turn with nothing to review.
             reviewer: ReviewerIdentity::default(),
-            tier,
             materialized: Box::new(snapshot.materialized),
             resume_forward: None,
             captured,
@@ -276,7 +246,6 @@ pub(super) async fn prepare(
     Ok(Prepared {
         state,
         reviewer: reviewer.clone(),
-        tier,
         materialized: Box::new(snapshot.materialized),
         resume_forward: None,
         captured,
@@ -331,7 +300,6 @@ pub(super) async fn prepare_recovery(
         state,
         // No reviewer process is started for a handoff-only recovery.
         reviewer: ReviewerIdentity::default(),
-        tier: ReviewTier::Quick,
         materialized: Box::new(snapshot.materialized),
         resume_forward: Some(pending),
         captured: None,
@@ -355,11 +323,19 @@ fn is_turn_review_command(command_id: &str) -> bool {
     command_id.starts_with(mj_core::review::driver::COMMAND_ID_PREFIX)
 }
 
-/// The quick tier's validator and the extended tier's intent analyst, which
-/// reviews no longer run. A worker that predates their removal may still have
-/// one running when a review was interrupted, so the leftover sweep stops them
-/// like any other turn-review role.
-const LEGACY_ROLES: [&str; 2] = ["validator", "intent"];
+/// Removed turn-review roles may still run in a worker after a daemon restart.
+/// Keep their identities here until those workers have been replaced.
+const LEGACY_ROLES: [&str; 9] = [
+    "validator",
+    "intent",
+    "supervisor",
+    "control_flow",
+    "duplication",
+    "error_handling",
+    "dead_code",
+    "tests",
+    "contracts",
+];
 
 /// Stops, in the worker, every reviewing role a turn review left running
 /// when the daemon that drove it went away.
@@ -374,10 +350,8 @@ const LEGACY_ROLES: [&str; 2] = ["validator", "intent"];
 /// stopped only while it runs a turn review's prompt. The other roles belong
 /// to turn reviews alone; pausing one that is not running does nothing.
 pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Result<(), String> {
-    use mj_core::review::driver::{REVIEWER_ROLE, SUPERVISOR_ROLE};
+    use mj_core::review::driver::REVIEWER_ROLE;
     let mut roles = LEGACY_ROLES.to_vec();
-    roles.push(SUPERVISOR_ROLE);
-    roles.extend(mj_review::lanes::REVIEW_LANES.iter().map(|lane| lane.id));
     let status = handle
         .reviewer_as(Some(REVIEWER_ROLE.to_owned()), ReviewerAction::Status)
         .await
@@ -396,6 +370,12 @@ pub(super) async fn stop_leftover_review(handle: &ManagedSessionHandle) -> Resul
             .reviewer_as(Some(role.to_owned()), ReviewerAction::Pause)
             .await
         {
+            // A worker that does not support named roles cannot have those
+            // legacy processes to stop. Workers with generic role support
+            // receive these requests and pause any live legacy roles.
+            if error.to_string().contains("no longer supported") {
+                continue;
+            }
             failures.push(format!("{role}: {error:#}"));
         }
     }
@@ -529,7 +509,6 @@ pub fn resolution_notice(
 /// than against the author's own account of it.
 pub(super) fn seed_from_session(
     session: &MaterializedSession,
-    tier: ReviewTier,
     state: &TurnReviewState,
     _trigger: &str,
 ) -> TurnReviewSeed {
@@ -572,7 +551,6 @@ pub(super) fn seed_from_session(
         user_messages.push(UserMessage::prompt(text));
     }
     TurnReviewSeed {
-        tier,
         task,
         user_messages,
         baselines: state.baselines.clone(),

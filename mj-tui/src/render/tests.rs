@@ -1,4 +1,3 @@
-use mj_client::quota::{five_hour_quota_reset_countdown, quota_reset_countdown};
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
@@ -47,25 +46,6 @@ fn session_metadata_text(
     .to_string()
 }
 
-#[test]
-fn scrollbar_thumb_reaches_both_ends_of_the_viewport() {
-    let mut terminal = Terminal::new(TestBackend::new(1, 10)).unwrap();
-    for (position, thumb_row) in [(0, 1), (90, 8)] {
-        terminal
-            .draw(|frame| {
-                render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 100, position, 10);
-            })
-            .unwrap();
-        assert_eq!(terminal.backend().buffer()[(0, thumb_row)].symbol(), "▐");
-    }
-    terminal
-        .draw(|frame| {
-            render_session_scrollbar(frame, Rect::new(0, 0, 1, 10), 10, 0, 10);
-        })
-        .unwrap();
-    assert!((0..10).all(|row| terminal.backend().buffer()[(0, row)].symbol() == " "));
-}
-
 fn minimize_all_panes(dashboard: &mut DashboardState) {
     for pane in [
         SupportPane::Sessions,
@@ -76,45 +56,40 @@ fn minimize_all_panes(dashboard: &mut DashboardState) {
     }
 }
 
-#[test]
-fn grouped_dashboard_has_no_column_header_and_uses_fixed_session_summaries() {
-    let mut dashboard = dashboard_with_session(running_session());
-    apply_materialized_transcript(&mut dashboard, numbered_conversation(2));
-    dashboard
-        .session_details
-        .get_mut("session-1")
-        .unwrap()
-        .current_turn_started_at = Some(now_seconds().saturating_sub(10));
-    dashboard
-        .session_details
-        .get_mut("session-1")
-        .unwrap()
-        .queued_prompts
-        .push(mj_core::relay::QueuedPrompt {
-            id: "queued-1".into(),
-            text: "later".into(),
-            attachments: Vec::new(),
-            created_at_ms: 1,
-        });
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
+fn append_golden_state(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    lines: &[String],
+) {
+    output.push_str(&format!("=== {label} ({width}x{height}) ===\n"));
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+}
 
-    assert!(rendered.contains("hel"));
-    assert!(!rendered.contains("[1] hel"));
-    assert!(!rendered.contains("Turn clock"));
-    assert!(!rendered.contains("Session name"));
-    assert!(rendered.contains("podman"), "{rendered}");
-    assert!(rendered.contains("codex-1"), "{rendered}");
-    assert!(rendered.contains("[Q 1]"));
-    assert!(rendered.contains("Sessions"));
-    assert!(!rendered.contains("Turn=time"));
-    assert!(!rendered.contains("Step=time"));
-    assert!(rendered.contains("codex-1"));
-    assert!(!rendered.contains("queued]"));
-    assert!(rendered.contains("answer 1"));
+fn append_golden_value(output: &mut String, label: &str, value: impl std::fmt::Debug) {
+    output.push_str(&format!("{label}: {value:?}\n"));
+}
+
+fn append_dashboard_golden(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    dashboard: &mut DashboardState,
+) {
+    let lines = drawn(dashboard, width, height);
+    append_golden_state(output, label, width, height, &lines);
+}
+
+fn clear_session_activity(dashboard: &mut DashboardState, session_id: &str) {
+    let detail = dashboard
+        .session_details
+        .get_mut(session_id)
+        .expect("the session detail is present");
+    detail.current_turn_started_at = None;
+    detail.activity = Default::default();
 }
 
 #[test]
@@ -173,43 +148,6 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
     assert!(
         minimized.contains("Sessions [!1]") || minimized.contains("!1"),
         "{minimized}"
-    );
-}
-
-#[test]
-fn a_modal_overlays_the_dashboard_instead_of_replacing_it() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_workspace_name("UNDERLYING DASHBOARD SENTINEL".into());
-    // The rename editor is reached through the command palette now.
-    dashboard.focus_sessions();
-    open_palette(&mut dashboard);
-    for character in "rename".chars() {
-        dashboard.handle_key(crate::test_support::key(KeyCode::Char(character)));
-    }
-    assert_eq!(
-        dashboard.handle_key(crate::test_support::key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw rename dialog");
-    let lines = buffer_lines(terminal.backend().buffer());
-
-    let row_of = |needle: &str| {
-        lines
-            .iter()
-            .position(|line| line.contains(needle))
-            .unwrap_or_else(|| panic!("missing {needle} in {lines:#?}"))
-    };
-    let popup_top = row_of("Rename session");
-    // The dashboard underneath still shows through every row the modal's
-    // centred popup does not cover.
-    assert!(row_of("Sessions") < popup_top);
-    assert!(
-        row_of("podman") < popup_top,
-        "the session row behind the popup still shows"
     );
 }
 
@@ -327,70 +265,10 @@ fn unanswered_user_line_stays_bright_and_shows_the_latest_agent_activity() {
     );
 }
 
-#[test]
-fn the_sessions_title_prioritizes_workspace_and_controls_at_minimum_width() {
-    let wide = sessions_title("a-workspace", 120, true, false)
-        .line
-        .to_string();
-    assert_eq!(wide, " Sessions · a-workspace ");
-    assert!(!wide.contains("Turn"));
-    assert!(!wide.contains("Step"));
-
-    let narrow = sessions_title("a-rather-long-workspace-name", 32, true, false)
-        .line
-        .to_string();
-    assert!(narrow.starts_with(" S · "), "{narrow:?}");
-    assert!(narrow.contains('…'), "{narrow:?}");
-    assert!(narrow.chars().count() <= usize::from(pane_title_content_width(32, true)));
-}
-
-/// User request 2026-09-26: while a filter is in force, the Sessions title
-/// ends the filter label with the chip that clears it, `×`, or `x` with
-/// ASCII symbols. A title without a filter has no chip, and a narrow title
-/// shortens the label rather than drop the chip.
-#[test]
-fn a_filter_label_on_the_sessions_title_ends_with_a_clear_chip_in_both_glyph_sets() {
-    use mj_core::config::SymbolSet;
-
-    for (symbols, close) in [(SymbolSet::Unicode, '×'), (SymbolSet::Ascii, 'x')] {
-        theme::with_symbols(symbols, || {
-            let unfiltered = sessions_title("", 120, true, false);
-            assert_eq!(unfiltered.line.to_string(), " Sessions ", "{symbols:?}");
-            assert_eq!(unfiltered.clear_chip, None, "{symbols:?}");
-
-            for label in ["working", "3 hidden · working"] {
-                let without = sessions_title(label, 120, true, false);
-                assert_eq!(without.line.to_string(), format!(" Sessions · {label} "));
-                assert_eq!(without.clear_chip, None);
-
-                let with = sessions_title(label, 120, true, true);
-                let text = with.line.to_string();
-                assert_eq!(text, format!(" Sessions · {label} {close} "));
-                let chip = usize::from(with.clear_chip.expect("the chip has room"));
-                assert_eq!(
-                    text.chars().skip(chip).collect::<String>(),
-                    format!(" {close} "),
-                    "the chip is the padded glyph that ends the title"
-                );
-            }
-
-            let narrow = sessions_title("a-rather-long-search-query", 32, true, true);
-            let text = narrow.line.to_string();
-            assert!(text.starts_with(" S · "), "{text:?}");
-            assert!(text.ends_with(&format!(" {close} ")), "{text:?}");
-            assert!(text.chars().count() <= usize::from(pane_title_content_width(32, true)));
-            assert_eq!(
-                narrow.clear_chip.map(usize::from),
-                Some(text.chars().count() - 3),
-                "{text:?}"
-            );
-        });
-    }
-}
-
 /// RCL-2 (2026-09-29): a minimized Sessions pane swaps its title for the
 /// attention count when the title is narrow. A filter in force must still show
 /// on it: the label gives way first, and the clear chip stays.
+// Hard-won: daa8f51d: With the Sessions pane minimized, the compact attention title dropped the active filter and its clear chip.
 #[test]
 fn a_narrow_sessions_title_with_attention_keeps_the_filter_clear_chip() {
     use crate::AttentionLevel;
@@ -435,132 +313,6 @@ fn a_narrow_sessions_title_with_attention_keeps_the_filter_clear_chip() {
 /// The drawn Sessions pane shows the chip on its title row exactly while a
 /// filter is in force, with the state label and, given the room, the hidden
 /// count before it.
-#[test]
-fn the_drawn_sessions_title_shows_the_clear_chip_only_while_a_filter_is_on() {
-    use mj_core::config::SymbolSet;
-
-    for (symbols, close, dot) in [(SymbolSet::Unicode, '×', '·'), (SymbolSet::Ascii, 'x', '-')] {
-        let mut dashboard = dashboard_with_session(running_session());
-        let mut config = dashboard.config.clone();
-        config.advanced.symbols = Some(symbols);
-        dashboard.set_config(config);
-        set_working(&mut dashboard, "session-1");
-        dashboard.focus_sessions();
-        // The Sessions pane's own cells on its title row.
-        let title = |dashboard: &mut DashboardState, width: u16| {
-            let lines = drawn(dashboard, width, 40);
-            let pane = dashboard.pane_areas.expect("pane areas")[0];
-            lines[usize::from(pane.y)]
-                .chars()
-                .skip(usize::from(pane.x))
-                .take(usize::from(pane.width))
-                .collect::<String>()
-        };
-        let chip = format!(" {close} ");
-
-        let unfiltered = title(&mut dashboard, 120);
-        assert!(unfiltered.contains("Sessions"), "{unfiltered:?}");
-        assert!(!unfiltered.contains(&chip), "{symbols:?}: {unfiltered:?}");
-
-        dashboard.handle_key(key(KeyCode::Char('w')));
-        let working = title(&mut dashboard, 120);
-        assert!(
-            working.contains(&format!(" Sessions {dot} working{chip}")),
-            "{symbols:?}: {working:?}"
-        );
-
-        // Nothing is blocked, but the active row remains visible outside
-        // the filter and must not be counted as hidden.
-        dashboard.handle_key(key(KeyCode::Char('b')));
-        let blocked = title(&mut dashboard, 240);
-        assert!(
-            blocked.contains(&format!(" Sessions {dot} blocked{chip}")),
-            "{symbols:?}: {blocked:?}"
-        );
-
-        dashboard.handle_key(key(KeyCode::Esc));
-        let cleared = title(&mut dashboard, 120);
-        assert!(!cleared.contains(&chip), "{symbols:?}: {cleared:?}");
-    }
-}
-
-#[test]
-fn actual_sessions_renderer_keeps_actions_and_row_shapes_across_widths() {
-    use mj_core::config::SessionsSide;
-
-    for (width, expected_sidebar) in [(80, 40), (120, 40), (180, 60)] {
-        for side in [SessionsSide::Left, SessionsSide::Right] {
-            let mut dashboard = dashboard_with_session(running_session());
-            dashboard.config.sessions_side = side;
-            dashboard
-                .session_details
-                .get_mut("session-1")
-                .expect("fixture detail")
-                .queued_prompts
-                .push(mj_core::relay::QueuedPrompt {
-                    id: "queued".into(),
-                    text: "follow-up".into(),
-                    attachments: Vec::new(),
-                    created_at_ms: 1,
-                });
-            let rendered = drawn(&mut dashboard, width, 40).join("\n");
-            let sessions = dashboard.pane_areas.expect("dashboard panes")[0];
-            assert_eq!(sessions.width, expected_sidebar);
-            assert!(rendered.contains("Create"), "{rendered}");
-            assert!(rendered.contains("Open"), "{rendered}");
-            assert!(rendered.contains("Q"), "{rendered}");
-            assert!(
-                dashboard
-                    .session_row_areas
-                    .iter()
-                    .all(|(_, area)| area.height == 4)
-            );
-        }
-    }
-
-    let mut minimized = dashboard_with_session(running_session());
-    minimized.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
-    let rendered = drawn(&mut minimized, 80, 40).join("\n");
-    let sessions = minimized.pane_areas.expect("minimized panes")[0];
-    assert_eq!(sessions.width, 20);
-    assert!(rendered.contains("Create"), "{rendered}");
-    assert!(rendered.contains("Open"), "{rendered}");
-    assert!(
-        minimized
-            .session_row_areas
-            .iter()
-            .all(|(_, area)| area.height == 2)
-    );
-}
-
-#[test]
-fn minimized_running_clocks_leave_the_queue_count_visible() {
-    for elapsed in [45, 6_000, 172_800] {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
-        let detail = dashboard.session_details.get_mut("session-1").unwrap();
-        detail.current_turn_started_at = Some(now_seconds().saturating_sub(elapsed));
-        detail.pending_elicitations.clear();
-        detail.queued_prompts.push(mj_core::relay::QueuedPrompt {
-            id: "queued-1".into(),
-            text: "next task".into(),
-            attachments: Vec::new(),
-            created_at_ms: 1,
-        });
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .unwrap();
-        let (_, row) = dashboard.session_row_areas[0];
-        let status = (row.x..row.right())
-            .map(|x| terminal.backend().buffer()[(x, row.y + 1)].symbol())
-            .collect::<String>();
-        assert!(status.contains("Working "), "{status:?}");
-        assert!(status.contains(" Q1"), "{status:?}");
-        assert!(!status.contains('…'), "{status:?}");
-    }
-}
-
 #[test]
 fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -670,558 +422,6 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
             .all(|(pane, size, _)| *pane != SupportPane::Targets || *size != PaneSize::Maximized)
     );
     assert_eq!(dashboard.focus(), Focus::Sessions);
-}
-
-#[test]
-fn unavailable_sessions_maximum_is_hidden_and_returns_on_resize() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
-
-    let mut narrow = Terminal::new(TestBackend::new(80, 40)).expect("narrow terminal");
-    narrow
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw narrow dashboard");
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Maximized
-    );
-    assert!(!dashboard.pane_maximize_enabled(SupportPane::Sessions));
-    assert_eq!(dashboard.pane_areas.expect("pane areas")[0].width, 40);
-    let session_controls = dashboard
-        .pane_size_control_areas
-        .iter()
-        .copied()
-        .filter(|(pane, _, _)| *pane == SupportPane::Sessions)
-        .collect::<Vec<_>>();
-    assert_eq!(session_controls.len(), 2);
-    assert!(
-        session_controls
-            .iter()
-            .all(|(_, size, _)| *size != PaneSize::Maximized)
-    );
-    let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
-    let session_title = (sessions_area.x..sessions_area.right())
-        .map(|x| narrow.backend().buffer()[(x, sessions_area.y)].symbol())
-        .collect::<String>();
-    assert!(!session_title.contains('□'), "{session_title:?}");
-    assert_eq!(session_controls[1].2.x, session_controls[0].2.x + 4);
-    assert_eq!(session_controls[1].2.right(), sessions_area.right() - 1);
-    let standard = session_controls
-        .iter()
-        .find(|(_, size, _)| *size == PaneSize::Standard)
-        .map(|(_, _, area)| *area)
-        .expect("visible Standard control");
-    let cell = &narrow.backend().buffer()[(standard.x + 1, standard.y)];
-    assert_eq!(Some(cell.bg), theme::active_control().bg);
-    assert_eq!(cell.fg, theme::palette().accent);
-    assert!(cell.modifier.contains(Modifier::BOLD));
-
-    dashboard.focus_sessions();
-    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
-    chord(&mut dashboard, crate::CommandId::CycleFocusedPaneSize);
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Minimized,
-        "the pane-size chord skips unavailable Maximized from Standard"
-    );
-
-    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
-    let mut wide = Terminal::new(TestBackend::new(120, 40)).expect("wide terminal");
-    wide.draw(|frame| render(frame, &mut dashboard))
-        .expect("draw wide dashboard");
-    assert_eq!(
-        dashboard.pane_size(SupportPane::Sessions),
-        PaneSize::Maximized
-    );
-    assert!(dashboard.pane_maximize_enabled(SupportPane::Sessions));
-    assert_eq!(dashboard.pane_areas.expect("pane areas")[0].width, 60);
-    let maximum = dashboard
-        .pane_size_control_areas
-        .iter()
-        .find(|(pane, size, _)| *pane == SupportPane::Sessions && *size == PaneSize::Maximized)
-        .map(|(_, _, area)| *area)
-        .expect("visible Maximized control");
-    let sessions_area = dashboard.pane_areas.expect("pane areas")[0];
-    assert_eq!(maximum.right(), sessions_area.right() - 1);
-    let cell = &wide.backend().buffer()[(maximum.x + 1, maximum.y)];
-    assert_eq!(Some(cell.bg), theme::active_control().bg);
-    assert_eq!(cell.fg, theme::palette().accent);
-    assert!(cell.modifier.contains(Modifier::BOLD));
-}
-
-#[test]
-fn sessions_sidebar_layout_uses_fractional_sizes_and_caps() {
-    for (width, standard, maximized) in
-        [(80, 40, 40), (120, 40, 60), (240, 80, 100), (480, 80, 100)]
-    {
-        let mut standard_dashboard = dashboard_with_session(running_session());
-        standard_dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
-        drawn(&mut standard_dashboard, width, 40);
-        assert_eq!(
-            standard_dashboard.pane_areas.expect("standard pane areas")[0].width,
-            standard,
-            "standard width at {width} columns"
-        );
-
-        let mut maximized_dashboard = dashboard_with_session(running_session());
-        maximized_dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Maximized);
-        drawn(&mut maximized_dashboard, width, 40);
-        assert_eq!(
-            maximized_dashboard
-                .pane_areas
-                .expect("maximized pane areas")[0]
-                .width,
-            maximized,
-            "maximized width at {width} columns"
-        );
-    }
-}
-
-#[test]
-fn maximize_availability_tracks_content_and_works_from_minimized() {
-    let mut dashboard = dashboard_with_session(running_session());
-    drawn(&mut dashboard, 120, 40);
-    assert!(!dashboard.pane_maximize_enabled(SupportPane::Quota));
-
-    let profile = dashboard.config.profiles.values().next().unwrap().clone();
-    for index in 0..20 {
-        dashboard
-            .config
-            .profiles
-            .insert(format!("extra-{index}"), profile.clone());
-    }
-    drawn(&mut dashboard, 120, 40);
-    assert!(dashboard.pane_maximize_enabled(SupportPane::Quota));
-    let standard_height = dashboard.pane_areas.unwrap()[2].height;
-    dashboard.set_pane_size(SupportPane::Quota, PaneSize::Minimized);
-    drawn(&mut dashboard, 120, 40);
-    assert!(dashboard.pane_maximize_enabled(SupportPane::Quota));
-    let maximum = dashboard
-        .pane_size_control_areas
-        .iter()
-        .find(|(pane, size, _)| *pane == SupportPane::Quota && *size == PaneSize::Maximized)
-        .unwrap()
-        .2;
-    let focus = dashboard.focus();
-    dashboard.handle_mouse(mouse_at_row(
-        MouseEventKind::Down(MouseButton::Left),
-        maximum,
-        0,
-    ));
-    assert_eq!(dashboard.pane_size(SupportPane::Quota), PaneSize::Maximized);
-    assert_eq!(dashboard.focus(), focus);
-    drawn(&mut dashboard, 120, 40);
-    assert!(dashboard.pane_areas.unwrap()[2].height > standard_height);
-
-    drawn(&mut dashboard, 120, 120);
-    assert!(!dashboard.pane_maximize_enabled(SupportPane::Quota));
-}
-
-#[test]
-fn the_pane_preset_compacts_sessions_and_returns_space_to_the_conversation() {
-    for (height, expected_sessions_height) in [(32, 28), (44, 40)] {
-        let mut dashboard = minimized_sessions_dashboard(3, 2);
-        dashboard
-            .restore_pane_sizes(crate::PaneSizes::default())
-            .unwrap();
-        dashboard.focus_sessions();
-        let standard = drawn(&mut dashboard, 120, height).join("\n");
-        let standard_panes = dashboard.pane_areas.unwrap();
-        let standard_transcript = dashboard.focused_transcript_area().unwrap();
-        assert!(standard.contains("Idle"), "{standard}");
-        assert!(standard.contains("codex-1"), "{standard}");
-
-        chord(&mut dashboard, crate::CommandId::TogglePanePreset);
-        let compact = drawn(&mut dashboard, 120, height).join("\n");
-        let compact_panes = dashboard.pane_areas.unwrap();
-        assert_eq!(compact_panes[0].height, expected_sessions_height);
-        assert_eq!(compact_panes[1].height, 1);
-        assert_eq!(compact_panes[2].height, 1);
-        assert!(compact_panes[0].width < standard_panes[0].width);
-        assert!(dashboard.focused_transcript_area().unwrap().height > standard_transcript.height);
-        assert!(!compact.contains("You:"), "{compact}");
-        assert!(!compact.contains("Agent:"), "{compact}");
-        assert!(!dashboard.session_row_areas.is_empty());
-
-        chord(&mut dashboard, crate::CommandId::TogglePanePreset);
-        drawn(&mut dashboard, 120, height);
-        assert_eq!(dashboard.pane_areas.unwrap(), standard_panes);
-        assert_eq!(
-            dashboard.focused_transcript_area().unwrap(),
-            standard_transcript
-        );
-    }
-}
-
-#[test]
-fn tab_focus_never_changes_band_geometry() {
-    let mut dashboard = minimized_sessions_dashboard(3, 2);
-    for pane in [
-        SupportPane::Sessions,
-        SupportPane::Targets,
-        SupportPane::Quota,
-    ] {
-        dashboard.set_pane_size(pane, PaneSize::Standard);
-    }
-    drawn(&mut dashboard, 120, 44);
-    let expected = (
-        dashboard.pane_areas,
-        dashboard.focused_transcript_area(),
-        dashboard.focused_prompt_area(),
-    );
-    for _ in 0..4 {
-        dashboard.cycle_focus(false);
-        drawn(&mut dashboard, 120, 44);
-        assert_eq!(
-            (
-                dashboard.pane_areas,
-                dashboard.focused_transcript_area(),
-                dashboard.focused_prompt_area(),
-            ),
-            expected
-        );
-    }
-}
-
-#[test]
-fn expanded_sessions_keep_selection_inside_the_card_and_a_blank_row_between_cards() {
-    let mut first = running_session();
-    first.id = "session-first".into();
-    first.project_directory = Some("/projects/shared".into());
-    first.session_title_override = Some("First session".into());
-    let mut second = running_session();
-    second.id = "session-second".into();
-    second.project_directory = Some("/projects/shared".into());
-    second.session_title_override = Some("Second session".into());
-    second.created_at = "2026-08-10T00:00:00Z".into();
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(first.id.clone(), first), (second.id.clone(), second)]
-            .into_iter()
-            .collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    let first = dashboard.ordered_sessions()[0].id.clone();
-    dashboard.select_active_session(&first);
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let first_y = lines
-        .iter()
-        .position(|line| line.contains("First session"))
-        .expect("first session row") as u16;
-    let second_y = lines
-        .iter()
-        .position(|line| line.contains("Second session"))
-        .expect("second session row") as u16;
-    assert_eq!(
-        buffer[(
-            cell_column(&lines[first_y as usize], "First session"),
-            first_y
-        )]
-            .bg,
-        theme::palette().selection,
-        "the selected session is distinguished from the surrounding project"
-    );
-
-    assert_eq!(
-        buffer[(
-            cell_column(&lines[second_y as usize], "Second session"),
-            second_y
-        )]
-            .bg,
-        theme::palette().surface,
-        "unselected sessions stay on the quiet panel surface"
-    );
-    assert!(lines[first_y as usize].contains("› "));
-    assert!(lines[first_y as usize].contains("First session"));
-    assert_eq!(
-        second_y,
-        first_y + 5,
-        "sessions in an expanded project have one blank row between them"
-    );
-    let pane = dashboard.pane_areas.expect("pane areas")[0];
-    assert!(
-        (pane.x + 1..pane.right() - 1).all(|x| buffer[(x, first_y + 4)].symbol().trim().is_empty())
-    );
-}
-
-#[test]
-fn missing_configuration_renders_repair_status_and_clears_after_restore() {
-    let session = running_session();
-    let bundle_id = session.bundle_id.clone();
-    let mut dashboard = dashboard_with_session(session);
-    let bundle = dashboard.config.bundles.remove(&bundle_id).unwrap();
-    let broken = drawn(&mut dashboard, 120, 44).join("\n");
-    assert!(broken.contains("Needs config repair"), "{broken}");
-    dashboard.config.bundles.insert(bundle_id, bundle);
-    let repaired = drawn(&mut dashboard, 120, 44).join("\n");
-    assert!(!repaired.contains("Needs config repair"), "{repaired}");
-}
-
-#[test]
-fn session_transitions_preserve_the_blank_row_before_the_next_session() {
-    let mut first = running_session();
-    first.project_directory = Some("/projects/shared".into());
-    first.session_title_override = Some("First session".into());
-    let mut second = first.clone();
-    second.id = "session-second".into();
-    second.session_title_override = Some("Second session".into());
-    second.created_at = "2026-08-10T00:00:00Z".into();
-    let mut dashboard = dashboard_with_session(first.clone());
-    dashboard.state.sessions.insert(second.id.clone(), second);
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-    for kind in [
-        Some(SessionOperationKind::Launching),
-        Some(SessionOperationKind::Resuming),
-        Some(SessionOperationKind::Moving),
-        Some(SessionOperationKind::Suspending),
-        Some(SessionOperationKind::Destroying),
-        None,
-    ] {
-        dashboard.session_operations.clear();
-        if let Some(kind) = kind {
-            dashboard
-                .session_operations
-                .insert(first.id.clone(), operation(kind, None));
-        } else {
-            let session = dashboard.state.sessions.get_mut(&first.id).unwrap();
-            session.state = SessionState::Closing;
-            session.last_error = Some("checkpoint failed".into());
-        }
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .expect("draw session transition");
-        let buffer = terminal.backend().buffer();
-        let lines = buffer_lines(buffer);
-        let first_y = lines
-            .iter()
-            // The row leads with the session name; the ellipsis action marks
-            // it as a Sessions-pane row rather than the conversation's own
-            // transition notice.
-            .position(|line| line.contains("First session") && line.contains('⋯'))
-            .expect("transition row");
-        let second_y = lines
-            .iter()
-            .position(|line| line.contains("Second session"))
-            .expect("following session row");
-        assert_eq!(second_y, first_y + 2, "{kind:?}: {lines:#?}");
-        assert!(
-            (dashboard.pane_areas.expect("pane areas")[0].x + 1
-                ..dashboard.pane_areas.expect("pane areas")[0].right() - 1)
-                .all(|x| { buffer[(x, (first_y + 1) as u16)].symbol().trim().is_empty() }),
-            "{kind:?}: the separator must be blank"
-        );
-    }
-}
-
-#[test]
-fn project_groups_have_one_blank_row_between_them() {
-    let mut first = running_session();
-    first.id = "session-alpha".into();
-    first.project_directory = Some("/projects/alpha".into());
-    let mut second = running_session();
-    second.id = "session-beta".into();
-    second.project_directory = Some("/projects/beta".into());
-    second.created_at = "2026-08-10T00:00:00Z".into();
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(first.id.clone(), first), (second.id.clone(), second)]
-            .into_iter()
-            .collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    let first = dashboard.ordered_sessions()[0].id.clone();
-    dashboard.select_active_session(&first);
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let first_y = lines
-        .iter()
-        .position(|line| line.contains("› ") && line.contains("ACP pretty name"))
-        .expect("first session row") as u16;
-    let second_heading_y = lines
-        .iter()
-        .position(|line| line.contains("beta"))
-        .expect("second project heading") as u16;
-    let first_bottom = first_y + 4;
-    assert_eq!(second_heading_y, first_bottom + 1);
-    let pane = dashboard.pane_areas.expect("pane areas")[0];
-    assert!(
-        (pane.x + 1..pane.right() - 1)
-            .all(|x| buffer[(x, first_bottom)].symbol().trim().is_empty())
-    );
-}
-
-#[test]
-fn project_hotkeys_collapse_and_expand_groups_independently() {
-    let mut first = running_session();
-    first.id = "session-alpha".into();
-    first.project_directory = Some("/projects/alpha".into());
-    let mut second = running_session();
-    second.id = "session-beta".into();
-    second.project_directory = Some("/projects/beta".into());
-    second.created_at = "2026-08-10T00:00:00Z".into();
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(first.id.clone(), first), (second.id.clone(), second)]
-            .into_iter()
-            .collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    dashboard.apply_materialized_session(&materialized_session_for(
-        "session-alpha",
-        numbered_conversation(1),
-    ));
-    dashboard.apply_materialized_session(&materialized_session_for(
-        "session-beta",
-        vec![
-            transcript_item(
-                1,
-                TranscriptBody::User {
-                    content: vec![serde_json::json!({"type":"text","text":"beta question"})],
-                },
-            ),
-            agent_message(2, "beta answer"),
-        ],
-    ));
-    let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw first project");
-    let first_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-    // Every project starts expanded, so both groups show their full form.
-    assert!(first_draw.contains("[1] alpha"));
-    assert!(first_draw.contains("[2] beta"));
-    assert!(first_draw.contains("answer 0"));
-    assert!(first_draw.contains("beta answer"));
-
-    // The numbered hotkey collapses only its own project.
-    assert_eq!(
-        dashboard.handle_key(crate::test_support::key(KeyCode::Char('2'))),
-        DashboardAction::None
-    );
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw with beta collapsed");
-    let second_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(second_draw.contains("answer 0"), "{second_draw}");
-    assert!(!second_draw.contains("beta answer"), "{second_draw}");
-    assert!(
-        second_draw.contains("[2] beta") && second_draw.contains("Working"),
-        "the collapsed group keeps a two-line summary per session: {second_draw}"
-    );
-
-    // Collapsing alpha too leaves both groups collapsed at once.
-    dashboard.handle_key(crate::test_support::key(KeyCode::Char('1')));
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw with both collapsed");
-    let third_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(!third_draw.contains("answer 0"), "{third_draw}");
-    assert!(!third_draw.contains("beta answer"), "{third_draw}");
-
-    // And the hotkey is a toggle, so pressing it again brings beta back.
-    dashboard.handle_key(crate::test_support::key(KeyCode::Char('2')));
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw with beta expanded again");
-    let fourth_draw = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(fourth_draw.contains("beta answer"), "{fourth_draw}");
-    assert!(!fourth_draw.contains("answer 0"), "{fourth_draw}");
-}
-
-#[test]
-fn collapsed_duplicate_targets_are_numbered_within_their_project() {
-    let mut alpha = running_session();
-    alpha.id = "session-alpha".into();
-    alpha.project_directory = Some("/projects/alpha".into());
-    let mut beta_first = running_session();
-    beta_first.id = "session-beta-first".into();
-    beta_first.project_directory = Some("/projects/beta".into());
-    beta_first.created_at = "2026-08-10T00:00:00Z".into();
-    let mut beta_second = beta_first.clone();
-    beta_second.id = "session-beta-second".into();
-    beta_second.created_at = "2026-08-11T00:00:00Z".into();
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [alpha, beta_first, beta_second]
-            .into_iter()
-            .map(|session| (session.id.clone(), session))
-            .collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    dashboard.apply_materialized_session(&materialized_session_for(
-        "session-beta-first",
-        vec![agent_message(1, "first tail")],
-    ));
-    dashboard.apply_materialized_session(&materialized_session_for(
-        "session-beta-second",
-        vec![agent_message(1, "second tail")],
-    ));
-    for id in ["session-beta-first", "session-beta-second"] {
-        dashboard
-            .session_details
-            .get_mut(id)
-            .unwrap()
-            .current_turn_started_at = Some(now_seconds().saturating_sub(10));
-    }
-    dashboard.focus_sessions();
-    let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
-    // Collapse the beta project so its sessions draw their compact form,
-    // which is where duplicate targets need their numbering.
-    dashboard.handle_key(crate::test_support::key(KeyCode::Char('2')));
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw collapsed duplicate targets");
-    let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-
-    assert_eq!(
-        rendered
-            .lines()
-            .filter(|line| line.contains("podman [1]"))
-            .count(),
-        1,
-        "{rendered}"
-    );
-    assert_eq!(
-        rendered
-            .lines()
-            .filter(|line| line.contains("podman [2]"))
-            .count(),
-        1,
-        "{rendered}"
-    );
-    assert!(!rendered.contains("first tail"), "{rendered}");
-    assert!(!rendered.contains("second tail"), "{rendered}");
 }
 
 /// The band a row draws, derived exactly as the renderer derives it: the
@@ -1421,6 +621,7 @@ fn current_agent_excerpt_never_repeats_an_old_answer() {
 /// A long reply is rendered for its Sessions row once, not on every frame.
 /// Later frames reuse its rows until the reply or the room for it changes,
 /// and the rows are the reply's first two rows as a fresh rendering gives.
+// Hard-won: 36763162: Long replies were wrapped and rendered repeatedly on every frame, slowing dashboard input as sessions accumulated.
 #[test]
 fn a_long_reply_is_rendered_for_its_session_row_once_across_frames() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -1491,6 +692,7 @@ fn a_long_reply_is_rendered_for_its_session_row_once_across_frames() {
     }
 }
 
+// Hard-won: 86ab9abd: A pending Muse question row showed the request_user_input tool name instead of the question text.
 #[test]
 fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
     let asking = SessionDetail {
@@ -1501,336 +703,12 @@ fn a_pending_question_is_the_excerpt_instead_of_the_tool_name() {
     assert_eq!(current_agent_excerpt(&asking), Some("Choose a path"));
 }
 
-#[test]
-fn marking_all_read_removes_the_unread_tint_from_an_idle_session() {
-    let mut dashboard = dashboard_with_session(running_session());
-    apply_materialized_transcript(&mut dashboard, vec![agent_message(4, "unread response")]);
-    let detail = dashboard.session_details.get_mut("session-1").unwrap();
-    detail.current_turn_started_at = None;
-    detail.activity = mj_client::usage_format::SessionActivity::default();
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-    let mut row_color = |dashboard: &mut DashboardState| {
-        terminal
-            .draw(|frame| render(frame, dashboard))
-            .expect("draw dashboard");
-        let buffer = terminal.backend().buffer();
-        let lines = buffer_lines(buffer);
-        let row = lines
-            .iter()
-            .position(|line| line.contains("podman"))
-            .expect("session row");
-        buffer[(cell_column(&lines[row], "Idle"), row as u16)].fg
-    };
-    assert_eq!(
-        row_color(&mut dashboard),
-        theme::palette().session_attention,
-        "an answer nobody has read wants a person"
-    );
-    assert_eq!(
-        chord(&mut dashboard, crate::CommandId::MarkAllRead),
-        DashboardAction::MarkAllRead {
-            receipts: vec![("session-1".into(), 4)]
-        }
-    );
-    assert_eq!(row_color(&mut dashboard), theme::palette().session_idle);
-}
-
-#[test]
-fn dashboard_replaces_too_short_layout_with_required_height() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    let mut terminal = Terminal::new(TestBackend::new(120, 10)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw short dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Terminal too small"));
-    assert!(
-        rendered.contains("at least 13 rows (currently 10)"),
-        "{rendered:?}"
-    );
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 16)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw exact minimum dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(!rendered.contains("Terminal too small"));
-    assert!(rendered.contains("Sessions"));
-    assert!(rendered.contains('▁'));
-    assert!(rendered.contains('▪'));
-    assert!(rendered.contains('□'));
-    assert!(rendered.contains("Profiles"));
-}
-
-#[test]
-fn dashboard_stacks_below_80_columns_and_gives_up_below_60() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    let mut terminal = Terminal::new(TestBackend::new(59, 30)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw narrow dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Terminal too small"));
-    assert!(rendered.contains("Need at least 60 columns"));
-    assert!(rendered.contains("Current width: 59"));
-
-    // Between 60 and 79 columns the Sessions list stacks above the
-    // conversation in its compact form, and Targets and Quota go below.
-    let lines = drawn(&mut dashboard, 70, 30);
-    assert!(
-        !lines.join("\n").contains("Terminal too small"),
-        "{lines:#?}"
-    );
-    let [sessions, targets, quota] = dashboard.pane_areas.expect("pane geometry");
-    let conversation = dashboard.conversation_area.expect("conversation geometry");
-    assert_eq!(sessions.width, 70, "{lines:#?}");
-    assert_eq!(sessions.y, 3, "the workspace tabs sit above the list");
-    assert_eq!(conversation.y, sessions.bottom(), "{lines:#?}");
-    assert_eq!(conversation.width, 70);
-    assert_eq!(targets.y, conversation.bottom());
-    assert_eq!(targets.width, 70);
-    assert_eq!(quota.y, targets.bottom());
-    assert!(
-        dashboard.sessions_minimized(),
-        "the stacked list is compact"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("ACP pretty name")),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line.contains("Conversation")),
-        "{lines:#?}"
-    );
-    // Seventy columns has no room for the chord list, so what the row keeps is
-    // the pane's own keys and the two hints that lead to all the others.
-    assert!(lines.last().unwrap().contains("? keys"), "{lines:#?}");
-
-    // From 80 columns the sidebar sits beside the conversation again.
-    let lines = drawn(&mut dashboard, 80, 30);
-    let [sessions, _, _] = dashboard.pane_areas.expect("pane geometry");
-    let conversation = dashboard.conversation_area.expect("conversation geometry");
-    assert!(sessions.width < 80, "{lines:#?}");
-    assert_eq!(conversation.x, sessions.right());
-    assert!(!dashboard.sessions_minimized());
-}
-
-#[test]
-fn new_session_picker_keeps_choices_and_controls_visible_at_minimum_width() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    assert_eq!(
-        open_new_session_wizard(&mut dashboard),
-        DashboardAction::None
-    );
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw minimum-width new-session picker");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(rendered.contains("claude-1"));
-    assert!(rendered.contains("codex-2"));
-    assert!(rendered.contains("Cancel"));
-    assert!(rendered.contains("Next"));
-}
-
-#[test]
-fn the_footer_is_one_row_that_a_notice_takes_over() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.set_workspace_name("personal".into());
-    dashboard.set_notice("Transient dashboard message");
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let buffer = terminal.backend().buffer();
-    let line = |y| {
-        (buffer.area.x..buffer.area.right())
-            .map(|x| buffer[(x, y)].symbol())
-            .collect::<String>()
-    };
-
-    // The workspace pane precedes Sessions, while the
-    // transcript keeps the same upper band height.
-    let sessions = dashboard.pane_areas.expect("pane geometry")[0];
-    assert!(
-        line(sessions.y).contains("Sessions"),
-        "{:?}",
-        line(sessions.y)
-    );
-    assert_eq!(dashboard.workspace_name, "personal");
-    assert!(!line(sessions.y).contains("ACP sessions"));
-    // The footer is one row: a notice replaces the hints while one is
-    // showing, so the row costs one line whichever surface drew it.
-    assert!(
-        line(buffer.area.bottom() - 1).contains("Transient dashboard message"),
-        "{:?}",
-        line(buffer.area.bottom() - 1)
-    );
-    dashboard.notices.clear();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let buffer = terminal.backend().buffer();
-    let hotkeys = (buffer.area.x..buffer.area.right())
-        .map(|x| buffer[(x, buffer.area.bottom() - 1)].symbol())
-        .collect::<String>();
-    assert!(hotkeys.contains("ctrl+b then c create"), "{hotkeys:?}");
-    assert!(hotkeys.contains("a read"), "{hotkeys:?}");
-    assert!(!hotkeys.contains("[S]ort"));
-}
-
-/// The footer is the only place a beginner learns what the cancel chord does,
-/// so it must name the operation it would cancel — and must not offer the key at
-/// all while there is nothing in flight.
-#[test]
-fn footer_lists_cancel_only_while_an_operation_is_in_flight() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    assert!(
-        !combined_footer_text(&dashboard, 200).contains("cancel"),
-        "{}",
-        combined_footer_text(&dashboard, 200)
-    );
-
-    dashboard.begin_session_operation_at(
-        "session-1".into(),
-        SessionOperationKind::Launching,
-        None,
-        1_000,
-    );
-    let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("shift+c cancel launch"), "{footer}");
-
-    dashboard.finish_session_operation("session-1");
-    assert!(
-        !combined_footer_text(&dashboard, 200).contains("cancel"),
-        "{}",
-        combined_footer_text(&dashboard, 200)
-    );
-}
-
 /// Help is the one hint that is worth more than any other, so it survives
 /// every focus and every width squeeze.
-#[test]
-fn footer_ends_with_help_at_every_focus() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    for focus in [Focus::Sessions, Focus::Targets, Focus::Quota, Focus::Prompt] {
-        dashboard.focus = focus;
-        let footer = combined_footer_text(&dashboard, 200);
-        assert!(footer.ends_with("? keys"), "{focus:?}: {footer}");
-    }
-}
-
 /// A hint cut in half names a key that does not exist. Narrow terminals
 /// therefore lose whole hints from the right, and never part of one.
-#[test]
-fn footer_drops_whole_hints_when_the_width_runs_out() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    let full = combined_footer_text(&dashboard, 200);
-    assert!(full.chars().count() > 40, "{full}");
-
-    for width in 0_u16..=80 {
-        let footer = combined_footer_text(&dashboard, width);
-        assert!(Line::raw(footer.as_str()).width() <= usize::from(width));
-        if width >= 6 {
-            assert!(footer.ends_with("? keys"), "{width}: {footer}");
-        }
-        if width >= 20 {
-            assert!(footer.contains(": palette"), "{width}: {footer}");
-        }
-        // Every hint that survived is a whole hint of the full text. The
-        // prefix label moves to whichever chord survives first, so it is
-        // set aside before comparing.
-        let unlabeled = |hint: &str| hint.strip_prefix("ctrl+b then ").unwrap_or(hint).to_owned();
-        let whole = footer_hints(&full)
-            .iter()
-            .map(|hint| unlabeled(hint))
-            .collect::<Vec<_>>();
-        for hint in footer_hints(&footer) {
-            assert!(
-                whole.contains(&unlabeled(&hint)),
-                "{width}: {hint:?} is not a whole hint of {full:?}"
-            );
-        }
-    }
-}
-
 /// A half-typed chord owns the footer: the reader needs the way out of it and
 /// the key that lists the rest, not the hints they are part-way through.
-#[test]
-fn the_footer_shows_the_prefix_banner_while_a_chord_is_pending() {
-    for focus in [Focus::Sessions, Focus::Prompt] {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.focus = focus;
-        assert_eq!(
-            dashboard.route_bound_key(&crate::test_support::prefix_key()),
-            crate::KeyRoute::Consumed
-        );
-        assert!(dashboard.prefix_pending(), "{focus:?}");
-        let lines = drawn(&mut dashboard, 120, 40);
-        let footer = lines.last().expect("the footer row");
-        assert!(footer.contains("PREFIX"), "{focus:?}: {footer}");
-        assert!(
-            footer.contains("esc cancel · ctrl+b send · ? keys"),
-            "{focus:?}: {footer}"
-        );
-        assert!(!footer.contains("detach"), "{focus:?}: {footer}");
-
-        // Cancelling puts the hints back.
-        dashboard.cancel_prefix();
-        let lines = drawn(&mut dashboard, 120, 40);
-        assert!(
-            lines
-                .last()
-                .expect("the footer row")
-                .contains("ctrl+b then "),
-            "{focus:?}"
-        );
-    }
-}
-
-/// The letters in the chord group mean nothing without the key that starts
-/// them, so the group leads with whichever prefix is configured.
-#[test]
-fn footer_chord_group_starts_with_the_live_prefix() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    let mut config = config();
-    config.keys.prefix = "ctrl+a".to_owned();
-    dashboard.set_config(config);
-    let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("│ ctrl+a then c create"), "{footer}");
-    assert!(!footer.contains("ctrl+b"), "{footer}");
-}
-
 /// Every hint in the footer, whichever separator it sits between.
 fn footer_hints(footer: &str) -> Vec<String> {
     footer
@@ -1844,6 +722,7 @@ fn footer_hints(footer: &str) -> Vec<String> {
 /// The prefix label rides on the first chord hint, which is also the first
 /// chord a narrow row gives up. The label must outlive it: a row reading
 /// `: palette · ? keys` would say `:` alone opens the palette.
+// Hard-won: 22d10cb4: A narrow footer dropped the prefix label with the first chord and made the remaining shortcut look like a plain key.
 #[test]
 fn the_prefix_is_still_named_when_only_protected_chords_survive() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -1861,6 +740,7 @@ fn the_prefix_is_still_named_when_only_protected_chords_survive() {
 
 /// A-11: Enter on the Profiles pane opens the profile-ID rename, so the hint
 /// says rename rather than promising a profile editor.
+// Hard-won: 4592b7de: The Quota footer said Enter edits a profile although the action only renames its configuration ID.
 #[test]
 fn the_quota_footer_says_enter_renames_the_profile() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -1872,6 +752,7 @@ fn the_quota_footer_says_enter_renames_the_profile() {
 
 /// A-12: at every ordinary width and for every pane focus, the chord group
 /// leads with the prefix, and the palette's `:` never follows a colon.
+// Hard-won: 48c2a9ca: The composer footer dropped its chord-prefix label at narrower widths and presented prefix chords as plain keys.
 #[test]
 fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
     for focus in [
@@ -1901,64 +782,11 @@ fn every_pane_footer_names_the_prefix_at_140_100_and_80_columns() {
     }
 }
 
-/// The row is read left to right by someone hunting one key, so the kinds of
-/// key never swap places: what this pane answers, then the keys that follow
-/// the prefix, in one rank order. The chord group leads with the prefix
-/// itself, because the letters after it mean nothing without it.
-#[test]
-fn footer_groups_pane_keys_then_prefix_chords_in_rank_order() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    assert_eq!(
-        combined_footer_text(&dashboard, 200),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create \
-         · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings \
-         · : palette · ? keys"
-    );
-
-    // At the widths people actually work at, the pane group stays whole and the
-    // chord list gives way from its right-hand end.
-    assert_eq!(
-        combined_footer_text(&dashboard, 160),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create \
-         · g sessions · a read · b panes · q detach · u web · : palette · ? keys"
-    );
-    assert_eq!(
-        combined_footer_text(&dashboard, 140),
-        "Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create \
-         · g sessions · a read · b panes · : palette · ? keys"
-    );
-    // The filter letters are what the search hint is there to teach, and 140
-    // columns is an ordinary window, so that hint has to survive at that width.
-    assert!(
-        footer_hints(&combined_footer_text(&dashboard, 140))
-            .iter()
-            .any(|hint| hint == "/ search (filter a/b/w/i/d)"),
-        "{}",
-        combined_footer_text(&dashboard, 140)
-    );
-
-    // The cancel chord takes its fixed place before detach, and only while
-    // there is something to cancel.
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    dashboard.begin_session_operation_at(
-        "session-1".into(),
-        SessionOperationKind::Launching,
-        None,
-        1_000,
-    );
-    let footer = combined_footer_text(&dashboard, 200);
-    assert!(footer.contains("│ ctrl+b then c create"), "{footer}");
-    assert!(
-        footer.contains("b panes · shift+c cancel launch · q detach"),
-        "{footer}"
-    );
-}
-
 /// The prefix chords give way before the pane's own hints, and help and palette
 /// remain visible after every other hint has been dropped. The pane group is
 /// the short list of keys that work right here; the chord group is the long one
 /// the palette holds in full, so the long one is what a narrow row gives up.
+// Hard-won: 36fbf1f1: A 140-column footer kept chord hints while dropping the focused pane hints that teach its active controls.
 #[test]
 fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -1995,6 +823,7 @@ fn footer_drops_chord_hints_before_pane_hints_and_keeps_help_longest() {
 /// The footer is generated from the same table the keyboard reads, so
 /// pressing what it names must do what it says. This is the test that
 /// makes the registry worth having.
+// Hard-won: 7bd8ab16: Hand-written key, footer, and help mappings drifted, so the displayed command could disagree with dispatched behavior.
 #[test]
 fn every_footer_hint_dispatches_the_command_it_names() {
     for focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
@@ -2072,53 +901,10 @@ fn every_footer_hint_dispatches_the_command_it_names() {
     }
 }
 
-/// Expanded output flattens source newlines into a compact preview, with
-/// one quiet gutter separating it from the session's identity and status.
-#[test]
-fn an_expanded_agent_excerpt_flattens_newlines_with_one_preview_gutter() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-    apply_materialized_transcript(
-        &mut dashboard,
-        vec![
-            transcript_item(
-                1,
-                TranscriptBody::User {
-                    content: vec![serde_json::json!({
-                        "type": "text",
-                        "text": "summarize the README"
-                    })],
-                },
-            ),
-            agent_message(2, "reliability\nreply: summarize the README"),
-        ],
-    );
-
-    let lines = drawn(&mut dashboard, 120, 44);
-    let agent = lines
-        .iter()
-        .find(|line| line.contains("reliability reply"))
-        .expect("the agent excerpt row");
-    let pane = dashboard.pane_areas.expect("session pane")[0];
-    let session_cell = agent
-        .chars()
-        .skip(usize::from(pane.x + 1))
-        .take(usize::from(pane.width.saturating_sub(2)))
-        .collect::<String>();
-    assert!(
-        session_cell.starts_with("  │ reliability reply"),
-        "the source newline is flattened inside the preview: {agent:?}"
-    );
-    assert_eq!(
-        session_cell.matches('│').count(),
-        1,
-        "the excerpt has one rail, with no nested transcript chrome: {agent:?}"
-    );
-}
-
 /// The empty band has two causes and they need different advice. Telling
 /// someone there is no live session while the pane above lists one is a
 /// plain lie.
+// Hard-won: 465c6478: A live session existed but was not open, yet the empty prompt falsely said there was no live session.
 #[test]
 fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
     let mut empty = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -2136,119 +922,6 @@ fn the_empty_prompt_distinguishes_no_session_from_no_conversation() {
     assert!(lines.contains("Enter on the one to open"), "{lines}");
     assert!(!lines.contains("No live session"), "{lines}");
     assert!(!lines.contains("Opening session"), "{lines}");
-}
-
-/// Attaching is asynchronous, and until it lands the chat still loaded
-/// belongs to the row the selection has moved off. The transcript says
-/// the session is opening, and the prompt band is the real composer
-/// parked until the attach lands.
-#[test]
-fn an_attach_in_flight_draws_an_opening_transcript_and_the_standby_composer() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_opening_session(Some("session-1"));
-    dashboard.focus_prompt();
-
-    let lines = drawn(&mut dashboard, 120, 44).join("\n");
-    // The transcript hero says the conversation is opening...
-    assert!(
-        lines.contains("Bringing your conversation into focus…"),
-        "{lines}"
-    );
-    // ...while the prompt band is the real composer, parked.
-    assert!(
-        lines.contains("Type a draft · sending opens when the session is live"),
-        "{lines}"
-    );
-    assert!(!lines.contains("No conversation open"), "{lines}");
-}
-
-/// The band order is the whole point of the surface: everything is on one
-/// screen, in one arrangement, at every size it draws at.
-#[test]
-fn the_session_sidebar_spans_all_other_panes_on_either_side() {
-    for side in [
-        mj_core::config::SessionsSide::Left,
-        mj_core::config::SessionsSide::Right,
-    ] {
-        for (width, height) in [(140, 32), (80, 20), (80, 16)] {
-            let mut dashboard = dashboard_with_session(running_session());
-            dashboard.config.sessions_side = side;
-            let lines = drawn(&mut dashboard, width, height);
-            let [sessions, targets, quota] = dashboard.pane_areas.unwrap();
-            let transcript = dashboard.focused_transcript_area().unwrap();
-            let prompt = dashboard.focused_prompt_area().unwrap();
-            assert_eq!(sessions.y, 3);
-            assert!(sessions.height > 0);
-            assert!(sessions.width > 0 && transcript.width > 0);
-            for pane in [transcript, prompt, targets, quota] {
-                assert!(pane.height > 0);
-            }
-            for pane in [transcript, prompt] {
-                if side == mj_core::config::SessionsSide::Left {
-                    assert_eq!(sessions.right(), pane.x);
-                } else {
-                    assert_eq!(pane.right(), sessions.x);
-                }
-            }
-            let support_in_content = targets.width == transcript.width;
-            if support_in_content {
-                if side == mj_core::config::SessionsSide::Left {
-                    assert_eq!(sessions.right(), targets.x);
-                } else {
-                    assert_eq!(targets.right(), sessions.x);
-                }
-                assert_eq!(sessions.bottom(), quota.bottom());
-            } else {
-                assert_eq!(targets.x, 0);
-                assert_eq!(targets.width, width);
-                assert_eq!(sessions.bottom(), targets.y);
-            }
-            assert_eq!(transcript.bottom(), prompt.y);
-            assert_eq!(prompt.bottom(), targets.y);
-            assert_eq!(targets.bottom(), quota.y);
-            assert!(!lines.last().unwrap().trim().is_empty());
-        }
-    }
-}
-
-/// Collapsing the support panes hands their freed rows to the transcript,
-/// and the transcript also absorbs whatever the Sessions pane gives up (or
-/// gives back) as it moves to its fixed mode-2 third — nothing appears or
-/// vanishes, so the gesture is measurable rather than merely visible.
-#[test]
-fn minimizing_the_support_panes_gives_their_rows_to_the_transcript() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    dashboard.focus_prompt();
-    /// Rows from the start of one band to the start of the next.
-    fn band(lines: &[String], from: &str, to: &str) -> isize {
-        let start = lines
-            .iter()
-            .position(|line| line.contains(from))
-            .unwrap_or_else(|| panic!("missing {from}: {lines:#?}"));
-        let end = lines
-            .iter()
-            .position(|line| line.contains(to))
-            .unwrap_or_else(|| panic!("missing {to}: {lines:#?}"));
-        (end - start) as isize
-    }
-
-    let before = drawn(&mut dashboard, 140, 44);
-    minimize_all_panes(&mut dashboard);
-    let after = drawn(&mut dashboard, 140, 44);
-
-    // Every row the tables and the Sessions pane give up lands in the
-    // transcript; the composer and footer are untouched.
-    let tables_freed = (band(&before, "Targets", "Profiles") - band(&after, "Targets", "Profiles"))
-        + (band(&before, "Profiles", "q detach") - band(&after, "Profiles", "q detach"));
-    let sessions_freed = 0;
-    let transcript_gain = band(&after, "Conversation", "No conversation open")
-        - band(&before, "Conversation", "No conversation open");
-    assert!(tables_freed > 0, "the tables gave up nothing");
-    assert_eq!(transcript_gain, tables_freed + sessions_freed);
-    // Each minimized pane really is one row.
-    assert_eq!(band(&after, "Targets", "Profiles"), 1);
-    assert_eq!(band(&after, "Profiles", "q detach"), 1);
 }
 
 fn now_seconds() -> u64 {
@@ -2320,25 +993,9 @@ fn api_quota(profile_id: &str) -> ProfileQuota {
     }
 }
 
-/// Adds a usage-priced profile to the dashboard's configuration, since the
-/// shared fixture only carries subscription profiles.
-fn add_api_priced_profile(dashboard: &mut DashboardState) {
-    dashboard.config.profiles.insert(
-        "api-priced".into(),
-        mj_core::config::HarnessProfile {
-            enabled: true,
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-            kind: HarnessKind::Codex,
-            home: std::path::PathBuf::from("/profiles/api-priced"),
-            environment: Default::default(),
-        },
-    );
-}
-
 /// An agent that is idle but left a command running says so, in the wide
 /// rows and in the minimized grid, from the one fact the daemon forwards.
+// Hard-won: db2e99a5: Sessions that left a command running in the background were shown as idle across Mjolnir surfaces.
 #[test]
 fn background_work_reaches_both_session_row_forms() {
     let started_at_ms = i64::try_from(mj_core::clock::epoch_seconds()).unwrap() * 1_000 - 2_616_000;
@@ -2398,109 +1055,6 @@ fn background_work_reaches_both_session_row_forms() {
 /// Every expanded session is the same height, so the layout can be
 /// computed from a count and rows never jitter as messages arrive. A
 /// session with nothing to show still draws its two agent rows.
-#[test]
-fn an_expanded_session_always_draws_four_rows() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.focus_sessions();
-
-    let lines = drawn(&mut dashboard, 120, 44);
-    let first = lines
-        .iter()
-        .position(|line| line.contains("ACP pretty name"))
-        .expect("the session's name row");
-    assert!(
-        lines[first + 1].contains("podman"),
-        "{:?}",
-        lines[first + 1]
-    );
-    assert!(
-        lines[first + 2].contains("No messages yet"),
-        "{:?}",
-        lines[first + 2]
-    );
-    // The fourth row is the second agent row, blank here because there is
-    // only one line to show.
-    assert!(
-        lines[first + 3].trim_matches(['│', '║', ' ']).is_empty(),
-        "{:?}",
-        lines[first + 3]
-    );
-}
-
-#[test]
-fn runtime_review_activity_is_visible_on_an_unselected_session_row() {
-    let mut first = running_session();
-    first.id = "session-first".into();
-    let mut second = running_session();
-    second.id = "session-second".into();
-    second.created_at = "2026-08-10T00:00:00Z".into();
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: mj_core::state::STATE_VERSION,
-            sessions: [(first.id.clone(), first), (second.id.clone(), second)]
-                .into_iter()
-                .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-    dashboard.set_session_reviews([RuntimeReviewView {
-        session_id: "session-second".into(),
-        questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
-        phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
-        roles: Vec::new(),
-        status: "the reviewer is reading the change…".into(),
-        verdict: None,
-    }]);
-
-    // Collapse the project so the test exercises the compact two-line
-    // form; the reviewed session is intentionally unselected.
-    dashboard.focus_sessions();
-    dashboard.handle_key(crate::test_support::key(KeyCode::Char('1')));
-    let rendered = drawn(&mut dashboard, 140, 44).join("\n");
-    let review_line = rendered
-        .lines()
-        .find(|line| line.contains("Reviewing"))
-        .expect("review activity on the unselected compact row");
-    assert!(!review_line.contains("Idle"), "{review_line}");
-
-    // Removing the complete runtime projection restores the primary
-    // session's ordinary activity clock.
-    dashboard.set_session_reviews(Vec::new());
-    let restored = drawn(&mut dashboard, 140, 44).join("\n");
-    assert!(
-        restored
-            .lines()
-            .any(|line| line.contains("podman") && line.contains("Idle")),
-        "{restored}"
-    );
-
-    // The minimized list uses the same compact activity slot and also
-    // must not pair a live review with the primary's idle marker.
-    dashboard.set_session_reviews([RuntimeReviewView {
-        session_id: "session-second".into(),
-        questions: Vec::new(),
-        tier: mj_core::review::lanes::ReviewTier::Quick,
-        phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
-        roles: Vec::new(),
-        status: "the reviewer is reading the change…".into(),
-        verdict: None,
-    }]);
-    minimize_all_panes(&mut dashboard);
-    let minimized = drawn(&mut dashboard, 140, 44).join("\n");
-    let minimized_line = minimized
-        .lines()
-        .find(|line| line.contains("Reviewing"))
-        .expect("review activity in the minimized list");
-    let review_cell = &minimized_line[minimized_line.find("Reviewing").expect("review label")..];
-    assert!(!review_cell.contains("Idle"), "{minimized_line}");
-}
-
 /// `projects` projects, `per_project` live sessions in each, laid out so
 /// the minimized list has headings and enough sessions to scroll. Project
 /// directories are zero-padded so they sort in the obvious order.
@@ -2552,16 +1106,6 @@ fn minimized_content_rows(dashboard: &mut DashboardState, width: u16, height: u1
 
 /// Minimized Sessions keeps the familiar vertical list but drops every
 /// transcript preview beneath the session's summary line.
-#[test]
-fn minimized_sessions_keep_summary_rows_without_message_previews() {
-    let mut dashboard = minimized_sessions_dashboard(3, 2);
-    let rendered = drawn(&mut dashboard, 120, 44).join("\n");
-    assert!(!dashboard.session_row_areas.is_empty());
-    assert!(rendered.contains("ACP pretty"), "{rendered}");
-    assert!(!rendered.contains("You:"), "{rendered}");
-    assert!(!rendered.contains("Agent:"), "{rendered}");
-}
-
 #[test]
 fn a_starting_session_keeps_one_preview_across_incomplete_state_publications() {
     let mut session = running_session();
@@ -2622,45 +1166,6 @@ fn finishing_a_launch_removes_a_preview_absent_from_authoritative_state() {
     assert!(dashboard.ordered_sessions().is_empty());
 }
 
-/// A busy minimized list keeps a bounded height and two-line hitboxes.
-#[test]
-fn minimized_sessions_bound_the_viewport_to_preserve_the_conversation() {
-    let mut dashboard = minimized_sessions_dashboard(3, 3);
-    let lines = drawn(&mut dashboard, 120, 20);
-    assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 16);
-    assert!(
-        dashboard
-            .session_row_areas
-            .iter()
-            .all(|(_, area)| area.height == 2)
-    );
-    assert!(!lines.iter().any(|line| line.contains("You:")), "{lines:?}");
-}
-
-/// A sparse minimized list uses one row for its heading and each session.
-#[test]
-fn a_sparse_minimized_list_shows_its_heading_and_sessions() {
-    let mut dashboard = minimized_sessions_dashboard(1, 2);
-    let lines = drawn(&mut dashboard, 120, 44);
-    assert!(
-        !lines.iter().any(|line| line.contains("more")),
-        "no marker expected when all sessions fit: {lines:?}"
-    );
-    assert_eq!(dashboard.pane_areas.expect("pane geometry")[0].height, 40);
-}
-
-/// The minimized row keeps the session name and its actionable status.
-#[test]
-fn minimized_sessions_identify_the_session_by_name() {
-    let mut dashboard = minimized_sessions_dashboard(1, 1);
-    let rendered = drawn(&mut dashboard, 120, 44).join("\n");
-    assert!(rendered.contains("ACP pretty"), "{rendered}");
-    assert!(rendered.contains("Idle"), "{rendered}");
-    let rows = minimized_content_rows(&mut dashboard, 120, 44);
-    let status = rows.iter().find(|line| line.contains("Idle")).unwrap();
-    assert!(status.starts_with("  Idle"), "{status:?}");
-}
-
 /// A session row is coloured by the same state rule the expanded rows
 /// use: idle is blue, active work yellow, and a failed session red.
 #[test]
@@ -2701,27 +1206,6 @@ fn the_minimized_list_colours_a_session_row_by_state() {
     assert_eq!(colour_of(failed), theme::palette().session_error);
 }
 
-/// A narrow minimized pane truncates the summary without bringing back
-/// the message previews.
-#[test]
-fn minimized_sessions_truncate_only_the_top_line() {
-    let mut dashboard = minimized_sessions_dashboard(1, 1);
-    dashboard
-        .state
-        .sessions
-        .get_mut("session-00")
-        .expect("the session")
-        .target_template_id = "extremely-long-target-identifier".into();
-
-    let rows = minimized_content_rows(&mut dashboard, 80, 22);
-    assert!(
-        rows.iter().any(|line| line.contains("ACP pretty")),
-        "the narrow summary keeps the session name: {rows:?}"
-    );
-    assert!(!rows.iter().any(|line| line.contains("You:")), "{rows:?}");
-    assert!(!rows.iter().any(|line| line.contains("Agent:")), "{rows:?}");
-}
-
 /// The minimized list is a viewport: selecting a session past the visible
 /// rows scrolls the window so it shows, and earlier rows leave view.
 #[test]
@@ -2753,70 +1237,6 @@ fn the_minimized_list_scrolls_to_keep_the_selection_visible() {
     );
 }
 
-/// Clicking a minimized row selects that session and leaves the dial where
-/// the user set it; the list draws the selection itself.
-#[test]
-fn clicking_a_minimized_row_selects_it_and_keeps_the_list() {
-    use crossterm::event::{MouseButton, MouseEventKind};
-
-    let mut dashboard = minimized_sessions_dashboard(2, 2);
-    drawn(&mut dashboard, 120, 44);
-
-    let (index, rect) = *dashboard
-        .session_row_areas
-        .first()
-        .expect("a minimized row hitbox");
-    let expected = dashboard.ordered_sessions()[index].id.clone();
-
-    dashboard.handle_mouse(mouse_at_row(
-        MouseEventKind::Down(MouseButton::Left),
-        rect,
-        0,
-    ));
-
-    assert_eq!(dashboard.selected_session_id(), Some(expected.as_str()));
-    assert!(
-        dashboard.sessions_minimized(),
-        "the click should leave the minimized list alone"
-    );
-    assert_eq!(dashboard.focus(), Focus::Sessions);
-}
-
-#[test]
-fn a_short_terminal_keeps_every_minimized_title_and_control() {
-    let mut dashboard = minimized_sessions_dashboard(2, 2);
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    dashboard.apply_quota(weekly_quota("claude-1", 63));
-
-    let lines = drawn(&mut dashboard, 120, 20);
-    let pane = dashboard.pane_areas.expect("short minimized pane")[0];
-
-    assert!(
-        lines[usize::from(pane.y)].contains('╭') && lines[usize::from(pane.y)].contains("Sessi"),
-        "the minimized list keeps its title and border: {lines:?}"
-    );
-    assert!(
-        lines[usize::from(pane.y)].contains('▁')
-            && lines[usize::from(pane.y)].contains('▪')
-            && lines[usize::from(pane.y)].contains('□')
-    );
-    for visible in ["Targets", "Profiles"] {
-        assert!(
-            lines.iter().any(|line| line.contains(visible)),
-            "{visible} should remain visible: {lines:?}"
-        );
-    }
-    let pane = dashboard.pane_areas.expect("pane geometry")[0];
-    let selection = dashboard
-        .frame_surfaces()
-        .surface(SurfaceId::DashboardPane(0))
-        .expect("tiny minimized selection surface");
-    assert_eq!(selection.rect, pane.inner(Margin::new(1, 1)));
-    // Targets and Quota fit beside the minimized sidebar at this width.
-    assert_eq!(dashboard.pane_areas.unwrap()[1].x, pane.right());
-    assert_eq!(selection.rect.height, 14);
-}
-
 #[test]
 fn the_minimized_list_follows_the_terminal_height_each_frame() {
     let mut dashboard = minimized_sessions_dashboard(3, 2);
@@ -2844,78 +1264,7 @@ fn the_minimized_list_follows_the_terminal_height_each_frame() {
     );
 }
 
-/// Minimized Sessions draws a sparse list on a landscape terminal.
-#[test]
-fn minimized_on_a_landscape_terminal_draws_the_list() {
-    let mut dashboard = dashboard_with_session(running_session());
-    minimize_all_panes(&mut dashboard);
-
-    let lines = drawn(&mut dashboard, 120, 40);
-
-    assert!(dashboard.sessions_minimized());
-    let sessions_height = lines
-        .iter()
-        .position(|line| line.contains("Conversation"))
-        .expect("the conversation band");
-    assert_eq!(sessions_height, 0, "{lines:#?}");
-}
-
-/// A brand-new workspace has no sessions at all, and minimizing Sessions
-/// there must still draw rather than fall over on an empty list.
-#[test]
-fn the_minimized_list_draws_with_no_sessions() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    minimize_all_panes(&mut dashboard);
-
-    let lines = drawn(&mut dashboard, 200, 50);
-    assert!(
-        lines.iter().any(|line| line.contains("Conversation")),
-        "{lines:#?}"
-    );
-}
-
-#[test]
-fn minimized_on_a_portrait_terminal_still_draws_the_list() {
-    let mut dashboard = dashboard_with_session(running_session());
-    minimize_all_panes(&mut dashboard);
-
-    let (width, height) = (80u16, 120u16);
-    let lines = drawn(&mut dashboard, width, height);
-
-    assert!(dashboard.sessions_minimized());
-    let sessions_height = lines
-        .iter()
-        .position(|line| line.contains("Conversation"))
-        .expect("the conversation band");
-    assert_eq!(sessions_height, 0, "{lines:#?}");
-}
-
-#[test]
-fn a_short_portrait_terminal_keeps_the_list_and_support_summaries() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    dashboard.apply_quota(weekly_quota("claude-1", 63));
-    minimize_all_panes(&mut dashboard);
-
-    let lines = drawn(&mut dashboard, 80, 38);
-
-    let pane = dashboard.pane_areas.expect("pane geometry")[0];
-    assert!(
-        lines[usize::from(pane.y)].contains('╭') && pane.width > 0,
-        "the portrait list keeps its bordered Sessions title: {lines:?}"
-    );
-    let panes = dashboard.pane_areas.expect("pane geometry");
-    assert_eq!(panes[0].bottom(), panes[2].bottom());
-    assert_eq!(panes[1].x, panes[0].right());
-    assert_eq!(panes[1].width, 60);
-    for visible in ["Tar", "Pro"] {
-        assert!(
-            lines.iter().any(|line| line.contains(visible)),
-            "{visible} should remain: {lines:?}"
-        );
-    }
-}
-
+// Hard-won: 0cb06579: Independent daemon and dashboard quota pollers could disagree; the pane now follows the daemon report and replaces stale snapshots.
 #[test]
 fn the_profiles_pane_shows_the_daemons_report_and_probing_set_and_nothing_older() {
     let mut dashboard = dashboard_with_session(running_session());
@@ -2996,101 +1345,6 @@ fn a_rate_limited_profile_reads_the_retry_time_not_unavailable() {
         .expect("the minimized Profiles row");
     assert!(row.contains("claude-1 rate limited"), "{row:?}");
     assert!(row.contains("codex-1 rate limited"), "{row:?}");
-}
-
-#[test]
-fn the_minimized_rows_report_cpu_and_weekly_percent_used() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    dashboard.apply_deployment_capacity("local", Ok(Some(host_usage(42))), now_seconds());
-    dashboard.apply_quota(weekly_quota("claude-1", 63));
-    minimize_all_panes(&mut dashboard);
-
-    let lines = drawn(&mut dashboard, 120, 44);
-    let targets = lines
-        .iter()
-        .find(|line| line.contains("─ Targets ──"))
-        .expect("the minimized Targets row");
-    assert!(targets.contains("local 42%"), "{targets:?}");
-    let quota = lines
-        .iter()
-        .find(|line| line.contains("─ Profiles ──"))
-        .expect("the minimized Profiles row");
-    // The open pane prints the remaining percentage; so does this row.
-    assert!(quota.contains("claude-1 63%"), "{quota:?}");
-    // Each minimized pane is exactly one row.
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.contains("─ Targets ──"))
-            .count(),
-        1
-    );
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.contains("─ Profiles ──"))
-            .count(),
-        1
-    );
-}
-
-/// A fleet with `count` machines running, which is what its probe list
-/// records: one probe per live instance.
-fn fleet_target(count: usize) -> mj_core::targets::DeploymentCapacityTarget {
-    mj_core::targets::DeploymentCapacityTarget {
-        id: "aws:ec2".into(),
-        host: "ec2".into(),
-        target_ids: vec!["ec2".into()],
-        kind: DeploymentCapacityKind::AwsFleet,
-        local: false,
-        probes: (0..count)
-            .map(|index| mj_core::targets::CommandSpec::new("true", [format!("instance-{index}")]))
-            .collect(),
-        probe_error: None,
-    }
-}
-
-/// A fleet has no CPU percentage of its own, so what it reports in use is
-/// how many machines it is running - including when that is none, which
-/// used to read "on demand" and said nothing about the fleet's state.
-#[test]
-fn a_fleet_reports_how_many_machines_it_is_running() {
-    for (count, expected) in [(0, "0 VMs"), (1, "1 VM"), (3, "3 VMs")] {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.set_deployment_capacity_targets(vec![fleet_target(count)]);
-        if count > 0 {
-            dashboard.apply_deployment_capacity(
-                "aws:ec2",
-                Ok(Some(mj_core::targets::DeploymentCapacityUsage {
-                    cpu_percent: None,
-                    memory_used_bytes: 0,
-                    memory_total_bytes: 8,
-                    logical_cores: 4,
-                    disk_total_bytes: Some(64),
-                    storage: Vec::new(),
-                })),
-                now_seconds(),
-            );
-        } else {
-            dashboard.apply_deployment_capacity("aws:ec2", Ok(None), now_seconds());
-        }
-
-        let open = drawn(&mut dashboard, 140, 44).join("\n");
-        assert!(open.contains(expected), "open pane, {count}: {open}");
-        assert!(!open.contains("on demand"), "open pane, {count}: {open}");
-
-        minimize_all_panes(&mut dashboard);
-        let minimized = drawn(&mut dashboard, 140, 44)
-            .into_iter()
-            .find(|line| line.contains("─ Targets ──"))
-            .expect("the minimized Targets row");
-        assert!(
-            minimized.contains(&format!("ec2 {expected}")),
-            "minimized row, {count}: {minimized}"
-        );
-        assert!(!minimized.contains("no CPU"), "minimized row, {count}");
-    }
 }
 
 /// An exhausted profile reads 0%, the same as the open pane's bar. Showing
@@ -3204,180 +1458,10 @@ fn a_failed_session_draws_a_red_summary_at_both_pane_sizes() {
     }
 }
 
-/// The minimized rows read as pane titles: the pane's rule, plain text,
-/// and readings separated by commas. Colour is the only thing carrying
-/// meaning, and it comes from the same scale the full quota bar uses.
-#[test]
-fn the_minimized_rows_keep_the_pane_rule_and_colour_by_headroom() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(vec![
-        test_capacity_target(),
-        mj_core::targets::DeploymentCapacityTarget {
-            id: "morannon".into(),
-            host: "morannon".into(),
-            ..test_capacity_target()
-        },
-    ]);
-    // A quiet host has headroom; a busy one does not.
-    dashboard.apply_deployment_capacity("local", Ok(Some(host_usage(3))), now_seconds());
-    dashboard.apply_deployment_capacity("morannon", Ok(Some(host_usage(95))), now_seconds());
-    // Plenty of the weekly window left.
-    dashboard.apply_quota(weekly_quota("claude-1", 63));
-    // Nearly none, and in trouble.
-    dashboard.apply_quota(weekly_quota("codex-1", 10));
-    minimize_all_panes(&mut dashboard);
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw the minimized panes");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-
-    let targets_row = lines
-        .iter()
-        .position(|line| line.contains("─ Targets ──"))
-        .expect("the minimized Targets row");
-    let targets = &lines[targets_row];
-    assert!(targets.contains("local 3%, morannon 95%"), "{targets:?}");
-    assert!(targets.contains("─ ▁   ▪ "), "{targets:?}");
-
-    let quota_row = lines
-        .iter()
-        .position(|line| line.contains("─ Profiles ──"))
-        .expect("the minimized Profiles row");
-    assert!(
-        lines[quota_row].contains("claude-1 63%, codex-1 10%"),
-        "the row reads the remaining percentage the open pane prints: {:?}",
-        lines[quota_row]
-    );
-
-    // The colour of a value, by the column its first digit sits in.
-    let colour_of = |row: usize, needle: &str| {
-        let column = cell_column(&lines[row], needle);
-        buffer[(column, row as u16)].fg
-    };
-    // A quiet host has headroom left, a busy one does not; a quota reads
-    // the same scale on the headroom it reports.
-    assert_eq!(colour_of(targets_row, "3%"), theme::palette().success);
-    assert_eq!(colour_of(targets_row, "95%"), theme::palette().error);
-    assert_eq!(colour_of(quota_row, "63%"), theme::palette().success);
-    assert_eq!(colour_of(quota_row, "10%"), theme::palette().error);
-    // The label and the names are ordinary text; only the values carry a
-    // colour.
-    assert_eq!(colour_of(targets_row, "Targets"), theme::palette().text);
-    assert_eq!(colour_of(targets_row, "morannon"), theme::palette().text);
-}
-
-/// A usage-priced profile has no window to summarise, so once its report
-/// says it is API-priced it is left out of the minimized row rather than
-/// spending width on a placeholder.
-#[test]
-fn a_usage_priced_profile_is_absent_from_the_minimized_row() {
-    let mut dashboard = dashboard_with_session(running_session());
-    add_api_priced_profile(&mut dashboard);
-    minimize_all_panes(&mut dashboard);
-
-    let row = |dashboard: &mut DashboardState| {
-        drawn(dashboard, 160, 44)
-            .into_iter()
-            .find(|line| line.contains("─ Profiles ──"))
-            .expect("the minimized Profiles row")
-    };
-
-    dashboard.apply_quota(api_quota("api-priced"));
-    let after = row(&mut dashboard);
-    assert!(!after.contains("api-priced"), "{after:?}");
-    assert!(!after.contains("API"), "{after:?}");
-    // The subscription profiles still read normally.
-    assert!(after.contains("claude-1"), "{after:?}");
-}
-
 /// A week with headroom left is no comfort while the next five hours are
 /// spent, so a profile that has dipped into its week reports both figures.
 /// An untouched week says everything there is to say on its own, and a
 /// profile with no five-hour window has nothing more to add.
-#[test]
-fn the_minimized_row_pairs_the_weekly_and_five_hour_figures() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.apply_quota(weekly_and_five_hour_quota("claude-1", 96, 40));
-    dashboard.apply_quota(weekly_and_five_hour_quota("codex-1", 100, 40));
-    dashboard.apply_quota(weekly_quota("codex-2", 63));
-    minimize_all_panes(&mut dashboard);
-
-    let quota = drawn(&mut dashboard, 160, 44)
-        .into_iter()
-        .find(|line| line.contains("─ Profiles ──"))
-        .expect("the minimized Profiles row");
-    assert!(quota.contains("claude-1 96%/40%"), "{quota:?}");
-    assert!(quota.contains("codex-1 100%,"), "{quota:?}");
-    assert!(!quota.contains("100%/"), "{quota:?}");
-    assert!(quota.contains("codex-2 63%"), "{quota:?}");
-    assert!(!quota.contains("63%/"), "{quota:?}");
-}
-
-/// The reading's colour has to describe the window that is actually
-/// running out: a profile with most of its week left but no five-hour
-/// headroom is in trouble now.
-#[test]
-fn the_paired_reading_takes_the_colour_of_the_tighter_window() {
-    let mut dashboard = dashboard_with_session(running_session());
-    // Plenty of week, almost no five hours.
-    dashboard.apply_quota(weekly_and_five_hour_quota("claude-1", 96, 5));
-    // Almost no week, plenty of five hours.
-    dashboard.apply_quota(weekly_and_five_hour_quota("codex-1", 8, 90));
-    minimize_all_panes(&mut dashboard);
-
-    let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw the minimized panes");
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let row = lines
-        .iter()
-        .position(|line| line.contains("─ Profiles ──"))
-        .expect("the minimized Profiles row");
-    let colour_of = |needle: &str| {
-        let column = cell_column(&lines[row], needle);
-        buffer[(column, row as u16)].fg
-    };
-
-    assert_eq!(colour_of("96%/5%"), theme::palette().error);
-    assert_eq!(colour_of("8%/90%"), theme::palette().error);
-}
-
-/// A minimized pane is one row by definition, so more hosts than fit have
-/// to be cut rather than wrapped onto a second row.
-#[test]
-fn the_minimized_rows_truncate_rather_than_wrap() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_deployment_capacity_targets(
-        (0..8)
-            .map(|index| mj_core::targets::DeploymentCapacityTarget {
-                id: format!("host-{index}"),
-                host: format!("a-rather-long-host-name-{index}"),
-                ..test_capacity_target()
-            })
-            .collect(),
-    );
-    minimize_all_panes(&mut dashboard);
-
-    let lines = drawn(&mut dashboard, 80, 44);
-    let rows = lines
-        .iter()
-        .filter(|line| line.contains("─ Targets ──"))
-        .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 1, "{lines:#?}");
-    assert!(rows[0].chars().count() <= 80);
-    assert!(
-        rows[0].contains('…'),
-        "the readings are cut rather than wrapped: {:?}",
-        rows[0]
-    );
-    assert!(rows[0].contains("─ ▁   ▪ "), "{:?}", rows[0]);
-}
-
 #[test]
 fn read_idle_session_distinguishes_status_from_identity_in_expanded_and_collapsed_rows() {
     let mut session = stopped_session();
@@ -3430,6 +1514,7 @@ fn read_idle_session_distinguishes_status_from_identity_in_expanded_and_collapse
 /// A session the harness has not named and nobody renamed is listed by the
 /// title it was created with ("project via fake"), not its id, which the row
 /// would otherwise repeat (launch finding R2-8).
+// Hard-won: e7eb288e: An unnamed dashboard-created session fell back to its hexadecimal ID instead of the created project/profile title.
 #[test]
 fn session_name_prefers_override_then_acp_title_then_created_title() {
     let mut session = stopped_session();
@@ -3450,6 +1535,7 @@ fn session_name_prefers_override_then_acp_title_then_created_title() {
 /// installed. The Targets pane checks each one in the background, the same
 /// check the new-session wizard uses, and marks one whose engine is missing
 /// rather than listing it as if it could run.
+// Hard-won: 0b408d01: Launch finding J-7 showed the Targets pane omitted whether a listed local container engine was unavailable.
 #[test]
 fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -3494,51 +1580,11 @@ fn targets_pane_marks_a_local_container_target_whose_engine_is_missing() {
 /// A default candidate whose engine is missing (the user has no Docker and
 /// wrote no `docker` target) is not listed in the host row. A target the
 /// user wrote whose engine is missing stays, marked unavailable.
-#[test]
-fn host_row_hides_a_default_candidate_with_a_missing_runtime_but_keeps_a_configured_one() {
-    let mut config = Config::default();
-    let mut sandbox = Config::default().with_local_targets().targets["docker"].clone();
-    if let TargetTemplate::LocalDocker { container } = &mut sandbox {
-        container.image = "example.test/own:latest".into();
-    }
-    config.targets.insert("sandbox".into(), sandbox);
-    let mut dashboard = DashboardState::new(
-        config.with_local_targets(),
-        State::default(),
-        BTreeMap::new(),
-    );
-    let mut target = test_capacity_target();
-    target.target_ids = vec![
-        "docker".into(),
-        "localhost".into(),
-        "podman".into(),
-        "sandbox".into(),
-    ];
-    dashboard.set_deployment_capacity_targets(vec![target]);
-    let Some(crate::DashboardAction::CheckTargetReadiness {
-        generation,
-        target_ids,
-    }) = dashboard.take_target_availability_check()
-    else {
-        panic!("the Targets pane must check its local container targets");
-    };
-    assert!(target_ids.contains(&"docker".to_owned()));
-    for id in ["docker", "sandbox"] {
-        dashboard.apply_target_runtime_missing(generation, id.into(), "docker: not found".into());
-    }
-
-    let rendered = drawn_dashboard(&mut dashboard, 160);
-
-    assert!(rendered.contains("sandbox (unavailable)"), "{rendered}");
-    assert!(rendered.contains("localhost, podman"), "{rendered}");
-    assert!(!rendered.contains("docker (unavailable)"), "{rendered}");
-    assert!(!rendered.contains("docker,"), "{rendered}");
-}
-
 /// The config the dashboard installs comes off the runtime feed, which does
 /// not serialize `Config::default_targets`. The origin travels beside the
 /// config, so a host without Docker lists no `docker` the user never wrote,
 /// while a `[targets.docker]` the user wrote stays, marked unavailable.
+// Hard-won: 9a81ac2b: The runtime-fed dashboard could not distinguish a synthesized Docker candidate and showed it as unavailable on hosts without Docker.
 #[test]
 fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
     let docker_missing_row = |user_wrote_docker: bool| {
@@ -3594,6 +1640,7 @@ fn feed_installed_config_hides_default_docker_but_keeps_a_user_written_one() {
 /// precision-3260: an unreachable session on a full disk read as plain
 /// "Unreachable". Its row now says "Disk full", and the Targets row shows the
 /// host as full, both from the daemon's one storage verdict.
+// Hard-won: 540c9202: A real full-disk incident made every worker appear merely unreachable and caused recovery to retry writes on the same full filesystem.
 #[test]
 fn an_unreachable_session_on_a_full_disk_says_disk_full() {
     let session = precision_session();
@@ -3606,6 +1653,7 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
         kind: mj_core::targets::DeploymentCapacityKind::Host,
         local: false,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }]);
     let draw = |dashboard: &mut DashboardState| {
@@ -3645,57 +1693,6 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
 
 /// A capacity sample the poller keeps refreshing carries no clock column
 /// and no staleness marker: the number on screen is the current one.
-#[test]
-fn capacity_pane_renders_grouped_host_load_without_sample_clock() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    let mut target = test_capacity_target();
-    target.target_ids = vec!["podman".into(), "mac-container".into()];
-    dashboard.set_deployment_capacity_targets(vec![target]);
-    dashboard.apply_deployment_capacity(
-        "local",
-        Ok(Some(DeploymentCapacityUsage {
-            cpu_percent: Some(37),
-            memory_used_bytes: 3,
-            memory_total_bytes: 4,
-            logical_cores: 8,
-            disk_total_bytes: None,
-            storage: Vec::new(),
-        })),
-        now_epoch_seconds(),
-    );
-    let backend = TestBackend::new(120, 40);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(
-        rendered.contains("podman, mac-container  37% CPU"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("37% CPU · 75% RAM"));
-    assert!(!rendered.contains("Sample"));
-    assert!(!rendered.contains("stale"));
-    let buffer = terminal.backend().buffer();
-    let header = (buffer.area.y..buffer.area.bottom())
-        .map(|y| {
-            (buffer.area.x..buffer.area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .find(|line| line.contains("Host / fleet") && line.contains("Targets"))
-        .expect("capacity header");
-    assert!(header.contains("In Use"));
-}
-
 /// `symbols = "ascii"` must reach the Targets pane's own summary text: the
 /// "% CPU · % RAM" join was a literal Unicode dot, so it survived the ASCII
 /// set while every other glyph in the row correctly swapped. The symbol set
@@ -3722,99 +1719,6 @@ fn ascii_symbols_reach_the_capacity_panes_cpu_and_ram_join() {
     assert!(
         cpu_ram_line.contains("37% CPU - 75% RAM"),
         "{cpu_ram_line:?}"
-    );
-}
-
-#[test]
-fn dashboard_colors_named_host_permission_badges() {
-    let mut config = config();
-    let container = match config.targets["podman"].clone() {
-        mj_core::config::TargetTemplate::LocalPodman { container } => container,
-        _ => unreachable!(),
-    };
-    let ssh = |host: &str| mj_core::config::SshConnection {
-        host: host.into(),
-        user: None,
-        identity_file: None,
-        extra_args: Vec::new(),
-    };
-    config.targets.insert(
-        "precision-3260".into(),
-        mj_core::config::TargetTemplate::SshBare {
-            ssh: ssh("precision-3260"),
-            permissions: PermissionMode::Yolo,
-            workspace_prefix: ".local/share/hel/workspaces".into(),
-        },
-    );
-    config.targets.insert(
-        "morannon-podman".into(),
-        mj_core::config::TargetTemplate::SshPodman {
-            ssh: ssh("morannon"),
-            container,
-        },
-    );
-    config.targets.insert(
-        "morannon-raw".into(),
-        mj_core::config::TargetTemplate::SshBare {
-            ssh: ssh("morannon"),
-            permissions: PermissionMode::Guardian,
-            workspace_prefix: ".local/share/hel/workspaces".into(),
-        },
-    );
-    let mut session = running_session();
-    session.target_template_id = "precision-3260".into();
-    session.project_directory = Some("/home/dev/hel".into());
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions: [(session.id.clone(), session)].into_iter().collect(),
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config, state, BTreeMap::new());
-    let capacity_target =
-        |host: &str, target_ids: &[&str]| mj_core::targets::DeploymentCapacityTarget {
-            id: format!("ssh:{host}"),
-            host: host.into(),
-            target_ids: target_ids.iter().map(|id| (*id).into()).collect(),
-            kind: DeploymentCapacityKind::Host,
-            local: false,
-            probes: Vec::new(),
-            probe_error: None,
-        };
-    dashboard.set_deployment_capacity_targets(vec![
-        capacity_target("precision-3260", &["precision-3260"]),
-        capacity_target("morannon", &["morannon-podman", "morannon-raw"]),
-    ]);
-    let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-
-    let buffer = terminal.backend().buffer();
-    let lines = buffer_lines(buffer);
-    let badge_has_color = |needle: &str, color: Color| {
-        lines.iter().enumerate().any(|(row, line)| {
-            let Some(byte) = line.find(needle) else {
-                return false;
-            };
-            let x = buffer.area.x + line[..byte].chars().count() as u16;
-            (x..x + 3).all(|x| buffer[(x, buffer.area.y + row as u16)].fg == color)
-        })
-    };
-    let rendered = lines.join("\n");
-    assert!(rendered.contains("precision-3260 [Y]"), "{rendered}");
-    assert!(
-        rendered.contains("morannon-podman, morannon-raw [G]"),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("morannon-podman [G]"), "{rendered}");
-    assert!(badge_has_color("[Y]", theme::palette().error), "{rendered}");
-    assert!(
-        badge_has_color("[G]", theme::palette().success),
-        "{rendered}"
     );
 }
 
@@ -3909,288 +1813,7 @@ fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
     assert!(!rendered.contains("stale"), "{rendered}");
 }
 
-#[test]
-fn selected_transcript_tail_adapts_to_a_constrained_terminal() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let mut dashboard = dashboard_with_session(session);
-    let message = (1..=20)
-        .map(|line| format!("line {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    apply_materialized_transcript(&mut dashboard, vec![agent_message(1, message)]);
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw constrained dashboard");
-
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Sessions"));
-    assert!(rendered.contains("Targets"));
-    assert!(rendered.contains("Profiles"));
-}
-
-#[test]
-fn overflowing_session_pane_shows_a_scrollbar() {
-    let mut sessions = mj_core::snapshot_map::SnapshotMap::new();
-    for index in 0..6 {
-        let mut session = running_session();
-        session.id = format!("active-{index:02}");
-        session.state = SessionState::Running;
-        sessions.insert(session.id.clone(), session);
-    }
-    for index in 0..20 {
-        let mut session = stopped_session();
-        session.id = format!("archived-{index:02}");
-        sessions.insert(session.id.clone(), session);
-    }
-    let state = State {
-        last_subagent_policy: Default::default(),
-        subagents: Default::default(),
-        version: STATE_VERSION,
-        sessions,
-        mount_history: Default::default(),
-        container_sizes: Default::default(),
-    };
-    let mut dashboard = DashboardState::new(config(), state, BTreeMap::new());
-    for index in 0..6 {
-        apply_materialized_transcript_for(
-            &mut dashboard,
-            &format!("active-{index:02}"),
-            vec![agent_message(1, "one\ntwo\nthree\nfour")],
-        );
-    }
-    let backend = TestBackend::new(120, 24);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let symbols = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<Vec<_>>();
-
-    let thumb = symbols.iter().filter(|symbol| **symbol == "▐").count();
-    let track = symbols.iter().filter(|symbol| **symbol == "│").count();
-    assert!(thumb >= 1, "expected a scrollbar thumb, rendered {thumb}");
-    assert!(track >= 1, "expected a scrollbar track, rendered {track}");
-}
-
-#[test]
-fn fully_visible_tables_do_not_show_scrollbars() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw fully visible tables");
-    let symbols = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<Vec<_>>();
-
-    assert!(!symbols.contains(&"▐"));
-}
-
-#[test]
-fn overflowing_quota_pane_uses_the_shared_scrollbar() {
-    let mut config = config();
-    let profile = config.profiles["codex-1"].clone();
-    for index in 0..20 {
-        config
-            .profiles
-            .insert(format!("profile-{index:02}"), profile.clone());
-    }
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    dashboard.focus = Focus::Quota;
-    let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("test terminal");
-
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw overflowing quotas");
-    let symbols = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<Vec<_>>();
-
-    assert!(symbols.contains(&"▐"));
-    assert!(symbols.contains(&"│"));
-}
-
-#[test]
-fn active_checkpoint_age_uses_compact_seconds_minutes_hours_and_days() {
-    let checkpointed_at = "2026-08-09T01:00:00Z";
-    let base = chrono::DateTime::parse_from_rfc3339(checkpointed_at)
-        .unwrap()
-        .timestamp() as u64;
-
-    assert_eq!(checkpoint_age(base + 12, checkpointed_at), "12s");
-    assert_eq!(checkpoint_age(base + 8 * 60, checkpointed_at), "8m");
-    assert_eq!(checkpoint_age(base + 3 * 3_600, checkpointed_at), "3h");
-    assert_eq!(checkpoint_age(base + 2 * 86_400, checkpointed_at), "2d");
-}
-
-#[test]
-fn recovery_state_is_hidden_until_a_failure_needs_attention() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    assert_eq!(
-        recovery_warning_name(&session, "Build Hel".into(), 0),
-        "Build Hel"
-    );
-
-    session.last_checkpoint_error = Some("copy failed".into());
-    session.checkpoint = None;
-    assert_eq!(
-        recovery_warning_name(&session, "Build Hel".into(), 0),
-        "Build Hel  ⚠ Recovery unavailable"
-    );
-}
-
-#[test]
-fn active_session_with_no_turn_in_flight_reads_idle() {
-    let mut session = stopped_session();
-    session.state = SessionState::Running;
-    let detail = SessionDetail {
-        last_activity_at_ms: Some(1_000_000),
-        ..SessionDetail::default()
-    };
-
-    let text = session_metadata_text(&session, Some(&detail), None, 1_480, &config());
-    assert!(text.contains("Idle"), "{text}");
-}
-
-/// #1161: a parked sub-agent's turn ended and its worker is stopped. It
-/// needs nothing from anyone, so it is idle (and drawn with the idle
-/// symbol), and its row says
-/// "Parked" rather than a clock that would never move.
-#[test]
-fn a_parked_sub_agent_is_idle_and_reads_parked() {
-    let mut session = stopped_session();
-    session.state = SessionState::Parked;
-    let detail = SessionDetail {
-        last_activity_at_ms: Some(1_000_000),
-        ..SessionDetail::default()
-    };
-
-    let attention = crate::dashboard_sessions::attention_level(
-        Some(&detail),
-        None,
-        session.state,
-        false,
-        false,
-        false,
-    );
-    assert_eq!(attention, crate::AttentionLevel::Idle);
-    let text = session_metadata_text(&session, Some(&detail), None, 1_480, &config());
-    assert!(text.contains("Parked"), "{text}");
-}
-
-#[test]
-fn provisioning_clock_uses_elapsed_seconds_since_state_update() {
-    let mut session = stopped_session();
-    session.state = SessionState::Provisioning;
-    session.updated_at = "1970-01-01T00:16:40Z".into();
-
-    let text = session_metadata_text(&session, None, None, 1_012, &config());
-    assert!(text.contains("Launch 12s"), "{text}");
-}
-
-#[test]
-fn transition_row_is_compact_and_contains_stage_identity_and_elapsed() {
-    let session = stopped_session();
-    let operation = operation(SessionOperationKind::Moving, Some(ProvisionStage::Cloning));
-    let line = session_transition_line(
-        "› ",
-        &session,
-        mj_core::state::SessionTransitionKind::Moving,
-        Some(&operation),
-        1_012,
-        "podman",
-        120,
-        None,
-    );
-    let text = line
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
-    assert!(text.contains("Moving"), "{text}");
-    assert!(text.contains("Clone"), "{text}");
-    assert!(text.contains("12s"), "{text}");
-    assert!(text.contains("ACP pretty name"), "{text}");
-    assert!(!text.contains("No messages"), "{text}");
-
-    // Sessions that start together on one target differ only by their names,
-    // so the name has to survive a narrow Sessions pane.
-    let narrow = session_transition_line(
-        "› ",
-        &session,
-        mj_core::state::SessionTransitionKind::Moving,
-        Some(&operation),
-        1_012,
-        "podman",
-        40,
-        None,
-    );
-    let narrow = narrow
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
-    assert!(narrow.contains("ACP pretty name"), "{narrow}");
-    assert!(narrow.contains("Moving"), "{narrow}");
-}
-
-#[test]
-fn launch_clock_names_the_reported_stage() {
-    let session = stopped_session();
-    let operation = operation(
-        SessionOperationKind::Launching,
-        Some(ProvisionStage::Booting),
-    );
-
-    let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
-    assert!(text.contains("Boot 12s"), "{text}");
-}
-
-#[test]
-fn launch_clock_falls_back_to_the_kind_label_without_a_stage() {
-    let session = stopped_session();
-    let operation = operation(SessionOperationKind::Launching, None);
-
-    let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
-    assert!(text.contains("Launch 12s"), "{text}");
-}
-
-#[test]
-fn a_stage_does_not_rename_a_non_launch_operation() {
-    let session = stopped_session();
-    let operation = operation(
-        SessionOperationKind::Suspending,
-        Some(ProvisionStage::Syncing),
-    );
-
-    let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
-    assert!(text.contains("Suspending 12s"), "{text}");
-}
-
+// Hard-won: 6dec78fe: An in-flight Resuming row kept showing its source profile and target after the operation had recorded its destination.
 #[test]
 fn resuming_row_shows_the_destination_profile_and_target_not_the_stale_record() {
     // The controller updates the session's own last_profile/target as
@@ -4207,17 +1830,6 @@ fn resuming_row_shows_the_destination_profile_and_target_not_the_stale_record() 
 
     assert!(text.contains("grok-1"), "{text}");
     assert!(text.contains("localhost"), "{text}");
-}
-
-#[test]
-fn without_a_resume_destination_the_row_falls_back_to_the_session_record() {
-    let session = stopped_session();
-    let resuming = operation(SessionOperationKind::Resuming, None);
-
-    let text = session_metadata_text(&session, None, Some(&resuming), 1_012, &config());
-
-    assert!(text.contains(&session.last_profile), "{text}");
-    assert!(text.contains(&session.target_template_id), "{text}");
 }
 
 #[test]
@@ -4248,6 +1860,7 @@ fn move_panel_elapsed_counts_the_operation_across_stage_changes() {
     assert!(text.contains("Elapsed: 2m"), "{text}");
 }
 
+// Hard-won: 90c11161: The launch clock paired each new stage name with elapsed time from the whole operation instead of that stage.
 #[test]
 fn stage_clock_counts_from_when_the_stage_began_not_the_operation() {
     let session = stopped_session();
@@ -4263,21 +1876,6 @@ fn stage_clock_counts_from_when_the_stage_began_not_the_operation() {
 
     let text = session_metadata_text(&session, None, Some(&operation), 1_052, &config());
     assert!(text.contains("Boot 12s"), "{text}");
-}
-
-#[test]
-fn install_stage_names_the_harness_not_the_profile() {
-    let session = stopped_session();
-    assert_eq!(session.last_profile, "codex-1");
-    let operation = operation(
-        SessionOperationKind::Launching,
-        Some(ProvisionStage::Installing(HarnessKind::Codex)),
-    );
-
-    let text = session_metadata_text(&session, None, Some(&operation), 1_012, &config());
-
-    assert!(text.contains("Installing Codex 12s"), "{text}");
-    assert!(text.contains("codex-1"), "{text}");
 }
 
 #[test]
@@ -4342,233 +1940,6 @@ fn focused_panes_use_quiet_rounded_borders_and_accent_titles_without_focus_label
 }
 
 #[test]
-fn only_focused_pane_draws_caret_without_shifting_table_columns() {
-    let mut first = stopped_session();
-    first.id = "session-0".into();
-    first.state = SessionState::Running;
-    let mut second = stopped_session();
-    second.state = SessionState::Running;
-    let mut dashboard = DashboardState::new(
-        config(),
-        State {
-            last_subagent_policy: Default::default(),
-            subagents: Default::default(),
-            version: STATE_VERSION,
-            sessions: [(first.id.clone(), first), (second.id.clone(), second)]
-                .into_iter()
-                .collect(),
-            mount_history: Default::default(),
-            container_sizes: Default::default(),
-        },
-        BTreeMap::new(),
-    );
-
-    let first = dashboard.ordered_sessions()[0].id.clone();
-    dashboard.select_active_session(&first);
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
-    let backend = TestBackend::new(120, 40);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    let mut initial_name_columns = None;
-
-    for expected_focus in [Focus::Sessions, Focus::Targets, Focus::Quota] {
-        dashboard.focus = expected_focus;
-        terminal
-            .draw(|frame| render(frame, &mut dashboard))
-            .expect("draw dashboard");
-        let buffer = terminal.backend().buffer();
-        let lines = (buffer.area.y..buffer.area.bottom())
-            .map(|y| {
-                (buffer.area.x..buffer.area.right())
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
-        // The Sessions pane always marks the conversation on screen, and
-        // a focused table marks its own row. Nothing else draws a caret,
-        // so a support pane that does not have focus adds none.
-        let carets = lines
-            .iter()
-            .flat_map(|line| line.chars())
-            .filter(|character| *character == '›')
-            .count();
-        let expected_carets = usize::from(expected_focus != Focus::Sessions) + 1;
-        assert_eq!(carets, expected_carets, "{expected_focus:?}");
-        if expected_focus == Focus::Sessions {
-            // Both sessions draw their expanded form, and the caret on one
-            // of them does not shift the other's columns.
-            let name_columns = lines
-                .iter()
-                .filter_map(|line| {
-                    line.find("ACP pretty name")
-                        .map(|byte| line[..byte].chars().count())
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(name_columns.len(), 2);
-            assert_eq!(name_columns[0], name_columns[1]);
-            initial_name_columns = Some(name_columns);
-        }
-    }
-    assert!(initial_name_columns.is_some());
-}
-
-#[test]
-fn existing_sessions_remain_visible_when_settings_has_no_accounts_or_targets() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.set_config(Config::default());
-    let rendered = drawn(&mut dashboard, 120, 40).join("\n");
-    assert!(rendered.contains("Sessions"), "{rendered}");
-    assert!(rendered.contains("ACP pretty name"), "{rendered}");
-    assert!(dashboard.pane_areas.is_some());
-    dashboard.focus_sessions();
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::None
-    );
-    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
-}
-
-#[test]
-fn empty_config_renders_the_normal_dashboard_without_a_get_started_panel() {
-    let mut dashboard = DashboardState::new(Config::default(), State::default(), BTreeMap::new());
-    let backend = TestBackend::new(100, 24);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let buffer = terminal.backend().buffer();
-    let rendered = buffer
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Sessions"));
-    assert!(!rendered.contains("Get started"));
-    assert_eq!(
-        dashboard.handle_key(key(KeyCode::Char('e'))),
-        DashboardAction::None
-    );
-}
-
-#[test]
-fn workspace_name_does_not_change_with_dashboard_updates() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.set_workspace_name("acme-workspace".into());
-    dashboard.set_state(State::default());
-    dashboard.set_quotas(BTreeMap::new());
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("Sessions"));
-    assert_eq!(dashboard.workspace_name, "acme-workspace");
-}
-
-#[test]
-fn quota_render_includes_errors_and_refresh_age_in_title() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        State::default(),
-        BTreeMap::from([(
-            "codex-1".into(),
-            ProfileQuota {
-                banked_resets: None,
-                profile_id: "codex-1".into(),
-                harness: HarnessKind::Codex,
-                windows: vec![],
-                extra: None,
-                error: Some("offline".into()),
-                refreshed_at_epoch_seconds: 1,
-                rate_limited_until_epoch_seconds: None,
-            },
-        )]),
-    );
-    let backend = TestBackend::new(120, 28);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("unavailable"));
-    assert!(!rendered.contains("offline"));
-    assert!(rendered.contains("Profiles ▾ (refreshed"));
-    assert!(!rendered.contains("Refreshed"));
-    assert!(!rendered.contains("Access"));
-    assert!(!rendered.contains("agent-full-access"));
-}
-
-#[test]
-fn quota_render_shows_login_expired_without_unavailable_prefix() {
-    let mut dashboard = DashboardState::new(
-        config(),
-        State::default(),
-        BTreeMap::from([(
-            "claude-1".into(),
-            ProfileQuota {
-                banked_resets: None,
-                profile_id: "claude-1".into(),
-                harness: HarnessKind::Claude,
-                windows: vec![],
-                extra: None,
-                error: Some("login expired".into()),
-                refreshed_at_epoch_seconds: 1,
-                rate_limited_until_epoch_seconds: None,
-            },
-        )]),
-    );
-    let backend = TestBackend::new(120, 28);
-    let mut terminal = Terminal::new(backend).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("login expired"));
-    assert!(!rendered.contains("unavailable: login expired"));
-}
-
-#[test]
-fn a_usage_priced_quota_row_shows_api_without_bars_or_reset_dates() {
-    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
-    dashboard.apply_quota(api_quota("codex-1"));
-    let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(rendered.contains("API"));
-    assert!(rendered.contains("▕   API    ▏"));
-    assert!(!rendered.contains("API Pricing"));
-    assert!(!rendered.contains("unavailable"));
-    assert!(!rendered.contains('%'));
-}
-
-#[test]
 fn quota_bars_show_fractional_remaining_capacity_and_blank_missing_windows() {
     let window = QuotaWindow {
         label: "Week".into(),
@@ -4599,426 +1970,6 @@ fn quota_bars_show_fractional_remaining_capacity_and_blank_missing_windows() {
     assert_eq!(chart.to_string(), "▕███████▎  ▏73%");
     assert_eq!(chart.spans[0].style, quota_chart_border_style());
     assert!(quota_bar(None).spans.is_empty());
-}
-
-#[test]
-fn api_quota_label_uses_the_black_bordered_chart_field() {
-    let api = api_quota_bar();
-    let rendered: String = api.spans.iter().map(|span| span.content.as_ref()).collect();
-    assert_eq!(rendered, "   API    ▏");
-    assert!(
-        api.spans
-            .iter()
-            .all(|span| span.style.bg == Some(theme::palette().background))
-    );
-    assert_eq!(api.spans[3].style.fg, Some(theme::palette().muted));
-}
-
-#[test]
-fn quota_render_hides_five_hour_bar_and_reset_when_weekly_quota_is_exhausted() {
-    let quota = ProfileQuota {
-        banked_resets: None,
-        profile_id: "codex-1".into(),
-        harness: HarnessKind::Codex,
-        windows: vec![
-            QuotaWindow {
-                label: "Week".into(),
-                remaining_percent: Some(0),
-                used: None,
-                limit: None,
-                resets: Some("09:00 Aug 20".into()),
-                resets_at_epoch_seconds: Some(604_800),
-            },
-            QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(70),
-                used: None,
-                limit: None,
-                resets: Some("14:00 Aug 13".into()),
-                resets_at_epoch_seconds: Some(14_400),
-            },
-        ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    let mut dashboard = DashboardState::new(
-        config(),
-        State::default(),
-        BTreeMap::from([("codex-1".into(), quota)]),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-
-    assert!(rendered.contains("0%"));
-    assert!(!rendered.contains("70%"));
-    assert!(!rendered.contains("4h"));
-}
-
-#[test]
-fn quota_reset_countdown_always_shows_hours() {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    let now = 100;
-
-    assert_eq!(
-        quota_reset_countdown(now, (now + 2 * DAY + 5 * HOUR) as i64),
-        "2d 5h"
-    );
-    assert_eq!(quota_reset_countdown(now, (now + 2 * DAY) as i64), "2d 0h");
-    assert_eq!(
-        quota_reset_countdown(now, (now + DAY + 5 * HOUR) as i64),
-        "1d 5h"
-    );
-    assert_eq!(
-        quota_reset_countdown(now, (now + 2 * HOUR + 5 * MINUTE) as i64),
-        "2h 5m"
-    );
-    assert_eq!(quota_reset_countdown(now, (now + 9 * HOUR) as i64), "9h");
-    assert_eq!(
-        quota_reset_countdown(now, (now + 9 * HOUR + 5 * MINUTE) as i64),
-        "9h 5m"
-    );
-    assert_eq!(
-        quota_reset_countdown(now, (now + 10 * HOUR + 5 * MINUTE) as i64),
-        "10h"
-    );
-    assert_eq!(
-        quota_reset_countdown(now, (now + HOUR + 5 * MINUTE) as i64),
-        "1h 5m"
-    );
-    assert_eq!(
-        quota_reset_countdown(now, (now + 35 * MINUTE) as i64),
-        "35m"
-    );
-    assert_eq!(quota_reset_countdown(now, (now + 30) as i64), "<1m");
-    assert_eq!(quota_reset_countdown(now, now as i64), "now");
-}
-
-#[test]
-fn weekly_and_five_hour_resets_are_independent() {
-    let quota = ProfileQuota {
-        banked_resets: None,
-        profile_id: "codex-1".into(),
-        harness: HarnessKind::Codex,
-        windows: vec![
-            QuotaWindow {
-                label: "Week".into(),
-                remaining_percent: Some(73),
-                used: None,
-                limit: None,
-                resets: Some("09:00 Aug 20".into()),
-                resets_at_epoch_seconds: Some(604_800),
-            },
-            QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(80),
-                used: None,
-                limit: None,
-                resets: Some("14:00 Aug 13".into()),
-                resets_at_epoch_seconds: Some(14_400),
-            },
-        ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-
-    assert_eq!(
-        quota_reset_cells(&quota, 0),
-        ("7d 0h".into(), "4h 0m".into())
-    );
-}
-
-#[test]
-fn banked_resets_appear_only_beside_the_weekly_countdown() {
-    let mut quota = weekly_and_five_hour_quota("codex", 75, 80);
-    quota.windows[0].resets_at_epoch_seconds = Some(5 * 86400 + 7 * 3600);
-    quota.windows[1].resets_at_epoch_seconds = Some(4 * 3600);
-    quota.banked_resets = Some(1);
-    assert_eq!(
-        quota_reset_cells(&quota, 0),
-        ("5d 7h [1]".into(), "4h 0m".into())
-    );
-    for count in [Some(0), None] {
-        quota.banked_resets = count;
-        assert_eq!(quota_reset_cells(&quota, 0).0, "5d 7h");
-    }
-    quota.banked_resets = Some(1);
-    quota.windows[0].resets_at_epoch_seconds = None;
-    assert_eq!(quota_reset_cells(&quota, 0).0, "[1]");
-}
-
-#[test]
-fn five_hour_reset_always_uses_minutes_above_one_hour() {
-    const MINUTE: i64 = 60;
-    const HOUR: i64 = 60 * MINUTE;
-
-    assert_eq!(
-        five_hour_quota_reset_countdown(100, 100 + 4 * HOUR + 50 * MINUTE),
-        "4h 50m"
-    );
-    assert_eq!(
-        five_hour_quota_reset_countdown(100, 100 + 4 * HOUR + 5 * MINUTE),
-        "4h 5m"
-    );
-    assert_eq!(
-        five_hour_quota_reset_countdown(100, 100 + HOUR + 5 * MINUTE),
-        "1h 5m"
-    );
-    assert_eq!(five_hour_quota_reset_countdown(100, 130), "<1m");
-}
-
-#[test]
-fn quota_render_uses_weekly_five_hour_and_reset_columns() {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let now = i64::try_from(now).unwrap();
-    let quota = ProfileQuota {
-        banked_resets: None,
-        profile_id: "codex-1".into(),
-        harness: HarnessKind::Codex,
-        windows: vec![
-            QuotaWindow {
-                label: "Week".into(),
-                remaining_percent: Some(73),
-                used: None,
-                limit: None,
-                resets: Some("09:00 Aug 20".into()),
-                resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60 + 30),
-            },
-            QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(70),
-                used: None,
-                limit: None,
-                resets: Some("14:00 Aug 13".into()),
-                resets_at_epoch_seconds: Some(now + 60 * 60 + 5 * 60 + 30),
-            },
-        ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    let mut dashboard = DashboardState::new(
-        config(),
-        State::default(),
-        BTreeMap::from([("codex-1".into(), quota)]),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(140, 28)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let lines = buffer_lines(terminal.backend().buffer());
-    let rendered = lines.join("\n");
-
-    assert!(rendered.contains("Weekly"));
-    assert!(rendered.contains("5H"));
-    assert_eq!(rendered.matches("Resets").count(), 2);
-    assert!(rendered.contains("73%"));
-    assert!(rendered.contains("70%"));
-    assert!(rendered.contains("2d"));
-    assert!(rendered.contains("1h 5m"));
-    assert!(!rendered.contains("09:00 Aug 20"));
-
-    let row = lines
-        .iter()
-        .find(|line| line.contains("codex-1"))
-        .expect("quota row");
-    assert!(row.contains("▕███████▎  ▏73%"), "{row:?}");
-    assert!(row.contains("▕███████   ▏70%"), "{row:?}");
-    let weekly_percent = cell_column(row, "73%");
-    let weekly_reset = cell_column(row, "2d");
-    let five_hour_percent = cell_column(row, "70%");
-    let five_hour_reset = cell_column(row, "1h 5m");
-    assert_eq!(weekly_reset, weekly_percent + 3 + 1);
-    assert_eq!(five_hour_percent - 12, weekly_reset + 6 + 2);
-    assert_eq!(five_hour_reset, five_hour_percent + 3 + 1);
-}
-
-/// User request 2026-09-25: the pane that lists the profiles is titled
-/// Profiles, and its first column has no heading of its own, because the
-/// title already says what the rows are. The heading cell is blank, but the
-/// column keeps the width the heading gave it, so a short profile ID does not
-/// pull the other columns left.
-#[test]
-fn the_profiles_pane_is_titled_profiles_and_its_first_column_has_no_heading() {
-    let mut config = config();
-    let profile = config.profiles.remove("codex-1").expect("fixture profile");
-    config.profiles.clear();
-    config.profiles.insert("cx".into(), profile);
-    let mut dashboard = DashboardState::new(config, State::default(), BTreeMap::new());
-    let lines = drawn(&mut dashboard, 140, 40);
-    let area = dashboard.pane_areas.expect("pane areas")[2];
-
-    let title = &lines[usize::from(area.y)];
-    assert!(title.contains("╭ Profiles ▾ "), "{title:?}");
-    assert!(
-        !lines.iter().any(|line| line.contains("Quota")),
-        "{lines:#?}"
-    );
-
-    let header = &lines[usize::from(area.y) + 1];
-    assert!(header.contains("Harness"), "{header:?}");
-    assert!(!header.contains("Profile"), "{header:?}");
-    // Border, the two-cell selection marker, then the first column: the
-    // seven cells "Profile" took, and its two-cell gap.
-    assert_eq!(
-        cell_column(header, "Harness"),
-        area.x + 1 + 2 + 7 + 2,
-        "{header:?}"
-    );
-    let row = lines
-        .iter()
-        .find(|line| line.contains(" cx "))
-        .expect("the profile row");
-    assert_eq!(cell_column(row, "Codex"), cell_column(header, "Harness"));
-}
-
-#[test]
-fn quota_render_keeps_both_percentages_and_resets_at_eighty_columns() {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let now = i64::try_from(now).unwrap();
-    let quota = ProfileQuota {
-        banked_resets: Some(1),
-        profile_id: "codex-1".into(),
-        harness: HarnessKind::Codex,
-        windows: vec![
-            QuotaWindow {
-                label: "Week".into(),
-                remaining_percent: Some(73),
-                used: None,
-                limit: None,
-                resets: None,
-                resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60 + 30),
-            },
-            QuotaWindow {
-                label: "5H".into(),
-                remaining_percent: Some(70),
-                used: None,
-                limit: None,
-                resets: None,
-                resets_at_epoch_seconds: Some(now + 60 * 60 + 5 * 60 + 30),
-            },
-        ],
-        extra: None,
-        error: None,
-        refreshed_at_epoch_seconds: 0,
-        rate_limited_until_epoch_seconds: None,
-    };
-    let mut dashboard = DashboardState::new(
-        config(),
-        State::default(),
-        BTreeMap::from([("codex-1".into(), quota)]),
-    );
-    let mut terminal = Terminal::new(TestBackend::new(80, 28)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw dashboard");
-    let row = buffer_lines(terminal.backend().buffer())
-        .into_iter()
-        .find(|line| line.contains("codex-1"))
-        .expect("quota row");
-    assert!(row.contains("73%"), "{row:?}");
-    assert!(row.contains("70%"), "{row:?}");
-    assert!(row.contains("2d 0h [1]"), "{row:?}");
-    assert!(row.contains("1h 5m"), "{row:?}");
-}
-
-/// Two panes are two conversations on one screen: each draws its own bordered
-/// panel, in the rectangle the layout tree says it owns.
-#[test]
-fn two_panes_draw_two_conversation_panels_at_the_rectangles_the_layout_reports() {
-    let mut second = running_session();
-    second.id = "session-2".into();
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard
-        .state
-        .sessions
-        .insert(second.id.clone(), second.clone());
-    dashboard.set_current_session(Some("session-1"));
-    drawn(&mut dashboard, 160, 44);
-    let first = dashboard.focused_pane();
-    let right = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("a 160-column frame has room for two panes");
-
-    let lines = drawn(&mut dashboard, 160, 44);
-
-    let band = dashboard.conversation_area.expect("the conversation band");
-    let expected = dashboard.navigation.layout().panes(band);
-    assert_eq!(expected.len(), 2);
-    for pane in &expected {
-        let (transcript, prompt) = dashboard.pane_bands(pane.id).expect("the pane drew");
-        assert_eq!(transcript.x, pane.rect.x);
-        assert_eq!(transcript.width, pane.rect.width);
-        assert_eq!(transcript.y, pane.rect.y);
-        assert_eq!(prompt.x, pane.rect.x);
-        assert_eq!(prompt.width, pane.rect.width);
-        assert_eq!(transcript.bottom(), prompt.y);
-        assert_eq!(prompt.bottom(), pane.rect.bottom());
-        assert!(transcript.height >= 3 && prompt.height >= 3);
-    }
-    // Both panels are on screen at once, side by side on the same rows.
-    let panels = lines
-        .iter()
-        .filter(|line| line.matches(" Conversation ").count() == 2)
-        .count();
-    assert!(panels > 0, "{lines:#?}");
-    assert_ne!(first, right);
-}
-
-/// The focused pane is the one the user is typing into: only it wears the
-/// focused border, and only it hands its keys to the footer.
-#[test]
-fn only_the_focused_pane_draws_the_focused_border() {
-    let mut second = running_session();
-    second.id = "session-2".into();
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.state.sessions.insert(second.id.clone(), second);
-    dashboard.set_current_session(Some("session-1"));
-    dashboard.focus_prompt();
-    drawn(&mut dashboard, 160, 44);
-    let first = dashboard.focused_pane();
-    let right = dashboard
-        .split_focused_pane(ratatui::layout::Direction::Horizontal, Some("session-2"))
-        .expect("a 160-column frame has room for two panes");
-    dashboard.focus_prompt();
-
-    let mut terminal = Terminal::new(TestBackend::new(160, 44)).expect("terminal");
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .expect("draw the two panes");
-    let buffer = terminal.backend().buffer();
-
-    let border_style = |pane| {
-        let (_, prompt) = dashboard.pane_bands(pane).expect("the pane drew");
-        buffer[(prompt.x, prompt.y)].style()
-    };
-    assert_eq!(dashboard.focused_pane(), right);
-    assert_ne!(
-        border_style(right),
-        border_style(first),
-        "the focused pane's composer is drawn differently from its neighbour's"
-    );
 }
 
 /// One session whose title is `title`, measured at `recent` permille.
@@ -5055,37 +2006,6 @@ fn name_and_following(dashboard: &DashboardState, width: u16, minimized: bool) -
 }
 
 #[test]
-fn session_row_name_line_ends_with_right_justified_cpu() {
-    let dashboard = dashboard_with_measured_session("Parser", 230);
-    let lines = name_and_following(&dashboard, 60, false);
-    println!("{}", lines.join("\n"));
-    // The title line leaves five cells for the pin and menu controls.
-    assert_eq!(Line::raw(lines[0].as_str()).width(), 55, "{lines:#?}");
-    assert!(lines[0].contains("Parser"), "{lines:#?}");
-    assert!(lines[0].ends_with("23%"), "{lines:#?}");
-    // It appears once: not on the status line.
-    assert!(
-        lines[1..].iter().all(|line| !line.contains('%')),
-        "{lines:#?}"
-    );
-    // Below the 1.0% threshold nothing is drawn.
-    let quiet = dashboard_with_measured_session("Parser", 5);
-    assert!(
-        row_texts(&quiet, 60, false)
-            .iter()
-            .all(|l| !l.contains('%'))
-    );
-}
-
-#[test]
-fn minimized_session_rows_omit_cpu() {
-    let dashboard = dashboard_with_measured_session("Parser", 230);
-    let lines = row_texts(&dashboard, 60, true);
-    assert!(!lines.is_empty());
-    assert!(lines.iter().all(|line| !line.contains('%')), "{lines:#?}");
-}
-
-#[test]
 fn a_narrow_session_row_truncates_the_name_before_dropping_cpu() {
     let title = "Refactor the parser to stream tokens";
     let dashboard = dashboard_with_measured_session(title, 230);
@@ -5100,8 +2020,12 @@ fn a_narrow_session_row_truncates_the_name_before_dropping_cpu() {
     assert!(tiny[0].contains("Refac"), "{tiny:#?}");
 }
 
-#[test]
-fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
+/// An open CPU report over two machines: machine-a lists three sessions and
+/// machine-b two. Every measured session's recent share is 23%.
+fn two_machine_cpu_report() -> (
+    DashboardState,
+    mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
+) {
     use mj_client::runtime_feed::SessionCpuView;
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.state.sessions.clear();
@@ -5150,20 +2074,96 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
                 kind: DeploymentCapacityKind::Host,
                 local: true,
                 probes: Vec::new(),
+                local_storage_paths: Vec::new(),
                 probe_error: None,
             })
             .collect(),
     );
     dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    (dashboard, cpu)
+}
+
+/// The rows a modal titled `title` spans, from its top border to its bottom.
+fn modal_rows(lines: &[String], title: &str) -> std::ops::RangeInclusive<usize> {
+    let top = lines
+        .iter()
+        .position(|line| line.contains(title))
+        .unwrap_or_else(|| panic!("{title} is drawn:\n{}", lines.join("\n")));
+    let column = lines[top]
+        .find('╭')
+        .expect("the title row is the top border");
+    let bottom = (top + 1..lines.len())
+        .find(|row| {
+            lines[*row]
+                .get(column..)
+                .is_some_and(|rest| rest.starts_with('╰'))
+        })
+        .expect("the modal has a bottom border");
+    top..=bottom
+}
+
+#[test]
+fn session_cpu_report_keeps_its_size_across_tabs_and_switches_metric() {
+    let (mut dashboard, _) = two_machine_cpu_report();
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    let mut draw = |dashboard: &mut DashboardState| {
+        terminal.draw(|frame| render(frame, dashboard)).unwrap();
+        buffer_lines(terminal.backend().buffer())
+    };
+
+    let first = draw(&mut dashboard);
+    let rows = modal_rows(&first, "CPU by session");
+    assert!(first.join("\n").contains("fast  [codex-1]"));
+    dashboard.handle_key(key(KeyCode::Right));
+    let second = draw(&mut dashboard);
+    assert!(second.join("\n").contains("other  [codex-1]"));
+    assert_eq!(
+        modal_rows(&second, "CPU by session"),
+        rows,
+        "the shorter machine keeps the dialog's size"
+    );
+
+    // The stacked buttons choose the figure the rows, totals and tabs show.
+    dashboard.handle_key(key(KeyCode::Left));
+    let text = draw(&mut dashboard).join("\n");
+    assert!(text.contains("machine-a · 40% hourly"), "{text}");
+    assert!(text.contains("30% hourly"), "{text}");
+    assert!(text.contains("(14m)"), "{text}");
+    let recent = point(&draw(&mut dashboard), "Recent");
+    click_cpu_report(&mut dashboard, recent);
+    let text = draw(&mut dashboard).join("\n");
+    assert!(text.contains("machine-a · 46% recent"), "{text}");
+    assert!(text.contains("machine-b · 23% recent"), "{text}");
+    assert!(text.contains("fast  [codex-1]  23% recent"), "{text}");
+    assert!(!text.contains("hourly"), "{text}");
+    assert!(
+        !text.contains("(14m)"),
+        "the covered period qualifies only the hourly average:\n{text}"
+    );
+    let hourly = point(&draw(&mut dashboard), "Hourly");
+    click_cpu_report(&mut dashboard, hourly);
+    assert!(
+        draw(&mut dashboard)
+            .join("\n")
+            .contains("machine-a · 40% hourly")
+    );
+}
+
+#[test]
+fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
+    use mj_client::runtime_feed::SessionCpuView;
+    let (mut dashboard, mut cpu) = two_machine_cpu_report();
     let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(
-        text.find("machine-a").unwrap() < text.find("machine-b").unwrap(),
+        text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
         "{text}"
     );
+    assert!(text.contains("machine-a · 40% hourly"), "{text}");
+    assert!(text.contains("machine-b · 20% hourly"), "{text}");
     assert!(
         text.find("fast  [codex-1]").unwrap() < text.find("slow  [codex-1]").unwrap(),
         "{text}"
@@ -5173,8 +2173,37 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         "{text}"
     );
     assert!(text.contains("permission denied"));
-    assert!(text.contains("no CPU data yet"));
     assert!(text.contains("(14m)"));
+    assert!(
+        !text.contains("other  [codex-1]"),
+        "the second machine is a tab:\n{text}"
+    );
+
+    // Tabs stay alphabetically ordered, and Right displays the next machine.
+    dashboard.handle_key(key(KeyCode::Right));
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("other  [codex-1]"), "{text}");
+    assert!(text.contains("no CPU data yet"), "{text}");
+    assert!(!text.contains("fast  [codex-1]"), "{text}");
+
+    // A click on a tab selects it without changing the alphabetic tab order.
+    let tab = point(
+        &text.lines().map(str::to_owned).collect::<Vec<_>>(),
+        "machine-a ·",
+    );
+    click_cpu_report(&mut dashboard, tab);
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .unwrap();
+    let text = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(text.contains("fast  [codex-1]"), "{text}");
+    assert!(
+        text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
+        "{text}"
+    );
     dashboard.acknowledge_render();
     cpu.insert(
         "other".into(),
@@ -5197,9 +2226,63 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     assert!(
-        text.find("machine-b").unwrap() < text.find("machine-a").unwrap(),
+        text.find("machine-a ·").unwrap() < text.find("machine-b ·").unwrap(),
         "{text}"
     );
+}
+
+fn click_cpu_report(dashboard: &mut DashboardState, position: (u16, u16)) -> DashboardAction {
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let action = dashboard.handle_mouse(mouse_at(kind, position));
+        if kind == MouseEventKind::Up(MouseButton::Left) {
+            return action;
+        }
+    }
+    unreachable!()
+}
+
+#[test]
+fn session_cpu_report_opens_on_the_selected_sessions_machine() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let mut first = running_session();
+    first.id = "machine-a-session".into();
+    first.title = first.id.clone();
+    first.acp_session_title = None;
+    first.target_template_id = "machine-a".into();
+    let mut selected = running_session();
+    selected.id = "machine-b-session".into();
+    selected.title = selected.id.clone();
+    selected.acp_session_title = None;
+    selected.target_template_id = "machine-b".into();
+    let mut state = dashboard.state.clone();
+    state.sessions.clear();
+    state.sessions.insert(first.id.clone(), first);
+    state.sessions.insert(selected.id.clone(), selected.clone());
+    dashboard.set_state(state);
+    dashboard.set_deployment_capacity_targets(
+        ["machine-a", "machine-b"]
+            .into_iter()
+            .map(|host| mj_core::targets::DeploymentCapacityTarget {
+                id: host.into(),
+                host: host.into(),
+                target_ids: vec![host.into()],
+                kind: DeploymentCapacityKind::Host,
+                local: true,
+                probes: Vec::new(),
+                local_storage_paths: Vec::new(),
+                probe_error: None,
+            })
+            .collect(),
+    );
+    dashboard.select_active_session(&selected.id);
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+
+    let text = drawn(&mut dashboard, 120, 32).join("\n");
+    assert!(text.contains("machine-b-session  [codex-1]"), "{text}");
+    assert!(!text.contains("machine-a-session  [codex-1]"), "{text}");
 }
 
 fn measured_cpu(recent: u16, hourly: u16) -> mj_client::runtime_feed::SessionCpuView {
@@ -5245,6 +2328,184 @@ fn set_cpu(dashboard: &mut DashboardState, entries: &[(&str, u16, u16)]) {
 }
 
 #[test]
+fn session_cpu_report_excludes_parked_stopped_and_failed_subagents() {
+    let (mut dashboard, _) = dashboard_with_subagents(&[
+        "parked-child",
+        "stopped-child",
+        "error-child",
+        "active-child",
+    ]);
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut("parked-child").unwrap().state = SessionState::Parked;
+    state.sessions.get_mut("stopped-child").unwrap().state = SessionState::Stopped;
+    state.sessions.get_mut("error-child").unwrap().state = SessionState::Error;
+    dashboard.set_state(state);
+
+    let ids = crate::session_cpu_report::report_groups(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Hourly,
+    )
+    .into_iter()
+    .flat_map(|group| group.session_ids)
+    .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&"session-1".to_owned()),
+        "parent is active: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"active-child".to_owned()),
+        "active child: {ids:?}"
+    );
+    assert!(!ids.contains(&"parked-child".to_owned()), "{ids:?}");
+    assert!(!ids.contains(&"stopped-child".to_owned()), "{ids:?}");
+    assert!(!ids.contains(&"error-child".to_owned()), "{ids:?}");
+}
+
+#[test]
+fn session_cpu_report_selection_stays_with_its_session_after_cpu_resort() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let mut state = dashboard.state.clone();
+    state.sessions.clear();
+    for id in ["fast", "middle", "slow"] {
+        let mut session = running_session();
+        session.id = id.into();
+        session.title = id.into();
+        session.acp_session_title = None;
+        session.target_template_id = "shared-machine".into();
+        state.sessions.insert(id.into(), session);
+    }
+    dashboard.set_state(state);
+    set_cpu(
+        &mut dashboard,
+        &[("fast", 300, 300), ("middle", 200, 200), ("slow", 100, 100)],
+    );
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    dashboard.handle_key(key(KeyCode::End));
+    let crate::Mode::SessionCpuReport(dialog) = &dashboard.mode else {
+        panic!("CPU report is open");
+    };
+    assert_eq!(dialog.selected_session_id.borrow().as_deref(), Some("slow"));
+
+    set_cpu(
+        &mut dashboard,
+        &[("fast", 50, 50), ("middle", 200, 200), ("slow", 500, 500)],
+    );
+    let _ = drawn(&mut dashboard, 120, 30);
+    let crate::Mode::SessionCpuReport(dialog) = &dashboard.mode else {
+        panic!("CPU report remains open");
+    };
+    assert_eq!(
+        dialog.selected_session_id.borrow().as_deref(),
+        Some("slow"),
+        "the cursor follows the selected id through re-sorting"
+    );
+    assert_eq!(dialog.selected_row.get(), 0);
+}
+
+#[test]
+fn enter_on_a_cpu_report_top_level_row_opens_its_session() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let session_id = dashboard.selected_session_id().unwrap().to_owned();
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Open {
+            session_id: session_id.clone()
+        }
+    );
+    assert!(matches!(dashboard.mode, crate::Mode::Dashboard));
+    assert_eq!(dashboard.selected_session_id(), Some(session_id.as_str()));
+}
+
+#[test]
+fn enter_on_a_cpu_report_subagent_opens_its_parent_view_and_conversation() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    // A filter that would hide the child is cleared by going to it.
+    *dashboard.sessions_filter = Some(crate::SessionsFilter {
+        query: mj_chat::text_input::TextInput::from_value("matches nothing"),
+        state: None,
+        editing: false,
+    });
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    dashboard.handle_key(key(KeyCode::Down));
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::Open {
+            session_id: "kid-a".into()
+        }
+    );
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
+    assert!(dashboard.sessions_filter.is_none());
+}
+
+#[test]
+fn double_click_on_a_cpu_report_subagent_opens_its_parent_view() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    let first = drawn(&mut dashboard, 120, 35);
+    let child_row = point(&first, "kid-a");
+    assert_eq!(
+        click_cpu_report(&mut dashboard, child_row),
+        DashboardAction::None
+    );
+    let crate::Mode::SessionCpuReport(dialog) = &dashboard.mode else {
+        panic!("first click keeps the CPU report open");
+    };
+    assert_eq!(
+        dialog.selected_session_id.borrow().as_deref(),
+        Some("kid-a")
+    );
+    let _ = drawn(&mut dashboard, 120, 35);
+
+    assert_eq!(
+        click_cpu_report(&mut dashboard, child_row),
+        DashboardAction::Open {
+            session_id: "kid-a".into()
+        }
+    );
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
+}
+
+#[test]
+fn cpu_report_subagent_navigation_restores_the_parent_view_after_workspace_switch() {
+    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a"]);
+    let mut state = dashboard.state.clone();
+    state.sessions.get_mut(&parent).unwrap().workspace_id = "other".into();
+    state.sessions.get_mut("kid-a").unwrap().workspace_id = "other".into();
+    dashboard.set_state(state);
+    dashboard.workspace_order.push("other".into());
+    dashboard
+        .workspace_names
+        .insert("other".into(), "Other".into());
+    dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    dashboard.handle_key(key(KeyCode::Down));
+
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Enter)),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    assert_eq!(dashboard.navigation_session.as_deref(), Some("kid-a"));
+    assert_eq!(
+        dashboard.navigation_subagent_parent.as_deref(),
+        Some(parent.as_str())
+    );
+
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
+    assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
+    assert_eq!(
+        dashboard.take_navigation_session().as_deref(),
+        Some("kid-a")
+    );
+}
+
+#[test]
 fn parent_cpu_is_its_own_plus_every_live_subagent() {
     let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
     set_cpu(
@@ -5271,37 +2532,6 @@ fn parent_cpu_is_marked_partial_when_a_subagent_is_unmeasured() {
     // Nothing measured anywhere in the tree shows nothing.
     set_cpu(&mut dashboard, &[]);
     assert_eq!(dashboard.cpu_share(&parent), None);
-}
-
-#[test]
-fn parent_row_draws_the_rolled_up_figure_and_the_threshold_applies_to_it() {
-    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
-    // Each part is under 1.0%; the sum is over it.
-    set_cpu(
-        &mut dashboard,
-        &[(&parent, 4, 4), ("kid-a", 5, 5), ("kid-b", 6, 6)],
-    );
-    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("1.5%"), "{text}");
-    println!("{text}");
-    // The same parent with one child unmeasured: a lower bound, marked.
-    set_cpu(&mut dashboard, &[(&parent, 4, 4), ("kid-a", 50, 5)]);
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("5.4%+"), "{text}");
-    // Under the threshold nothing is drawn.
-    set_cpu(&mut dashboard, &[(&parent, 4, 4), ("kid-a", 5, 5)]);
-    terminal
-        .draw(|frame| render(frame, &mut dashboard))
-        .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(!text.contains("0.9%"), "{text}");
 }
 
 #[test]
@@ -5342,10 +2572,13 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     println!("{text}");
-    let lines = crate::session_cpu_report::report_lines(&dashboard)
-        .into_iter()
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>();
+    let lines = crate::session_cpu_report::report_lines(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Hourly,
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
     let parent_line = lines
         .iter()
         .position(|line| line.contains("tree of 3"))
@@ -5354,9 +2587,21 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         lines[parent_line].contains("32% hourly+") || lines[parent_line].contains("32%+ hourly"),
         "{lines:#?}"
     );
+    // The parent's own share is the same figure as its tree total.
     assert!(
-        lines[parent_line].contains("own 3.0%, 2 of 3 measured"),
+        lines[parent_line].contains("own 2.0%, 2 of 3 measured"),
         "{lines:#?}"
+    );
+    let recent = crate::session_cpu_report::report_lines(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Recent,
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+    assert!(
+        recent[parent_line].contains("43%+ recent (tree of 3; own 3.0%, 2 of 3 measured)"),
+        "{recent:#?}"
     );
     assert!(
         lines[parent_line + 1].starts_with("    kid-a"),
@@ -5369,6 +2614,7 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     assert!(lines[parent_line + 2].contains("no CPU data yet"));
 }
 
+// Hard-won: c17d3225: A stale table offset hid fitting session rows after a list shrank.
 #[test]
 fn sessions_pane_shows_every_row_from_the_top_after_the_list_shrank() {
     let (mut dashboard, _parent) = dashboard_with_subagents(&["worker-a", "worker-b"]);
@@ -5382,6 +2628,7 @@ fn sessions_pane_shows_every_row_from_the_top_after_the_list_shrank() {
 /// The Sub-agents view is the Sessions pane listing only a parent's children.
 /// A render that kept an offset from a longer list hid the first children
 /// although all of them fit.
+// Hard-won: c17d3225: A stale parent-list offset hid children and made a running child look parked after switching to Sub-agents.
 #[test]
 fn subagents_pane_shows_every_child_from_the_top_with_a_stale_offset() {
     let (mut dashboard, parent) = dashboard_with_subagents(&["worker-a", "worker-b", "worker-c"]);
@@ -5446,79 +2693,564 @@ fn sessions_pane_keeps_the_keyboard_selection_centred_and_pins_the_ends() {
 }
 
 #[test]
-fn session_cpu_report_separates_root_blocks_with_one_blank_line() {
-    let (mut dashboard, parent) = dashboard_with_subagents(&["kid-a", "kid-b"]);
-    let mut state = dashboard.state.clone();
-    let mut solo = state.sessions[&parent].clone();
-    solo.id = "solo".into();
-    solo.title = "solo".into();
-    solo.acp_session_title = None;
-    state.sessions.insert("solo".into(), solo);
-    dashboard.set_state(state);
-    set_cpu(
+fn golden_dashboard_session_render() {
+    let mut output = String::new();
+
+    let mut dashboard = dashboard_with_session(running_session());
+    apply_materialized_transcript(&mut dashboard, numbered_conversation(2));
+    clear_session_activity(&mut dashboard, "session-1");
+    dashboard
+        .session_details
+        .get_mut("session-1")
+        .unwrap()
+        .queued_prompts
+        .push(mj_core::relay::QueuedPrompt {
+            id: "queued-1".into(),
+            text: "later".into(),
+            attachments: Vec::new(),
+            created_at_ms: 1,
+        });
+    append_dashboard_golden(
+        &mut output,
+        "grouped session summary",
+        120,
+        30,
         &mut dashboard,
-        &[
-            (&parent, 30, 20),
-            ("kid-a", 400, 300),
-            ("kid-b", 5, 5),
-            ("solo", 100, 90),
-        ],
     );
-    let lines = crate::session_cpu_report::report_lines(&dashboard)
-        .into_iter()
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>();
-    println!("{}", lines.join("\n"));
-    let first = lines.iter().position(|l| l.contains("tree of 3")).unwrap();
-    let solo = lines.iter().position(|l| l.contains("solo  [")).unwrap();
-    let (block, rest) = if first < solo {
-        (first, solo)
-    } else {
-        (solo, first)
-    };
-    let _ = block;
-    assert!(lines[rest - 1].is_empty(), "{lines:#?}");
-    assert!(!lines[rest - 2].is_empty(), "{lines:#?}");
-    // No blank line inside the parent's block.
-    let kids: Vec<_> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.contains("kid-"))
-        .collect();
-    assert_eq!(kids.len(), 2, "{lines:#?}");
-    for (index, _) in kids {
-        assert!(!lines[index - 1].is_empty(), "{lines:#?}");
+
+    for (symbols, state_name) in [
+        (mj_core::config::SymbolSet::Unicode, "Unicode"),
+        (mj_core::config::SymbolSet::Ascii, "ASCII"),
+    ] {
+        let close = if symbols == mj_core::config::SymbolSet::Unicode {
+            '×'
+        } else {
+            'x'
+        };
+        let dot = if symbols == mj_core::config::SymbolSet::Unicode {
+            '·'
+        } else {
+            '-'
+        };
+        let mut dashboard = dashboard_with_session(running_session());
+        let mut config = dashboard.config.clone();
+        config.advanced.symbols = Some(symbols);
+        dashboard.set_config(config);
+        clear_session_activity(&mut dashboard, "session-1");
+        dashboard.focus_sessions();
+        append_dashboard_golden(
+            &mut output,
+            &format!("{state_name} unfiltered Sessions title"),
+            120,
+            40,
+            &mut dashboard,
+        );
+        dashboard.handle_key(key(KeyCode::Char('w')));
+        append_dashboard_golden(
+            &mut output,
+            &format!("{state_name} working filter"),
+            120,
+            40,
+            &mut dashboard,
+        );
+        dashboard.handle_key(key(KeyCode::Char('b')));
+        append_dashboard_golden(
+            &mut output,
+            &format!("{state_name} blocked filter at wide size"),
+            240,
+            40,
+            &mut dashboard,
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        append_dashboard_golden(
+            &mut output,
+            &format!("{state_name} cleared filter"),
+            120,
+            40,
+            &mut dashboard,
+        );
+        append_golden_value(
+            &mut output,
+            &format!("{state_name} title markers"),
+            (close, dot),
+        );
     }
-    assert_eq!(
-        lines.iter().filter(|l| l.is_empty()).count(),
-        1,
-        "{lines:#?}"
+
+    for (width, side, label) in [
+        (80, mj_core::config::SessionsSide::Left, "80 left"),
+        (80, mj_core::config::SessionsSide::Right, "80 right"),
+        (120, mj_core::config::SessionsSide::Left, "120 left"),
+        (120, mj_core::config::SessionsSide::Right, "120 right"),
+        (180, mj_core::config::SessionsSide::Left, "180 left"),
+        (180, mj_core::config::SessionsSide::Right, "180 right"),
+    ] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.config.sessions_side = side;
+        dashboard
+            .session_details
+            .get_mut("session-1")
+            .expect("fixture detail")
+            .queued_prompts
+            .push(mj_core::relay::QueuedPrompt {
+                id: "queued".into(),
+                text: "follow-up".into(),
+                attachments: Vec::new(),
+                created_at_ms: 1,
+            });
+        append_dashboard_golden(
+            &mut output,
+            &format!("expanded rows, {label}"),
+            width,
+            40,
+            &mut dashboard,
+        );
+    }
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_pane_size(SupportPane::Sessions, PaneSize::Minimized);
+    append_dashboard_golden(
+        &mut output,
+        "minimized rows at 80 columns",
+        80,
+        40,
+        &mut dashboard,
+    );
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.focus_sessions();
+    append_dashboard_golden(&mut output, "expanded session row", 120, 44, &mut dashboard);
+
+    let mut dashboard = minimized_sessions_dashboard(3, 2);
+    append_dashboard_golden(
+        &mut output,
+        "minimized session summaries",
+        120,
+        44,
+        &mut dashboard,
+    );
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.apply_deployment_capacity("local", Ok(Some(host_usage(42))), now_seconds());
+    dashboard.apply_quota(weekly_quota("claude-1", 63));
+    minimize_all_panes(&mut dashboard);
+    append_dashboard_golden(
+        &mut output,
+        "minimized CPU and weekly quota",
+        120,
+        44,
+        &mut dashboard,
+    );
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.apply_quota(weekly_and_five_hour_quota("claude-1", 96, 40));
+    dashboard.apply_quota(weekly_and_five_hour_quota("codex-1", 100, 40));
+    dashboard.apply_quota(weekly_quota("codex-2", 63));
+    minimize_all_panes(&mut dashboard);
+    append_dashboard_golden(
+        &mut output,
+        "paired weekly and five-hour quota",
+        160,
+        44,
+        &mut dashboard,
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "dashboard-session-render",
+        &output,
     );
 }
 
 #[test]
-fn session_row_cpu_pin_and_menu_are_one_space_apart() {
-    let mut dashboard = dashboard_with_measured_session("Parser", 230);
-    let glyphs = theme::glyphs();
-    let row_with_cpu = |dashboard: &mut DashboardState| {
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, dashboard))
-            .expect("draw dashboard");
-        buffer_lines(terminal.backend().buffer())
-            .into_iter()
-            .find(|line| line.contains("23%"))
-            .expect("a row shows the CPU figure")
+fn golden_dashboard_layout_render() {
+    let mut output = String::new();
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_workspace_name("UNDERLYING DASHBOARD SENTINEL".into());
+    dashboard.focus_sessions();
+    open_palette(&mut dashboard);
+    for character in "rename".chars() {
+        dashboard.handle_key(key(KeyCode::Char(character)));
+    }
+    let action = dashboard.handle_key(key(KeyCode::Enter));
+    append_golden_value(&mut output, "open Rename action", action);
+    append_dashboard_golden(
+        &mut output,
+        "Rename modal over dashboard",
+        120,
+        30,
+        &mut dashboard,
+    );
+
+    for height in [32, 44] {
+        let mut dashboard = minimized_sessions_dashboard(3, 2);
+        dashboard
+            .restore_pane_sizes(crate::PaneSizes::default())
+            .unwrap();
+        dashboard.focus_sessions();
+        append_dashboard_golden(
+            &mut output,
+            &format!("standard panes at height {height}"),
+            120,
+            height,
+            &mut dashboard,
+        );
+        append_golden_value(
+            &mut output,
+            &format!("standard transcript area at height {height}"),
+            dashboard.focused_transcript_area().unwrap(),
+        );
+        let action = chord(&mut dashboard, crate::CommandId::TogglePanePreset);
+        append_golden_value(&mut output, "compact pane preset action", action);
+        append_dashboard_golden(
+            &mut output,
+            &format!("compact panes at height {height}"),
+            120,
+            height,
+            &mut dashboard,
+        );
+        append_golden_value(
+            &mut output,
+            &format!("compact transcript area at height {height}"),
+            dashboard.focused_transcript_area().unwrap(),
+        );
+        let action = chord(&mut dashboard, crate::CommandId::TogglePanePreset);
+        append_golden_value(&mut output, "restore pane preset action", action);
+        append_dashboard_golden(
+            &mut output,
+            &format!("restored panes at height {height}"),
+            120,
+            height,
+            &mut dashboard,
+        );
+        append_golden_value(
+            &mut output,
+            &format!("restored transcript area at height {height}"),
+            dashboard.focused_transcript_area().unwrap(),
+        );
+    }
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    for width in [59, 70, 80] {
+        append_dashboard_golden(
+            &mut output,
+            &format!("dashboard at {width} columns"),
+            width,
+            30,
+            &mut dashboard,
+        );
+        append_golden_value(
+            &mut output,
+            &format!("dashboard geometry at {width} columns"),
+            (
+                dashboard.pane_areas,
+                dashboard.conversation_area,
+                dashboard.sessions_minimized(),
+            ),
+        );
+    }
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "dashboard-layout-render",
+        &output,
+    );
+}
+
+#[test]
+fn golden_dashboard_footer_render() {
+    let mut output = String::new();
+
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_workspace_name("personal".into());
+    dashboard.set_notice("Transient dashboard message");
+    append_dashboard_golden(
+        &mut output,
+        "notice takes over the one-row footer",
+        120,
+        24,
+        &mut dashboard,
+    );
+    dashboard.notices.clear();
+    append_dashboard_golden(
+        &mut output,
+        "footer hints after notice",
+        120,
+        24,
+        &mut dashboard,
+    );
+
+    for focus in [Focus::Sessions, Focus::Targets, Focus::Quota, Focus::Prompt] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+        dashboard.focus = focus;
+        append_dashboard_golden(
+            &mut output,
+            &format!("footer at {focus:?} focus"),
+            200,
+            24,
+            &mut dashboard,
+        );
+    }
+
+    let mut dashboard = dashboard_with_session(running_session());
+    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.focus_sessions();
+    for width in 0_u16..=80 {
+        append_dashboard_golden(
+            &mut output,
+            &format!("footer at {width} columns"),
+            width,
+            30,
+            &mut dashboard,
+        );
+    }
+
+    for focus in [Focus::Sessions, Focus::Prompt] {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus = focus;
+        let action = dashboard.route_bound_key(&crate::test_support::prefix_key());
+        append_golden_value(&mut output, &format!("{focus:?} prefix action"), action);
+        append_dashboard_golden(
+            &mut output,
+            &format!("{focus:?} pending chord"),
+            120,
+            40,
+            &mut dashboard,
+        );
+        dashboard.cancel_prefix();
+        append_dashboard_golden(
+            &mut output,
+            &format!("{focus:?} after cancelling chord"),
+            120,
+            40,
+            &mut dashboard,
+        );
+    }
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "dashboard-footer-render",
+        &output,
+    );
+}
+
+#[test]
+fn golden_dashboard_resource_panels() {
+    let mut output = String::new();
+
+    let mut target_config = Config::default();
+    let mut sandbox = Config::default().with_local_targets().targets["docker"].clone();
+    if let TargetTemplate::LocalDocker { container } = &mut sandbox {
+        container.image = "example.test/own:latest".into();
+    }
+    target_config.targets.insert("sandbox".into(), sandbox);
+    let mut dashboard = DashboardState::new(
+        target_config.with_local_targets(),
+        State::default(),
+        BTreeMap::new(),
+    );
+    let mut target = test_capacity_target();
+    target.target_ids = vec![
+        "docker".into(),
+        "localhost".into(),
+        "podman".into(),
+        "sandbox".into(),
+    ];
+    dashboard.set_deployment_capacity_targets(vec![target]);
+    let readiness = dashboard.take_target_availability_check();
+    append_golden_value(&mut output, "target readiness request", &readiness);
+    if let Some(crate::DashboardAction::CheckTargetReadiness {
+        generation,
+        target_ids,
+    }) = readiness
+    {
+        for id in ["docker", "sandbox"] {
+            dashboard.apply_target_runtime_missing(
+                generation,
+                id.into(),
+                "docker: not found".into(),
+            );
+        }
+        append_golden_value(&mut output, "checked target ids", target_ids);
+    }
+    append_dashboard_golden(
+        &mut output,
+        "Targets hides unavailable defaults",
+        160,
+        40,
+        &mut dashboard,
+    );
+
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut target = test_capacity_target();
+    target.target_ids = vec!["podman".into(), "mac-container".into()];
+    dashboard.set_deployment_capacity_targets(vec![target]);
+    dashboard.apply_deployment_capacity(
+        "local",
+        Ok(Some(DeploymentCapacityUsage {
+            cpu_percent: Some(37),
+            memory_used_bytes: 3,
+            memory_total_bytes: 4,
+            logical_cores: 8,
+            disk_total_bytes: None,
+            storage: Vec::new(),
+        })),
+        now_epoch_seconds(),
+    );
+    append_dashboard_golden(
+        &mut output,
+        "grouped host load without sample clock",
+        120,
+        40,
+        &mut dashboard,
+    );
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        State::default(),
+        BTreeMap::from([(
+            "codex-1".into(),
+            ProfileQuota {
+                banked_resets: None,
+                profile_id: "codex-1".into(),
+                harness: HarnessKind::Codex,
+                windows: vec![],
+                extra: None,
+                error: Some("offline".into()),
+                refreshed_at_epoch_seconds: 0,
+                rate_limited_until_epoch_seconds: None,
+            },
+        )]),
+    );
+    append_dashboard_golden(
+        &mut output,
+        "quota error with refresh age",
+        120,
+        28,
+        &mut dashboard,
+    );
+
+    let mut dashboard = DashboardState::new(
+        config(),
+        State::default(),
+        BTreeMap::from([(
+            "claude-1".into(),
+            ProfileQuota {
+                banked_resets: None,
+                profile_id: "claude-1".into(),
+                harness: HarnessKind::Claude,
+                windows: vec![],
+                extra: None,
+                error: Some("login expired".into()),
+                refreshed_at_epoch_seconds: 0,
+                rate_limited_until_epoch_seconds: None,
+            },
+        )]),
+    );
+    append_dashboard_golden(&mut output, "expired login quota", 120, 28, &mut dashboard);
+
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    let mut quota = api_quota("codex-1");
+    quota.refreshed_at_epoch_seconds = 0;
+    dashboard.apply_quota(quota);
+    append_dashboard_golden(
+        &mut output,
+        "usage-priced API quota",
+        120,
+        28,
+        &mut dashboard,
+    );
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let now = i64::try_from(now).unwrap();
+    let quota = ProfileQuota {
+        banked_resets: None,
+        profile_id: "codex-1".into(),
+        harness: HarnessKind::Codex,
+        windows: vec![
+            QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(73),
+                used: None,
+                limit: None,
+                resets: Some("09:00 Aug 20".into()),
+                resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60 + 30),
+            },
+            QuotaWindow {
+                label: "5H".into(),
+                remaining_percent: Some(70),
+                used: None,
+                limit: None,
+                resets: Some("14:00 Aug 13".into()),
+                resets_at_epoch_seconds: Some(now + 60 * 60 + 5 * 60 + 30),
+            },
+        ],
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
     };
-    let menu = glyphs.row_menu.trim();
+    let mut dashboard = DashboardState::new(
+        config(),
+        State::default(),
+        BTreeMap::from([("codex-1".into(), quota)]),
+    );
+    append_dashboard_golden(
+        &mut output,
+        "weekly and five-hour quota columns",
+        140,
+        28,
+        &mut dashboard,
+    );
 
-    let unpinned = row_with_cpu(&mut dashboard);
-    let expected = format!("23% {} {menu}", glyphs.pin);
-    assert!(unpinned.contains(&expected), "{unpinned:?}");
+    let quota = ProfileQuota {
+        banked_resets: Some(1),
+        profile_id: "codex-1".into(),
+        harness: HarnessKind::Codex,
+        windows: vec![
+            QuotaWindow {
+                label: "Week".into(),
+                remaining_percent: Some(73),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(now + 2 * 24 * 60 * 60 + 30),
+            },
+            QuotaWindow {
+                label: "5H".into(),
+                remaining_percent: Some(70),
+                used: None,
+                limit: None,
+                resets: None,
+                resets_at_epoch_seconds: Some(now + 60 * 60 + 5 * 60 + 30),
+            },
+        ],
+        extra: None,
+        error: None,
+        refreshed_at_epoch_seconds: 0,
+        rate_limited_until_epoch_seconds: None,
+    };
+    let mut dashboard = DashboardState::new(
+        config(),
+        State::default(),
+        BTreeMap::from([("codex-1".into(), quota)]),
+    );
+    append_dashboard_golden(
+        &mut output,
+        "weekly and five-hour quota at 80 columns",
+        80,
+        28,
+        &mut dashboard,
+    );
 
-    // A pinned badge is two cells wide; the gaps stay one space each.
-    dashboard.pin_ids.insert("session-1".into(), 0);
-    let pinned = row_with_cpu(&mut dashboard);
-    let expected = format!("23% {}A {menu}", glyphs.pinned);
-    assert!(pinned.contains(&expected), "{pinned:?}");
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "dashboard-resource-panels",
+        &output,
+    );
 }

@@ -1,6 +1,6 @@
 //! Shared turn-review requests, status and recovery data.
 
-use super::lanes::{PriorReviewContext, ReviewTier, UserMessage};
+use super::lanes::{PriorReviewContext, UserMessage};
 use super::verdict::{ReviewPassEvidence, ReviewVerdict};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -120,10 +120,8 @@ pub enum TurnReviewPhase {
     Resolved(Resolution),
 }
 
-/// The quick tier's sole reviewer.
+/// The turn review's sole reviewer.
 pub const REVIEWER_ROLE: &str = "reviewer";
-/// The extended tier's supervisor, which owns the verdict.
-pub const SUPERVISOR_ROLE: &str = "supervisor";
 
 /// How every command a turn review sends a reviewing role begins, so a
 /// reviewer's running prompt says which kind of review it belongs to.
@@ -132,7 +130,6 @@ pub const COMMAND_ID_PREFIX: &str = "turn-review-";
 /// Everything about the reviewed turn that is known before the capture lands.
 #[derive(Debug, Clone)]
 pub struct TurnReviewSeed {
-    pub tier: ReviewTier,
     /// The latest real user prompt; earlier requirements remain in the history.
     pub task: String,
     /// All real user messages in chronological order, excluding harness notes.
@@ -160,22 +157,22 @@ pub struct PendingForward {
     pub reviewed_through_ordinal: u64,
     /// Who produced the findings, which decides how the corrective prompt
     /// describes them. Durable so a retried handoff sends the same prompt the
-    /// first attempt did. Records written before it existed were all a
-    /// supervisor's or a validator's vetted synthesis.
+    /// first attempt did. Records written before it existed used the legacy
+    /// vetted wording.
     #[serde(default, skip_serializing_if = "FindingsProvenance::is_vetted")]
     pub provenance: FindingsProvenance,
 }
 
-/// Who produced a review's findings.
+/// Who produced a review's findings. `Vetted` remains for old pending
+/// forwards, whose retry must preserve its original correction note.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingsProvenance {
-    /// A role that vetted other reviewers' reports before concluding: the
-    /// extended tier's supervisor.
+    /// Legacy review output vetted by the removed multi-reviewer flow.
     #[default]
     Vetted,
-    /// The quick tier's one reviewer. Nothing checked its findings before
-    /// they reach the primary agent.
+    /// The sole current reviewer. Nothing checks its findings before they
+    /// reach the primary agent.
     SingleReviewer,
 }
 
@@ -189,6 +186,7 @@ impl FindingsProvenance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::verdict::LaneOutcome;
 
     /// A handoff persisted before provenance was recorded came from a
     /// supervisor or the removed validator, and retries with the vetted note.
@@ -223,5 +221,26 @@ mod tests {
             serde_json::from_str::<PendingForward>(&stored).unwrap(),
             pending
         );
+    }
+
+    #[test]
+    fn a_legacy_pending_forward_with_lane_evidence_still_loads() {
+        let stored = r#"{
+            "synthesis":"legacy finding",
+            "evidence":{
+                "intent_brief":"Goal: add a retry",
+                "intent_available":true,
+                "lanes":[{"id":"tests","outcome":{"outcome":"completed"}}]
+            },
+            "command_id":"forward-legacy",
+            "trees":{"/w":"tree-2"},
+            "reviewed_through_ordinal":7,
+            "provenance":"vetted"
+        }"#;
+        let pending: PendingForward = serde_json::from_str(stored).unwrap();
+        assert_eq!(pending.provenance, FindingsProvenance::Vetted);
+        assert_eq!(pending.evidence.lanes.len(), 1);
+        assert_eq!(pending.evidence.lanes[0].id, "tests");
+        assert_eq!(pending.evidence.lanes[0].outcome, LaneOutcome::Completed);
     }
 }
