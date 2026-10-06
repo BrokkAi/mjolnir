@@ -151,7 +151,7 @@ A prompt sent from the phone layout test
 Queued
 Tasks 1 · Shells 1 · Queue 1
 
-Reviewing every completed turn with [review] profile "reviewer" (extended tier)
+Reviewing every completed turn with [review] profile "reviewer"
 controls: [{"id":"conversation-status","text":"Tasks 1 · Shells 1 · Queue 1","value":null,"checked":null,"visible":true,"disabled":null},{"id":"prompt-settings","text":"Current session settings","value":null,"checked":null,"visible":false,"disabled":null},{"id":"prompt-text","text":"Message the agent","value":null,"checked":null,"visible":true,"disabled":null},{"id":"send-button","text":"Queue","value":"","checked":null,"visible":false,"disabled":false},{"id":"attach-image","text":"Attach one or more images","value":"","checked":null,"visible":false,"disabled":false}]
 action: POST /api/actions [{"action":"prompt","session_id":"plan-session","text":"A prompt sent from the phone layout test","images":[],"command_id":"<generated>"}]
 === long phone elicitation form (320x568) ===

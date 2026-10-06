@@ -141,11 +141,10 @@ fn install_fake_with_dispatcher(
         .unwrap_or_else(|error| panic!("link the {program} stand-in: {error}"));
 }
 
-#[cfg(all(test, feature = "test-hooks"))]
+#[cfg(all(test, unix, feature = "test-hooks"))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn fake_command_preserves_arguments_output_and_status_with_restricted_path() {
         let root = tempfile::tempdir().unwrap();
@@ -173,7 +172,6 @@ mod tests {
         assert!(output.stderr.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
     fn fake_command_streams_input_while_its_script_is_open_for_writing() {
         let directory = tempfile::tempdir().unwrap();

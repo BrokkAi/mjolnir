@@ -412,7 +412,7 @@ test('golden_viewer_conversation', async ({ context }) => {
   await expect(page.locator('#conversation-feed')).toContainText('Available commands:');
   await captureConversationState(output, page, 'help lists Mjolnir and harness commands', state);
 
-  state.snapshot.review_config = { enabled: true, tier: 'extended', profile: 'reviewer' };
+  state.snapshot.review_config = { enabled: true, profile: 'reviewer' };
   state.snapshot.sessions[0].turn_review = null;
   revision = state.snapshotRequests;
   state.snapshot.revision += 1;
@@ -421,7 +421,7 @@ test('golden_viewer_conversation', async ({ context }) => {
   await page.locator('#prompt-text').fill('/review status');
   await page.locator('#send-button').click();
   await expect(page.locator('#conversation-error')).toHaveText(
-    'Reviewing every completed turn with [review] profile "reviewer" (extended tier)',
+    'Reviewing every completed turn with [review] profile "reviewer"',
   );
   await captureConversationState(output, page, 'review status describes automatic review', state);
   await page.close();

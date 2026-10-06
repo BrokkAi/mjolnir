@@ -788,7 +788,7 @@ fn install_bootstrap_cookie(
     Ok(())
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn decode_certificate_pem(pem: &str) -> Option<Vec<u8>> {
     use base64::Engine;
 
@@ -805,7 +805,6 @@ fn decode_certificate_pem(pem: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use std::net::TcpListener;
     use std::thread;

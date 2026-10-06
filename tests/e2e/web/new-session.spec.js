@@ -394,7 +394,13 @@ test('golden_viewer_new_session', async ({ context }) => {
       return {
         header: rect(document.querySelector('#shell-header')),
         sourceButtons: buttons.map(button => ({ text: button.innerText, ...rect(button) })),
-        result: result ? { text: result.innerText, ...rect(result) } : null,
+        // A text-sized button's width follows the installed fonts; record
+        // only that it stays inside the viewport.
+        result: result ? (({ width, ...box }) => ({
+          text: result.innerText,
+          ...box,
+          fitsViewport: result.getBoundingClientRect().right <= window.innerWidth,
+        }))(rect(result)) : null,
         documentWidth: document.documentElement.scrollWidth,
       };
     });
