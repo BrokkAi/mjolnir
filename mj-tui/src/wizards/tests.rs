@@ -1640,7 +1640,12 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
         );
     }
 
-    for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Grok] {
+    for kind in [
+        HarnessKind::Codex,
+        HarnessKind::Claude,
+        HarnessKind::Grok,
+        HarnessKind::OpenCode,
+    ] {
         let quiet = profile_step(kind);
         assert!(!quiet.contains('⚠'), "{kind:?}: {quiet}");
         assert!(

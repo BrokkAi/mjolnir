@@ -580,7 +580,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
             &["podman-volume", "host-helper", "container-layer"]
         }
         "kind" if path.first().is_some_and(|key| key == "profiles") => {
-            &["codex", "claude", "kimi", "grok", "muse"]
+            &["codex", "claude", "kimi", "grok", "muse", "opencode"]
         }
         "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
         "kind" => &["bare", "podman", "docker", "apple-container"],
