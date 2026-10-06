@@ -175,7 +175,7 @@ impl DashboardContext {
             if !splash.finished() {
                 // Nothing behind the splash has been seen, so nothing is
                 // acknowledged as drawn.
-                self.terminal.terminal.draw(|frame| splash.render(frame))?;
+                self.terminal.draw(|frame| splash.render(frame))?;
                 return Ok(());
             }
             self.splash = None;
@@ -197,7 +197,7 @@ impl DashboardContext {
         // The highlight and the extraction both run inside the draw closure,
         // once the surface has drawn: the hitboxes are registered by that
         // render and the cells the selection covers only exist in this frame.
-        terminal.terminal.draw(|frame| {
+        terminal.draw(|frame| {
             drawn = render_combined(
                 frame,
                 dashboard,
