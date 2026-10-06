@@ -63,6 +63,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
         request_key: "fresh-child-request".into(),
         created_at: "2026-10-05T00:00:00Z".into(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: false,
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();

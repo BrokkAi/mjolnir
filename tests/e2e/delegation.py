@@ -230,10 +230,8 @@ def main():
         wait_prompt(child, "Return a short fixture report.")
         # Handback travels through the child's durable queue while its turn runs.
         tool(child, "handback", {"message": "first report without a dashboard"})
-        first = tool(
-            parent, "wait_agents", {"child_session_ids": [child], "timeout_seconds": 30}
-        )
-        assert first["status"] == "complete", first
+        first = tool(parent, "wait_agents")
+        assert first["status"] == "reported", first
         assert first["agents"][0]["output"] == "first report without a dashboard", first
 
         def wait_parked(session):
@@ -254,18 +252,17 @@ def main():
         # A wait on a parked child whose report is already delivered answers
         # at once, not after its timeout.
         asked = time.monotonic()
-        parked = tool(
-            parent, "wait_agents", {"child_session_ids": [child], "timeout_seconds": 30}
-        )
+        parked = tool(parent, "wait_agents")
         parked_seconds = time.monotonic() - asked
-        assert parked["status"] == "complete", parked
-        assert parked["agents"][0]["output"] == "first report without a dashboard", parked
+        assert parked["status"] == "nothing_to_wait_for", parked
+        assert parked["agents"][0]["output"] is None, parked
         assert parked_seconds < 5, f"wait on a parked child took {parked_seconds}"
-        # A wait that names no children finds nothing running and answers at
-        # once, listing the finished child.
-        idless = tool(parent, "wait_agents", {"timeout_seconds": 30})
-        assert idless["status"] == "complete", idless
+        # Wait always watches the parent's children and answers immediately
+        # when no new report or unfinished child remains.
+        idless = tool(parent, "wait_agents")
+        assert idless["status"] == "nothing_to_wait_for", idless
         assert [agent["child_session_id"] for agent in idless["agents"]] == [child], idless
+        assert idless["agents"][0]["output"] is None, idless
         # Submit the next wait while send_input is still starting the parked
         # child. It must not answer with the old report or return early, and
         # the daemon must not re-park the child under the input. Then replace
@@ -281,7 +278,6 @@ def main():
                 tool,
                 parent,
                 "wait_agents",
-                {"child_session_ids": [child], "timeout_seconds": 60},
             )
             wait_prompt(child, "second turn")
             assert not waiting.done(), "wait answered before the second report"
@@ -302,7 +298,7 @@ def main():
                 "the child turn must survive daemon replacement"
             )
             second = waiting.result(timeout=40)
-            assert second["status"] == "complete", second
+            assert second["status"] == "reported", second
             assert second["agents"][0]["output"] == (
                 "second report across daemon replacement"
             ), second
@@ -332,7 +328,7 @@ def main():
         wait_prompt(legacy, "legacy source evidence")
         wait_prompt(legacy, "retained parent context")
         tool(legacy, "handback", {"message": "legacy content retained"})
-        tool(parent, "wait_agents", {"child_session_ids": [legacy], "timeout_seconds": 30})
+        tool(parent, "wait_agents")
         wait_parked(legacy)
 
         # Simulate a daemon exiting after it records failed startup but before
@@ -351,6 +347,31 @@ def main():
         else:
             raise RuntimeError(f"startup teardown did not settle after restart: {row}")
         assert child_usage == json.loads(cli("usage", "--session", child, "--json"))
+
+        # Hard-won: d3312d34: a failed child queues a parent prompt that can
+        # otherwise become an unfinished turn while the parent is destroyed.
+        startup_failure = tool(parent, "wait_agents")
+        assert startup_failure["status"] == "reported", startup_failure
+        assert any(
+            agent["child_session_id"] == child
+            and agent["output"] == "fixture startup failure"
+            for agent in startup_failure["agents"]
+        ), startup_failure
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                unfinished = database.execute(
+                    "SELECT COUNT(*) FROM session_turn_selections s "
+                    "WHERE session_id=? AND NOT EXISTS("
+                    "SELECT 1 FROM session_turn_usage u "
+                    "WHERE u.session_id=s.session_id AND u.command_id=s.command_id)",
+                    (parent,),
+                ).fetchone()[0]
+            if unfinished == 0:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("parent wait prompt did not finish before accounting checks")
 
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
         for session in [child, legacy, parent]:

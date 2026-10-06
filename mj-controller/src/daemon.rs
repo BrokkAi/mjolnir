@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::database::StoreSchemaMismatch;
 use crate::recovery_gate::RecoveryObserver;
@@ -123,6 +123,14 @@ pub struct RuntimeState {
     workspace_refresh: tokio::sync::Mutex<()>,
     session_manager: SessionManagerControl,
     owner: Mutex<RuntimeStateOwner>,
+    /// Rebuilt by the delegation service at daemon startup; weak so the
+    /// backend's ExportRuntime reference does not form an Arc cycle.
+    pub(crate) wait_prompt_backend:
+        std::sync::OnceLock<std::sync::Weak<crate::server_runtime::api::ApiBackend>>,
+    /// Parents whose level-triggered wait-prompt reconcile failed. The
+    /// delegation coordinator retries these; startup also rebuilds the set
+    /// from child records after a daemon restart.
+    pub(crate) wait_prompt_retries: Mutex<BTreeMap<String, Instant>>,
     pub(crate) credential_targets:
         Arc<tokio::sync::watch::Sender<Vec<mj_core::credentials::CredentialSyncTarget>>>,
     feed: Mutex<feed::RuntimeHistory>,

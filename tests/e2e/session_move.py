@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 
+import reliability_lab
 from reliability_lab import Lab, ScenarioFailure
 
 
@@ -27,17 +28,19 @@ def run(lab):
     code, _ = lab.wait_daemon_status(port)
     assert lab.request("POST", "/auth/session", {"code": code})[0] == 204
     workspace = lab.snapshot()["workspaces"][0]["id"]
-    assert lab.request("POST", "/api/actions", {
+    created = lab.request("POST", "/api/actions", {
         "action": "new", "workspace_id": workspace, "profile_id": "fake",
         "bundle_id": "fixture", "target_id": "localhost", "title": "move-acceptance",
         "project_directory": str(lab.project),
-    })[0] == 202
+    })
+    assert created[0] == 202, created
     snapshot = lab.wait_snapshot(lambda s: any(row.get("state") == "running" for row in s.get("sessions", [])), "new worker ready")
     session_id = next(row["id"] for row in snapshot["sessions"] if row["state"] == "running")
 
     def record():
-        reply = lab.daemon_request({"action": "runtime_snapshot", "arguments": {"workspace_id": workspace, "after_revision": 0}})
-        return next(row for row in reply["value"]["records"] if row["id"] == session_id)
+        reply = lab.daemon_request({"action": "session_record", "arguments": {"session_id": session_id}})
+        assert reply["value"] is not None, reply
+        return reply["value"]
 
     original = record()
     checkout = pathlib.Path(original["project_directory"])
@@ -61,9 +64,13 @@ def run(lab):
         lab.wait_snapshot(lambda s: len((lab.session(s, session_id) or {}).get("queued_prompts", [])) == count
                           and not (lab.session(s, session_id) or {}).get("operation"), "queued command admission")
 
-    def move(profile_id, target, queue, selectors="both"):
+    def move(profile_id, target, queue, selectors="both", subagents=None):
         started = time.monotonic()
+        expected_policy = ({"mode": subagents} if subagents is not None
+                           else record().get("subagents") or {"mode": "native"})
         flags = []
+        if subagents is not None:
+            flags += ["--subagents", subagents]
         if selectors != "target":
             flags += ["--profile", profile_id]
         if selectors != "profile":
@@ -89,6 +96,9 @@ def run(lab):
         assert current["last_profile"] == profile_id
         assert current["target_template_id"] == target
         assert current["workspace_id"] == original["workspace_id"]
+        assert current["subagents"] == expected_policy, current
+        launch_path = pathlib.Path(current["target"]["worker_root"]) / "launch.json"
+        assert json.loads(launch_path.read_text())["subagents"] == expected_policy
         assert current["native_session_id"] == original["native_session_id"]
         assert pathlib.Path(current["project_directory"], "move-untracked.txt").read_text() == content
         restored = pathlib.Path(current["project_directory"])
@@ -101,7 +111,7 @@ def run(lab):
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("chat_phase") == "running", "active source turn")
     prompt("discard-this-pending-prompt")
     wait_queued(1)
-    move("destination", "destination", "discard")
+    move("destination", "destination", "discard", subagents="none")
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("chat_phase") == "idle", "idle destination")
     logs = (lab.runtime_root / "fake-acp.log").read_text()
     assert "discard-this-pending-prompt" not in logs, "discarded prompt ran on a harness"
@@ -128,7 +138,7 @@ def run(lab):
     expected_status = lab.git_output(["status", "--porcelain"], cwd=checkout)
     daemon_log = lab.data / "daemon.log"
     log_offset = daemon_log.stat().st_size if daemon_log.exists() else 0
-    move("fake", "destination", "discard", "profile")
+    move("fake", "destination", "discard", "profile", subagents="native")
     after_swap = record()
     assert after_swap["target"] == swap_locator, (swap_locator, after_swap["target"])
     assert survivor.read_text() == survivor_content, "in-place move lost an untracked file"
@@ -176,6 +186,8 @@ def run(lab):
 
 
 def main():
+    # Cold installation copies a large debug worker before Move can be tested.
+    reliability_lab.TIMEOUT = 90.0
     parser = argparse.ArgumentParser()
     parser.add_argument("--hel", required=True, type=pathlib.Path)
     args = parser.parse_args()

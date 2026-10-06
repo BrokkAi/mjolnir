@@ -653,6 +653,25 @@ pub(super) fn test_runtime_state() -> Arc<RuntimeState> {
     ))
 }
 
+#[tokio::test]
+async fn failed_wait_prompt_reconcile_is_coalesced_and_retried_after_backoff() {
+    let state = test_runtime_state();
+    let now = std::time::Instant::now();
+    state.schedule_wait_prompt_retry("parent");
+    state.schedule_wait_prompt_retry("parent");
+    assert!(state.take_due_wait_prompt_retries(now, 10).is_empty());
+    assert_eq!(
+        state.take_due_wait_prompt_retries(now + Duration::from_secs(2), 10),
+        ["parent"],
+        "one failed parent gets one retry after backoff"
+    );
+    assert!(
+        state
+            .take_due_wait_prompt_retries(now + Duration::from_secs(2), 10)
+            .is_empty()
+    );
+}
+
 /// The wait notice names what the daemon is waiting for, so `UpgradeBlockers`
 /// must report a live gate label and stop reporting it once released. The gate
 /// is process-wide and other tests hold their own labels beside this one, so
@@ -1121,6 +1140,7 @@ pub(super) fn runtime_test_subagent(
         request_key: format!("request-{child_session_id}"),
         created_at: "2026-09-03T00:00:00Z".into(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: false,
     }
 }

@@ -906,7 +906,7 @@ pub(super) fn exclude_harness_environment(
         tracing::info!(
             profile_id,
             removed = removed.join(", "),
-            "left API key settings out of the harness environment: this Codex profile signs in with ChatGPT and must not fall back to an API key"
+            "left API key settings out of the harness environment: this Codex profile must not use an OpenAI API key"
         );
     }
     excluded

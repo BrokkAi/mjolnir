@@ -391,6 +391,7 @@ mod tests {
                 request_key: "request-1".into(),
                 created_at: child.created_at.clone(),
                 noticed_turn: None,
+                reported_finish: None,
                 handback_tool: false,
             },
         );

@@ -258,6 +258,16 @@ struct CheckpointArgs {
         .multiple(true)
 ))]
 struct MoveArgs {
+    /// Destination delegation policy. Omit to retain the session's policy,
+    /// or the recorded policy when retrying a sealed Move.
+    #[arg(long, value_parser = ["native", "single-model", "none"])]
+    subagents: Option<String>,
+    /// Fixed child model, required with --subagents single-model.
+    #[arg(long, requires = "subagents")]
+    subagent_model: Option<String>,
+    /// Fixed child reasoning effort.
+    #[arg(long, requires = "subagents")]
+    subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
     #[arg(long)]
     prepare: bool,
@@ -786,6 +796,11 @@ async fn run_command(
 /// CLI connection does not cancel the daemon operation; only an explicit
 /// Ctrl-C does.
 async fn move_session(args: MoveArgs) -> Result<()> {
+    let subagents = api_commands::subagent_policy(
+        args.subagents.as_deref(),
+        args.subagent_model.as_deref(),
+        args.subagent_effort.as_deref(),
+    )?;
     if !args.yes
         && !args.prepare
         && (!std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -823,7 +838,7 @@ async fn move_session(args: MoveArgs) -> Result<()> {
         }
     };
     let selection = MoveSelection {
-        subagents: None,
+        subagents,
         workspace: mj_core::move_workspace::WorkspaceSelection {
             exclusions: args
                 .exclusions

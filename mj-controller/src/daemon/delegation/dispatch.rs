@@ -1,5 +1,6 @@
 //! Scheduling only: requests remain owned by the parent's durable worker queue.
-use mj_core::subagent::{SubagentToolAction, SubagentToolRequest, SubagentToolResult};
+use crate::database::StoredDelegationResult;
+use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -7,8 +8,8 @@ pub(super) type Identity = (String, String);
 enum Phase {
     Pending(Instant),
     Executing,
-    Delivery(SubagentToolResult, Instant),
-    Delivering(SubagentToolResult),
+    Delivery(StoredDelegationResult, Instant),
+    Delivering(StoredDelegationResult),
     Finished,
 }
 struct Entry {
@@ -22,7 +23,7 @@ pub(super) struct SubagentDispatch {
 }
 pub(super) enum Job {
     Execute(SubagentToolRequest),
-    Deliver(SubagentToolResult),
+    Deliver(StoredDelegationResult),
 }
 impl SubagentDispatch {
     pub fn observe(&mut self, parent: &str, requests: &[SubagentToolRequest]) {
@@ -111,7 +112,7 @@ impl SubagentDispatch {
         }
         ready
     }
-    pub fn executed(&mut self, id: &Identity, result: SubagentToolResult) {
+    pub fn executed(&mut self, id: &Identity, result: StoredDelegationResult) {
         if let Some(entry) = self.entries.get_mut(id) {
             entry.phase = Phase::Delivery(result, Instant::now());
         }
@@ -165,12 +166,15 @@ mod tests {
             },
         }
     }
-    fn result(id: &str) -> SubagentToolResult {
-        SubagentToolResult {
-            request_id: id.into(),
-            completed_at_ms: 2,
-            is_error: false,
-            message: "done".into(),
+    fn result(id: &str) -> StoredDelegationResult {
+        StoredDelegationResult {
+            result: mj_core::subagent::SubagentToolResult {
+                request_id: id.into(),
+                completed_at_ms: 2,
+                is_error: false,
+                message: "done".into(),
+            },
+            reported_finishes: Vec::new(),
         }
     }
     #[test]

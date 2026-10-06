@@ -264,7 +264,8 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         relay.clone(),
     ));
     let (subagents, subagent_socket_guard) = if subagent_role.is_some() {
-        let (endpoint, guard) = super::subagents::serve(&runtime, &root, relay.clone())?;
+        let (endpoint, guard) =
+            super::subagents::serve(&runtime, &root, relay.clone(), config.harness)?;
         (Some(endpoint), Some(guard))
     } else {
         (None, None)
@@ -2122,8 +2123,16 @@ pub(super) async fn serve_client_with_memory(
                     }
                     (Some(endpoint), RelayRequest::CompleteSubagentRequest { result }) => {
                         match endpoint.complete(result) {
-                            Ok(()) => RelayResponseBody::Ok {
-                                payload: RelayResponsePayload::SubagentRequestCompleted,
+                            Ok(delivered_to_waiter) => RelayResponseBody::Ok {
+                                payload: if protocol_version
+                                    >= mj_core::relay::RELAY_PROTOCOL_VERSION
+                                {
+                                    RelayResponsePayload::SubagentRequestCompletedWithDelivery {
+                                        delivered_to_waiter,
+                                    }
+                                } else {
+                                    RelayResponsePayload::SubagentRequestCompleted
+                                },
                             },
                             Err(error) => compaction_error(
                                 RelayErrorCode::Internal,

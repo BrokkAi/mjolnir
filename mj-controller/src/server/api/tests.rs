@@ -761,6 +761,7 @@ impl SubagentBackend for FakeBackend {
                 request_key: request.request_key,
                 created_at: "2026-09-18T00:00:00Z".to_owned(),
                 noticed_turn: None,
+                reported_finish: None,
                 handback_tool: false,
             })
         })

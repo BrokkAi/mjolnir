@@ -71,6 +71,7 @@ impl Policy {
             .with_quota_reports(reports.clone())
             .with_rejected_logins(rejected.clone()),
         );
+        state.install_wait_prompt_backend(&backend);
         let (quotas_tx, quotas) = watch::channel(BTreeMap::new());
         let (refresh, refresh_rx) = mpsc::channel(1);
         // A surface's Refresh reaches this poller through the daemon.

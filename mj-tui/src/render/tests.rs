@@ -2020,8 +2020,12 @@ fn a_narrow_session_row_truncates_the_name_before_dropping_cpu() {
     assert!(tiny[0].contains("Refac"), "{tiny:#?}");
 }
 
-#[test]
-fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
+/// An open CPU report over two machines: machine-a lists three sessions and
+/// machine-b two. Every measured session's recent share is 23%.
+fn two_machine_cpu_report() -> (
+    DashboardState,
+    mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>,
+) {
     use mj_client::runtime_feed::SessionCpuView;
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.state.sessions.clear();
@@ -2076,6 +2080,79 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
             .collect(),
     );
     dashboard.dispatch_command(crate::CommandId::SessionCpuReport);
+    (dashboard, cpu)
+}
+
+/// The rows a modal titled `title` spans, from its top border to its bottom.
+fn modal_rows(lines: &[String], title: &str) -> std::ops::RangeInclusive<usize> {
+    let top = lines
+        .iter()
+        .position(|line| line.contains(title))
+        .unwrap_or_else(|| panic!("{title} is drawn:\n{}", lines.join("\n")));
+    let column = lines[top]
+        .find('╭')
+        .expect("the title row is the top border");
+    let bottom = (top + 1..lines.len())
+        .find(|row| {
+            lines[*row]
+                .get(column..)
+                .is_some_and(|rest| rest.starts_with('╰'))
+        })
+        .expect("the modal has a bottom border");
+    top..=bottom
+}
+
+#[test]
+fn session_cpu_report_keeps_its_size_across_tabs_and_switches_metric() {
+    let (mut dashboard, _) = two_machine_cpu_report();
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    let mut draw = |dashboard: &mut DashboardState| {
+        terminal.draw(|frame| render(frame, dashboard)).unwrap();
+        buffer_lines(terminal.backend().buffer())
+    };
+
+    let first = draw(&mut dashboard);
+    let rows = modal_rows(&first, "CPU by session");
+    assert!(first.join("\n").contains("fast  [codex-1]"));
+    dashboard.handle_key(key(KeyCode::Right));
+    let second = draw(&mut dashboard);
+    assert!(second.join("\n").contains("other  [codex-1]"));
+    assert_eq!(
+        modal_rows(&second, "CPU by session"),
+        rows,
+        "the shorter machine keeps the dialog's size"
+    );
+
+    // The stacked buttons choose the figure the rows, totals and tabs show.
+    dashboard.handle_key(key(KeyCode::Left));
+    let text = draw(&mut dashboard).join("\n");
+    assert!(text.contains("machine-a · 40% hourly"), "{text}");
+    assert!(text.contains("30% hourly"), "{text}");
+    assert!(text.contains("(14m)"), "{text}");
+    let recent = point(&draw(&mut dashboard), "Recent");
+    click_cpu_report(&mut dashboard, recent);
+    let text = draw(&mut dashboard).join("\n");
+    assert!(text.contains("machine-a · 46% recent"), "{text}");
+    assert!(text.contains("machine-b · 23% recent"), "{text}");
+    assert!(text.contains("fast  [codex-1]  23% recent"), "{text}");
+    assert!(!text.contains("hourly"), "{text}");
+    assert!(
+        !text.contains("(14m)"),
+        "the covered period qualifies only the hourly average:\n{text}"
+    );
+    let hourly = point(&draw(&mut dashboard), "Hourly");
+    click_cpu_report(&mut dashboard, hourly);
+    assert!(
+        draw(&mut dashboard)
+            .join("\n")
+            .contains("machine-a · 40% hourly")
+    );
+}
+
+#[test]
+fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
+    use mj_client::runtime_feed::SessionCpuView;
+    let (mut dashboard, mut cpu) = two_machine_cpu_report();
     let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -2264,10 +2341,13 @@ fn session_cpu_report_excludes_parked_stopped_and_failed_subagents() {
     state.sessions.get_mut("error-child").unwrap().state = SessionState::Error;
     dashboard.set_state(state);
 
-    let ids = crate::session_cpu_report::report_groups(&dashboard)
-        .into_iter()
-        .flat_map(|group| group.session_ids)
-        .collect::<Vec<_>>();
+    let ids = crate::session_cpu_report::report_groups(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Hourly,
+    )
+    .into_iter()
+    .flat_map(|group| group.session_ids)
+    .collect::<Vec<_>>();
     assert!(
         ids.contains(&"session-1".to_owned()),
         "parent is active: {ids:?}"
@@ -2492,10 +2572,13 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         .unwrap();
     let text = buffer_lines(terminal.backend().buffer()).join("\n");
     println!("{text}");
-    let lines = crate::session_cpu_report::report_lines(&dashboard)
-        .into_iter()
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>();
+    let lines = crate::session_cpu_report::report_lines(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Hourly,
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
     let parent_line = lines
         .iter()
         .position(|line| line.contains("tree of 3"))
@@ -2504,9 +2587,21 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
         lines[parent_line].contains("32% hourly+") || lines[parent_line].contains("32%+ hourly"),
         "{lines:#?}"
     );
+    // The parent's own share is the same figure as its tree total.
     assert!(
-        lines[parent_line].contains("own 3.0%, 2 of 3 measured"),
+        lines[parent_line].contains("own 2.0%, 2 of 3 measured"),
         "{lines:#?}"
+    );
+    let recent = crate::session_cpu_report::report_lines(
+        &dashboard,
+        crate::session_cpu_report::CpuMetric::Recent,
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+    assert!(
+        recent[parent_line].contains("43%+ recent (tree of 3; own 3.0%, 2 of 3 measured)"),
+        "{recent:#?}"
     );
     assert!(
         lines[parent_line + 1].starts_with("    kid-a"),

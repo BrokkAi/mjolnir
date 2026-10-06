@@ -87,6 +87,8 @@ impl RuntimeState {
             workspace_refresh: tokio::sync::Mutex::new(()),
             session_manager,
             owner: Mutex::new(RuntimeStateOwner::new(controller)),
+            wait_prompt_backend: std::sync::OnceLock::new(),
+            wait_prompt_retries: Mutex::new(BTreeMap::new()),
             credential_targets: Arc::new(tokio::sync::watch::channel(Vec::new()).0),
             feed: Mutex::new(feed::RuntimeHistory::default()),
             committed: None,

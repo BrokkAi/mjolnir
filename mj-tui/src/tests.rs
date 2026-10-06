@@ -934,6 +934,7 @@ fn a_stopped_subagent_opens_as_its_stored_read_only_transcript() {
         request_key: "request-1".into(),
         created_at: child.created_at.clone(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: true,
     };
     let mut dashboard = DashboardState::new(
@@ -1034,6 +1035,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         request_key: "request-1".into(),
         created_at: first_child.created_at.clone(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: false,
     };
     let mut dashboard = DashboardState::new(
@@ -1071,6 +1073,7 @@ fn a_second_set_state_with_a_new_relation_hides_the_new_child_too() {
         request_key: "request-2".into(),
         created_at: second_child.created_at.clone(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: false,
     };
     dashboard.set_state(State {
@@ -3073,6 +3076,7 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
             request_key: "request".into(),
             created_at: parent.created_at.clone(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );

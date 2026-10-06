@@ -1105,6 +1105,7 @@ fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_
         request_key: format!("request-{child_session_id}"),
         created_at: "2026-10-05T00:00:00Z".into(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: false,
     };
     let state = State {
@@ -1183,14 +1184,7 @@ fn in_place_drain_waits_for_mutations_and_durable_effects_but_not_wait_or_list()
     for action in mutating {
         assert!(super::subagent_mutations_pending(&[request(action)], false));
     }
-    let observations = [
-        Action::ListAgents,
-        Action::WaitAgents {
-            child_session_ids: vec!["child".into()],
-            timeout_seconds: Some(30),
-            return_when: Default::default(),
-        },
-    ];
+    let observations = [Action::ListAgents, Action::WaitAgents];
     assert!(
         observations
             .iter()
@@ -2254,6 +2248,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         request_key: "spawn-live-child".into(),
         created_at: "2026-10-05T00:00:00Z".into(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: false,
     };
     crate::database::save_subagent_session(&child, &relation).unwrap();
@@ -2360,6 +2355,7 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
             request_key: format!("spawn-{child_id}"),
             created_at: "2026-10-05T00:00:00Z".into(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         };
         crate::database::save_subagent_session(&child, &relation).unwrap();

@@ -2,6 +2,38 @@
 use super::*;
 use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StoredDelegationResult {
+    pub result: SubagentToolResult,
+    #[serde(default)]
+    pub reported_finishes: Vec<(String, mj_core::subagent::SubagentFinishIdentity)>,
+}
+
+fn decode_stored_result(body: &str) -> Result<StoredDelegationResult> {
+    let value: serde_json::Value = serde_json::from_str(body)?;
+    if value.get("result").is_some() {
+        Ok(serde_json::from_value(value)?)
+    } else {
+        // Results written before report identities were persisted are still
+        // replayable; their marker list is empty because the old format did
+        // not record which children the answer contained.
+        Ok(StoredDelegationResult {
+            result: serde_json::from_value(value)?,
+            reported_finishes: Vec::new(),
+        })
+    }
+}
+
+pub(crate) fn list_subagent_parent_ids() -> Result<Vec<String>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT parent_session_id FROM subagent_sessions ORDER BY parent_session_id",
+    )?;
+    Ok(statement
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PreparedDelegation {
     pub request: SubagentToolRequest,
@@ -40,13 +72,13 @@ pub(crate) fn prepare_delegation_spawn(
 pub(crate) fn load_delegation(
     parent: &str,
     request: &str,
-) -> Result<Option<(PreparedDelegation, Option<SubagentToolResult>)>> {
+) -> Result<Option<(PreparedDelegation, Option<StoredDelegationResult>)>> {
     let connection = open_reader(&database_path())?;
     let row = connection.query_row("SELECT prepared_json, result_json FROM delegation_effects WHERE parent_session_id=?1 AND request_id=?2", params![parent, request], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).optional()?;
     row.map(|(prepared, result)| {
         Ok((
             serde_json::from_str(&prepared)?,
-            result.map(|s| serde_json::from_str(&s)).transpose()?,
+            result.map(|s| decode_stored_result(&s)).transpose()?,
         ))
     })
     .transpose()
@@ -91,15 +123,93 @@ pub(crate) fn delegation_delivering(parent: String, request: String) -> Result<(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn record_delegation_result(parent: String, result: SubagentToolResult) -> Result<()> {
+    record_delegation_result_with_reports(
+        parent,
+        StoredDelegationResult {
+            result,
+            reported_finishes: Vec::new(),
+        },
+    )
+}
+
+/// Commit the wait answer and the child finishes it reports in one
+/// transaction. A replay therefore sees either both, or neither.
+pub(crate) fn record_delegation_result_with_reports(
+    parent: String,
+    stored_result: StoredDelegationResult,
+) -> Result<()> {
     submit_database_write("record delegation result", move |connection| {
-        let changed = connection.execute("UPDATE delegation_effects SET phase='result', result_json=?3 WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NULL", params![parent, result.request_id, serde_json::to_string(&result)?])?;
+        let result = stored_result.result;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let body = serde_json::to_string(&StoredDelegationResult {
+            result: result.clone(),
+            reported_finishes: stored_result.reported_finishes.clone(),
+        })?;
+        let changed = transaction.execute("UPDATE delegation_effects SET phase='result', result_json=?3 WHERE parent_session_id=?1 AND request_id=?2 AND result_json IS NULL", params![parent, result.request_id, body])?;
         ensure!(
             changed == 1,
             "delegation result has no pending durable effect"
         );
+        for (child_id, identity) in stored_result.reported_finishes {
+            let stored: String = transaction.query_row(
+                "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1",
+                [&child_id],
+                |row| row.get(0),
+            )?;
+            let mut relation: mj_core::subagent::SubagentRecord = serde_json::from_str(&stored)?;
+            ensure!(
+                relation.parent_session_id == parent,
+                "reported child {child_id} does not belong to parent {parent}"
+            );
+            relation.reported_finish = Some(identity);
+            transaction.execute(
+                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1",
+                params![child_id, serde_json::to_string(&relation)?],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     })
+}
+
+/// Undo only the report markers written by this answer. A later finish may
+/// already have replaced one, in which case it remains untouched.
+pub(crate) fn unreport_delegation_finishes(
+    parent: String,
+    reported_finishes: Vec<(String, mj_core::subagent::SubagentFinishIdentity)>,
+) -> Result<()> {
+    submit_database_write(
+        "restore undelivered delegation reports",
+        move |connection| {
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            for (child_id, identity) in reported_finishes {
+                let stored: Option<String> = transaction
+                .query_row(
+                    "SELECT record_json FROM subagent_sessions WHERE child_session_id=?1 AND parent_session_id=?2",
+                    params![child_id, parent],
+                    |row| row.get(0),
+                )
+                .optional()?;
+                let Some(stored) = stored else { continue };
+                let mut relation: mj_core::subagent::SubagentRecord =
+                    serde_json::from_str(&stored)?;
+                if relation.reported_finish.as_ref() != Some(&identity) {
+                    continue;
+                }
+                relation.reported_finish = None;
+                transaction.execute(
+                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1 AND parent_session_id=?3",
+                params![child_id, serde_json::to_string(&relation)?, parent],
+            )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        },
+    )
 }
 
 /// The parent has its result, so the record has done its one job: making a
@@ -175,7 +285,7 @@ mod tests {
         assert!(!has_pending_mutating_delegations("parent").unwrap());
         let (restored, result) = load_delegation("parent", "request").unwrap().unwrap();
         assert_eq!(restored.turn_target.as_deref(), Some("original-turn"));
-        assert_eq!(result.unwrap().message, "original result");
+        assert_eq!(result.unwrap().result.message, "original result");
         // Acknowledgement is the end of the record's life: a later replay of
         // the same request id is a new request, and the table does not grow.
         acknowledge_delegation("parent".into(), "request".into()).unwrap();
@@ -190,5 +300,18 @@ mod tests {
         .unwrap();
         prune_acknowledged_delegations().unwrap();
         assert!(load_delegation("parent", "request").unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_raw_delegation_results_load_without_report_markers() {
+        let result = SubagentToolResult {
+            request_id: "legacy".into(),
+            completed_at_ms: 2,
+            is_error: false,
+            message: "old result shape".into(),
+        };
+        let restored = decode_stored_result(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(restored.result, result);
+        assert!(restored.reported_finishes.is_empty());
     }
 }

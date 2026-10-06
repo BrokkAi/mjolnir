@@ -340,10 +340,10 @@ impl StandaloneSession {
     pub async fn complete_subagent_request(
         &mut self,
         result: mj_core::subagent::SubagentToolResult,
-    ) -> Result<()> {
-        self.client.complete_subagent_request(result).await?;
+    ) -> Result<bool> {
+        let delivered = self.client.complete_subagent_request(result).await?;
         (self.subagent_requests, self.subagent_results) = self.client.subagent_requests().await?;
-        Ok(())
+        Ok(delivered)
     }
 
     pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {

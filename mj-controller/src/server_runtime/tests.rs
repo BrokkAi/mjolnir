@@ -763,6 +763,7 @@ fn golden_phone_session_snapshot() {
             request_key: "request".into(),
             created_at: "now".into(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );
@@ -1310,6 +1311,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
             request_key: "request".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: true,
         },
     );

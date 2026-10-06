@@ -698,6 +698,7 @@ fn startup_cleanup_fixture() -> (Controller, String) {
             request_key: "cleanup-test".into(),
             created_at: now(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: true,
         },
     )

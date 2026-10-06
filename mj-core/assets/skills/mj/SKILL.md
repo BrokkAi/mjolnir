@@ -69,11 +69,16 @@ child sessions in the same target and filesystem:
 - `send_input` — durably queue follow-up input to one child, including while it
   starts. The queue receipt is not delivery confirmation; do not resend it.
   `wait` and `list_agents` show pending input and delivery failures.
-- `wait` — block until the named children finish their current turn. Omit
-  `child_session_ids` to wait for every child that is still running. Status
-  `complete` means the reports are in `output`; `still_running` means the
-  timeout came first. That is not a failure: call `wait` again with the same
-  `child_session_ids`.
+- `wait` — call without arguments to watch every child that is not stopped. It
+  returns as soon as one has a new report, when nothing is unfinished, or when
+  this harness's wait window ends. A wait may end before work is done, and
+  another wait is normal. Each finish is
+  reported once; `send_input` can start another turn and produce another
+  report. Status `reported` means new reports are in `output`;
+  `nothing_to_wait_for` means no new report or unfinished child;
+  `still_running` means the wait window ended first. Call `wait` again later to
+  collect reports that become ready. A prompt may remind you to call `wait`,
+  but does not include child output.
 - `interrupt` — stop only the child's current turn. With no active turn it
   returns immediately; queued input remains queued.
 - `close` — stop a child and keep its conversation.

@@ -13,6 +13,73 @@ const PARK_TIMEOUT: Duration = Duration::from_secs(120);
 const UNPARK_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl RuntimeState {
+    const WAIT_PROMPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    pub(crate) fn install_wait_prompt_backend(
+        &self,
+        backend: &Arc<crate::server_runtime::api::ApiBackend>,
+    ) {
+        assert!(
+            self.wait_prompt_backend
+                .set(Arc::downgrade(backend))
+                .is_ok(),
+            "delegation wait-prompt backend is installed once"
+        );
+    }
+
+    pub(crate) async fn ensure_parent_wait_prompt(&self, parent_session_id: &str) -> Result<()> {
+        if let Some(backend) = self
+            .wait_prompt_backend
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            match backend.ensure_parent_wait_prompt(parent_session_id).await {
+                Ok(()) => {
+                    self.wait_prompt_retries
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(parent_session_id);
+                }
+                Err(error) => {
+                    self.schedule_wait_prompt_retry(parent_session_id);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn schedule_wait_prompt_retry(&self, parent_session_id: &str) {
+        self.wait_prompt_retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                parent_session_id.to_owned(),
+                std::time::Instant::now() + Self::WAIT_PROMPT_RETRY_DELAY,
+            );
+    }
+
+    pub(crate) fn take_due_wait_prompt_retries(
+        &self,
+        now: std::time::Instant,
+        limit: usize,
+    ) -> Vec<String> {
+        let mut retries = self
+            .wait_prompt_retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let due = retries
+            .iter()
+            .filter(|(_, due)| **due <= now)
+            .take(limit)
+            .map(|(parent, _)| parent.clone())
+            .collect::<Vec<_>>();
+        for parent in &due {
+            retries.remove(parent);
+        }
+        due
+    }
+
     /// Park a sub-agent whose turn ended and whose parent was told. A child
     /// that has work in flight or queued, or that is no longer running, is
     /// left as it is. Any failure leaves the child running; the caller logs it.
@@ -30,6 +97,13 @@ impl RuntimeState {
     /// running. Failures are logged; the parent already reads the cause from
     /// the failed startup whatever happens here.
     pub(super) async fn fail_subagent_start(self: &Arc<Self>, child_session_id: &str, cause: &str) {
+        let parent_session_id = self
+            .owner()
+            .controller()
+            .state
+            .subagents
+            .get(child_session_id)
+            .map(|relation| relation.parent_session_id.clone());
         if !self
             .owner()
             .controller()
@@ -60,6 +134,16 @@ impl RuntimeState {
                 error = format!("{error:#}"),
                 "could not record a sub-agent whose first prompt was refused as failed"
             ),
+        }
+        if let Some(parent_session_id) = parent_session_id
+            && let Err(error) = self.ensure_parent_wait_prompt(&parent_session_id).await
+        {
+            tracing::warn!(
+                child_session_id,
+                parent_session_id,
+                error = format!("{error:#}"),
+                "could not reconcile the parent's sub-agent wait prompt after startup failure"
+            );
         }
     }
 

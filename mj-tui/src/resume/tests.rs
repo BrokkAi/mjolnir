@@ -2256,6 +2256,7 @@ fn sub_agents_are_never_offered_for_resume() {
             request_key: "request-1".into(),
             created_at: managed_child.created_at.clone(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );

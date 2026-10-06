@@ -345,6 +345,66 @@ fn session_records_written_before_container_overrides_still_load() {
 }
 
 #[test]
+fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
+    let config = sample_config();
+    let mut parent = sample_session();
+    parent.id = "parent-session".into();
+    parent.managed_worktree = Some(ManagedWorktree {
+        kind: Default::default(),
+        source_project_directory: PathBuf::from("/home/test/Projects/source"),
+        source_repository: PathBuf::from("/home/test/Projects/source"),
+        worktree_root: PathBuf::from("/worktrees/parent-session"),
+        branch: "mj/parent-session".into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: None,
+    });
+    parent.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
+    // A child is launched into the parent's worktree checkout, which is named
+    // after the parent session, and owns no worktree of its own.
+    let mut child = sample_session();
+    child.id = "child-session".into();
+    child.managed_worktree = None;
+    child.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
+
+    let mut state = State::default();
+    state.sessions.insert(parent.id.clone(), parent.clone());
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(
+        child.id.clone(),
+        crate::subagent::SubagentRecord {
+            child_session_id: child.id.clone(),
+            parent_session_id: parent.id.clone(),
+            task_name: "Inspect parser".into(),
+            profile_id: child.last_profile.clone(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Inspect the parser".into(),
+            request_key: "request-1".into(),
+            created_at: child.created_at.clone(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: false,
+        },
+    );
+
+    assert_eq!(child.project_name(&config), "parent-session");
+    assert_eq!(
+        state
+            .project_identity_session(&child)
+            .project_source(&config)
+            .key,
+        parent.project_source(&config).key,
+        "a child groups under the project its parent works in"
+    );
+    assert_eq!(
+        state.project_identity_session(&parent).id,
+        parent.id,
+        "a session that is not a sub-agent keeps its own project identity"
+    );
+}
+
+#[test]
 fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     let mut parent = sample_session();
     parent.id = "0123456789abcdef0123456789abcdef".into();
@@ -367,6 +427,7 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );
@@ -541,6 +602,7 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
                 created_at: child.created_at.clone(),
                 noticed_turn: None,
                 handback_tool: false,
+                reported_finish: None,
             },
         );
     };
@@ -1094,6 +1156,86 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         .unwrap();
 }
 
+#[test]
+fn configuration_repair_reports_all_missing_entries_and_clears_after_restoration() {
+    let state = sample_state();
+    let session = state.sessions.values().next().unwrap();
+    let mut config = sample_config();
+    config.profiles.clear();
+    config.bundles.clear();
+    config.targets.clear();
+    let issue = session.configuration_issue(&config).unwrap();
+    assert!(issue.contains("missing profile"));
+    assert!(issue.contains("missing bundle"));
+    assert!(issue.contains("missing target template"));
+    assert!(issue.contains("config.toml"));
+    assert!(session.configuration_issue(&sample_config()).is_none());
+    let mut raw = session.clone();
+    raw.project_directory = Some(PathBuf::from("/project"));
+    let mut config = sample_config();
+    config.bundles.clear();
+    assert!(raw.configuration_issue(&config).is_none());
+    let mut stopped = session.clone();
+    stopped.state = SessionState::Stopped;
+    assert!(stopped.configuration_issue(&Config::default()).is_none());
+}
+
+#[test]
+fn active_state_validates_references_and_harness_kind() {
+    let state = sample_state();
+    state.validate_against_config(&sample_config()).unwrap();
+
+    let mut config = sample_config();
+    config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Claude;
+    assert!(
+        state
+            .validate_against_config(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("expects Codex")
+    );
+}
+
+/// A child's working directory is a launch choice, not a containment
+/// boundary, so a stored record may name any path on the parent's target.
+#[test]
+fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
+    let mut state = sample_state();
+    let parent_id = state.sessions.keys().next().unwrap().clone();
+    let child_id = "fedcba9876543210".to_owned();
+    let mut child = state.sessions[&parent_id].clone();
+    child.id = child_id.clone();
+    state.sessions.insert(child_id.clone(), child);
+    state.subagents.insert(
+        child_id.clone(),
+        SubagentRecord {
+            child_session_id: child_id.clone(),
+            parent_session_id: parent_id,
+            task_name: "lane".into(),
+            profile_id: "codex-1".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "work in the lane".into(),
+            request_key: "request-1".into(),
+            created_at: "2026-09-16T00:00:00Z".into(),
+            noticed_turn: None,
+            reported_finish: None,
+            handback_tool: false,
+        },
+    );
+    for working_directory in [
+        PathBuf::from("/mnt/optane/bifrost-sg-c2"),
+        PathBuf::from("../shared-checkout"),
+    ] {
+        state
+            .subagents
+            .get_mut(&child_id)
+            .unwrap()
+            .working_directory = working_directory;
+        state.validate().unwrap();
+    }
+}
 /// Records written before the verb was renamed say "archived". They must
 /// still load, and they must be written back with the new name.
 #[test]
