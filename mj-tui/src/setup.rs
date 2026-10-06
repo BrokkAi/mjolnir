@@ -83,6 +83,7 @@ pub(crate) enum SetupControl {
     SubagentModel,
     SubagentEffort,
     DetectRuntimes,
+    InstallMbx,
     Save,
     Cancel,
 }
@@ -202,6 +203,8 @@ pub(crate) struct SetupDialog {
     /// What the SessionWiki page's archive window would reclaim, keyed by the
     /// number of days it was measured for.
     archive_space_preview: Option<ArchiveSpacePreviewState>,
+    /// The machine-wide mbx install in flight, if settings initiated one.
+    mbx_install: Option<MbxInstallState>,
     preferred_width: u16,
     preferred_height: u16,
 }
@@ -226,6 +229,24 @@ struct BuildCachePreviewState {
     /// edit that changes them starts a new resolution.
     key: Value,
     result: BuildCachePreviewResult,
+    install_mbx_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MbxInstallState {
+    key: Value,
+    machine_id: String,
+    upgrading: bool,
+}
+
+struct MbxInstallOffer {
+    machine_id: String,
+    key: Value,
+    upgrading: bool,
+    profile_file: String,
+    profile_warning: Option<String>,
+    manual_path_line: Option<String>,
+    machine: mj_core::config::Machine,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +306,36 @@ fn populate_subagent_profile_choices(draft: &mut Value) {
     }
     for (profile_id, value) in selected {
         choices.insert(profile_id, value);
+    }
+}
+
+fn machine_host_label(machine_id: &str, machine: &mj_core::config::Machine) -> String {
+    match machine {
+        mj_core::config::Machine::Local { .. } => "the local machine".to_owned(),
+        mj_core::config::Machine::Ssh { ssh, .. } => ssh
+            .user
+            .as_ref()
+            .map_or_else(|| ssh.host.clone(), |user| format!("{user}@{}", ssh.host)),
+        mj_core::config::Machine::AwsEc2 { .. } => machine_id.to_owned(),
+    }
+}
+
+fn format_mbx_install_result(
+    result: Result<String, String>,
+    operation: Option<&MbxInstallState>,
+) -> String {
+    match result {
+        Ok(message) => message,
+        Err(error) => {
+            let action = operation.map_or("install or upgrade", |operation| {
+                if operation.upgrading {
+                    "upgrade"
+                } else {
+                    "install"
+                }
+            });
+            format!("Could not {action} mbx: {error}")
+        }
     }
 }
 
@@ -703,7 +754,7 @@ fn value_summary(
             Some(label) => label,
             None if storage_path(&child_path) == ["theme"] => schema::theme_report(
                 &schema::choice_label(&child_path, value, draft),
-                theme::no_color_requested(),
+                crate::no_color_requested(),
             ),
             None => schema::choice_label(&child_path, value, draft),
         },
@@ -854,6 +905,7 @@ impl SetupDialog {
             notice_anchor: None,
             build_cache_preview: None,
             archive_space_preview: None,
+            mbx_install: None,
             preferred_width: preferred.width,
             preferred_height: preferred.height,
         };
@@ -937,6 +989,9 @@ impl SetupDialog {
                 label,
                 interactive && !self.discovering && !self.saving,
             ));
+        }
+        if let Some((label, enabled)) = self.install_mbx_page_action() {
+            actions.push((InstallMbx, label, interactive && enabled && !self.saving));
         }
         actions.push((Save, self.save_label(), !self.saving));
         actions
@@ -1391,6 +1446,63 @@ impl SetupDialog {
         Some((machine_id.clone(), key))
     }
 
+    /// Install eligibility and the exact machine draft a confirmation will use.
+    fn install_mbx_offer(&self) -> Option<MbxInstallOffer> {
+        let (machine_id, key) = self.build_cache_machine_page()?;
+        let preview = self.build_cache_preview.as_ref()?;
+        if preview.key != key || !preview.install_mbx_available {
+            return None;
+        }
+        let BuildCachePreviewResult::Ready(Some(preview)) = &preview.result else {
+            return None;
+        };
+        let profile_file = preview.mbx_profile_file.clone()?;
+        let profile_warning = preview.mbx_profile_warning.clone();
+        let manual_path_line = preview.mbx_manual_path_line.clone();
+        let machine = self.machine(&machine_id)?;
+        Some(MbxInstallOffer {
+            machine_id,
+            key,
+            upgrading: preview.native_mbx.is_some(),
+            profile_file,
+            profile_warning,
+            manual_path_line,
+            machine,
+        })
+    }
+
+    fn install_mbx_page_action(&self) -> Option<(&'static str, bool)> {
+        let [section, machine_id] = self.path.as_slice() else {
+            return None;
+        };
+        if section != "machines" {
+            return None;
+        }
+        if let Some(install) = self
+            .mbx_install
+            .as_ref()
+            .filter(|install| install.machine_id == *machine_id)
+        {
+            return Some((
+                if install.upgrading {
+                    "Upgrading mbx…"
+                } else {
+                    "Installing mbx…"
+                },
+                false,
+            ));
+        }
+        let upgrading = self.install_mbx_offer()?.upgrading;
+        Some((
+            if upgrading {
+                "Upgrade mbx"
+            } else {
+                "Install mbx"
+            },
+            true,
+        ))
+    }
+
     /// What the machine page's build cache row says when the resolved preview
     /// shows the host cannot share the cache.
     fn build_cache_row_unavailable(&self) -> Option<&'static str> {
@@ -1434,6 +1546,7 @@ impl SetupDialog {
         self.build_cache_preview = Some(BuildCachePreviewState {
             key: key.clone(),
             result: BuildCachePreviewResult::Resolving,
+            install_mbx_available: false,
         });
         self.notice = Some("Resolving the build cache defaults on the machine…".into());
         DashboardAction::PreviewBuildCache {
@@ -2711,6 +2824,39 @@ impl DashboardState {
                     scope,
                 };
             }
+            Some(Interaction::Activate(InstallMbx)) => {
+                let Some(MbxInstallOffer {
+                    machine_id,
+                    key,
+                    upgrading,
+                    profile_file,
+                    profile_warning,
+                    manual_path_line,
+                    machine,
+                }) = dialog.install_mbx_offer()
+                else {
+                    self.mode = Mode::Setup(dialog);
+                    return DashboardAction::None;
+                };
+                let host = machine_host_label(&machine_id, &machine);
+                let generation = dialog.generation;
+                let previous = Box::new(Mode::Setup(dialog));
+                self.mode = Mode::Confirm(crate::dialogs::ConfirmDialog::new(
+                    crate::dialogs::Confirmation::InstallMbx {
+                        generation,
+                        key,
+                        machine_id,
+                        machine: Box::new(machine),
+                        host,
+                        upgrading,
+                        profile_file,
+                        profile_warning,
+                        manual_path_line,
+                        previous,
+                    },
+                ));
+                return DashboardAction::None;
+            }
             _ => {}
         }
         if action == DashboardAction::None {
@@ -2729,6 +2875,7 @@ impl DashboardState {
         generation: u64,
         key: &Value,
         result: Result<Option<mj_core::state::BuildCachePreview>, String>,
+        install_mbx_available: bool,
     ) {
         let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
             return;
@@ -2763,7 +2910,94 @@ impl DashboardState {
                 Ok(preview) => BuildCachePreviewResult::Ready(preview.map(Box::new)),
                 Err(error) => BuildCachePreviewResult::Failed(error),
             },
+            install_mbx_available,
         });
+        dialog.notice = Some(notice);
+        dialog.prepare();
+    }
+
+    /// Mark the confirmed host mutation busy before the CLI starts its worker.
+    pub fn mbx_install_started(&mut self, generation: u64, key: &Value, machine_id: &str) -> bool {
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            return false;
+        };
+        if dialog.generation != generation || dialog.mbx_install.is_some() {
+            return false;
+        }
+        let Some(offer) = dialog.install_mbx_offer() else {
+            return false;
+        };
+        if offer.machine_id != machine_id || &offer.key != key {
+            return false;
+        }
+        let host = machine_host_label(machine_id, &offer.machine);
+        dialog.mbx_install = Some(MbxInstallState {
+            key: key.clone(),
+            machine_id: machine_id.to_owned(),
+            upgrading: offer.upgrading,
+        });
+        dialog.notice = Some(if offer.upgrading {
+            format!("Upgrading mbx on {host}…")
+        } else {
+            format!("Installing mbx on {host}…")
+        });
+        dialog.prepare();
+        true
+    }
+
+    /// Report the install result and apply its fresh cache preview when the
+    /// settings draft still describes the machine that was installed.
+    pub fn mbx_install_finished(
+        &mut self,
+        generation: u64,
+        key: &Value,
+        machine_id: &str,
+        result: Result<String, String>,
+        preview: Result<Option<mj_core::state::BuildCachePreview>, String>,
+        install_mbx_available: bool,
+    ) {
+        let Some(dialog) = setup_dialog_mut(&mut self.mode) else {
+            self.set_notice(format_mbx_install_result(result, None));
+            return;
+        };
+        if dialog.generation != generation {
+            dialog.notice = Some(format_mbx_install_result(result, None));
+            dialog.prepare();
+            return;
+        }
+        let operation = dialog
+            .mbx_install
+            .as_ref()
+            .filter(|operation| operation.machine_id == machine_id && &operation.key == key)
+            .cloned();
+        if operation.is_some() {
+            dialog.mbx_install = None;
+        }
+        let mut notice = format_mbx_install_result(result, operation.as_ref());
+        let current = dialog.build_cache_machine_page();
+        if current
+            .as_ref()
+            .is_some_and(|(current_id, current_key)| current_id == machine_id && current_key == key)
+        {
+            match preview {
+                Ok(preview) => {
+                    dialog.build_cache_preview = Some(BuildCachePreviewState {
+                        key: key.clone(),
+                        result: BuildCachePreviewResult::Ready(preview.map(Box::new)),
+                        install_mbx_available,
+                    });
+                }
+                Err(error) => {
+                    notice.push_str(&format!(
+                        " Could not refresh the build cache preview: {error}"
+                    ));
+                }
+            }
+        } else if let Err(error) = preview {
+            notice.push_str(&format!(
+                " Could not refresh the build cache preview: {error}"
+            ));
+        }
         dialog.notice = Some(notice);
         dialog.prepare();
     }

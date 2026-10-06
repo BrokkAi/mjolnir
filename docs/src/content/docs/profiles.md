@@ -396,8 +396,8 @@ Mjolnir then adds its own files to the staged home:
   sub-agent hands back its report or a parent starts or waits for one;
 - for a Codex profile with a custom provider, the generated `models.json` and
   the `config.toml` line that points at it;
-- for Kimi Code on a target other than this machine, the `mj-memory` MCP server
-  in `mcp.json`;
+- for Kimi Code on a target other than this machine, the `mj-memory` history
+  MCP server in `mcp.json`;
 - for Muse, the permission profile in its settings;
 - in a container or on an EC2 instance, a note in the instruction file
   (`AGENTS.md` or `CLAUDE.md`) that the environment is disposable.
@@ -536,7 +536,7 @@ receive the owning daemon's configuration and data paths so their commands
 address the same Mjolnir instance.
 
 Container, SSH, and EC2 sessions do not receive this host CLI skill. Their
-delegation and project-memory MCP tools carry their own instructions. Launch
+delegation and session-history MCP tools carry their own instructions. Launch
 staging and ongoing skills reconciliation both enforce this distinction,
 including removing an older copy from an isolated session. The `skills/mj/`
 directory is reserved: localhost sessions receive the managed copy and isolated
@@ -548,16 +548,16 @@ Session recall and file provenance are provided by the `mj-memory` MCP server:
 `trace_file`, `session_files`, and `blame_file`. They query the controller's
 session index on local, container, and SSH targets without installing `sw` or
 copying the index to the target. Claude receives these history tools and keeps
-native project notes; the other harnesses also receive the document tools
-`list`, `read`, and `write`. Applicable tools are registered again when a
-session resumes.
+native project notes. Other harnesses read and write their session's project
+memory replica with their own file tools. Applicable history tools are
+registered again when a session resumes.
 
 History reads are bounded and include continuation information. The index can
 lag active sessions, and older transcripts may lack timestamps or file evidence.
 `blame_file` runs Git in the target checkout and reports heuristic attribution;
 uncommitted lines remain unattributed. Queries require a connected controller
-and time out after 60 seconds. Local project document tools remain usable while
-a history query waits. History tools never resume or restore old sessions.
+and time out after 60 seconds. Local project-memory files remain usable while a
+history query waits. History tools never resume or restore old sessions.
 User-supplied `recall` and `provenance` skills are preserved.
 
 The destination tree is replaced atomically. Removing the controller-side
@@ -641,15 +641,17 @@ other sessions or credentials. External Muse sessions normally come from
 `~/.local/share/muse/sessions` (`XDG_DATA_HOME/muse/sessions` when set); mj
 restores them into the destination profile’s isolated data directory.
 
-Muse receives Mjolnir's project-memory and review tools through muse-acp 0.8.0
-or newer with Muse Code 1.3.0 or newer, which managed targets and the agent-dev
-image install. A session whose Muse runtime does not accept them, such as one
-in a container created from an older image, continues without them and says
-so; suspend and resume it once the image has updated. A Muse reviewer needs its
-tools, so it does not start without them. Because Muse always runs
-unconstrained, it reviews only sessions that already run unconstrained, such as
-sessions on container targets and Muse sessions. Muse Spark can also supply utility
-inference for cross-harness handoffs; see
+Muse reads and writes its session's project-memory files directly because its
+sandbox is disabled. It receives Mjolnir's session-history and review MCP tools
+through muse-acp 0.8.0 or newer with Muse Code 1.3.0 or newer, which managed
+targets and the agent-dev image install. A session whose Muse runtime does not
+accept MCP servers, such as one in a container created from an older image,
+continues without those tools and says so; suspend and resume it once the image
+has updated. A Muse reviewer needs its review MCP tools, so it does not start
+without them. Because Muse always runs unconstrained, it reviews only sessions
+that already run unconstrained, such as sessions on container targets and Muse
+sessions. Muse Spark can also supply utility inference for cross-harness
+handoffs; see
 [Durability and recovery](/durability/).
 
 - Kimi Code has no guardian approval mode. Prefer an isolated

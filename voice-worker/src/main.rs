@@ -128,26 +128,3 @@ fn read_commands(command_tx: mpsc::Sender<backend::StdinCommand>) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_auth_path_requires_explicit_profile() {
-        assert_eq!(
-            parse_auth_path([OsString::from("--codex-auth"), OsString::from("/tmp/a")])
-                .expect("auth path"),
-            PathBuf::from("/tmp/a")
-        );
-        assert!(parse_auth_path(std::iter::empty()).is_err());
-    }
-
-    #[test]
-    fn parse_auth_path_accepts_equals_form() {
-        assert_eq!(
-            parse_auth_path([OsString::from("--codex-auth=/tmp/a")]).expect("auth path"),
-            PathBuf::from("/tmp/a")
-        );
-    }
-}

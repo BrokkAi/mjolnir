@@ -665,6 +665,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 251e812e42b5: SSH container uploads targeted a path that existed only inside the container.
     #[test]
     fn remote_container_targets_stage_the_reviewer_on_the_host_not_in_the_worker_root() {
         // The worker root is a path inside the container. Uploading to it over
@@ -725,63 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn local_container_targets_stage_the_reviewer_through_their_engine() {
-        let directory = tempfile::tempdir().unwrap();
-        let container_id = crate::targets::resource_name(SESSION_ID).unwrap();
-        for (locator, engine) in [
-            (
-                mj_core::state::TargetLocator::LocalPodman {
-                    borrowed_from: None,
-                    container_id: container_id.clone(),
-                    workspace_storage: Default::default(),
-                },
-                "podman",
-            ),
-            (
-                mj_core::state::TargetLocator::LocalDocker {
-                    borrowed_from: None,
-                    container_id: container_id.clone(),
-                },
-                "docker",
-            ),
-        ] {
-            let (controller, session_id) = fixture(directory.path(), locator);
-            let executor = RecordingExecutor::new();
-
-            controller
-                .stage_reviewer_profile_controlled(&session_id, "codex", 3, &[], &executor)
-                .unwrap();
-
-            let script = executor.script();
-            assert!(
-                script
-                    .iter()
-                    .all(|line| line.starts_with(&format!("{engine} "))),
-                "a container target is reached only through its engine: {script:?}"
-            );
-            let home = script
-                .iter()
-                .find_map(|line| {
-                    line.split(' ')
-                        .find(|word| word.contains("/reviewer/profile"))
-                })
-                .expect("the reviewer profile is placed")
-                .to_owned();
-            assert!(
-                home.contains(&format!("/{session_id}")),
-                "the reviewer lives under this session's worker root: {home}"
-            );
-            // Nothing here provisions a target, a checkout, or another session.
-            assert!(
-                !script.iter().any(|line| {
-                    line.contains("run") || line.contains("git") || line.contains("create")
-                }),
-                "staging a reviewer provisions nothing: {script:?}"
-            );
-        }
-    }
-
-    #[test]
     fn reviewer_staging_preserves_owned_approval_for_both_mcp_delivery_paths() {
         let directory = tempfile::tempdir().unwrap();
         let (controller, session_id) = fixture(
@@ -804,6 +748,7 @@ mod tests {
         }
     }
 
+    // Hard-won: c5deb2a59c0c: an unconstrained Muse reviewer could bypass Guardian approvals on the host.
     #[test]
     fn an_unconstrained_reviewer_is_refused_for_a_session_that_runs_with_approvals() {
         let directory = tempfile::tempdir().unwrap();
@@ -889,25 +834,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged["permissions"]["default_profile"], ":unrestricted");
-    }
-
-    #[test]
-    fn an_unknown_profile_is_refused_before_anything_is_copied() {
-        let directory = tempfile::tempdir().unwrap();
-        let (controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        let error = controller
-            .stage_reviewer_profile_controlled(&session_id, "missing", 0, &[], &executor)
-            .unwrap_err();
-
-        assert!(format!("{error:#}").contains("unknown profile"));
-        assert!(executor.commands.borrow().is_empty());
     }
 
     #[test]

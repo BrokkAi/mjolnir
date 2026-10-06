@@ -26,4 +26,5 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 
 [dev-dependencies]
+mj-core = { workspace = true, features = ["golden"] }
 tempfile.workspace = true

@@ -75,6 +75,7 @@ mod tests {
 
     /// I2-12: a review left `.bifrost/analyzer.db` in the session worktree,
     /// and it showed up in `mj diff` and in the next review's capture.
+    // Hard-won: 9c22154b: Bifrost analyzer artifacts appeared in `mj diff` and triggered a needless later review.
     #[cfg(unix)]
     #[tokio::test]
     async fn bifrost_state_stays_out_of_the_session_changes() {

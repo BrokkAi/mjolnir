@@ -189,16 +189,6 @@ fn materialize_worker_source(source: WorkerBinaryAvailability) -> Result<PathBuf
     Ok(path)
 }
 
-pub(in crate::controller) fn target_architecture(
-    locator: &targets::TargetLocator,
-    executor: &impl CommandExecutor,
-) -> Result<&'static str> {
-    let command = targets::locator_command(locator, vec!["uname".into(), "-m".into()])
-        .purpose("detect target architecture");
-    let output = execute_checked(executor, command)?;
-    targets::normalize_architecture(String::from_utf8(output.stdout)?.trim())
-}
-
 fn probe_platform(
     executor: &impl CommandExecutor,
     command: CommandSpec,

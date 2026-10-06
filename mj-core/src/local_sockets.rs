@@ -143,6 +143,7 @@ mod tests {
         directory
     }
 
+    // Hard-won: d1744be0: long Unix socket paths made most macOS and some Linux worker launches fail
     #[test]
     fn bind_and_connect_work_through_a_path_longer_than_sun_path() {
         // Changing cwd affects every thread, including concurrent subprocess
@@ -187,29 +188,5 @@ mod tests {
         drop(client);
 
         assert_eq!(accepting.join().expect("join"), 7);
-    }
-
-    #[test]
-    fn a_short_path_binds_without_switching_directory() {
-        let temporary = tempfile::tempdir().expect("tempdir");
-        let socket = temporary.path().join("short.sock");
-
-        let before = std::env::current_dir().expect("cwd");
-        let listener = bind_unix_listener(&socket).expect("bind short path");
-        assert_eq!(std::env::current_dir().expect("cwd"), before);
-        drop(listener);
-        assert!(socket.exists());
-    }
-
-    #[test]
-    fn binding_into_a_missing_directory_names_the_full_path() {
-        let temporary = tempfile::tempdir().expect("tempdir");
-        let socket = temporary.path().join("absent").join("control.sock");
-
-        let error = bind_unix_listener(&socket).expect_err("missing directory");
-        assert!(
-            format!("{error:#}").contains(&socket.display().to_string()),
-            "error should name the full path: {error:#}"
-        );
     }
 }

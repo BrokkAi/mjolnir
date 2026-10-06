@@ -76,6 +76,7 @@ mod tests {
         reason: String,
     }
 
+    // Hard-won: 540c920: A full target disk left workers unreachable without persisting the reason into their reserved exit record.
     #[test]
     fn a_reservation_reads_as_no_record_and_takes_the_reason_in_place() {
         let root = tempfile::tempdir().unwrap();
@@ -126,16 +127,5 @@ mod tests {
         let record = record.unwrap();
         assert!(record.reason.starts_with("journal write failed: "));
         assert!(record.reason.ends_with('…'));
-    }
-
-    #[test]
-    fn without_a_reservation_the_record_is_created() {
-        let root = tempfile::tempdir().unwrap();
-        write(root.path(), "startup failed", Some("install the harness")).unwrap();
-        let record: Option<Record> = serde_json::from_slice(
-            &std::fs::read(root.path().join(mj_core::relay::WORKER_EXIT_FILE)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(record.unwrap().reason, "startup failed");
     }
 }

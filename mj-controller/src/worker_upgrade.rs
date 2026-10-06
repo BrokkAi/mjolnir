@@ -426,23 +426,6 @@ mod tests {
         }
     }
 
-    /// The two facts that make an upgrade due, each on its own.
-    #[test]
-    fn only_a_quiet_session_with_an_unknown_build_is_due() {
-        let now = Utc::now();
-        let policy = PolicyState::default();
-
-        assert!(policy.due(&observation(Some("build-a"), true), now));
-        assert!(
-            !policy.due(&observation(Some("build-a"), false), now),
-            "a working session must not have its worker killed"
-        );
-        assert!(
-            policy.due(&observation(None, true), now),
-            "a worker too old to report a build is outdated"
-        );
-    }
-
     #[test]
     fn a_busy_turn_is_never_upgraded_no_matter_how_long_it_runs() {
         let started = Utc::now();
@@ -453,6 +436,10 @@ mod tests {
         assert!(
             policy.due(&observation(Some("old-build"), true), two_days_later),
             "the next quiet observation may upgrade without an age-based busy timeout"
+        );
+        assert!(
+            policy.due(&observation(None, true), two_days_later),
+            "a worker too old to report a build is outdated"
         );
     }
 
@@ -630,15 +617,5 @@ mod tests {
 
         let received = std::iter::from_fn(|| queued.try_recv()).count();
         assert_eq!(received, 1);
-    }
-
-    /// A stopped coordinator leaves observing harmless.
-    #[test]
-    fn observing_a_stopped_coordinator_is_a_no_op() {
-        let (observations, queued) = observation_channel();
-        let observer = WorkerUpgradeObserver { observations };
-        drop(queued);
-
-        observer.observe(observation(Some("build-a"), true));
     }
 }

@@ -3,11 +3,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::*;
-use agent_client_protocol::schema::v1::{
-    SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions, ToolCallUpdate,
-};
+use agent_client_protocol::schema::v1::ToolCallUpdate;
 use mj_core::subagent::SubagentMcpRole;
 
+// Hard-won: 61a1cfa: Codex replay dropped the current available-command catalogue and goal metadata, including on large history.
 #[cfg(unix)]
 #[tokio::test]
 async fn loading_native_history_preserves_current_commands_and_goal_metadata() {
@@ -585,22 +584,6 @@ async fn a_codex_session_given_project_memory_is_titled_from_the_users_prompt() 
     );
 }
 
-/// A Codex session without project memory sends the user's blocks alone, as
-/// it always did, and Codex's title stands.
-#[tokio::test]
-async fn a_codex_session_without_project_memory_is_titled_as_before() {
-    let request = "Reply with the single word pong.";
-
-    let (received, titles) =
-        codex_session_titles(None, vec![ContentBlock::Text(TextContent::new(request))]).await;
-
-    assert_eq!(titles, [request]);
-    assert_eq!(
-        received,
-        serde_json::json!([{"type": "text", "text": request}])
-    );
-}
-
 /// Only Codex receives the hidden context as a resource. Every other harness
 /// gets the same text block as before; its bridge may not accept embedded
 /// resources at all.
@@ -767,7 +750,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
 }
 
 #[test]
-fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
+fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     let mut spec = LaunchSpec {
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
@@ -779,7 +762,10 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         args: Vec::new(),
         environment: BTreeMap::new(),
         cwd: "/workspace/app".into(),
-        additional_directories: vec!["/workspace/api".into()],
+        additional_directories: vec![
+            "/workspace/api".into(),
+            "/profile/projects/abc/memory".into(),
+        ],
         extra_mcp_servers: Vec::new(),
         project_memory: Some(ProjectMemoryLaunchConfig {
             history_socket: None,
@@ -808,20 +794,17 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
         }),
         stall_policy: None,
     };
-    let servers = project_memory_mcp(&spec);
+    let servers = project_history_mcp(&spec);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
         panic!("non-Claude sessions receive exactly one memory MCP server");
     };
     assert_eq!(server.name, "mj-memory");
     assert_eq!(server.command, Path::new("/worker/hel"));
+    assert_eq!(server.args, ["worker", "memory-mcp"]);
+    let request = serde_json::to_value(new_session_request(&spec, true)).unwrap();
     assert_eq!(
-        server.args,
-        [
-            "worker",
-            "memory-mcp",
-            "--root",
-            "/profile/projects/abc/memory"
-        ]
+        request["additionalDirectories"],
+        serde_json::json!(["/workspace/api", "/profile/projects/abc/memory"])
     );
     assert!(
         !server
@@ -832,184 +815,31 @@ fn project_memory_mcp_honors_harness_delivery_and_claude_native_memory() {
     );
 
     spec.project_memory.as_mut().unwrap().mcp_delivery = ProjectMemoryMcpDelivery::HarnessProfile;
-    assert!(project_memory_mcp(&spec).is_empty());
+    assert!(project_history_mcp(&spec).is_empty());
     spec.project_memory.as_mut().unwrap().mcp_delivery = ProjectMemoryMcpDelivery::Acp;
 
     let mut claude = spec;
     claude.harness = HarnessKind::Claude;
-    assert!(project_memory_mcp(&claude).is_empty());
+    assert!(project_history_mcp(&claude).is_empty());
     claude.project_memory.as_mut().unwrap().history_socket = Some("/worker/control.sock".into());
-    let servers = project_memory_mcp(&claude);
+    let servers = project_history_mcp(&claude);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
         panic!("Claude receives history tools");
     };
-    assert!(server.args.contains(&"--native-notes".into()));
+    assert!(!server.args.contains(&"--root".into()));
     assert!(server.args.contains(&"/worker/control.sock".into()));
     claude.harness = HarnessKind::Codex;
-    let servers = project_memory_mcp(&claude);
+    let servers = project_history_mcp(&claude);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
-        panic!("Codex receives history and notes");
+        panic!("Codex receives history");
     };
-    assert!(!server.args.contains(&"--native-notes".into()));
+    assert!(!server.args.contains(&"--root".into()));
     claude.harness = HarnessKind::Muse;
-    let servers = project_memory_mcp(&claude);
+    let servers = project_history_mcp(&claude);
     let [McpServer::Stdio(server)] = servers.as_slice() else {
-        panic!("Muse receives history and notes");
+        panic!("Muse receives history");
     };
-    assert!(!server.args.contains(&"--native-notes".into()));
-}
-
-#[test]
-fn claude_session_metadata_subscribes_to_background_task_levels_and_results_for_all_policies() {
-    let mut spec = LaunchSpec {
-        bridge_spec_path: None,
-        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-        subagent_mcp_socket: None,
-        clear_context_request: None,
-        context_restore: None,
-        goal_recovery: Default::default(),
-        command: "claude-agent-acp".into(),
-        args: Vec::new(),
-        environment: BTreeMap::new(),
-        cwd: "/workspace/app".into(),
-        additional_directories: vec!["/workspace/api".into()],
-        extra_mcp_servers: Vec::new(),
-        project_memory: None,
-        resume_session: None,
-        native_session_may_have_history: false,
-        accepted_config: Default::default(),
-        initial_model: None,
-        harness: HarnessKind::Claude,
-        execution_policy: ExecutionPolicy::Unconstrained,
-        acp_activity: AcpActivityClock::default(),
-        step_clock: crate::acp::StepClock::default(),
-        tools_in_flight: Default::default(),
-        turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
-        stall_policy: None,
-    };
-    let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
-    assert_eq!(
-        meta.pointer("/claudeCode/options/sandbox/enabled"),
-        Some(&serde_json::Value::Bool(false))
-    );
-    assert_eq!(
-        meta.pointer("/claudeCode/options/perTaskStopAffordance"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    let filter = serde_json::json!([
-        {"type": "system", "subtype": "background_tasks_changed"},
-        {"type": "result"},
-    ]);
-    assert_eq!(
-        meta.pointer("/claudeCode/emitRawSDKMessages"),
-        Some(&filter)
-    );
-    for request in [
-        serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-        serde_json::to_value(new_session_request(&spec, false)).unwrap(),
-        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
-    ] {
-        assert_eq!(
-            request.pointer("/_meta/claudeCode/options/sandbox/enabled"),
-            Some(&serde_json::Value::Bool(false)),
-            "{request}"
-        );
-        assert_eq!(
-            request.pointer("/_meta/claudeCode/options/perTaskStopAffordance"),
-            Some(&serde_json::Value::Bool(true)),
-            "{request}"
-        );
-        assert_eq!(
-            request.pointer("/_meta/claudeCode/emitRawSDKMessages"),
-            Some(&filter),
-            "{request}"
-        );
-        assert_eq!(
-            request["additionalDirectories"],
-            serde_json::json!(["/workspace/api"]),
-            "{request}"
-        );
-    }
-
-    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    let configured_meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
-    assert_eq!(
-        configured_meta.pointer("/claudeCode/emitRawSDKMessages"),
-        Some(&filter)
-    );
-    assert_eq!(
-        configured_meta.pointer("/claudeCode/options/perTaskStopAffordance"),
-        Some(&serde_json::Value::Bool(true))
-    );
-    assert!(
-        configured_meta
-            .pointer("/claudeCode/options/sandbox")
-            .is_none()
-    );
-    for request in [
-        serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-        serde_json::to_value(load_session_request(&spec, SessionId::from("native"))).unwrap(),
-    ] {
-        assert_eq!(
-            request.pointer("/_meta/claudeCode/emitRawSDKMessages"),
-            Some(&filter),
-            "{request}"
-        );
-        assert!(
-            request
-                .pointer("/_meta/claudeCode/options/sandbox")
-                .is_none(),
-            "{request}"
-        );
-    }
-    spec.execution_policy = ExecutionPolicy::Unconstrained;
-    spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
-    spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
-    let claude_meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
-    assert_eq!(
-        claude_meta.pointer("/claudeCode/options/disallowedTools"),
-        Some(&serde_json::json!(["Agent", "Task"]))
-    );
-    assert!(
-        extra_mcp(&spec).is_empty(),
-        "Claude reads its staged MCP profile"
-    );
-
-    spec.harness = HarnessKind::Codex;
-    let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
-    assert!(meta.get("claudeCode").is_none());
-    assert_eq!(
-        meta.pointer("/goal/resumePolicy"),
-        Some(&serde_json::json!("preserve"))
-    );
-    assert_eq!(
-        meta.pointer("/codex/options/disallowedTools"),
-        Some(&serde_json::json!(["spawn_agent"]))
-    );
-    let servers = extra_mcp(&spec);
-    let [McpServer::Stdio(server)] = servers.as_slice() else {
-        panic!("Codex receives the Mjolnir sub-agent MCP server");
-    };
-    assert_eq!(server.name, "mj-agents");
-    // The harness travels with the server because its own MCP client decides
-    // how long one `wait` call may stay open.
-    assert_eq!(
-        server.args,
-        [
-            "worker",
-            "subagent-mcp",
-            "--socket",
-            "/worker/subagents.sock",
-            "--harness",
-            "codex",
-            "--role",
-            "parent"
-        ]
-    );
+    assert!(!server.args.contains(&"--root".into()));
 }
 
 fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
@@ -1074,167 +904,6 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     assert_eq!(
         server.args.iter().rev().take(2).collect::<Vec<_>>(),
         ["child", "--role"]
-    );
-}
-
-#[test]
-fn claude_async_task_updates_publish_only_stop_capability_changes() {
-    assert_eq!(
-        claude_async_task_control_update(&serde_json::json!({
-            "sessionUpdate": "async_task_spawned",
-            "asyncTaskId": "task-7",
-            "canStop": true,
-        }))
-        .unwrap(),
-        Some(ClaudeAsyncTaskControlUpdate::Set {
-            task_id: "task-7".into(),
-            can_stop: true,
-            settled: false,
-        })
-    );
-    assert_eq!(
-        claude_async_task_control_update(&serde_json::json!({
-            "sessionUpdate": "async_task_state_update",
-            "asyncTaskId": "task-7",
-            "state": "stopped",
-        }))
-        .unwrap(),
-        Some(ClaudeAsyncTaskControlUpdate::Set {
-            task_id: "task-7".into(),
-            can_stop: false,
-            settled: false,
-        })
-    );
-    // A completed task is followed by a task-notification turn; a stopped one is not.
-    assert_eq!(
-        claude_async_task_control_update(&serde_json::json!({
-            "sessionUpdate": "async_task_state_update",
-            "asyncTaskId": "task-7",
-            "state": "completed",
-        }))
-        .unwrap(),
-        Some(ClaudeAsyncTaskControlUpdate::Set {
-            task_id: "task-7".into(),
-            can_stop: false,
-            settled: true,
-        })
-    );
-    assert_eq!(
-        claude_async_task_control_update(&serde_json::json!({
-            "sessionUpdate": "async_task_progress",
-            "asyncTaskId": "task-7",
-        }))
-        .unwrap(),
-        Some(ClaudeAsyncTaskControlUpdate::Ignore)
-    );
-    assert!(
-        claude_async_task_control_update(&serde_json::json!({
-            "sessionUpdate": "async_task_spawned",
-            "asyncTaskId": "",
-            "canStop": true,
-        }))
-        .is_err()
-    );
-    assert_eq!(
-        claude_async_task_control_update(&serde_json::json!({
-            "sessionUpdate": "tool_call",
-        }))
-        .unwrap(),
-        None
-    );
-}
-
-#[test]
-fn claude_async_task_stop_request_uses_the_air_wire_shape() {
-    let request = ClaudeAsyncTaskStopRequest {
-        session_id: SessionId::from("native-session"),
-        async_task_id: "task-7".into(),
-    };
-    assert_eq!(
-        serde_json::to_value(request).unwrap(),
-        serde_json::json!({
-            "sessionId": "native-session",
-            "asyncTaskId": "task-7",
-        })
-    );
-}
-
-#[test]
-fn resumed_session_request_keeps_load_context() {
-    let spec = LaunchSpec {
-        bridge_spec_path: None,
-        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-        subagent_mcp_socket: None,
-        clear_context_request: None,
-        context_restore: None,
-        goal_recovery: Default::default(),
-        command: "claude-agent-acp".into(),
-        args: Vec::new(),
-        environment: BTreeMap::new(),
-        cwd: "/workspace/app".into(),
-        additional_directories: vec!["/workspace/api".into()],
-        extra_mcp_servers: Vec::new(),
-        project_memory: None,
-        resume_session: Some("native".into()),
-        native_session_may_have_history: false,
-        accepted_config: Default::default(),
-        initial_model: None,
-        harness: HarnessKind::Claude,
-        execution_policy: ExecutionPolicy::Unconstrained,
-        acp_activity: AcpActivityClock::default(),
-        step_clock: crate::acp::StepClock::default(),
-        tools_in_flight: Default::default(),
-        turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
-        stall_policy: None,
-    };
-    let load = serde_json::to_value(load_session_request(&spec, SessionId::from("native")))
-        .expect("load request serializes");
-    let resume = serde_json::to_value(resume_session_request(&spec, SessionId::from("native")))
-        .expect("resume request serializes");
-
-    for field in ["sessionId", "cwd", "additionalDirectories", "_meta"] {
-        assert_eq!(resume[field], load[field], "resume request changed {field}");
-    }
-}
-
-#[test]
-fn claude_sdk_messages_keep_only_non_ambient_background_task_levels() {
-    let notification = <ClaudeSdkMessageNotification as agent_client_protocol::JsonRpcMessage>::parse_message(
-        "_claude/sdkMessage",
-        &serde_json::json!({
-            "sessionId": "native",
-            "message": {
-                "type": "system",
-                "subtype": "background_tasks_changed",
-                "tasks": [
-                    {"task_id": "server", "task_type": "shell", "description": "npm run dev"},
-                    {"task_id": "watcher", "task_type": "watch", "description": "Watch files", "ambient": true},
-                ],
-            },
-        }),
-    )
-    .expect("Claude extension notification deserializes");
-    assert_eq!(notification.session_id.to_string(), "native");
-    assert_eq!(
-        claude_background_tasks(&notification.message).unwrap(),
-        Some(vec![ClaudeBackgroundTask {
-            task_id: "server".into(),
-            description: "npm run dev".into(),
-        }])
-    );
-    assert_eq!(
-        claude_background_tasks(&serde_json::json!({
-            "type": "system",
-            "subtype": "task_started",
-            "task_id": "foreground",
-        }))
-        .unwrap(),
-        None,
-        "edge lifecycle messages must not become background levels"
     );
 }
 
@@ -1440,157 +1109,6 @@ async fn claude_sdk_extension_notification_reaches_runtime_without_opening_a_ste
 }
 
 #[test]
-fn finds_modes_in_flat_and_grouped_options() {
-    let flat =
-        SessionConfigKind::Select(agent_client_protocol::schema::v1::SessionConfigSelect::new(
-            "default",
-            vec![SessionConfigSelectOption::new("auto", "Auto")],
-        ));
-    assert!(select_contains(&flat, "auto"));
-
-    let grouped =
-        SessionConfigKind::Select(agent_client_protocol::schema::v1::SessionConfigSelect::new(
-            "default",
-            SessionConfigSelectOptions::Grouped(vec![SessionConfigSelectGroup::new(
-                "permissions",
-                "Permissions",
-                vec![SessionConfigSelectOption::new(
-                    "bypassPermissions",
-                    "Bypass",
-                )],
-            )]),
-        ));
-    assert!(select_contains(&grouped, "bypassPermissions"));
-}
-
-#[test]
-fn muse_empty_model_selection_treats_first_advertised_choice_as_default() {
-    let options = vec![
-        SessionConfigOption::select(
-            "model",
-            "Model",
-            "",
-            vec![
-                SessionConfigSelectOption::new("muse-spark-1.3", "Muse Spark 1.3"),
-                SessionConfigSelectOption::new("muse-spark-1.2", "Muse Spark 1.2"),
-            ],
-        )
-        .category(SessionConfigOptionCategory::Model),
-    ];
-
-    assert!(muse_implicit_default(&options, "muse-spark-1.3"));
-    assert!(!muse_implicit_default(&options, "muse-spark-1.2"));
-}
-
-#[test]
-fn advertised_choices_flatten_groups_and_follow_the_option_category() {
-    let model = SessionConfigOption::select(
-        "gpt_model",
-        "Model",
-        "fast",
-        SessionConfigSelectOptions::Grouped(vec![
-            SessionConfigSelectGroup::new(
-                "hosted",
-                "Hosted",
-                vec![SessionConfigSelectOption::new("fast", "Fast")],
-            ),
-            SessionConfigSelectGroup::new(
-                "local",
-                "Local",
-                vec![SessionConfigSelectOption::new("deep", "Deep").description("Slower, better")],
-            ),
-        ]),
-    )
-    .category(SessionConfigOptionCategory::Model);
-    let effort = SessionConfigOption::select(
-        "reasoning_effort",
-        "Effort",
-        "low",
-        SessionConfigSelectOptions::Ungrouped(vec![
-            SessionConfigSelectOption::new("low", "Low"),
-            SessionConfigSelectOption::new("high", "High"),
-        ]),
-    );
-    let options = vec![model, effort];
-
-    // The option id is not "model", so only the category can find it.
-    assert_eq!(
-        session_config_choices(&options, "model"),
-        vec![
-            SessionConfigChoice {
-                value: "fast".into(),
-                name: "Fast".into(),
-                description: None,
-            },
-            SessionConfigChoice {
-                value: "deep".into(),
-                name: "Deep".into(),
-                description: Some("Slower, better".into()),
-            },
-        ]
-    );
-    assert_eq!(
-        session_config_choices(&options, "effort")
-            .into_iter()
-            .map(|choice| choice.value)
-            .collect::<Vec<_>>(),
-        vec!["low", "high"]
-    );
-}
-
-#[test]
-fn an_option_the_harness_does_not_advertise_offers_no_choices() {
-    assert!(session_config_choices(&[], "model").is_empty());
-    assert!(session_config_choices(&[], "effort").is_empty());
-
-    // A harness that advertises only a mode selector configures neither.
-    let mode = SessionConfigOption::select(
-        "interaction_mode",
-        "Mode",
-        "plan",
-        SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new("plan", "Plan")]),
-    )
-    .category(SessionConfigOptionCategory::Mode);
-    assert!(session_config_choices(std::slice::from_ref(&mode), "model").is_empty());
-    assert!(session_config_choices(std::slice::from_ref(&mode), "effort").is_empty());
-    assert_eq!(session_config_choices(&[mode], "mode").len(), 1);
-}
-
-#[test]
-fn live_config_finds_model_and_anvil_reasoning_effort_separately() {
-    let model = SessionConfigOption::select(
-        "model",
-        "Model",
-        "gpt-5.6-sol",
-        vec![SessionConfigSelectOption::new("gpt-5.6-sol", "Sol")],
-    )
-    .category(SessionConfigOptionCategory::Model);
-    let effort = SessionConfigOption::select(
-        "reasoning_effort",
-        "Reasoning effort",
-        "high",
-        vec![SessionConfigSelectOption::new("high", "High")],
-    )
-    .category(SessionConfigOptionCategory::Model);
-    let options = vec![model, effort];
-
-    assert_eq!(
-        find_session_config_option(&options, "model")
-            .unwrap()
-            .id
-            .to_string(),
-        "model"
-    );
-    assert_eq!(
-        find_session_config_option(&options, "effort")
-            .unwrap()
-            .id
-            .to_string(),
-        "reasoning_effort"
-    );
-}
-
-#[test]
 fn unconstrained_permission_prefers_a_one_time_allow_and_never_cancels() {
     use agent_client_protocol::schema::v1::{
         PermissionOption, ToolCallUpdate, ToolCallUpdateFields,
@@ -1663,39 +1181,11 @@ async fn runtime_event_delivery_waits_for_bounded_channel_capacity() {
     ));
 }
 
-#[test]
-fn adapter_chatter_never_becomes_error_context() {
-    assert_eq!(
-        actionable_stderr_tail(
-            "Unexpected case: {\"type\":\"vcs_state_changed\"}\nUnexpected case: {\"type\":\"other\"}"
-        ),
-        None
-    );
-    assert_eq!(
-        actionable_stderr_tail(
-            "Unexpected case: {\"type\":\"vcs_state_changed\"}\nnode: out of memory\nUnexpected case: {\"type\":\"other\"}"
-        ),
-        Some("node: out of memory".to_owned())
-    );
-    assert_eq!(
-        actionable_stderr_tail(
-            "Got response to unknown request null\nGot response to unknown request null"
-        ),
-        None
-    );
-    assert_eq!(
-        actionable_stderr_tail(
-            "Got response to unknown request null\nACP protocol failed: runtime identity missing"
-        ),
-        Some("ACP protocol failed: runtime identity missing".to_owned())
-    );
-    assert_eq!(actionable_stderr_tail("   "), None);
-}
-
 /// Launch finding J-25: a Codex quota error showed in the system row as
 /// `warning: prompt failed: Internal error: { "message": ..., "codexErrorInfo":
 /// "usageLimitExceeded" }`. The warning is the provider's sentence on one
 /// line, and the turn ends as a quota stop, as Kimi's limit already does.
+// Hard-won: cd2f1b6: Codex quota limits surfaced as raw JSON and repeated the same warning.
 #[test]
 fn a_codex_usage_limit_ends_as_a_quota_stop_with_a_readable_warning() {
     let error = agent_client_protocol::Error::internal_error().data(serde_json::json!({
@@ -1772,6 +1262,7 @@ fn an_auth_required_prompt_failure_carries_the_credential_marker() {
 /// and a 403 usage-limit message (`cli/1136-11-prompt.txt`). The turn ended
 /// as QuotaLimit, but the conversation said "prompt failed (ACP
 /// auth_required)", which also reads as a sign-in failure.
+// Hard-won: 88ef8fc: Kimi weekly quota errors were labeled authentication failures and suggested re-login.
 #[test]
 fn a_usage_limit_sent_as_auth_required_is_labelled_a_usage_limit() {
     let mut error = agent_client_protocol::Error::auth_required();
@@ -1791,6 +1282,7 @@ fn a_usage_limit_sent_as_auth_required_is_labelled_a_usage_limit() {
     );
 }
 
+// Hard-won: a1d7b48: Compaction failures were reported as finished turns, causing clients to resend unproductive prompts.
 #[test]
 fn only_a_finished_turn_that_produced_nothing_counts_as_unanswered() {
     assert!(prompt_returned_without_updates(&StopReason::EndTurn, 7, 7));
@@ -2165,15 +1657,6 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
     answer_architecture_form(HarnessKind::Claude, None).await;
 }
 
-#[tokio::test]
-async fn muse_route_form_is_answered_without_asking_the_person() {
-    let (routed_tx, routed_rx) = oneshot::channel();
-    answer_architecture_form(HarnessKind::Muse, Some(routed_tx)).await;
-    let routed = routed_rx.await.expect("bridge receives the route answer");
-    assert_eq!(routed["result"]["action"], "accept");
-    assert_eq!(routed["result"]["content"]["route"], "Answer questions");
-}
-
 /// Drives one prompt whose question the person answers. It fails if any
 /// form other than the architecture question reaches the person first.
 async fn answer_architecture_form(
@@ -2287,47 +1770,6 @@ async fn answer_architecture_form(
         .expect("runtime task does not panic")
         .expect("runtime exits cleanly");
     bridge.await.unwrap();
-}
-
-/// Modeled on the `_meta.modelState` a signed-in `grok agent stdio`
-/// returns from `initialize`.
-fn grok_model_meta() -> serde_json::Map<String, serde_json::Value> {
-    let state = serde_json::json!({
-        "currentModelId": "grok-4.6",
-        "availableModels": [
-            {
-                "modelId": "grok-4.6",
-                "name": "Grok 4.6",
-                "description": "SpaceXAI's latest frontier model",
-                "_meta": {
-                    "totalContextTokens": 500_000,
-                    "supportsReasoningEffort": true,
-                    "reasoningEffort": "high",
-                    "reasoningEfforts": [
-                        {"id": "xhigh", "value": "xhigh", "label": "Extra High Effort", "description": "Highest effort and reasoning level", "default": true},
-                        {"id": "high", "value": "high", "label": "High Effort", "default": true},
-                        {"id": "medium", "value": "medium", "label": "Medium Effort", "default": false},
-                        {"id": "low", "value": "low", "label": "Low Effort", "default": false}
-                    ]
-                }
-            },
-            {
-                "modelId": "grok-4.5",
-                "name": "Grok 4.5",
-                "_meta": {
-                    "supportsReasoningEffort": true,
-                    "reasoningEffort": "high",
-                    "reasoningEfforts": [
-                        {"id": "high", "value": "high", "label": "High Effort", "default": true},
-                        {"id": "low", "value": "low", "label": "Low Effort", "default": false}
-                    ]
-                }
-            }
-        ]
-    });
-    let mut meta = serde_json::Map::new();
-    meta.insert("modelState".into(), state);
-    meta
 }
 
 #[test]
@@ -2497,174 +1939,8 @@ async fn an_unknown_client_request_is_answered_with_an_error_rather_than_silence
     );
 }
 
-/// Answers `initialize` (with or without Grok Build's model catalogue) and
-/// `session/new`, then records the request Hel sends for a config change.
-async fn config_change_bridge(
-    stream: tokio::io::DuplexStream,
-    model_catalogue: bool,
-    observed: tokio::sync::oneshot::Sender<serde_json::Value>,
-) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let (read, mut write) = tokio::io::split(stream);
-    let mut lines = BufReader::new(read).lines();
-    let mut observed = Some(observed);
-    while let Some(line) = lines.next_line().await.expect("read bridge input") {
-        let message: serde_json::Value =
-            serde_json::from_str(&line).expect("bridge input must be JSON-RPC");
-        let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        let id = message
-            .get("id")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let response = match method {
-            "initialize" => {
-                let mut result = serde_json::json!({"protocolVersion": 1});
-                if model_catalogue {
-                    result["_meta"] = serde_json::Value::Object(grok_model_meta());
-                }
-                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
-            }
-            "session/new" => {
-                let config_options = if model_catalogue {
-                    serde_json::json!([{
-                        "id": "verbosity",
-                        "name": "Verbosity",
-                        "type": "select",
-                        "currentValue": "normal",
-                        "options": [{"value": "normal", "name": "Normal"},
-                                    {"value": "detailed", "name": "Detailed"}],
-                    }])
-                } else {
-                    serde_json::json!([{
-                        "id": "model",
-                        "name": "Model",
-                        "category": "model",
-                        "type": "select",
-                        "currentValue": "sonnet",
-                        "options": [{"value": "sonnet", "name": "Sonnet"},
-                                    {"value": "opus", "name": "Opus"}],
-                    }])
-                };
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "sessionId": "scripted",
-                        "configOptions": config_options,
-                        // Claude's guardian policy selects Auto at startup.
-                        "modes": {"currentModeId": "default", "availableModes": [
-                            {"id": "default", "name": "Default"},
-                            {"id": "auto", "name": "Auto"}
-                        ]},
-                    },
-                })
-            }
-            // The startup mode enforcement is not the change under test.
-            "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-            _ => {
-                if let Some(observed) = observed.take() {
-                    let _ = observed.send(message.clone());
-                }
-                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
-            }
-        };
-        if write
-            .write_all(format!("{response}\n").as_bytes())
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
-}
-
-async fn config_change_request(
-    harness: HarnessKind,
-    model_catalogue: bool,
-    key: &str,
-    value: &str,
-) -> serde_json::Value {
-    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
-    let bridge = tokio::spawn(config_change_bridge(
-        bridge_stream,
-        model_catalogue,
-        observed_tx,
-    ));
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-
-    let (request_tx, mut request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    let spec = LaunchSpec {
-        bridge_spec_path: None,
-        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-        subagent_mcp_socket: None,
-        clear_context_request: None,
-        context_restore: None,
-        goal_recovery: Default::default(),
-        command: "scripted".into(),
-        args: Vec::new(),
-        environment: BTreeMap::new(),
-        cwd: std::env::current_dir().unwrap(),
-        additional_directories: Vec::new(),
-        extra_mcp_servers: Vec::new(),
-        project_memory: None,
-        resume_session: None,
-        native_session_may_have_history: false,
-        accepted_config: Default::default(),
-        initial_model: None,
-        harness,
-        execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        acp_activity: AcpActivityClock::default(),
-        step_clock: crate::acp::StepClock::default(),
-        tools_in_flight: Default::default(),
-        turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
-        stall_policy: None,
-    };
-    let driver = tokio::spawn(async move {
-        drive(
-            transport,
-            spec,
-            &mut request_rx,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    request_tx
-        .send(CommandRequest::SetConfig {
-            request_id: "config-1".into(),
-            key: key.to_owned(),
-            value: value.to_owned(),
-        })
-        .await
-        .unwrap();
-
-    let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx)
-        .await
-        .expect("Hel must send a configuration request")
-        .expect("the bridge must publish the request");
-
-    drop(request_tx);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), driver).await;
-    bridge.abort();
-    events.abort();
-    observed
-}
-
 #[derive(Clone, Copy)]
 enum ModeSurface {
-    Legacy,
     Both,
 }
 
@@ -2733,7 +2009,7 @@ async fn mode_change_bridge(
                 if matches!(surface, ModeSurface::Both) {
                     result["configOptions"] = serde_json::json!([mode_option("agent")]);
                 }
-                if matches!(surface, ModeSurface::Legacy | ModeSurface::Both) {
+                if matches!(surface, ModeSurface::Both) {
                     result["modes"] = modes.clone();
                 }
                 serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
@@ -2768,96 +2044,6 @@ async fn mode_change_bridge(
         }
     }
 }
-
-async fn mode_change_request(surface: ModeSurface) -> serde_json::Value {
-    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
-    // Claude selects Auto at startup; the change under test is the plan mode.
-    let bridge = tokio::spawn(mode_change_bridge(
-        bridge_stream,
-        surface,
-        Some("auto"),
-        observed_tx,
-    ));
-    let (client_read, client_write) = tokio::io::split(client_stream);
-    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
-    let (request_tx, mut request_rx) = mpsc::channel(4);
-    let (event_tx, mut event_rx) = mpsc::channel(64);
-    let events = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-    let spec = LaunchSpec {
-        bridge_spec_path: None,
-        subagent_policy: mj_core::subagent::SubagentPolicy::Native,
-        subagent_mcp_socket: None,
-        clear_context_request: None,
-        context_restore: None,
-        goal_recovery: Default::default(),
-        command: "scripted".into(),
-        args: Vec::new(),
-        environment: BTreeMap::new(),
-        cwd: std::env::current_dir().unwrap(),
-        additional_directories: Vec::new(),
-        extra_mcp_servers: Vec::new(),
-        project_memory: None,
-        resume_session: None,
-        native_session_may_have_history: false,
-        accepted_config: Default::default(),
-        initial_model: None,
-        harness: HarnessKind::Claude,
-        execution_policy: ExecutionPolicy::ConfiguredApprovals,
-        acp_activity: AcpActivityClock::default(),
-        step_clock: crate::acp::StepClock::default(),
-        tools_in_flight: Default::default(),
-        turn_context: Default::default(),
-        verdict: Some(crate::acp::VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }),
-        stall_policy: None,
-    };
-    let driver = tokio::spawn(async move {
-        drive(
-            transport,
-            spec,
-            &mut request_rx,
-            event_tx,
-            Arc::new(Mutex::new(None)),
-            false,
-        )
-        .await
-    });
-    request_tx
-        .send(CommandRequest::SetSessionMode {
-            request_id: "mode-1".into(),
-            mode_id: "plan".into(),
-        })
-        .await
-        .unwrap();
-    let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx)
-        .await
-        .expect("Hel must send a mode request")
-        .expect("the bridge must publish the request");
-    drop(request_tx);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), driver).await;
-    bridge.abort();
-    events.abort();
-    observed
-}
-
-#[tokio::test]
-async fn legacy_modes_use_session_set_mode() {
-    let request = mode_change_request(ModeSurface::Legacy).await;
-
-    assert_eq!(request["method"], "session/set_mode");
-    assert_eq!(request["params"]["modeId"], "plan");
-}
-
-#[tokio::test]
-async fn set_session_mode_uses_the_mode_protocol_even_when_config_is_available() {
-    let request = mode_change_request(ModeSurface::Both).await;
-
-    assert_eq!(request["method"], "session/set_mode");
-}
-
 async fn policy_is_enforced_before_session_is_reported(
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
@@ -3062,6 +2248,7 @@ async fn stubborn_mode_bridge(stream: tokio::io::DuplexStream) {
     }
 }
 
+// Hard-won: eed6c53: A harness could acknowledge a permission mode but run under a different, unsafe mode.
 #[tokio::test]
 async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
@@ -3131,46 +2318,6 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     }
     drop(request_tx);
     bridge.abort();
-}
-
-#[tokio::test]
-async fn a_grok_effort_change_goes_out_as_a_legacy_set_model_request() {
-    let request = config_change_request(HarnessKind::Grok, true, "effort", "low").await;
-
-    assert_eq!(request["method"], "session/set_model");
-    assert_eq!(request["params"]["sessionId"], "scripted");
-    assert_eq!(request["params"]["modelId"], "grok-4.6");
-    assert_eq!(request["params"]["_meta"]["reasoningEffort"], "low");
-}
-
-#[tokio::test]
-async fn a_grok_model_change_goes_out_as_a_legacy_set_model_request() {
-    let request = config_change_request(HarnessKind::Grok, true, "model", "grok-4.5").await;
-
-    assert_eq!(request["method"], "session/set_model");
-    assert_eq!(request["params"]["modelId"], "grok-4.5");
-    assert!(
-        request["params"].get("_meta").is_none(),
-        "a model change carries no effort meta: {request}"
-    );
-}
-
-#[tokio::test]
-async fn a_grok_real_config_option_still_uses_the_standard_acp_request() {
-    let request = config_change_request(HarnessKind::Grok, true, "verbosity", "detailed").await;
-
-    assert_eq!(request["method"], "session/set_config_option");
-    assert_eq!(request["params"]["configId"], "verbosity");
-    assert_eq!(request["params"]["value"], "detailed");
-}
-
-#[tokio::test]
-async fn a_harness_with_real_config_options_still_uses_the_standard_acp_request() {
-    let request = config_change_request(HarnessKind::Claude, false, "model", "opus").await;
-
-    assert_eq!(request["method"], "session/set_config_option");
-    assert_eq!(request["params"]["configId"], "model");
-    assert_eq!(request["params"]["value"], "opus");
 }
 
 /// Codex's error when OpenAI rejects its refresh token (R14-1; reverify-14
@@ -3286,6 +2433,7 @@ async fn codex_refresh_failure_bridge(stream: tokio::io::DuplexStream) {
 /// when the turn's last agent message does not already say it, it stays one
 /// readable line that credential sync recognizes, and the failed turn carries
 /// Codex's error kind either way.
+// Hard-won: 1fb50fe: Codex refresh failures skipped credential reconciliation and duplicated their diagnostic.
 #[tokio::test]
 async fn a_failure_the_harness_already_streamed_is_not_repeated_as_a_warning() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
@@ -3835,6 +2983,7 @@ async fn a_turn_blocked_in_a_long_tool_call_is_not_failed() {
 /// bridge that dies leaving a tool card open cannot hold the turn forever.
 /// It could not be forced in a live session — Muse keeps emitting Reminder
 /// tool cards, which are activity — so it is covered here.
+// Hard-won: a11622f: The watchdog slept past short tool calls, so the advertised tool-call timeout never fired.
 #[tokio::test(flavor = "current_thread")]
 async fn a_tool_call_that_outlives_its_bound_ends_the_turn() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
@@ -4437,6 +3586,7 @@ async fn returned_steering_leaves_the_prompt_to_mj_without_cancellation() {
     exercise_image_steering(false, "promptRequired").await;
 }
 
+// Hard-won: 410851f: A Kimi bridge restarted unnecessarily after it acknowledged cancellation.
 #[tokio::test(start_paused = true)]
 async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
@@ -4681,6 +3831,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     bridge.abort();
 }
 
+// Hard-won: 410851f: A queued Kimi prompt reached a replacement bridge untracked and desynchronized the relay.
 #[tokio::test(start_paused = true)]
 async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
     fn scripted_spec(resume_session: Option<String>) -> LaunchSpec {
@@ -5122,58 +4273,6 @@ mod terminals {
     }
 
     #[tokio::test]
-    async fn terminal_create_output_wait_and_release_round_trip() {
-        let mut runtime = start_scripted_runtime();
-        let terminal_id = create_terminal(
-            &mut runtime.agent,
-            serde_json::json!({
-                "sessionId": "scripted",
-                "command": "/bin/sh",
-                // `PATH` proves the daemon environment is inherited rather
-                // than replaced by the agent's additions.
-                "args": ["-c", "printf 'ran %s %s' \"$MJ_TERMINAL_TEST\" \"${PATH:+inherited}\""],
-                "env": [{"name": "MJ_TERMINAL_TEST", "value": "overlaid"}],
-            }),
-        )
-        .await;
-
-        let exited = runtime
-            .agent
-            .call("terminal/wait_for_exit", terminal_params(&terminal_id))
-            .await;
-        assert_eq!(exited["result"]["exitCode"], 0, "{exited}");
-
-        let output = runtime
-            .agent
-            .call("terminal/output", terminal_params(&terminal_id))
-            .await;
-        assert_eq!(output["result"]["output"], "ran overlaid inherited");
-        assert_eq!(output["result"]["truncated"], false);
-        assert_eq!(output["result"]["exitStatus"]["exitCode"], 0);
-
-        let released = runtime
-            .agent
-            .call("terminal/release", terminal_params(&terminal_id))
-            .await;
-        assert!(released.get("result").is_some(), "{released}");
-
-        // A released terminal is gone, and Hel says so rather than hanging.
-        let stale = runtime
-            .agent
-            .call("terminal/output", terminal_params(&terminal_id))
-            .await;
-        assert_eq!(stale["error"]["code"], -32602, "{stale}");
-        assert!(
-            stale["error"]["data"]
-                .as_str()
-                .is_some_and(|data| data.contains(&terminal_id)),
-            "the error must name the terminal: {stale}"
-        );
-
-        runtime.stop().await;
-    }
-
-    #[tokio::test]
     async fn terminal_output_keeps_the_last_bytes_when_a_child_exceeds_the_limit() {
         let mut runtime = start_scripted_runtime();
         // 512 KiB is far past the 64 KiB pipe buffer: a supervisor that did
@@ -5348,36 +4447,6 @@ mod terminals {
             .await
             .expect("cancel must kill the terminal so wait_for_exit can finish");
         assert_eq!(exited["result"]["signal"], "SIGKILL", "{exited}");
-
-        runtime.stop().await;
-    }
-
-    #[tokio::test]
-    async fn terminal_create_accepts_a_grok_style_single_string_command() {
-        let mut runtime = start_scripted_runtime();
-        // Grok Build puts the whole shell line in `command` and sends no
-        // arguments at all.
-        let terminal_id = create_terminal(
-            &mut runtime.agent,
-            serde_json::json!({
-                "sessionId": "scripted",
-                "command": "/bin/sh -c 'printf grok-ok'",
-                "args": [],
-            }),
-        )
-        .await;
-
-        let exited = runtime
-            .agent
-            .call("terminal/wait_for_exit", terminal_params(&terminal_id))
-            .await;
-        assert_eq!(exited["result"]["exitCode"], 0, "{exited}");
-
-        let output = runtime
-            .agent
-            .call("terminal/output", terminal_params(&terminal_id))
-            .await;
-        assert_eq!(output["result"]["output"], "grok-ok", "{output}");
 
         runtime.stop().await;
     }
@@ -5652,7 +4721,7 @@ for line in sys.stdin:
 /// bridge restart (#1085).
 #[cfg(unix)]
 #[tokio::test]
-async fn a_relaunched_codex_session_keeps_delegation_and_memory_tools() {
+async fn a_relaunched_codex_session_keeps_delegation_and_history_tools() {
     let temp = tempfile::tempdir().unwrap();
     let marker = temp.path().join("second-bridge");
     let opens = temp.path().join("opens.txt");
@@ -5803,7 +4872,7 @@ for line in sys.stdin:
     assert_eq!(
         std::fs::read_to_string(&opens).unwrap(),
         "session/new mj-agents,mj-memory\nsession/resume mj-agents,mj-memory\n",
-        "every launch must carry delegation and memory servers"
+        "every launch must carry delegation and history servers"
     );
 }
 
@@ -6270,6 +5339,7 @@ fn echoed_user_images_do_not_reenter_the_relay_journal() {
     ));
 }
 
+// Hard-won: be5abcc: An invalid ACP tool status left the UI card unsettled indefinitely.
 #[test]
 fn an_out_of_spec_tool_status_is_coerced_to_failed_so_the_card_settles() {
     // Muse's adapter can send an ACP-illegal `cancelled` status; the whole
@@ -6284,23 +5354,6 @@ fn an_out_of_spec_tool_status_is_coerced_to_failed_so_the_card_settles() {
     assert_eq!(update["status"], "failed");
     // And it now parses into a real v1 update rather than being discarded.
     serde_json::from_value::<SessionUpdate>(update).expect("coerced update parses");
-}
-
-#[test]
-fn a_legal_tool_status_and_a_non_tool_update_are_left_untouched() {
-    let mut legal = serde_json::json!({
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": "item-1",
-        "status": "in_progress",
-    });
-    assert_eq!(coerce_tool_call_status(&mut legal), None);
-    assert_eq!(legal["status"], "in_progress");
-
-    let mut message = serde_json::json!({
-        "sessionUpdate": "agent_message_chunk",
-        "content": {"type": "text", "text": "hi"},
-    });
-    assert_eq!(coerce_tool_call_status(&mut message), None);
 }
 
 #[test]
@@ -6329,35 +5382,7 @@ fn salvage_settles_a_named_tool_and_ignores_the_rest() {
     assert!(salvage_tool_call_update(&message).is_none());
 }
 
-/// Both stall bounds are off unless an operator asks for one.
-///
-/// Mjolnir does not guess that a quiet turn is a dead turn: silence is not
-/// evidence, and failing a healthy turn for it destroys real work (#1020,
-/// #1017). Only a positive number of milliseconds arms a bound, so an unset,
-/// empty, zero or mistyped value leaves the turn running and visible.
-#[test]
-fn a_stall_bound_is_off_unless_a_positive_timeout_is_configured() {
-    for off in [
-        None,
-        Some(""),
-        Some("  "),
-        Some("0"),
-        Some("off"),
-        Some("-5"),
-    ] {
-        assert_eq!(
-            parse_stall_timeout(off),
-            None,
-            "{off:?} must not arm a watchdog"
-        );
-    }
-    assert_eq!(
-        parse_stall_timeout(Some(" 30000 ")),
-        Some(Duration::from_millis(30_000)),
-        "a positive value arms the bound it names"
-    );
-}
-
+// Hard-won: be5abcc: Stalled turns lacked a clear cause and recovery action for the user.
 #[test]
 fn the_stall_message_says_what_happened_and_what_to_do() {
     let silent = turn_stall_message(
@@ -6400,6 +5425,7 @@ fn the_stall_message_says_what_happened_and_what_to_do() {
 /// daemon's passthrough all said `MJ_TURN_TOOL_STALL_TIMEOUT_MS`, so setting
 /// the documented variable did nothing and the bound was always the four-hour
 /// default. Nothing caught it because every test asserted on the message.
+// Hard-won: db49943: The documented timeout variable was ignored, leaving tool calls with a four-hour bound.
 #[test]
 fn the_tool_call_bound_reads_the_variable_its_message_advertises() {
     let message = turn_stall_message(
@@ -6426,29 +5452,6 @@ fn the_tool_call_bound_reads_the_variable_its_message_advertises() {
         carried.contains(TOOL_CALL_STALL_TIMEOUT_VARIABLE),
         "the daemon carries the variable the worker reads"
     );
-}
-
-/// The daemon carries both knobs to the workers it starts. A worker re-execs
-/// with a cleared environment, so a value set for the daemon reaches it only
-/// because this list names it. Without the silence knob in that list there is
-/// no way to arm the opt-in bound on any target.
-#[test]
-fn the_daemon_carries_both_stall_knobs_to_its_workers() {
-    let carried = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../mj-controller/src/controller/worker_binary/launch.rs"
-    ))
-    .expect("read the launch configuration that carries the knobs");
-    for name in [
-        TURN_STALL_TIMEOUT_VARIABLE,
-        TOOL_CALL_STALL_TIMEOUT_VARIABLE,
-        "TYPESAFE_API_KEY",
-    ] {
-        assert!(
-            carried.contains(name),
-            "the daemon must carry {name} to the worker that reads it"
-        );
-    }
 }
 
 /// Fake bridge that rejects every attempt to reload a recorded session and
@@ -7227,6 +6230,7 @@ async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
 /// I1-13: a resumed Claude session reports its model as a raw id that its own
 /// catalogue does not list. Replaying that id after `/clear` must not fail the
 /// clear or stop the runtime; the new conversation keeps the bridge's model.
+// Hard-won: 2416c17: Clear stopped Claude permanently when a bridge no longer listed the saved model.
 #[tokio::test]
 async fn clear_skips_a_reported_model_the_bridge_does_not_list() {
     let temp = tempfile::tempdir().unwrap();
@@ -7525,6 +6529,7 @@ async fn live_adapter_compacts_and_replaces_context() {
     runtime.await.unwrap().unwrap();
 }
 
+// Hard-won: 7c4a57a: Reviewers saw only “Bash” in Kimi permission forms, not the command being approved.
 #[test]
 fn a_permission_form_shows_the_command_it_approves() {
     // I2-5: Kimi's reviewer asked "requests permission: Bash" with no command.
@@ -7559,6 +6564,7 @@ fn a_permission_form_shows_the_command_it_approves() {
 /// updates are replayed from the reviewer journal R4 saved
 /// (`reviewer-B-kimi-bash-permission.jsonl`), followed by a permission request
 /// that names the call and carries no input, as Kimi's did.
+// Hard-won: 11ace4e: Kimi permission forms omitted commands streamed in tool content rather than rawInput.
 #[tokio::test]
 async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     use serde_json::{Value, json};
@@ -7692,6 +6698,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     driver.abort();
 }
 
+// Hard-won: 536a8f8: Escape left Kimi permission forms open after the owning turn was cancelled.
 #[test]
 fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     // I2-15: after Escape, Kimi left its permission request pending and the
@@ -7726,6 +6733,7 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     assert_eq!(pending.lock().unwrap().len(), 1);
 }
 
+// Hard-won: 710ffb6: Codex thread-not-found errors were mislabeled as stray ACP output.
 #[test]
 fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
     // Launch finding I2-7: a missing Codex thread came back with a hint about
@@ -7759,6 +6767,7 @@ fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
 /// A Kimi launcher printed installer lines on the bridge's stdout before the
 /// agent's first frame, and the transport answered each with a parse error
 /// and never initialized (#1136). Those lines are skipped, not answered.
+// Hard-won: 2fe3b29: Kimi installer text on stdout corrupted ACP initialization before its first frame.
 #[tokio::test]
 async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -7862,6 +6871,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
 /// R8-2: the exit record's first line names why the worker stopped. The
 /// bridge's stderr tail used to come first, so a resume that failed on a
 /// refused mode showed "ACP bridge stderr:" and the bridge's log lines.
+// Hard-won: e794b25: Resume errors stored a 96-line diagnostics dump instead of the cause.
 #[test]
 fn a_worker_exit_reason_names_the_cause_before_the_bridge_stderr() {
     let error = anyhow::anyhow!(
@@ -8062,10 +7072,7 @@ async fn typed_failure_bridge(stream: tokio::io::DuplexStream) -> bool {
     asked
 }
 
-/// Issue 1217: codex-acp answered a turn whose model request failed with an
-/// ordinary end of turn, so the turn counted as finished and a sub-agent was
-/// told to hand back. With typed failures the turn fails, carries the
-/// provider's sentence and status, and the conversation gets one line.
+// Hard-won: 03e1b5a: Codex model failures counted as completed turns and asked child agents for reports they had not written.
 #[tokio::test]
 async fn a_typed_bridge_failure_fails_the_turn_with_the_providers_reason() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);

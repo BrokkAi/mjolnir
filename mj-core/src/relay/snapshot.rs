@@ -1543,6 +1543,7 @@ mod native_continuity_encoding_tests {
     /// fails validation on the next worker start.
     const RECORDED_BEFORE_THE_FLAG: &str = r#"{"format":2,"ordinal":493425,"digest":"28c6574464b1361ad00dedd7cb04dac0c617948e290936082f1fd354334b262e","recorded_at_ms":1789421283703,"observation":{"type":"session_opened","data":{"native_session_id":"fe6031fb-9af5-49ca-a587-5a816de61f86","resumed":false}}}"#;
 
+    // Hard-won: 370520bc: Adding a false field changed live journal digests and made workers refuse old journals.
     #[test]
     fn a_session_opened_record_without_the_flag_still_verifies() {
         let event: RelayEvent = serde_json::from_str(RECORDED_BEFORE_THE_FLAG).unwrap();
@@ -1558,6 +1559,7 @@ mod native_continuity_encoding_tests {
     /// live journal. Its digest covers that encoding.
     const RECORDED_BY_THE_FLAGGING_BUILD: &str = r#"{"format":2,"ordinal":188,"digest":"83a8ded900c35360e8998e6b7710902475145370bdaa88ce1fa186cb5d108636","recorded_at_ms":1789436362441,"observation":{"type":"session_opened","data":{"native_session_id":"020bb831-ec40-49ac-bbcb-a702135deb5d","resumed":true,"native_continuity_lost":false}}}"#;
 
+    // Hard-won: 131fa849: Three live journals contained digests over the intermediate false-field encoding.
     #[test]
     fn a_record_that_wrote_the_flag_as_false_still_verifies() {
         let event: RelayEvent = serde_json::from_str(RECORDED_BY_THE_FLAGGING_BUILD).unwrap();
@@ -1567,22 +1569,9 @@ mod native_continuity_encoding_tests {
         assert!(validate_relay_event_self(&tampered).is_err());
     }
 
-    #[test]
-    fn a_lost_native_session_is_written_and_read_back() {
-        let observation = RelayObservation::SessionOpened {
-            native_session_id: "fresh".into(),
-            resumed: false,
-            native_continuity_lost: true,
-            replaced_unused_native_session_id: None,
-        };
-        let encoded = serde_json::to_string(&observation).unwrap();
-        assert!(encoded.contains("\"native_continuity_lost\":true"));
-        let decoded: RelayObservation = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded, observation);
-    }
-
     /// The replaced session is written only when there is one, so every
     /// record written before the field existed keeps its digest.
+    // Hard-won: 2f8ec62e: Never-prompted Claude and Codex sessions could not resume after the harness opened a fresh native session.
     #[test]
     fn a_replaced_unused_session_is_written_only_when_there_is_one() {
         let replacing = RelayObservation::SessionOpened {

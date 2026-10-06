@@ -344,13 +344,20 @@ pub(crate) fn render_combined_for_test(
     opening_panes: &BTreeMap<PaneId, String>,
     transcript_selected: bool,
 ) -> Vec<String> {
-    render_combined_with_theme(
+    // Golden output defaults to Unicode; cases can request ASCII in config.
+    let symbols = dashboard
+        .config
+        .advanced
+        .symbols
+        .unwrap_or(theme::SymbolSet::Unicode);
+    render_combined_with_theme_and_symbols(
         frame,
         dashboard,
         chats,
         opening_panes,
         transcript_selected,
         dashboard.config.theme,
+        symbols,
     )
 }
 
@@ -366,8 +373,28 @@ pub fn render_combined_with_theme(
     transcript_selected: bool,
     selected_theme: theme::UiTheme,
 ) -> Vec<String> {
-    dashboard.drawn_failures.clear();
     let symbols = theme::symbols_for(dashboard.config.advanced.symbols);
+    render_combined_with_theme_and_symbols(
+        frame,
+        dashboard,
+        chats,
+        opening_panes,
+        transcript_selected,
+        selected_theme,
+        symbols,
+    )
+}
+
+fn render_combined_with_theme_and_symbols(
+    frame: &mut Frame,
+    dashboard: &mut DashboardState,
+    chats: &mut BTreeMap<String, ActiveChat>,
+    opening_panes: &BTreeMap<PaneId, String>,
+    transcript_selected: bool,
+    selected_theme: theme::UiTheme,
+    symbols: theme::SymbolSet,
+) -> Vec<String> {
+    dashboard.drawn_failures.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =
@@ -1762,6 +1789,7 @@ mod tests {
     /// Launch finding E-8 (right edge): a conversation title too long for its
     /// row stopped at the pane chips with no ellipsis ("End to follo ◇").
     /// The title must end in an ellipsis before the chips.
+    // Hard-won: 41bf4a6f83: the launch re-verification capture showed long titles overlapping the pin and menu chips.
     #[tokio::test]
     async fn a_long_conversation_title_ends_in_an_ellipsis_before_the_pane_chips() {
         let session = running_session();
@@ -1812,6 +1840,7 @@ mod tests {
     /// unlabeled first chord over the "ctrl+b then " label, so the row read
     /// "g sessionsn g sessions". The label and the chord after it must read
     /// as one intact hint at every width the campaign captured.
+    // Hard-won: 125232cbba: the first chord overwrote the composer footer label.
     #[tokio::test]
     async fn composer_footer_keeps_the_chord_label_and_first_chord_apart() {
         let session = running_session();
@@ -1868,6 +1897,7 @@ mod tests {
     /// here" hint on the first inside row was drawn over the splash at 79
     /// and 60 columns. The splash keeps clear of that row, and is dropped
     /// when the pane is too short for both.
+    // Hard-won: 0f6de648aa: the pin hint overlaid the empty-pane splash.
     #[test]
     fn the_splash_keeps_clear_of_the_pin_hint_row() {
         for height in 3..=16 {
@@ -1902,6 +1932,7 @@ mod tests {
 
     /// Launch campaign finding A-15: the "Opening session" advice kept a
     /// hard-coded "·" in ASCII symbol mode.
+    // Hard-won: 987af2e4b4: an open transcript kept stale Unicode glyphs after symbol mode changed.
     #[test]
     fn the_opening_advice_uses_the_symbol_set_in_force() {
         let dashboard = dashboard_with_session(running_session());
@@ -1926,21 +1957,18 @@ mod tests {
     }
 
     #[test]
-    fn minimized_sessions_use_two_content_lines_per_visible_item() {
+    fn minimized_sessions_cap_content_lines_at_four_short_and_ten_tall() {
         assert_eq!(minimized_session_rows(40, 0), 1);
         assert_eq!(minimized_session_rows(40, 1), 1);
         assert_eq!(minimized_session_rows(40, 3), 3);
         assert_eq!(minimized_session_rows(40, 4), 4);
-    }
-
-    #[test]
-    fn minimized_sessions_cap_content_lines_at_four_short_and_ten_tall() {
         assert_eq!(minimized_session_rows(39, 6), 4);
         assert_eq!(minimized_session_rows(39, 100), 4);
         assert_eq!(minimized_session_rows(40, 15), 10);
         assert_eq!(minimized_session_rows(100, 100), 10);
     }
 
+    // Hard-won: 7e71f7eccce4: focusing a mode-two pane changed the prompt split size.
     #[test]
     fn prompt_target_clamps_between_the_minimum_and_a_third() {
         // Below the minimum is raised to it; within range is kept; above a
@@ -2009,6 +2037,7 @@ mod tests {
     /// A launch that has not registered yet draws the same pair of panels a
     /// Starting transition does, with the launch standby in the band, so the
     /// typing has somewhere visible to go before the session exists.
+    // Hard-won: c8d6442496: pre-registration typing went to the previously selected session.
     #[test]
     fn a_launch_being_prepared_draws_the_launch_standby() {
         let mut dashboard = dashboard_with_session(running_session());
@@ -2048,66 +2077,10 @@ mod tests {
         );
     }
 
-    /// An empty standby composer still shows a composer, with the placeholder
-    /// that says what typing ahead means.
-    #[test]
-    fn an_empty_standby_composer_shows_the_placeholder() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
-        dashboard.focus_prompt();
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal
-            .draw(|frame| {
-                crate::render::render(frame, &mut dashboard);
-            })
-            .unwrap();
-
-        let prompt = dashboard
-            .focused_prompt_area()
-            .expect("prompt pane rendered");
-        let lines = buffer_lines(terminal.backend().buffer());
-        let content = &lines[prompt.y as usize + 1..prompt.bottom() as usize - 1];
-        assert!(
-            content
-                .iter()
-                .any(|line| line.contains("Type a draft · sending opens when the session is live")),
-            "placeholder missing from {content:?}"
-        );
-    }
-
-    /// Retiring transitions keep the status panel: there is no conversation
-    /// to type toward while the session is being stopped.
-    #[test]
-    fn a_suspending_transition_keeps_the_status_panel() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Suspending,
-            None,
-        );
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal
-            .draw(|frame| {
-                crate::render::render(frame, &mut dashboard);
-            })
-            .unwrap();
-
-        let lines = buffer_lines(terminal.backend().buffer());
-        assert!(
-            lines.iter().any(|line| line.contains(" Status ")),
-            "status panel missing: {lines:?}"
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("ctrl+b shift+c to cancel suspending")),
-            "cancel chord missing: {lines:?}"
-        );
-    }
-
     /// Launch findings B-2 / D-1 for Suspending: the transition panel's title
     /// started under the pane chrome label, so the row read
     /// "Conversation g". It starts after the label, as the chat title does.
+    // Hard-won: 8bdf82815c: transition titles were covered by pane chrome.
     #[test]
     fn the_pane_chrome_does_not_cover_the_transition_title() {
         for (kind, word) in [
@@ -2130,49 +2103,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// The standby composer keeps the empty chat composer's floor and grows
-    /// with the wrapped draft, and retiring transitions ask for none of it.
-    #[test]
-    fn standby_prompt_height_follows_the_wrapped_draft() {
-        let mut dashboard = dashboard_with_session(running_session());
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Launching,
-            None,
-        );
-        assert_eq!(
-            dashboard
-                .standby_prompts
-                .get("session-1")
-                .map(|standby| standby.desired_prompt_height(100)),
-            None
-        );
-
-        dashboard.seed_standby_prompt("session-1", "a\nb\nc\nd\ne\nf\ng".into());
-        assert_eq!(
-            dashboard
-                .standby_prompts
-                .get("session-1")
-                .map(|standby| standby.draft()),
-            Some("a\nb\nc\nd\ne\nf\ng".into())
-        );
-        assert_eq!(
-            dashboard
-                .standby_prompts
-                .get("session-1")
-                .map(|standby| standby.desired_prompt_height(100)),
-            Some(9)
-        );
-
-        dashboard.finish_session_operation("session-1");
-        dashboard.begin_session_operation(
-            "session-1".into(),
-            SessionOperationKind::Suspending,
-            None,
-        );
-        assert_eq!(dashboard.standby_prompt_session(), None);
     }
 
     #[test]
@@ -2204,30 +2134,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_then_maximum_then_standard_panes_receive_surplus() {
-        let band = |full, cap| PaneBand {
-            minimum: 3,
-            full,
-            cap,
-        };
-        let sizes = [
-            (SupportPane::Sessions, PaneSize::Standard),
-            (SupportPane::Targets, PaneSize::Maximized),
-            (SupportPane::Quota, PaneSize::Standard),
-        ];
-        let CombinedAllocation::Fits(heights) =
-            allocate_combined_heights(40, band(12, 10), band(15, 15), band(8, 8), 6, sizes)
-        else {
-            panic!("40 rows should fit");
-        };
-        assert_eq!(heights.prompt, 6);
-        assert_eq!(heights.targets, 15);
-        assert_eq!(heights.sessions, 10);
-        assert_eq!(heights.quota, 5);
-        assert_eq!(heights.transcript, 3);
-    }
-
-    #[test]
     fn allocation_reports_the_dynamic_state_minimum() {
         let fixed = |height| PaneBand {
             minimum: height,
@@ -2252,48 +2158,6 @@ mod tests {
                 required_frame_height: 13,
             }
         );
-    }
-
-    #[test]
-    fn support_layout_moves_both_panes_at_the_measured_threshold_for_every_sidebar_size() {
-        use mj_core::config::SessionsSide;
-        use ratatui::{Terminal, backend::TestBackend};
-        for side in [SessionsSide::Left, SessionsSide::Right] {
-            for size in [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized] {
-                let mut dashboard = dashboard_with_session(running_session());
-                dashboard.config.sessions_side = side;
-                dashboard.set_pane_size(SupportPane::Sessions, size);
-                let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
-                let threshold = (MINIMUM_TERMINAL_WIDTH..=480)
-                    .find(|&width| width - sessions_sidebar_width(width, size) >= required)
-                    .expect("support panes fit in a wide terminal");
-                for width in [
-                    threshold.saturating_sub(1).max(MINIMUM_TERMINAL_WIDTH),
-                    threshold,
-                    80,
-                    480,
-                ] {
-                    let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
-                    terminal
-                        .draw(|frame| {
-                            crate::render::render(frame, &mut dashboard);
-                        })
-                        .unwrap();
-                    let [sessions, targets, quota] = dashboard.pane_areas.expect("rendered panes");
-                    assert_eq!(targets.x, quota.x);
-                    assert_eq!(targets.width, quota.width);
-                    assert_eq!(targets.bottom(), quota.y);
-                    assert_eq!(sessions.y, 3, "workspace pane occupies three rows");
-                    if width < threshold {
-                        assert_eq!(targets.width, width);
-                        assert_eq!(targets.y, sessions.bottom());
-                    } else {
-                        assert_eq!(targets.width, width - sessions.width);
-                        assert_eq!(sessions.bottom(), 39);
-                    }
-                }
-            }
-        }
     }
 
     #[test]
@@ -2344,5 +2208,267 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn render_combined_golden(
+        dashboard: &mut DashboardState,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| crate::render::render(frame, dashboard))
+            .unwrap();
+        let mut lines = buffer_lines(terminal.backend().buffer());
+        // Transition spinners use a process-wide clock, so pin their glyph.
+        for line in &mut lines {
+            if line.contains("Transition ·") {
+                *line = line
+                    .chars()
+                    .map(|character| {
+                        if matches!(character, '⠁' | '⠂' | '⠄' | '⡀') {
+                            '?'
+                        } else {
+                            character
+                        }
+                    })
+                    .collect();
+            }
+        }
+        lines
+    }
+
+    fn append_combined_golden(
+        output: &mut String,
+        label: &str,
+        width: u16,
+        height: u16,
+        lines: &[String],
+    ) {
+        use std::fmt::Write as _;
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        writeln!(output, "=== {label} ({width}x{height}) ===").unwrap();
+        output.push_str(&lines.join("\n"));
+        output.push('\n');
+    }
+
+    fn append_pane_geometry(output: &mut String, dashboard: &DashboardState) {
+        use std::fmt::Write as _;
+        let [sessions, targets, quota] = dashboard.pane_areas.expect("rendered support panes");
+        let transcript = dashboard
+            .focused_transcript_area()
+            .expect("rendered transcript");
+        let prompt = dashboard.focused_prompt_area().expect("rendered prompt");
+        writeln!(
+            output,
+            "layout: sessions={sessions:?}; transcript={transcript:?}; prompt={prompt:?}; targets={targets:?}; quota={quota:?}"
+        )
+        .unwrap();
+    }
+
+    fn pin_combined_golden_operation_clock(dashboard: &mut DashboardState) {
+        dashboard
+            .session_operations
+            .get_mut("session-1")
+            .expect("golden session operation")
+            .started_at_epoch_seconds = u64::MAX;
+    }
+
+    #[test]
+    fn golden_combined_dashboard_render() {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        let mut standby = dashboard_with_session(running_session());
+        standby.begin_session_operation("session-1".into(), SessionOperationKind::Resuming, None);
+        pin_combined_golden_operation_clock(&mut standby);
+        standby.focus_prompt();
+        let lines = render_combined_golden(&mut standby, 100, 40);
+        append_combined_golden(&mut output, "empty standby composer", 100, 40, &lines);
+        append_pane_geometry(&mut output, &standby);
+
+        let mut suspending = dashboard_with_session(running_session());
+        suspending.begin_session_operation(
+            "session-1".into(),
+            SessionOperationKind::Suspending,
+            None,
+        );
+        pin_combined_golden_operation_clock(&mut suspending);
+        let lines = render_combined_golden(&mut suspending, 100, 40);
+        append_combined_golden(&mut output, "suspending status panel", 100, 40, &lines);
+        append_pane_geometry(&mut output, &suspending);
+
+        let mut draft = dashboard_with_session(running_session());
+        draft.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+        pin_combined_golden_operation_clock(&mut draft);
+        draft.seed_standby_prompt("session-1", "a\nb\nc\nd\ne\nf\ng".into());
+        draft.focus_prompt();
+        let desired = draft
+            .standby_prompts
+            .get("session-1")
+            .expect("launch draft")
+            .desired_prompt_height(100);
+        let lines = render_combined_golden(&mut draft, 100, 40);
+        append_combined_golden(&mut output, "wrapped standby draft", 100, 40, &lines);
+        append_pane_geometry(&mut output, &draft);
+        writeln!(output, "desired prompt height: {desired}").unwrap();
+        draft.finish_session_operation("session-1");
+        draft.begin_session_operation("session-1".into(), SessionOperationKind::Suspending, None);
+        pin_combined_golden_operation_clock(&mut draft);
+        writeln!(
+            output,
+            "standby prompt during suspension: {}",
+            draft.standby_prompt_session().is_some()
+        )
+        .unwrap();
+
+        let mut priority = dashboard_with_session(running_session());
+        priority.set_pane_size(SupportPane::Sessions, PaneSize::Standard);
+        priority.set_pane_size(SupportPane::Targets, PaneSize::Maximized);
+        priority.set_pane_size(SupportPane::Quota, PaneSize::Standard);
+        priority.begin_session_operation("session-1".into(), SessionOperationKind::Launching, None);
+        pin_combined_golden_operation_clock(&mut priority);
+        priority.seed_standby_prompt("session-1", "first\nsecond\nthird".into());
+        priority.focus_prompt();
+        let lines = render_combined_golden(&mut priority, 100, 40);
+        append_combined_golden(
+            &mut output,
+            "prompt then maximized then standard pane allocation",
+            100,
+            40,
+            &lines,
+        );
+        append_pane_geometry(&mut output, &priority);
+        let band = |full, cap| PaneBand {
+            minimum: 3,
+            full,
+            cap,
+        };
+        let sizes = [
+            (SupportPane::Sessions, PaneSize::Standard),
+            (SupportPane::Targets, PaneSize::Maximized),
+            (SupportPane::Quota, PaneSize::Standard),
+        ];
+        let CombinedAllocation::Fits(heights) =
+            allocate_combined_heights(40, band(12, 10), band(15, 15), band(8, 8), 6, sizes)
+        else {
+            panic!("40 rows should fit");
+        };
+        writeln!(
+            output,
+            "layout allocation: prompt={}; targets={}; sessions={}; quota={}; transcript={}",
+            heights.prompt, heights.targets, heights.sessions, heights.quota, heights.transcript,
+        )
+        .unwrap();
+
+        use mj_core::config::SessionsSide;
+        for side in [SessionsSide::Left, SessionsSide::Right] {
+            for size in [PaneSize::Minimized, PaneSize::Standard, PaneSize::Maximized] {
+                let mut dashboard = dashboard_with_session(running_session());
+                dashboard.config.sessions_side = side;
+                dashboard.set_pane_size(SupportPane::Sessions, size);
+                let required = capacity_table_width(&dashboard).max(quota_table_width(&dashboard));
+                let threshold = (MINIMUM_TERMINAL_WIDTH..=480)
+                    .find(|&width| width - sessions_sidebar_width(width, size) >= required)
+                    .expect("support panes fit in a wide terminal");
+                for width in [
+                    threshold.saturating_sub(1).max(MINIMUM_TERMINAL_WIDTH),
+                    threshold,
+                    80,
+                    480,
+                ] {
+                    let lines = render_combined_golden(&mut dashboard, width, 40);
+                    let label = format!(
+                        "support panes side={side:?} sessions={size:?} threshold={threshold}"
+                    );
+                    append_combined_golden(&mut output, &label, width, 40, &lines);
+                    append_pane_geometry(&mut output, &dashboard);
+                }
+            }
+        }
+
+        let mut session = running_session();
+        session.acp_session_title = None;
+        session.project_directory = Some("/actual/checkout".into());
+        let session_id = session.id.clone();
+        let mut go = dashboard_with_session(session);
+        let mode = crate::go::GoMode {
+            workspace_id: Some(mj_core::workspace::DEFAULT_WORKSPACE_ID.into()),
+            last_session_id: None,
+            directory: "/projects/current".into(),
+            save_as_default: false,
+            recipe: Some(mj_core::go::GoRecipe {
+                profile_id: "codex-1".into(),
+                target_id: "podman".into(),
+                bundle_id: Some("hel".into()),
+                project_directory: None,
+                create_managed_worktree: Some(false),
+                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                additional_mounts: Vec::new(),
+                resource_allocation: None,
+            }),
+        };
+        let startup = go.state.sessions.values().next().cloned();
+        go.begin_go(mode, false, startup);
+        go.set_go_context(
+            session_id,
+            Ok(("/actual/checkout".into(), "feature-x".into())),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::render::render(frame, &mut go);
+            })
+            .unwrap();
+        let lines = buffer_lines(terminal.backend().buffer());
+        append_combined_golden(&mut output, "selected checkout and branch", 140, 45, &lines);
+        let (row, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains(" New "))
+            .expect("New action in workspace banner");
+        let column = crate::test_support::cell_column(line, " New ") + 1;
+        let mouse = |kind| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row: row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        go.handle_mouse(mouse(crossterm::event::MouseEventKind::Down(
+            crossterm::event::MouseButton::Left,
+        )));
+        let action = go.handle_mouse(mouse(crossterm::event::MouseEventKind::Up(
+            crossterm::event::MouseButton::Left,
+        )));
+        writeln!(output, "action: {action:?}").unwrap();
+
+        let mut failed_session = running_session();
+        failed_session.state = mj_core::state::SessionState::Destroying;
+        failed_session.last_error = Some("Podman exited before the workspace was removed".into());
+        let failed_session_id = failed_session.id.clone();
+        let mut failed = dashboard_with_session(failed_session);
+        // The shared fixture resets updated_at, so pin the clock after building the dashboard.
+        failed
+            .state
+            .sessions
+            .get_mut(&failed_session_id)
+            .expect("failed destroy session remains in the dashboard")
+            .updated_at = "2099-01-01T00:00:00Z".into();
+        let lines = render_combined_golden(&mut failed, 100, 40);
+        append_combined_golden(
+            &mut output,
+            "failed destroy transition and recovery guidance",
+            100,
+            40,
+            &lines,
+        );
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "combined-dashboard-render",
+            &output,
+        );
     }
 }

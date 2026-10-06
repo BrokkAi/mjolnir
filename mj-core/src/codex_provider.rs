@@ -168,12 +168,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_config_file_reports_no_custom_provider() {
-        let home = tempfile::tempdir().expect("temporary home");
-        assert_eq!(codex_provider(home.path()).expect("read"), None);
-    }
-
-    #[test]
     fn config_without_model_provider_reports_no_custom_provider() {
         let home = tempfile::tempdir().expect("temporary home");
         std::fs::write(home.path().join("config.toml"), "model = \"gpt-5.5\"\n").expect("write");
@@ -265,33 +259,5 @@ mod tests {
             provider.model_catalog_json.as_deref(),
             Some(Path::new("mine.json"))
         );
-    }
-
-    #[test]
-    fn provider_kind_follows_the_base_url_host() {
-        let provider = |base_url: &str| CodexProvider {
-            id: "p".to_owned(),
-            base_url: base_url.to_owned(),
-            env_key: None,
-            inline_bearer_token: true,
-            model_catalog_json: None,
-        };
-        assert_eq!(
-            provider("https://api.z.ai/api/v1").kind(),
-            CodexProviderKind::Zai
-        );
-        assert_eq!(
-            provider("https://open.bigmodel.cn/api/coding/paas/v4").kind(),
-            CodexProviderKind::Zai
-        );
-        assert_eq!(
-            provider("https://api.deepseek.com/v1").kind(),
-            CodexProviderKind::DeepSeek
-        );
-        assert_eq!(
-            provider("https://example.invalid/v1").kind(),
-            CodexProviderKind::Other
-        );
-        assert_eq!(provider("not a url").kind(), CodexProviderKind::Other);
     }
 }

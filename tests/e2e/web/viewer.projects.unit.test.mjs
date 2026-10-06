@@ -125,23 +125,6 @@ test('a cancelled source create cannot overwrite a newer create on the same wiza
   assert.equal(context.newDraft.bundleId, 'current');
 });
 
-test('source failure preserves entered text for retry and a replaced wizard ignores late errors', async () => {
-  const { context, requests, advances, fresh, run } = fixture();
-  const first = run('selectProjectRepository()');
-  requests[0].reject(new Error('Repository unavailable'));
-  await first;
-  assert.equal(context.newError.textContent, 'Repository unavailable');
-  assert.equal(context.newDraft.bundleSource, 'example/app');
-  assert.equal(context.newDraft.creatingBundle, false);
-  const retry = run('selectProjectRepository()');
-  context.newDraft = fresh();
-  requests[1].reject(new Error('Old request failed'));
-  await retry;
-  assert.equal(context.newError.textContent, '');
-  assert.equal(context.newDraft.creatingBundle, false);
-  assert.deepEqual(advances, []);
-});
-
 test('catalog refresh ignores superseded replies, reports partial failures, and retries explicitly', async () => {
   const { context, requests, run } = fixture();
   const old = run('refreshProjectCatalog(newDraft)');
@@ -158,4 +141,21 @@ test('catalog refresh ignores superseded replies, reports partial failures, and 
   requests[2].resolve({ status: { state: 'ready' } });
   await retry;
   assert.equal(context.newDraft.catalogStatus.state, 'ready');
+});
+
+test('source failure preserves entered text for retry and a replaced wizard ignores late errors', async () => {
+  const { context, requests, advances, fresh, run } = fixture();
+  const first = run('selectProjectRepository()');
+  requests[0].reject(new Error('Repository unavailable'));
+  await first;
+  assert.equal(context.newError.textContent, 'Repository unavailable');
+  assert.equal(context.newDraft.bundleSource, 'example/app');
+  assert.equal(context.newDraft.creatingBundle, false);
+  const retry = run('selectProjectRepository()');
+  context.newDraft = fresh();
+  requests[1].reject(new Error('Old request failed'));
+  await retry;
+  assert.equal(context.newError.textContent, '');
+  assert.equal(context.newDraft.creatingBundle, false);
+  assert.deepEqual(advances, []);
 });

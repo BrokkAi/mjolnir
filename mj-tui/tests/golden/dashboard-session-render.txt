@@ -1,0 +1,828 @@
+=== grouped session summary (120x30) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ✓1                         ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│› ✓ ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle [Q 1]  podman  codex-1         ││                  Select a session to open its conversation.                  │
+│  │ answer 1                          ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== Unicode unfiltered Sessions title (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== Unicode working filter (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions · working × ───── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│  Outside filter                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== Unicode blocked filter at wide size (240x40) ===
+╭ Workspaces ─────────────────────────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                    ☰ ││                                                                                                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯│                                                                                                                                                              │
+╭ Sessions · blocked × ───────────────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                                                              │
+│ Create   Open   Filter: ________________________                             ││                                                                                                                                                              │
+│hel ──────────────────────────────────────────────────────────────────────────││                                                                                                                                                              │
+│› · ACP pretty name                                                       ◇ ⋯ ││                                                                                                                                                              │
+│  Idle  podman  codex-1                                                       ││                                                                                                                                                              │
+│  │ No messages yet                                                           ││                                                                                                                                                              │
+│  │                                                                           ││                                                                                                                                                              │
+│  Outside filter                                                              ││                                                                       ✦  M J O L N I R                                                                       │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                          Select a session to open its conversation.                                                          │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              ││                                                                                                                                                              │
+│                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                                              │╭ No conversation open ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                              ││No conversation open.                                                                                                                                         │
+│                                                                              ││Press Tab for Sessions, then Enter on the one to open.                                                                                                        │
+│                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                                              │╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                              ││  Host / fleet  Targets  In Use                                                                                                                               │
+│                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                                              │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                                              ││            Harness      Weekly      Resets  5H Resets                                                                                                        │
+│                                                                              ││  claude-1  Claude Code  refreshing…                                                                                                                          │
+│                                                                              ││  codex-1   Codex        refreshing…                                                                                                                          │
+│                                                                              ││  codex-2   Codex        refreshing…                                                                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
+=== Unicode cleared filter (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+Unicode title markers: ('×', '·')
+=== ASCII unfiltered Sessions title (120x40) ===
++ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
+| default                            = ||                                                                              |
++--------------------------------------+|                                                                              |
++ Sessions ----------------- -   =   + +|                                                                              |
+| Create   Open   Filter: _____________||                                                                              |
+|hel ----------------------------------||                                                                              |
+|> . ACP pretty name               + . ||                                                                              |
+|  Idle  podman  codex-1               ||                                                                              |
+|  | No messages yet                   ||                                                                              |
+|  |                                   ||                                                                              |
+|                                      ||                               *  M J O L N I R                               |
+|                                      ||                                                                              |
+|                                      ||                  Select a session to open its conversation.                  |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ No conversation open --------------------------------------------------------+
+|                                      ||No conversation open.                                                         |
+|                                      ||Press Tab for Sessions, then Enter on the one to open.                        |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Targets v ------------------------------------------------------------ -   = +
+|                                      ||  Host / fleet  Targets  In Use                                               |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
+|                                      ||            Harness      Weekly       Resets  5H Resets                       |
+|                                      ||  claude-1  Claude Code  refreshing..                                         |
+|                                      ||  codex-1   Codex        refreshing..                                         |
+|                                      ||  codex-2   Codex        refreshing..                                         |
++--------------------------------------++------------------------------------------------------------------------------+
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+=== ASCII working filter (120x40) ===
++ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
+| default                            = ||                                                                              |
++--------------------------------------+|                                                                              |
++ Sessions - working x ----- -   =   + +|                                                                              |
+| Create   Open   Filter: _____________||                                                                              |
+|hel ----------------------------------||                                                                              |
+|> . ACP pretty name               + . ||                                                                              |
+|  Idle  podman  codex-1               ||                                                                              |
+|  | No messages yet                   ||                                                                              |
+|  |                                   ||                                                                              |
+|  Outside filter                      ||                               *  M J O L N I R                               |
+|                                      ||                                                                              |
+|                                      ||                  Select a session to open its conversation.                  |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ No conversation open --------------------------------------------------------+
+|                                      ||No conversation open.                                                         |
+|                                      ||Press Tab for Sessions, then Enter on the one to open.                        |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Targets v ------------------------------------------------------------ -   = +
+|                                      ||  Host / fleet  Targets  In Use                                               |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
+|                                      ||            Harness      Weekly       Resets  5H Resets                       |
+|                                      ||  claude-1  Claude Code  refreshing..                                         |
+|                                      ||  codex-1   Codex        refreshing..                                         |
+|                                      ||  codex-2   Codex        refreshing..                                         |
++--------------------------------------++------------------------------------------------------------------------------+
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+=== ASCII blocked filter at wide size (240x40) ===
++ Workspaces ----------------------------------------------- * MJOLNIR v2.28.0 ++ Browse | Conversation ------------------------------------------------------------------------------------------------------------------------------ +   .---+
+| default                                                                    = ||                                                                                                                                                              |
++------------------------------------------------------------------------------+|                                                                                                                                                              |
++ Sessions - blocked x --------------------------------------------- -   =   + +|                                                                                                                                                              |
+| Create   Open   Filter: ________________________                             ||                                                                                                                                                              |
+|hel --------------------------------------------------------------------------||                                                                                                                                                              |
+|> . ACP pretty name                                                       + . ||                                                                                                                                                              |
+|  Idle  podman  codex-1                                                       ||                                                                                                                                                              |
+|  | No messages yet                                                           ||                                                                                                                                                              |
+|  |                                                                           ||                                                                                                                                                              |
+|  Outside filter                                                              ||                                                                       *  M J O L N I R                                                                       |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                          Select a session to open its conversation.                                                          |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              ||                                                                                                                                                              |
+|                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|                                                                              |+ No conversation open ----------------------------------------------------------------------------------------------------------------------------------------+
+|                                                                              ||No conversation open.                                                                                                                                         |
+|                                                                              ||Press Tab for Sessions, then Enter on the one to open.                                                                                                        |
+|                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|                                                                              |+ Targets v -------------------------------------------------------------------------------------------------------------------------------------------- -   = +
+|                                                                              ||  Host / fleet  Targets  In Use                                                                                                                               |
+|                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|                                                                              |+ Profiles v (not refreshed)---------------------------------------------------------------------------------------------------------------------------- -   = +
+|                                                                              ||            Harness      Weekly       Resets  5H Resets                                                                                                       |
+|                                                                              ||  claude-1  Claude Code  refreshing..                                                                                                                         |
+|                                                                              ||  codex-1   Codex        refreshing..                                                                                                                         |
+|                                                                              ||  codex-2   Codex        refreshing..                                                                                                                         |
++------------------------------------------------------------------------------++--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - a read - b panes - q detach - u web - shift+r refresh - s settings - t rendering - : palette - ? keys
+=== ASCII cleared filter (120x40) ===
++ Workspaces ------- * MJOLNIR v2.28.0 ++ Browse | Conversation ---------------------------------------------- +   .---+
+| default                            = ||                                                                              |
++--------------------------------------+|                                                                              |
++ Sessions ----------------- -   =   + +|                                                                              |
+| Create   Open   Filter: _____________||                                                                              |
+|hel ----------------------------------||                                                                              |
+|> . ACP pretty name               + . ||                                                                              |
+|  Idle  podman  codex-1               ||                                                                              |
+|  | No messages yet                   ||                                                                              |
+|  |                                   ||                                                                              |
+|                                      ||                               *  M J O L N I R                               |
+|                                      ||                                                                              |
+|                                      ||                  Select a session to open its conversation.                  |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      ||                                                                              |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ No conversation open --------------------------------------------------------+
+|                                      ||No conversation open.                                                         |
+|                                      ||Press Tab for Sessions, then Enter on the one to open.                        |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Targets v ------------------------------------------------------------ -   = +
+|                                      ||  Host / fleet  Targets  In Use                                               |
+|                                      |+------------------------------------------------------------------------------+
+|                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
+|                                      ||            Harness      Weekly       Resets  5H Resets                       |
+|                                      ||  claude-1  Claude Code  refreshing..                                         |
+|                                      ||  codex-1   Codex        refreshing..                                         |
+|                                      ||  codex-2   Codex        refreshing..                                         |
++--------------------------------------++------------------------------------------------------------------------------+
+Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c create - g sessions - : palette - ? keys
+ASCII title markers: ('x', '-')
+=== expanded rows, 80 left (80x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ default                            ☰ ││                                      │
+╰──────────────────────────────────────╯│                                      │
+╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
+│ Create   Open   Filter: _____________││                                      │
+│hel ──────────────────────────────────││                                      │
+│› · ACP pretty name               ◇ ⋯ ││                                      │
+│  Idle [Q 1]  podman  codex-1         ││                                      │
+│  │ No messages yet                   ││                                      │
+│  │                                   ││                                      │
+│                                      ││           ✦  M J O L N I R           │
+│                                      ││                                      │
+│                                      ││Select a session to open its conversat│
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      │╰──────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────╮
+│                                      ││No conversation open.                 │
+│                                      ││Press Tab for Sessions, then Enter on │
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│  Host / fleet  Targets  In Use                                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│            Harness      Weekly      Resets  5H Resets                        │
+│  claude-1  Claude Code  refreshing…                                          │
+│  codex-1   Codex        refreshing…                                          │
+│  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+=== expanded rows, 80 right (80x40) ===
+╭ Browse | Conversation ────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+│                                      ││ default                            ☰ │
+│                                      │╰──────────────────────────────────────╯
+│                                      │╭ Sessions ───────────────────── ▁   ▪ ╮
+│                                      ││ Create   Open   Filter: _____________│
+│                                      ││hel ──────────────────────────────────│
+│                                      ││› · ACP pretty name               ◇ ⋯ │
+│                                      ││  Idle [Q 1]  podman  codex-1         │
+│                                      ││  │ No messages yet                   │
+│                                      ││  │                                   │
+│           ✦  M J O L N I R           ││                                      │
+│                                      ││                                      │
+│Select a session to open its conversat││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+╰──────────────────────────────────────╯│                                      │
+╭ No conversation open ────────────────╮│                                      │
+│No conversation open.                 ││                                      │
+│Press Tab for Sessions, then Enter on ││                                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│  Host / fleet  Targets  In Use                                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│            Harness      Weekly      Resets  5H Resets                        │
+│  claude-1  Claude Code  refreshing…                                          │
+│  codex-1   Codex        refreshing…                                          │
+│  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+=== expanded rows, 120 left (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle [Q 1]  podman  codex-1         ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== expanded rows, 120 right (120x40) ===
+╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮
+│                                                                              ││ default                            ☰ │
+│                                                                              │╰──────────────────────────────────────╯
+│                                                                              │╭ Sessions ───────────────── ▁   ▪   □ ╮
+│                                                                              ││ Create   Open   Filter: _____________│
+│                                                                              ││hel ──────────────────────────────────│
+│                                                                              ││› · ACP pretty name               ◇ ⋯ │
+│                                                                              ││  Idle [Q 1]  podman  codex-1         │
+│                                                                              ││  │ No messages yet                   │
+│                                                                              ││  │                                   │
+│                               ✦  M J O L N I R                               ││                                      │
+│                                                                              ││                                      │
+│                  Select a session to open its conversation.                  ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+│                                                                              ││                                      │
+╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
+╭ No conversation open ────────────────────────────────────────────────────────╮│                                      │
+│No conversation open.                                                         ││                                      │
+│Press Tab for Sessions, then Enter on the one to open.                        ││                                      │
+╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮│                                      │
+│  Host / fleet  Targets  In Use                                               ││                                      │
+╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮│                                      │
+│            Harness      Weekly      Resets  5H Resets                        ││                                      │
+│  claude-1  Claude Code  refreshing…                                          ││                                      │
+│  codex-1   Codex        refreshing…                                          ││                                      │
+│  codex-2   Codex        refreshing…                                          ││                                      │
+╰──────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== expanded rows, 180 left (180x40) ===
+╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                ☰ ││                                                                                                                      │
+╰──────────────────────────────────────────────────────────╯│                                                                                                                      │
+╭ Sessions ───────────────────────────────────── ▁   ▪   □ ╮│                                                                                                                      │
+│ Create   Open   Filter: ________________________         ││                                                                                                                      │
+│hel ──────────────────────────────────────────────────────││                                                                                                                      │
+│› · ACP pretty name                                   ◇ ⋯ ││                                                                                                                      │
+│  Idle [Q 1]  podman  codex-1                             ││                                                                                                                      │
+│  │ No messages yet                                       ││                                                                                                                      │
+│  │                                                       ││                                                                                                                      │
+│                                                          ││                                                   ✦  M J O L N I R                                                   │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                      Select a session to open its conversation.                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          ││                                                                                                                      │
+│                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                          │╭ No conversation open ────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                          ││No conversation open.                                                                                                 │
+│                                                          ││Press Tab for Sessions, then Enter on the one to open.                                                                │
+│                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                          │╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                          ││  Host / fleet  Targets  In Use                                                                                       │
+│                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                          │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                          ││            Harness      Weekly      Resets  5H Resets                                                                │
+│                                                          ││  claude-1  Claude Code  refreshing…                                                                                  │
+│                                                          ││  codex-1   Codex        refreshing…                                                                                  │
+│                                                          ││  codex-2   Codex        refreshing…                                                                                  │
+╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+=== expanded rows, 180 right (180x40) ===
+╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+│                                                                                                                      ││ default                                                ☰ │
+│                                                                                                                      │╰──────────────────────────────────────────────────────────╯
+│                                                                                                                      │╭ Sessions ───────────────────────────────────── ▁   ▪   □ ╮
+│                                                                                                                      ││ Create   Open   Filter: ________________________         │
+│                                                                                                                      ││hel ──────────────────────────────────────────────────────│
+│                                                                                                                      ││› · ACP pretty name                                   ◇ ⋯ │
+│                                                                                                                      ││  Idle [Q 1]  podman  codex-1                             │
+│                                                                                                                      ││  │ No messages yet                                       │
+│                                                                                                                      ││  │                                                       │
+│                                                   ✦  M J O L N I R                                                   ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                      Select a session to open its conversation.                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+│                                                                                                                      ││                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
+╭ No conversation open ────────────────────────────────────────────────────────────────────────────────────────────────╮│                                                          │
+│No conversation open.                                                                                                 ││                                                          │
+│Press Tab for Sessions, then Enter on the one to open.                                                                ││                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
+╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮│                                                          │
+│  Host / fleet  Targets  In Use                                                                                       ││                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
+╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮│                                                          │
+│            Harness      Weekly      Resets  5H Resets                                                                ││                                                          │
+│  claude-1  Claude Code  refreshing…                                                                                  ││                                                          │
+│  codex-1   Codex        refreshing…                                                                                  ││                                                          │
+│  codex-2   Codex        refreshing…                                                                                  ││                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
+=== minimized rows at 80 columns (80x40) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default        ☰ ││                                                          │
+╰──────────────────╯│                                                          │
+╭ Sessions ─ ▁   ▪ ╮│                                                          │
+│ Create   Open    ││                                                          │
+│hel ──────────────││                                                          │
+│› · ACP pretty…◇  ││                                                          │
+│  Idle            ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                     ✦  M J O L N I R                     │
+│                  ││                                                          │
+│                  ││        Select a session to open its conversation.        │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  ││                                                          │
+│                  │╰──────────────────────────────────────────────────────────╯
+│                  │╭ No conversation open ────────────────────────────────────╮
+│                  ││No conversation open.                                     │
+│                  ││Press Tab for Sessions, then Enter on the one to open.    │
+│                  │╰──────────────────────────────────────────────────────────╯
+│                  │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│                  ││  Host / fleet  Targets  In Use                           │
+│                  │╰──────────────────────────────────────────────────────────╯
+│                  │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                  ││            Harness      Weekly      Resets  5H Resets    │
+│                  ││  claude-1  Claude Code  refreshing…                      │
+│                  ││  codex-1   Codex        refreshing…                      │
+│                  ││  codex-2   Codex        refreshing…                      │
+╰──────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
+=== expanded session row (120x44) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== minimized session summaries (120x44) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default        ☰ ││                                                                                                  │
+╰──────────────────╯│                                                                                                  │
+╭Sessi…─ ▁   ▪   □ ╮│                                                                                                  │
+│ Create   Open    ││                                                                                                  │
+│[1] proj00 ───────││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│                  ││                                                                                                  │
+│[2] proj01 ───────││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│                  ││                                         ✦  M J O L N I R                                         │
+│[3] proj02 ───────││                                                                                                  │
+│  · ACP pretty…◇  ││                            Select a session to open its conversation.                            │
+│  Idle            ││                                                                                                  │
+│  · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ No conversation open ────────────────────────────────────────────────────────────────────────────╮
+│                  ││No conversation open.                                                                             │
+│                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────── ▁   ▪ ─
+╰──────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, codex-2 unavailable ─────────────── ▁   ▪ ─
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== minimized CPU and weekly quota (120x44) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default        ☰ ││                                                                                                  │
+╰──────────────────╯│                                                                                                  │
+╭Sessi…─ ▁   ▪   □ ╮│                                                                                                  │
+│ Create   Open    ││                                                                                                  │
+│hel ──────────────││                                                                                                  │
+│› · ACP pretty…◇  ││                                                                                                  │
+│  Idle            ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                         ✦  M J O L N I R                                         │
+│                  ││                                                                                                  │
+│                  ││                            Select a session to open its conversation.                            │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  ││                                                                                                  │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ No conversation open ────────────────────────────────────────────────────────────────────────────╮
+│                  ││No conversation open.                                                                             │
+│                  ││Press Tab for Sessions, then Enter on the one to open.                                            │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │─ Targets ── local 42% ───────────────────────────────────────────────────────────────────── ▁   ▪ ─
+╰──────────────────╯─ Profiles ── claude-1 63%, codex-1 unavailable, codex-2 unavailable ─────────────────────── ▁   ▪ ─
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== paired weekly and five-hour quota (160x44) ===
+╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default        ☰ ││                                                                                                                                          │
+╰──────────────────╯│                                                                                                                                          │
+╭Sessi…─ ▁   ▪   □ ╮│                                                                                                                                          │
+│ Create   Open    ││                                                                                                                                          │
+│hel ──────────────││                                                                                                                                          │
+│› · ACP pretty…◇  ││                                                                                                                                          │
+│  Idle            ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                             ✦  M J O L N I R                                                             │
+│                  ││                                                                                                                                          │
+│                  ││                                                Select a session to open its conversation.                                                │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  ││                                                                                                                                          │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │╭ No conversation open ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                  ││No conversation open.                                                                                                                     │
+│                  ││Press Tab for Sessions, then Enter on the one to open.                                                                                    │
+│                  │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                  │─ Targets ── none configured ─────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ─
+╰──────────────────╯─ Profiles ── claude-1 96%/40%, codex-1 100%, codex-2 63% ────────────────────────────────────────────────────────────────────────── ▁   ▪ ─
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys

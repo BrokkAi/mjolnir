@@ -395,6 +395,7 @@ pub(super) fn runtime_projection_view(
 mod refresh_notice_tests {
     use super::*;
 
+    // Hard-won: 372572b0: a normal stopped-daemon missing daemon.json was reported as a runtime file error.
     #[test]
     fn a_stopped_daemon_is_reported_as_stopped_not_as_a_file_error() {
         let stopped = anyhow::Error::new(daemon::DaemonNotRunning {

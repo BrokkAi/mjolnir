@@ -1,0 +1,333 @@
+=== session action menu (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No message                                                                                                        │
+│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== session facts (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty                                                                                                        │
+│  Idle  podman                                                                                                        │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Mjolnir, gpt-5 (high)                                                  │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │  Container  4 CPUs · 8g memory                                                     │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== sub-agent CPU coverage (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty                                                                                                        │
+│  Idle  podman                                                                                                        │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native · 0 of 1 working                                                │                │
+│                │  CPU        2.0%+ hourly / 3.0%+ recent                                            │                │
+│                │             (tree of 2; own 3.0%, 1 of 2 measured)                                 │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== single-session CPU (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name           23% ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No message                                                                                                        │
+│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        10% hourly / 23% recent                                                │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== CPU not measured (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No message                                                                                                        │
+│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+=== copy session ID menu row (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No message                                                                                                        │
+│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Give the selected session your own title.                                           │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+action: CopySessionId { session_id: "session-1" }
+=== after copying the session ID (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+keyboard selection after skipping disabled Unpin: Some(ContainerSettings)
+disabled Unpin mouse-down action: None
+disabled Unpin mouse-up action: None
+selection after disabled click: Some(ContainerSettings)
+=== disabled Unpin remains open (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman                                                                                                        │
+│  │ No message                                                                                                        │
+│  │             ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │› Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Edit CPU, memory, and mounts for the next time the container is created.            │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▪ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys

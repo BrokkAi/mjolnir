@@ -352,7 +352,7 @@ pub(super) async fn serve_session(
             events,
             RuntimeEvent::Warning {
                 message: format!(
-                    "This session's Muse runtime does not accept MCP servers, so Mjolnir's tools, such as project memory, are unavailable in it. {remedy}."
+                    "This session's Muse runtime does not accept MCP servers, so Mjolnir's session-history and other MCP tools are unavailable in it. {remedy}."
                 ),
             },
         )

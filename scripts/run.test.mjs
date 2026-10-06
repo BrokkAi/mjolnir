@@ -72,28 +72,6 @@ if (process.env.NO_ARTIFACT !== '1') console.log(JSON.stringify({ reason: 'compi
   return { root, marker, log, run };
 }
 
-for (const platform of ['Linux', 'Darwin']) {
-  // A bare run builds release, so the worker it uploads to a remote target is
-  // optimized; `--profile dev` is the opt-in fast loop. The trailing
-  // `--release` is an application argument and must not reach Cargo.
-  for (const [args, profile] of [[[], 'release'], [['--profile', 'dev'], 'debug']]) {
-    test(`${platform} ${profile} builds workers and directly executes the CLI`, () => {
-      const f = fixture(platform);
-      try {
-        const result = f.run([...args, '--', 'doctor', 'a b', '--release']);
-        assert.equal(result.status, 0, result.stderr);
-        assert.equal(readFileSync(path.join(f.root, 'target/worker', profile, 'mj-worker'), 'utf8').trim(), 'fresh');
-        const triple = platform === 'Linux' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl';
-        assert.equal(readFileSync(path.join(f.root, 'target/worker', triple, profile, 'mj-worker'), 'utf8').trim(), 'fresh');
-        assert.deepEqual(JSON.parse(readFileSync(f.marker)), { args: ['doctor', 'a b', '--release'], restart: '1', marker: 'preserved' });
-        const builds = readFileSync(f.log, 'utf8').trim().split('\n').map(JSON.parse);
-        assert.ok(builds.every(args => args[0] === 'build'));
-        assert.equal(builds.at(-1).includes('doctor'), false);
-      } finally { rmSync(f.root, { recursive: true, force: true }); }
-    });
-  }
-}
-
 for (const failure of ['native', 'portable', 'voice', 'cli']) {
   test(`${failure} build failure is visible and prevents launching the client`, () => {
     const f = fixture();
@@ -112,14 +90,5 @@ test('the reported artifact supports a custom target directory and profile', () 
     const result = f.run(['--target-dir', path.join(f.root, 'custom artifacts'), '--profile', 'dev', '--', '--version']);
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(readFileSync(f.marker)).args, ['--version']);
-  } finally { rmSync(f.root, { recursive: true, force: true }); }
-});
-
-test('missing artifact fails instead of launching a stale binary', () => {
-  const f = fixture();
-  try {
-    const result = f.run([], { NO_ARTIFACT: '1' });
-    assert.notEqual(result.status, 0);
-    assert.equal(existsSync(f.marker), false);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });

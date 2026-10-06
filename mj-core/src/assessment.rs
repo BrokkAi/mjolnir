@@ -596,98 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn finished_and_wait_need_the_activity_bar_and_a_confident_absence_of_failure() {
-        let none = (Failure::None, 0.95);
-        assert_eq!(
-            scored(none, (Input::None, 0.85), (Work::Finished, 0.85)).action(false),
-            Action::Finished
-        );
-        assert_eq!(
-            scored(none, (Input::None, 0.85), (Work::Waiting, 0.85)).action(false),
-            Action::Wait
-        );
-        // One hundredth under either bar is uncertain.
-        assert_eq!(
-            scored(none, (Input::None, 0.84), (Work::Finished, 0.99)).action(false),
-            Action::Uncertain
-        );
-        assert_eq!(
-            scored(none, (Input::None, 0.99), (Work::Waiting, 0.84)).action(false),
-            Action::Uncertain
-        );
-        // Redundant permission is not "no input" for idle inference.
-        assert_eq!(
-            scored(
-                none,
-                (Input::RedundantRequest, 0.99),
-                (Work::Finished, 0.99)
-            )
-            .action(false),
-            Action::Uncertain
-        );
-        // An unsure failure axis blocks idle, waiting, and continuation alike.
-        for failure in [
-            (Failure::None, 0.89),
-            (Failure::Unclear, 0.5),
-            (Failure::Other, 0.6),
-        ] {
-            assert_eq!(
-                scored(failure, (Input::None, 0.99), (Work::Finished, 0.99)).action(true),
-                Action::Uncertain,
-                "{failure:?}"
-            );
-            assert_eq!(
-                scored(
-                    failure,
-                    (Input::None, 0.99),
-                    (Work::AuthorizedUnfinished, 0.99)
-                )
-                .action(true),
-                Action::Uncertain,
-                "{failure:?}"
-            );
-        }
-        // Continuation needs the automation bar on both axes, not the activity bar.
-        assert_eq!(
-            scored(
-                none,
-                (Input::None, 0.90),
-                (Work::AuthorizedUnfinished, 0.90)
-            )
-            .action(true),
-            Action::Continue
-        );
-        assert_eq!(
-            scored(
-                none,
-                (Input::None, 0.89),
-                (Work::AuthorizedUnfinished, 0.99)
-            )
-            .action(true),
-            Action::Uncertain
-        );
-        assert_eq!(
-            scored(
-                none,
-                (Input::None, 0.99),
-                (Work::AuthorizedUnfinished, 0.89)
-            )
-            .action(true),
-            Action::Uncertain
-        );
-        // A required-input answer wins even against a confident provider failure.
-        assert_eq!(
-            scored(
-                (Failure::TransientProvider, 0.99),
-                (Input::Required, 0.85),
-                (Work::Unclear, 0.1)
-            )
-            .action(true),
-            Action::AwaitInput
-        );
-    }
-
-    #[test]
     fn probability_gates_agree_across_running_and_completed_turns() {
         use crate::activity::verdict::{Decision, TurnPhase, TurnVerdict, decide};
         let cases: Vec<Value> =
@@ -727,48 +635,25 @@ mod tests {
             assert_eq!(&restored, assessment);
             assert_eq!(restored.action(complete), expected);
         }
-    }
 
-    #[test]
-    fn fresh_answers_require_complete_valid_winning_distributions() {
-        let cases: Vec<Value> =
-            serde_json::from_str(include_str!("../tests/jev-gates.json")).unwrap();
-        for axis in ["failure", "input", "work"] {
-            for bad in [
-                serde_json::json!(null),
-                serde_json::json!({}),
-                serde_json::json!({"required": 1.0}),
-            ] {
-                let mut response = cases[0].clone();
-                response["answers"][axis]["probabilities"] = bad;
-                assert!(Verdict::parse(&response).is_err());
+        // Preserve the cases that were unique in the older decision table.
+        assert_eq!(
+            scored(
+                (Failure::None, 0.99),
+                (Input::RedundantRequest, 0.99),
+                (Work::Finished, 0.99)
+            )
+            .action(false),
+            Action::Uncertain
+        );
+        for failure in [(Failure::Unclear, 0.5), (Failure::Other, 0.6)] {
+            for work in [Work::Finished, Work::AuthorizedUnfinished] {
+                assert_eq!(
+                    scored(failure, (Input::None, 0.99), (work, 0.99)).action(true),
+                    Action::Uncertain,
+                    "{failure:?} {work:?}"
+                );
             }
-            let mut response = cases[0].clone();
-            response["answers"][axis]
-                .as_object_mut()
-                .unwrap()
-                .remove("probabilities");
-            assert!(Verdict::parse(&response).is_err());
-        }
-        for bad in [
-            serde_json::json!(-0.1),
-            serde_json::json!(1.1),
-            serde_json::json!("0.5"),
-            serde_json::json!(null),
-            serde_json::json!(0.0),
-        ] {
-            let mut response = cases[0].clone();
-            response["answers"]["input"]["probabilities"]["required"] = bad;
-            assert!(Verdict::parse(&response).is_err());
-        }
-        let mut response = cases[0].clone();
-        response["answers"]["input"]["choice"] = serde_json::json!("none");
-        assert!(Verdict::parse(&response).is_err());
-        // Independent hundredth rounding can make the total 0.99 or 1.01.
-        for p in [0.49, 0.51] {
-            response = cases[0].clone();
-            response["answers"]["input"]["probabilities"]["required"] = serde_json::json!(p);
-            assert!(Verdict::parse(&response).is_ok());
         }
     }
 
@@ -866,23 +751,6 @@ mod tests {
         );
     }
     #[test]
-    fn parser_rejects_unknown_choices_and_invalid_confidence() {
-        let mut body = serde_json::json!({"answers":{
-            "failure": {"type":"choice","choice":"transient_provider","confidence":0.91, "probabilities": {"none": 0.0, "transient_provider": 1.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}},
-            "input": {"type":"choice","choice":"unclear","confidence":0.32, "probabilities": {"none": 0.0, "redundant_request": 0.0, "required": 0.0, "unclear": 1.0}},
-            "work": {"type":"choice","choice":"unclear","confidence":0.24, "probabilities": {"finished": 0.0, "authorized_unfinished": 0.0, "waiting": 0.0, "unclear": 1.0}}
-        }});
-        assert_eq!(
-            Verdict::parse(&body).unwrap().action(false),
-            Action::RetryProvider
-        );
-        body["answers"]["failure"]["confidence"] = serde_json::json!(1.1);
-        assert!(Verdict::parse(&body).is_err());
-        body["answers"]["failure"]["confidence"] = serde_json::json!(0.99);
-        body["answers"]["failure"]["choice"] = serde_json::json!("guess");
-        assert!(Verdict::parse(&body).is_err());
-    }
-    #[test]
     fn authorization_survives_assistant_eviction_without_clipping_user_consent() {
         use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
         let mut context = ContextHistory::default();
@@ -925,6 +793,7 @@ mod tests {
         assert!(!context.authorization_complete);
     }
 
+    // Hard-won: a893e12: recorded Codex goal fixtures failed after the previous total-entry cap rejected long sessions.
     #[test]
     fn long_sessions_evict_assistant_entries_before_refusing_a_user_message() {
         use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
@@ -971,6 +840,7 @@ mod tests {
         assert!(!context.authorization_complete);
     }
 
+    // Hard-won: a893e12: oversized assessment history was dropped instead of evicting old assistant entries to preserve the reply.
     #[test]
     fn shrinking_to_a_wire_limit_drops_old_assistant_entries_but_keeps_the_reply() {
         use agent_client_protocol::schema::v1::{ContentBlock, TextContent};

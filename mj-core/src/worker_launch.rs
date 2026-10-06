@@ -259,7 +259,7 @@ pub struct ProjectMemoryLaunchConfig {
     pub history_socket: Option<PathBuf>,
     /// Stable controller-derived identity for this repository or bundle.
     pub project_key: String,
-    /// Target-side replica used by native Claude and the MCP server.
+    /// Target-side replica for file-based project notes and controller sync.
     pub root: PathBuf,
     /// Session-private copy of the canonical tree from the last successful
     /// synchronization, used as the three-way merge base.
@@ -268,7 +268,7 @@ pub struct ProjectMemoryLaunchConfig {
     /// Bundle repository IDs mapped to the roots presented over ACP.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub repository_roots: std::collections::BTreeMap<String, PathBuf>,
-    /// How the harness learns about the project-memory MCP server. Most ACP
+    /// How the harness learns about the project-history MCP server. Most ACP
     /// adapters accept a stdio server in `session/new`; adapters that need
     /// harness-specific runtime metadata receive it through their staged
     /// profile instead.
@@ -374,7 +374,7 @@ pub enum ReviewMcpDelivery {
 
 impl ReviewMcpDelivery {
     /// Claude and Kimi both ignore servers offered over ACP -- Claude is not
-    /// given them at all (see `project_memory_mcp` in `src/acp.rs`), and
+    /// given them at all (see `project_history_mcp` in `src/acp.rs`), and
     /// Kimi needs runtime metadata its own schema carries -- so both are
     /// configured through their staged profile instead.
     #[must_use]

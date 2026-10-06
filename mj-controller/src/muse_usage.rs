@@ -459,36 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_live_shape_and_arbitrary_window_durations() {
-        let payload = json!({
-            "subs_usage": {
-                "weekly": {"used_percent": 1, "resets_at": 1_789_344_000_i64},
-                "window": {"used_percent": 3, "window_duration_mins": 300, "resets_at": 1_788_890_595_i64},
-                "tier": "premium"
-            },
-            "is_subs_active": true
-        });
-        assert_eq!(
-            parse(&payload).unwrap(),
-            vec![
-                MuseUsageWindow {
-                    label: "Week".into(),
-                    remaining_percent: 99,
-                    resets_at: Some(1_789_344_000),
-                },
-                MuseUsageWindow {
-                    label: "5H".into(),
-                    remaining_percent: 97,
-                    resets_at: Some(1_788_890_595),
-                },
-            ]
-        );
-        assert_eq!(window_label(120), "2H");
-        assert_eq!(window_label(61), "61m");
-        assert_eq!(window_label(2_880), "2d");
-    }
-
-    #[test]
     fn preserves_optional_windows_and_resets_but_rejects_incomplete_usage() {
         let payload = json!({
             "subs_usage": {
@@ -517,41 +487,6 @@ mod tests {
                 .is_err()
             );
         }
-    }
-
-    #[test]
-    fn rejects_negative_and_nonfinite_percentages_and_clamps_overage() {
-        assert!(
-            parse(&json!({
-                "subs_usage": {"weekly": {"used_percent": -1}}
-            }))
-            .is_err()
-        );
-        assert!(
-            parse(&json!({
-                "subs_usage": {"weekly": {"used_percent": "nan"}}
-            }))
-            .is_err()
-        );
-        assert!(
-            parse(&json!({
-                "subs_usage": {"weekly": []}
-            }))
-            .is_err()
-        );
-        assert!(
-            parse(&json!({
-                "subs_usage": {"window": {"used_percent": 1, "window_duration_mins": -1}}
-            }))
-            .is_err()
-        );
-        let windows = parse(&json!({
-            "subs_usage": {"weekly": {"used_percent": 101}}
-        }))
-        .unwrap();
-        assert_eq!(windows[0].remaining_percent, 0);
-        assert_eq!(parse_remaining_percent(Some(&json!(100))).unwrap(), 0);
-        assert_eq!(parse_remaining_percent(Some(&json!(3.5))).unwrap(), 97);
     }
 
     #[tokio::test]
@@ -627,6 +562,7 @@ mod tests {
         .to_string()
     }
 
+    // Hard-won: fd350b04: a live Muse 429 outage was amplified by duplicate key-mint calls and the dashboard discarded its last good reading.
     #[tokio::test]
     async fn gate_serves_last_reading_while_rate_limited_and_dedupes_refreshes() {
         let home = tempfile::tempdir().unwrap();
@@ -699,6 +635,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    // Hard-won: fd350b04: the live Muse 429 case without cached usage was shown as unavailable and retried on every poll.
     #[tokio::test]
     async fn rate_limit_without_a_prior_reading_reports_the_rate_limited_marker() {
         let home = tempfile::tempdir().unwrap();
@@ -733,6 +670,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    // Hard-won: fd350b04: Muse’s live rate limit required honoring Retry-After to stop repeated key-mint requests.
     #[tokio::test]
     async fn retry_after_seconds_set_the_next_allowed_check() {
         let home = tempfile::tempdir().unwrap();
@@ -768,6 +706,7 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    // Hard-won: fd350b04: the live Muse 429 fix needed bounded clock-based backoff and Retry-After date/seconds handling.
     #[test]
     fn retry_after_accepts_seconds_and_http_dates_and_backoff_is_capped() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);

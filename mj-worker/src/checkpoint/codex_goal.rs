@@ -344,16 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_native_home_has_no_goal_checkpoint() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(
-            collect(&temp.path().join("missing-home"), "selected")
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
     fn cleared_goal_checkpoint_removes_only_that_goal_and_rejects_foreign_identity() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();

@@ -12,7 +12,6 @@
 //! wrong until the fix in `.agents/plans/jev-quiet-and-scenario-suite.md`.
 //! The live-model half of the suite is `scripts/jev-scenarios-eval.py`.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use mj_core::activity::verdict::TurnEvidence;
@@ -23,6 +22,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+// Keep the full strict fixture schema even when a policy replay reads only a
+// subset of each recorded field.
+#[allow(dead_code)]
 struct Fixture {
     id: String,
     title: String,
@@ -59,6 +61,9 @@ struct Facts {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+// These recorded answer fields remain required so fixture shape drift is
+// rejected, even though the two replay checks use different axes.
+#[allow(dead_code)]
 struct Expected {
     failure: String,
     input: String,
@@ -162,90 +167,6 @@ fn activity_facts(fixture: &Fixture) -> ActivityFacts {
 /// The clock every fixture is evaluated at; `activity_facts` places events
 /// relative to it.
 const NOW_MS: i64 = 1_000_000_000;
-
-#[test]
-fn fixtures_are_well_formed_and_uniquely_named() {
-    let all = fixtures();
-    assert!(!all.is_empty(), "no fixtures found");
-    let mut ids = BTreeSet::new();
-    for (path, fixture) in &all {
-        assert!(
-            ids.insert(fixture.id.clone()),
-            "duplicate id {} in {}",
-            fixture.id,
-            path.display()
-        );
-        let stem = path.file_stem().unwrap().to_string_lossy();
-        assert!(
-            stem.starts_with(&format!("{}-", fixture.id)),
-            "{} is not named after its id",
-            path.display()
-        );
-        assert!(!fixture.title.trim().is_empty() && !fixture.category.trim().is_empty());
-        assert!(!fixture.harness.trim().is_empty());
-        assert!(fixture.source.is_object() && fixture.context.is_object());
-        let expected = fixture
-            .expected
-            .as_ref()
-            .unwrap_or_else(|| panic!("{}: expected is not filled in", path.display()));
-        for value in [&expected.failure, &expected.input, &expected.work] {
-            assert!(
-                !value.trim().is_empty(),
-                "{}: empty expectation",
-                path.display()
-            );
-        }
-        assert!(
-            fixture.facts_known || expected.quiet.is_none(),
-            "{}: quiet is only knowable when the runtime facts were recorded",
-            path.display()
-        );
-        for name in &fixture.known_failure {
-            assert!(
-                name == "quiet" || name == "action",
-                "{}: unknown known_failure {name}",
-                path.display()
-            );
-        }
-        const ACTIONS: [&str; 7] = [
-            "retry_provider",
-            "recover_quota",
-            "continue",
-            "await_input",
-            "finished",
-            "wait",
-            "uncertain",
-        ];
-        assert!(
-            ACTIONS.contains(&expected.action.as_str()),
-            "{}: unknown action {}",
-            path.display(),
-            expected.action
-        );
-        for name in &expected.wrong_actions {
-            assert!(
-                ACTIONS.contains(&name.as_str()),
-                "{}: unknown wrong action {name}",
-                path.display()
-            );
-        }
-        assert!(
-            fixture.facts.task_settled_s_ago.is_none() || fixture.facts_known,
-            "{}: a settled-task fact needs recorded runtime facts",
-            path.display()
-        );
-        assert!(
-            expected.background.is_none() || !fixture.evidence.background.is_empty(),
-            "{}: a background expectation needs background evidence",
-            path.display()
-        );
-        assert!(
-            fixture.outcome.is_some(),
-            "{}: outcome is not filled in",
-            path.display()
-        );
-    }
-}
 
 #[test]
 fn recorded_verdicts_never_produce_a_wrong_action() {

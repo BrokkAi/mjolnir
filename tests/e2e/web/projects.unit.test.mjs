@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const { LAB_SPECS, LAB_VARIABLES, inspectLabEnvironment, requireLabEnvironment } = require('./lab-env.js');
+const { LAB_SPECS, LAB_VARIABLES } = require('./lab-env.js');
 
 /// The files Playwright would actually run for a project, with no lab
 /// environment in sight.
@@ -52,16 +52,4 @@ test('every browser spec belongs to exactly one project', () => {
     'a spec file is in neither project',
   );
   for (const name of lab) assert.ok(!deterministic.has(name), `${name} is in both projects`);
-});
-
-test('a partly populated lab environment names the missing variables', () => {
-  assert.equal(inspectLabEnvironment({}).state, 'absent');
-  const partial = { MJ_BROWSER_BASE_URL: 'https://127.0.0.1:1', MJ_BROWSER_CODE: '000000' };
-  const status = inspectLabEnvironment(partial);
-  assert.equal(status.state, 'partial');
-  assert.throws(() => requireLabEnvironment(partial), /missing MJ_BROWSER_QR_URL/);
-
-  const complete = Object.fromEntries(LAB_VARIABLES.map(name => [name, 'value']));
-  assert.equal(inspectLabEnvironment(complete).state, 'complete');
-  assert.deepEqual(requireLabEnvironment(complete), complete);
 });

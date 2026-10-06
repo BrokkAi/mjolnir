@@ -123,6 +123,7 @@ mod tests {
         assert!(error.to_string().contains("reconnect"));
     }
 
+    // Hard-won: c87e5e88: events reached during daemon replacement were lost instead of yielding a resume cursor.
     #[test]
     fn a_handoff_announcement_keeps_earlier_events_and_names_the_resume_cursor() {
         let body = r#"{"seq":7,"session_id":"s","recorded_at_ms":1,"type":"session_fault","data":{"reason":"startup_failed","message":"failed","command_id":null}}"#;

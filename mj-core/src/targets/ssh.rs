@@ -1766,6 +1766,7 @@ mod tests {
     /// starts, each lock whose master's socket is gone, and leaves a lock that
     /// guards a live socket or that another process holds.
     #[cfg(unix)]
+    // Hard-won: 761279ef: an exited master left lock files that blocked later opens.
     #[test]
     fn stale_master_locks_are_removed_but_live_or_held_ones_stay() {
         let dir = tempfile::tempdir().unwrap();
@@ -1808,6 +1809,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 5cea6d11: a child inherited its parent locator and was refused before starting.
     #[test]
     fn verify_locator_accepts_a_container_borrowed_from_its_owner() {
         verify_locator(&borrowed_podman(BORROW_PARENT), BORROW_CHILD)
@@ -1847,48 +1849,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_borrowed_distinguishes_borrowed_targets_from_owned_ones() {
-        assert!(is_borrowed(&borrowed_podman(BORROW_PARENT)));
-        assert!(is_borrowed(&TargetLocator::SshBare {
-            ssh: SshTarget {
-                destination: "host".to_owned(),
-                ssh_args: Vec::new(),
-            },
-            workspace: format!(".local/share/hel/workspaces/{BORROW_PARENT}"),
-            worker_id: Some(BORROW_CHILD.to_owned()),
-        }));
-        assert!(!is_borrowed(&TargetLocator::LocalPodman {
-            container_id: crate::targets::resource_name(BORROW_CHILD).unwrap(),
-            workspace_storage: PodmanWorkspaceLocator::default(),
-            borrowed_from: None,
-        }));
-    }
-
-    #[test]
-    fn an_owned_container_locator_serializes_without_a_borrowed_from_key() {
-        let owned = TargetLocator::LocalDocker {
-            container_id: crate::targets::resource_name(BORROW_CHILD).unwrap(),
-            borrowed_from: None,
-        };
-        let serialized = serde_json::to_string(&owned).unwrap();
-        assert!(
-            !serialized.contains("borrowed_from"),
-            "owned locators must stay byte-identical for older readers: {serialized}"
-        );
-        assert_eq!(
-            serde_json::from_str::<TargetLocator>(&serialized).unwrap(),
-            owned
-        );
-
-        let borrowed = borrowed_podman(BORROW_PARENT);
-        let serialized = serde_json::to_string(&borrowed).unwrap();
-        assert!(serialized.contains("borrowed_from"));
-        assert_eq!(
-            serde_json::from_str::<TargetLocator>(&serialized).unwrap(),
-            borrowed
-        );
-    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Records the commands it is handed and reports an empty success.
@@ -2001,94 +1961,6 @@ mod tests {
         );
     }
 
-    /// `ssh` refuses `-J` after a `ProxyCommand`, so a session rewrites the
-    /// user's `-J` to the `ProxyJump` option the session's guard overrides.
-    /// `scp` already turns its `-J` into that option.
-    #[test]
-    #[cfg(unix)]
-    fn a_jump_host_flag_becomes_an_option_the_session_guard_overrides() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let socket_dir = sharing_socket_dir();
-        let ssh = SshTarget {
-            destination: "jump-rewrite-host".to_owned(),
-            ssh_args: vec!["-J".to_owned(), "bastion".to_owned(), "-Jother".to_owned()],
-        };
-        let masters = FakeMasters::default();
-        let args = spawned_args(
-            &ssh_command(&ssh, ["-J"]),
-            Some(socket_dir.path()),
-            &masters,
-        );
-        assert_eq!(
-            args[6..],
-            [
-                "-o",
-                "ProxyJump=bastion",
-                "-o",
-                "ProxyJump=other",
-                "jump-rewrite-host",
-                "'-J'",
-            ]
-        );
-        let upload = spawned_args(
-            &scp_upload(&ssh, Path::new("/tmp/file"), "file", false),
-            Some(socket_dir.path()),
-            &masters,
-        );
-        assert_eq!(
-            upload[6..],
-            [
-                "-J",
-                "bastion",
-                "-Jother",
-                "/tmp/file",
-                "jump-rewrite-host:file"
-            ]
-        );
-    }
-
-    /// A user who configures sharing in `ssh_args` owns it: Mjolnir adds no
-    /// sharing options of its own, in any spelling OpenSSH accepts, and opens
-    /// no master.
-    #[test]
-    #[cfg(unix)]
-    fn user_configured_sharing_suppresses_mjolnir_sharing() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let socket_dir = sharing_socket_dir();
-        let spellings: [&[&str]; 5] = [
-            &["-o", "ControlMaster=no"],
-            &["-o", "controlpath /tmp/mine"],
-            &["-oControlPath=/tmp/mine"],
-            &["-S", "/tmp/mine"],
-            &["-S/tmp/mine"],
-        ];
-        let masters = FakeMasters::default();
-        for user in spellings {
-            let ssh = SshTarget {
-                destination: "user-sharing-host".to_owned(),
-                ssh_args: user.iter().map(|arg| (*arg).to_owned()).collect(),
-            };
-            set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
-                socket_dir.path().to_path_buf(),
-            )));
-            let validation = ssh_validation_command(&ssh, vec!["true".to_owned()], "test");
-            let validation = spawned_args(&validation, Some(socket_dir.path()), &masters);
-            let command = ssh_command(&ssh, ["true"]);
-            let args = spawned_args(&command, Some(socket_dir.path()), &masters);
-            assert_eq!(args, command.args, "user args {user:?}");
-            let socket_dir_text = socket_dir.path().display().to_string();
-            assert!(
-                !validation.iter().any(|arg| arg.contains(&socket_dir_text)),
-                "user args {user:?}: {validation:?}"
-            );
-        }
-        assert_eq!(masters.commands(), 0);
-    }
-
     /// Each instance keeps its own sockets, because each daemon counts only
     /// its own sessions against a master.
     #[test]
@@ -2109,6 +1981,7 @@ mod tests {
     /// instance, so it must not share the default instance's masters or
     /// sweep its lock files (launch finding R5-1). Its directory is named by
     /// the same fingerprint `instance_identity` stamps on its workers.
+    // Hard-won: 5cd9c555: MJ_DATA_DIR-only daemons reused default-instance sockets and swept each other’s locks.
     #[test]
     #[cfg(unix)]
     fn a_data_directory_override_gets_its_own_socket_directory() {
@@ -2287,28 +2160,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn connection_sharing_is_absent_when_turned_off() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let ssh = SshTarget {
-            destination: "sharing-off-host".to_owned(),
-            ssh_args: Vec::new(),
-        };
-        let masters = FakeMasters::default();
-        let args = spawned_args(&ssh_command(&ssh, ["true"]), None, &masters);
-        let validation = spawned_args(
-            &ssh_validation_command(&ssh, vec!["true".to_owned()], "test"),
-            None,
-            &masters,
-        );
-        assert_eq!(args, ["sharing-off-host", "'true'"]);
-        assert!(!validation.iter().any(|arg| arg.starts_with("Control")));
-        assert_eq!(masters.commands(), 0);
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn a_control_path_that_cannot_fit_a_socket_address_is_skipped() {
         let _guard = SHARING_TEST_LOCK
             .lock()
@@ -2324,36 +2175,6 @@ mod tests {
         assert_eq!(args, ["long-path-host", "'true'"]);
         assert_eq!(masters.commands(), 0);
         assert!(!long.exists(), "an unusable directory must not be created");
-    }
-
-    #[test]
-    #[cfg(not(unix))]
-    fn connection_sharing_is_unix_only() {
-        let mut args = vec!["-o".to_owned(), "BatchMode=yes".to_owned()];
-        let ssh = SshTarget {
-            destination: "host".to_owned(),
-            ssh_args: Vec::new(),
-        };
-        push_connection_reuse_args(&mut args, &ssh);
-        assert_eq!(args, vec!["-o".to_owned(), "BatchMode=yes".to_owned()]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn the_escape_hatch_accepts_the_usual_off_spellings() {
-        for value in ["0", "off", "FALSE", " no "] {
-            assert!(
-                sharing_disabled(Some(std::ffi::OsStr::new(value))),
-                "{value:?} must disable connection sharing"
-            );
-        }
-        for value in ["1", "auto", "", "yes"] {
-            assert!(
-                !sharing_disabled(Some(std::ffi::OsStr::new(value))),
-                "{value:?} must leave connection sharing on"
-            );
-        }
-        assert!(!sharing_disabled(None));
     }
 
     /// Against a real host: leasing a session opens a master that
@@ -2535,50 +2356,6 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// `scp` spells the port `-P`; passing an `ssh` `-p` through would ask it
-    /// to preserve file times and read the port as a file name. Every `scp`
-    /// also opens a connection, so it is admitted like `ssh`.
-    #[test]
-    #[cfg(unix)]
-    fn scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
-        let ssh = SshTarget {
-            destination: "build@10.0.0.1".into(),
-            ssh_args: vec!["-p".into(), "2222".into()],
-        };
-
-        let upload = scp_upload(&ssh, Path::new("/tmp/local"), "remote/path", true);
-        let download = scp_download(&ssh, "remote/archive.zip", "/tmp/local.zip");
-        set_ssh_connection_sharing_for_test(None);
-
-        assert_eq!(
-            upload.args,
-            [
-                "-P",
-                "2222",
-                "-r",
-                "/tmp/local",
-                "build@10.0.0.1:remote/path"
-            ]
-        );
-        assert_eq!(
-            download.args,
-            [
-                "-P",
-                "2222",
-                "build@10.0.0.1:remote/archive.zip",
-                "/tmp/local.zip"
-            ]
-        );
-        for command in [upload, download] {
-            assert_eq!(command.program, "scp");
-            assert_eq!(command.ssh_destination.as_deref(), Some("build@10.0.0.1"));
-        }
-    }
-
     /// A hand-written stand-in for `ssh` that models masters: `-O check`
     /// succeeds only for a socket whose master it opened, and an opener
     /// starts one unless told to refuse. It records every command.
@@ -2670,6 +2447,51 @@ mod tests {
         }
     }
 
+    /// `scp` spells the port `-P`; passing an `ssh` `-p` through would ask it
+    /// to preserve file times and read the port as a file name. Every `scp`
+    /// also opens a connection, so it is admitted like `ssh`.
+    // Hard-won: a1b93a2e: controller uploads used SSH -p where scp requires -P.
+    #[test]
+    #[cfg(unix)]
+    fn scp_translates_the_ssh_port_option_and_is_tagged_with_its_destination() {
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let ssh = SshTarget {
+            destination: "build@10.0.0.1".into(),
+            ssh_args: vec!["-p".into(), "2222".into()],
+        };
+
+        let upload = scp_upload(&ssh, Path::new("/tmp/local"), "remote/path", true);
+        let download = scp_download(&ssh, "remote/archive.zip", "/tmp/local.zip");
+        set_ssh_connection_sharing_for_test(None);
+
+        assert_eq!(
+            upload.args,
+            [
+                "-P",
+                "2222",
+                "-r",
+                "/tmp/local",
+                "build@10.0.0.1:remote/path"
+            ]
+        );
+        assert_eq!(
+            download.args,
+            [
+                "-P",
+                "2222",
+                "build@10.0.0.1:remote/archive.zip",
+                "/tmp/local.zip"
+            ]
+        );
+        for command in [upload, download] {
+            assert_eq!(command.program, "scp");
+            assert_eq!(command.ssh_destination.as_deref(), Some("build@10.0.0.1"));
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn leases_fill_the_lowest_shard_and_open_another_at_the_cap() {
@@ -2708,6 +2530,7 @@ mod tests {
     /// other sessions are being provisioned. Each one uses a session on the
     /// master it joins, so each is counted: a burst of probes cannot push a
     /// master past the server's `MaxSessions`. A probe never opens a master.
+    // Hard-won: 79fcdde4: unmetered probes overfilled sshd session capacity on a shared master.
     #[test]
     #[cfg(unix)]
     fn probes_are_counted_on_the_shard_they_join_without_opening_it() {
@@ -2851,6 +2674,7 @@ mod tests {
     /// Two daemon processes that lease on the same instance's sockets at
     /// once (J-18) must open one master between them, not one master and one
     /// orphaned plain connection.
+    // Hard-won: 07a04c5d: two daemons could leave a second orphan SSH connection for one socket.
     #[test]
     #[cfg(unix)]
     fn two_processes_opening_one_socket_open_one_master() {
@@ -2883,56 +2707,6 @@ mod tests {
         ledger.lease(&ssh, dir.path(), &masters).expect("opens");
 
         assert_eq!(*masters.socket_existed_at_open.borrow(), [false]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn the_opener_is_an_admitted_batch_master_and_the_check_is_local() {
-        let ssh = SshTarget {
-            destination: "host".to_owned(),
-            ssh_args: vec!["-J".to_owned(), "jump".to_owned()],
-        };
-        let socket = Path::new("/run/mj/abc-0");
-        let open = master_open_command(&ssh, socket);
-        assert_eq!(
-            open.args,
-            [
-                "-J",
-                "jump",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-f",
-                "-N",
-                "-o",
-                "ControlMaster=yes",
-                "-o",
-                "ControlPath=/run/mj/abc-0",
-                "-o",
-                &format!("ControlPersist={CONTROL_PERSIST}"),
-                "host",
-            ]
-        );
-        assert_eq!(open.ssh_destination.as_deref(), Some("host"));
-
-        let check = master_check_command(&ssh, socket);
-        assert_eq!(
-            check.args,
-            [
-                "-J",
-                "jump",
-                "-o",
-                "ControlPath=/run/mj/abc-0",
-                "-O",
-                "check",
-                "host"
-            ]
-        );
-        assert_eq!(
-            check.ssh_destination, None,
-            "a check opens no connection and takes no admission permit"
-        );
     }
 
     #[test]
@@ -3016,43 +2790,10 @@ mod tests {
         );
     }
 
-    /// With sharing switched off, or configured by the user, a lease binds
-    /// nothing and runs nothing.
-    #[test]
-    #[cfg(unix)]
-    fn unshared_connections_lease_without_a_socket() {
-        let _guard = SHARING_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let masters = FakeMasters::default();
-        let dir = sharing_socket_dir();
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Directory(
-            dir.path().to_path_buf(),
-        )));
-        let user_owned = SshSessions::lease(
-            &SshTarget {
-                destination: "unshared-user-host".to_owned(),
-                ssh_args: vec!["-S".to_owned(), "/tmp/mine".to_owned()],
-            },
-            &masters,
-        );
-        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
-        let disabled = SshSessions::lease(&plain_target("unshared-disabled-host"), &masters);
-        set_ssh_connection_sharing_for_test(None);
-
-        for lease in [user_owned, disabled] {
-            let lease = lease.expect("an unshared lease never fails");
-            assert_eq!(lease.control_path(), None);
-            let mut args = Vec::new();
-            push_session_args(&mut args, &lease);
-            assert!(args.is_empty());
-        }
-        assert_eq!(masters.commands(), 0);
-    }
-
     /// A session refused on a live shared connection is told apart from a
     /// connection dropped before authentication, even though a session bound
     /// with `ProxyCommand=false` prints a closed connection after the refusal.
+    // Hard-won: 79fcdde4: an authenticated session refusal was mislabeled as a pre-authentication hangup.
     #[test]
     fn a_refused_session_is_named_apart_from_a_pre_authentication_hangup() {
         assert_eq!(

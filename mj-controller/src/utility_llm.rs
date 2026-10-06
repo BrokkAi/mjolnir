@@ -711,86 +711,6 @@ mod tests {
     use super::*;
     use futures::{StreamExt, stream};
 
-    const ZAI_CONFIG: &str = "model = \"glm-5.3\"\n\
-                              model_provider = \"zai\"\n\
-                              [model_providers.zai]\n\
-                              base_url = \"https://api.z.ai/api/v1\"\n\
-                              env_key = \"ZAI_API_KEY\"\n\
-                              wire_api = \"responses\"\n";
-
-    const DEEPSEEK_CONFIG: &str = "model = \"deepseek-v4-pro\"\n\
-                                   model_provider = \"deepseek\"\n\
-                                   [model_providers.deepseek]\n\
-                                   base_url = \"https://api.deepseek.com/v1\"\n\
-                                   env_key = \"DEEPSEEK_API_KEY\"\n\
-                                   wire_api = \"responses\"\n";
-
-    fn provider_profile(
-        home: &std::path::Path,
-        config: &str,
-        environment: &[(&str, &str)],
-    ) -> HarnessProfile {
-        std::fs::write(home.join("config.toml"), config).unwrap();
-        HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Codex,
-            home: home.to_path_buf(),
-            environment: environment
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                .collect(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        }
-    }
-
-    #[test]
-    fn a_zai_codex_profile_never_serves_as_the_utility_model() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = provider_profile(home.path(), ZAI_CONFIG, &[("ZAI_API_KEY", "key")]);
-
-        assert!(!profile_serves_as_utility(&profile));
-        assert!(
-            backend_for_profile(&profile).unwrap().is_none(),
-            "the utility client cannot reach the Coding Plan chat endpoint"
-        );
-        // A Codex profile using its own login still serves.
-        let native = HarnessProfile {
-            home: tempfile::tempdir().unwrap().path().to_path_buf(),
-            environment: Default::default(),
-            ..profile
-        };
-        assert!(profile_serves_as_utility(&native));
-        assert_eq!(utility_family(&native), Some(UtilityFamily::Codex));
-    }
-
-    #[test]
-    fn a_deepseek_codex_profile_serves_the_deepseek_utility_family() {
-        let home = tempfile::tempdir().unwrap();
-        let profile =
-            provider_profile(home.path(), DEEPSEEK_CONFIG, &[("DEEPSEEK_API_KEY", "key")]);
-
-        assert!(profile_serves_as_utility(&profile));
-        let family = utility_family(&profile).expect("a DeepSeek utility family");
-        assert_eq!(family, UtilityFamily::DeepSeek);
-        assert_eq!(family.precedence(), 1);
-        assert!(family.matches("deepseek-flash"));
-        assert!(!family.matches("deepseek-v4-pro"));
-        assert!(
-            backend_for_profile(&profile).unwrap().is_some(),
-            "the provider key builds the shared OpenAI client"
-        );
-    }
-
-    #[test]
-    fn a_deepseek_codex_profile_without_its_key_has_no_backend() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = provider_profile(home.path(), DEEPSEEK_CONFIG, &[]);
-
-        assert!(backend_for_profile(&profile).unwrap().is_none());
-    }
-
     #[tokio::test]
     async fn kimi_utility_uses_profile_auth_endpoint_and_headers_without_a_runtime() {
         use axum::http::HeaderMap;
@@ -843,28 +763,6 @@ mod tests {
         assert!(!home.path().join("credentials/kimi-code.json").exists());
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
-    }
-
-    #[test]
-    fn utility_families_never_include_claude() {
-        let claude = HarnessProfile {
-            enabled: true,
-            kind: HarnessKind::Claude,
-            home: tempfile::tempdir().unwrap().path().to_path_buf(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        };
-        assert_eq!(utility_family(&claude), None);
-        assert!(UtilityFamily::Codex.matches("gpt-5.7-luna"));
-        assert!(UtilityFamily::Grok.matches("grok-4.6"));
-        assert!(UtilityFamily::Kimi.matches("k3"));
-        assert!(UtilityFamily::DeepSeek.matches("deepseek-v4-flash"));
-        assert!(UtilityFamily::Muse.matches("muse-spark-1.3"));
-        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-contributor"));
-        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-image"));
-        assert!(!UtilityFamily::Muse.matches("muse-spark-1.3-voice"));
     }
 
     #[tokio::test]

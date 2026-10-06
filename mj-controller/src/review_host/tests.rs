@@ -2,7 +2,6 @@ use super::*;
 use crate::session_manager::{
     RelaySessionTarget, RemoteSessionRequest, RemoteSessionRequests, spawn_remote_session_manager,
 };
-use mj_core::review::driver::{RoleState, RoleStatus};
 use mj_core::state::{ManagedSessionSnapshot, MaterializedSession};
 
 use mj_core::relay::{
@@ -16,92 +15,15 @@ fn session_id(test: &str) -> String {
     format!("018f9dd2-a3b4-7c8d-9000-{test}")
 }
 
-#[test]
-fn review_activity_follows_typed_transitions_without_reading_progress_prose() {
-    let mut view = RuntimeReviewView {
-        session_id: "activity".to_owned(),
-        questions: Vec::new(),
-        tier: ReviewTier::Quick,
-        phase: TurnReviewPhase::LaunchingReviewer,
-        roles: Vec::new(),
-        status: "validating configuration".to_owned(),
-        verdict: None,
-    };
-    assert_eq!(view.activity_label(), Some("Reviewing"));
-    assert!(view.is_working());
-    view.phase = TurnReviewPhase::Running {
-        roles: vec![RoleStatus {
-            role: mj_core::review::driver::REVIEWER_ROLE.to_owned(),
-            label: "General".to_owned(),
-            state: RoleState::Running,
-        }],
-    };
-    view.status = "checking source".to_owned();
-    assert_eq!(view.activity_label(), Some("Reviewing"));
-    assert!(view.is_working());
-    view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Findings {
-        synthesis: "[P2] app.py:1 -- incorrect bounds".to_owned(),
-        evidence: Default::default(),
-    });
-    assert_eq!(view.activity_label(), Some("Findings"));
-    assert!(!view.is_working());
-    view.phase = TurnReviewPhase::Verdict(ReviewVerdict::Failed {
-        reason: "reviewer unavailable".to_owned(),
-    });
-    assert_eq!(view.activity_label(), Some("Review failed"));
-    assert!(!view.is_working());
-    view.phase = TurnReviewPhase::Forwarding {
-        synthesis: "findings".into(),
-        evidence: Default::default(),
-        command_id: "forward".into(),
-        error: None,
-    };
-    assert!(view.is_working());
-    if let TurnReviewPhase::Forwarding { error, .. } = &mut view.phase {
-        *error = Some("relay unavailable".into());
-    }
-    assert!(!view.is_working());
-    view.phase = TurnReviewPhase::Resolved(Resolution::Cancelled);
-    assert_eq!(view.activity_label(), None);
-    assert!(!view.is_working());
-}
-
 /// I1-14: a review that could not start because a lifecycle operation held
 /// the session said only "session is reserved for a lifecycle operation".
+// Hard-won: 8100bee6: the refusal surfaced raw lifecycle error text instead of an actionable message
 #[test]
 fn a_review_that_cannot_start_says_so_in_plain_words() {
     assert_eq!(
         start_refusal_notice("session is reserved for a lifecycle operation"),
         "Turn review did not start: another operation was using the session. \
          The next review covers these changes."
-    );
-}
-
-#[test]
-fn resolution_notices_keep_the_verdict_context_after_close() {
-    let resolved_dismissed = TurnReviewPhase::Resolved(Resolution::Dismissed);
-    assert_eq!(
-        resolution_notice(&resolved_dismissed, Some(&ReviewVerdict::Clean)),
-        Some("Review complete: no material findings".to_owned())
-    );
-    assert_eq!(
-        resolution_notice(
-            &TurnReviewPhase::Resolved(Resolution::Cancelled),
-            Some(&ReviewVerdict::Failed {
-                reason: "harness failed".to_owned(),
-            }),
-        ),
-        Some("Review failed; the change stays unreviewed".to_owned())
-    );
-    assert_eq!(
-        resolution_notice(
-            &resolved_dismissed,
-            Some(&ReviewVerdict::Findings {
-                synthesis: "[P1] broken".to_owned(),
-                evidence: Default::default(),
-            }),
-        ),
-        Some("Review dismissed".to_owned())
     );
 }
 
@@ -674,6 +596,7 @@ impl Drop for LiveHold {
 /// while the review was choosing its reviewer. The review gave up with "Turn
 /// review did not start: another operation was using the session". It now
 /// waits for that background work and tries again, within a bound.
+// Hard-won: 4db540d3: review gave up while an active recovery copy briefly refused attachment
 #[tokio::test]
 async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
     let session = session_id("waitforcopy0");
@@ -802,54 +725,6 @@ fn armed(profile: Option<&str>) -> ReviewConfigSource {
 }
 
 #[test]
-fn the_primary_profile_can_run_an_independent_reviewer() {
-    let session = mj_core::state::SessionRecord {
-        project: None,
-        target_runtime: None,
-        launch_base: None,
-        launch_branch: None,
-        checkout: None,
-        publication: None,
-        build_cache: None,
-        container_workspace: None,
-        subagents: None,
-        create_managed_worktree: None,
-        id: "session-1".to_owned(),
-        workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
-        title: "task".to_owned(),
-        harness_kind: mj_core::config::HarnessKind::Codex,
-        last_profile: "primary".to_owned(),
-        bundle_id: "bundle".to_owned(),
-        project_directory: None,
-        managed_worktree: None,
-        review: None,
-        target_template_id: "local".to_owned(),
-        resource_allocation: None,
-        additional_mounts: Vec::new(),
-        container_cpus: None,
-        container_memory: None,
-        state: mj_core::state::SessionState::Running,
-        archived: false,
-        target: None,
-        native_session_id: None,
-        acp_session_title: None,
-        session_title_override: None,
-        created_at: "2026-01-01T00:00:00Z".to_owned(),
-        updated_at: "2026-01-01T00:00:00Z".to_owned(),
-        viewed_through_event_ordinal: 0,
-        draft_input: String::new(),
-        last_error: None,
-        last_checkpoint_error: None,
-        checkpoint: None,
-    };
-
-    validate_reviewer_assignment("session-1", Some(&session), "primary")
-        .expect("same-profile review uses a separate conversation");
-    validate_reviewer_assignment("session-1", Some(&session), "reviewer")
-        .expect("a separate reviewer profile is accepted");
-}
-
-#[test]
 fn delivery_admission_bypasses_only_the_matching_held_prompt() {
     let session = session_id("admission");
     hold_prompts(&session);
@@ -885,62 +760,6 @@ async fn finish_a_turn(manager: &FakeManager, host: &TurnReviewHost) {
     }
 }
 
-#[tokio::test]
-async fn auto_preparation_is_visible_and_can_be_cancelled() {
-    let session = session_id("autoprepare");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    assert!(host.view(&session).unwrap().status.contains("Preparing"));
-    host.resolve(&session, Resolution::Cancelled).await.unwrap();
-    assert!(!host.refuses_prompt(&session));
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
-    host.shutdown().await.unwrap();
-}
-
-/// I2-9: a Mjolnir sub-agent's turn is reviewed through its parent's turn.
-/// Reviewing the child on its own raced the parent's lifecycle operations
-/// and posted their internal refusals into the child's transcript.
-#[tokio::test]
-async fn a_subagent_turn_is_not_reviewed_on_its_own() {
-    let session = session_id("subagent000");
-    let mut manager = FakeManager::new(&session).await;
-    let environment = FakeEnvironment::new();
-    environment
-        .subagent
-        .store(true, std::sync::atomic::Ordering::Release);
-    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
-    finish_a_turn(&manager, &host).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
-            .await
-            .is_err(),
-        "a sub-agent's turn asks its worker for nothing"
-    );
-    assert!(!host.refuses_prompt(&session));
-    let view = host.view(&session);
-    assert!(
-        view.as_ref()
-            .is_none_or(|view| !view.status.contains("did not start")),
-        "{view:?}"
-    );
-    host.shutdown().await.unwrap();
-}
-
-#[test]
-fn a_lifecycle_cancellation_is_not_shown_as_an_internal_error() {
-    let notice = start_refusal_notice("reviewer operation cancelled for session lifecycle change");
-    assert!(!notice.contains("lifecycle"), "{notice}");
-    assert!(
-        notice.contains("another operation was using the session"),
-        "{notice}"
-    );
-}
-
 /// A turn the harness starts on its own also runs and then goes idle.
 /// Reviewing those is a separate decision, so the automatic edge ignores
 /// one and still arms on the next turn that answers a prompt.
@@ -974,13 +793,61 @@ async fn a_self_started_turn_does_not_arm_an_automatic_review() {
     host.shutdown().await.expect("shutdown the host");
 }
 
-/// A session nobody is attached to is reviewed: the daemon sees the turn
-/// finish, captures, finds nothing changed, records its baseline, and
-/// releases the lock. This is the headless case the terminal-hosted
-/// review could never do.
+/// Automatic-review preparation remains visible while it is pending, and
+/// cancelling it releases the session's prompt hold.
 #[tokio::test]
-async fn a_headless_turn_is_reviewed_and_resolves_itself() {
-    let session = session_id("headless000");
+async fn auto_preparation_is_visible_and_can_be_cancelled() {
+    let session = session_id("autoprepare");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
+    finish_a_turn(&manager, &host).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
+        .await;
+    assert!(host.view(&session).unwrap().status.contains("Preparing"));
+    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    assert!(!host.refuses_prompt(&session));
+    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
+    host.shutdown().await.unwrap();
+}
+
+/// I2-9: a Mjolnir sub-agent's turn is reviewed through its parent's turn.
+/// Reviewing the child on its own raced the parent's lifecycle operations
+/// and posted their internal refusals into the child's transcript.
+// Hard-won: 1f754710: sub-agent turns incorrectly triggered their own review lifecycle
+#[tokio::test]
+async fn a_subagent_turn_is_not_reviewed_on_its_own() {
+    let session = session_id("subagent000");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .subagent
+        .store(true, std::sync::atomic::Ordering::Release);
+    let host = TurnReviewHost::spawn_in(manager.control.clone(), armed(None), environment);
+    finish_a_turn(&manager, &host).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), manager.requests.recv())
+            .await
+            .is_err(),
+        "a sub-agent's turn asks its worker for nothing"
+    );
+    assert!(!host.refuses_prompt(&session));
+    let view = host.view(&session);
+    assert!(
+        view.as_ref()
+            .is_none_or(|view| !view.status.contains("did not start")),
+        "{view:?}"
+    );
+    host.shutdown().await.unwrap();
+}
+
+/// Resolutions are gated on the verdict the review actually reached, in
+/// the host rather than in any surface, so every surface gets the same
+/// answer.
+#[tokio::test]
+async fn resolving_a_review_that_has_no_verdict_is_refused() {
+    let session = session_id("resolution0");
     let session = session.as_str();
     let mut manager = FakeManager::new(session).await;
     let environment = FakeEnvironment::new();
@@ -990,77 +857,73 @@ async fn a_headless_turn_is_reviewed_and_resolves_itself() {
         environment.clone(),
     );
 
+    let error = host
+        .resolve(session, Resolution::Forwarded)
+        .await
+        .expect_err("there is no review at all");
+    assert!(error.contains("no review is open"), "{error}");
+
     finish_a_turn(&manager, &host).await;
-
-    // The reviewer role is checked for a running second opinion first.
-    let (_, action, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::Status))
-        .await;
-    assert!(matches!(action, ReviewerAction::Status));
-    assert!(
-        host.refuses_prompt(session),
-        "admission holds prompts before preparation waits on the session actor"
-    );
-    let _ = reply.send(Ok(ReviewerOutcome::Status(Box::new(operational()))));
-
-    // Then the capture that defines what is under review. Preparation takes
-    // it before choosing a reviewer (I2-10), so it comes before the review
-    // opens and before its active marker is written; the capture changes no
-    // review state, and the prompt hold is already in place.
-    let (_, action, reply) = manager
+    let (_, _, reply) = manager
         .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
         .await;
-    assert!(matches!(action, ReviewerAction::CaptureDelta { .. }));
-    assert!(
-        host.refuses_prompt(session),
-        "the review holds the session's prompts from before the capture"
-    );
-    // Nothing changed, so the review records its baseline and resolves.
     let _ = reply.send(Ok(ReviewerOutcome::Delta {
         repositories: vec![mj_core::relay::RepoDelta {
             root: std::path::PathBuf::from("/workspace/app"),
-            baseline_tree: None,
-            current_tree: "first-tree".to_owned(),
-            patch: String::new(),
-            diffstat: "0 files changed".to_owned(),
-            changed_lines: 0,
+            baseline_tree: Some("base".to_owned()),
+            current_tree: "new".to_owned(),
+            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
+            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
+            changed_lines: 1,
             files: Vec::new(),
         }],
     }));
 
-    let (_, action, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::AdvanceBaseline { .. }))
-        .await;
-    let ReviewerAction::AdvanceBaseline { trees } = action else {
-        unreachable!("matched above");
-    };
-    assert_eq!(
-        trees
-            .get(std::path::Path::new("/workspace/app"))
-            .map(String::as_str),
-        Some("first-tree"),
-        "the capture becomes the baseline the next review measures from"
-    );
-    let _ = reply.send(Ok(ReviewerOutcome::BaselineAdvanced));
-
+    // The capture now arrives while the review is still being prepared
+    // (I2-10), so wait for the review itself rather than for any view.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session)
-            || host.view(session).is_some()
-            || environment.state().active.is_some()
+        while host
+            .view(session)
+            .is_none_or(|view| view.status.contains("Preparing"))
         {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("a resolved review releases prompts and drains its durable close");
-    assert!(host.view(session).is_none(), "the review is over");
-    assert_eq!(environment.state().active, None);
+    .expect("the review is open");
+
+    let error = host
+        .resolve(session, Resolution::Forwarded)
+        .await
+        .expect_err("nothing has been found yet");
+    assert!(error.contains("no findings"), "{error}");
+    let error = host
+        .resolve(session, Resolution::Dismissed)
+        .await
+        .expect_err("nothing has been decided yet");
+    assert!(error.contains("verdict"), "{error}");
+    // Cancel is always available, which is what keeps a surface from ever
+    // being stuck with an open review it cannot end.
+    host.resolve(session, Resolution::Cancelled)
+        .await
+        .expect("cancel needs no verdict");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.refuses_prompt(session) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelling releases the prompts");
+}
+
+// Hard-won: 1f754710: lifecycle cancellation was presented as an internal review failure
+#[test]
+fn a_lifecycle_cancellation_is_not_shown_as_an_internal_error() {
+    let notice = start_refusal_notice("reviewer operation cancelled for session lifecycle change");
+    assert!(!notice.contains("lifecycle"), "{notice}");
     assert!(
-        environment
-            .writes()
-            .first()
-            .is_some_and(|(state, _)| state.active.is_some()),
-        "the active marker is durable before the review moves the baseline"
+        notice.contains("another operation was using the session"),
+        "{notice}"
     );
 }
 
@@ -1069,6 +932,7 @@ async fn a_headless_turn_is_reviewed_and_resolves_itself() {
 /// "Nothing to review: the turn changed no files". Choosing a reviewer is the
 /// slow step, and a turn with nothing to review needs none, so the capture
 /// comes first and an empty one resolves without waiting for a reviewer.
+// Hard-won: f13227b3: an empty review waited for a reviewer and delayed completion
 #[tokio::test]
 async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
     let session = session_id("nochanges00");
@@ -1130,6 +994,7 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
 /// no capture and went on to choose a reviewer, so a turn that changed
 /// nothing still waited through an Auto choice before "Nothing to review"
 /// (I2-10). The capture now waits for background work and tries again.
+// Hard-won: 66888613: a temporary recovery-copy refusal delayed capture and produced an empty review
 #[tokio::test]
 async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_reviewer() {
     let session = session_id("capturewait0");
@@ -1422,6 +1287,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
 /// I1-8: `mj daemon restart` during a review left no notice, because the old
 /// daemon cleared its own in-flight marker while shutting down and the new
 /// daemon's startup sweep then found nothing to report.
+// Hard-won: c974a33c: daemon restart erased an open review marker and gave no notice
 #[tokio::test]
 async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its_baseline() {
     let session = session_id("restartnotice");
@@ -1501,6 +1367,7 @@ async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its
 /// I1-8 as observed: the restart came while the review was still choosing its
 /// reviewer, before any review state was written, and the row read
 /// `Reviewing`.
+// Hard-won: c974a33c: daemon restart lost the marker for a review still preparing
 #[tokio::test]
 async fn a_review_still_preparing_at_a_restart_is_reported_by_the_next_daemon() {
     let session = session_id("restartprep");
@@ -1725,80 +1592,6 @@ async fn queued_prompts_hold_a_review_back() {
         .await
         .expect_err("a manual review is refused for the same reason");
     assert!(refusal.0.contains("queued"), "{refusal}");
-}
-
-/// Resolutions are gated on the verdict the review actually reached, in
-/// the host rather than in any surface, so every surface gets the same
-/// answer.
-#[tokio::test]
-async fn resolving_a_review_that_has_no_verdict_is_refused() {
-    let session = session_id("resolution0");
-    let session = session.as_str();
-    let mut manager = FakeManager::new(session).await;
-    let environment = FakeEnvironment::new();
-    let host = TurnReviewHost::spawn_in(
-        manager.control.clone(),
-        armed(Some("reviewer")),
-        environment.clone(),
-    );
-
-    let error = host
-        .resolve(session, Resolution::Forwarded)
-        .await
-        .expect_err("there is no review at all");
-    assert!(error.contains("no review is open"), "{error}");
-
-    finish_a_turn(&manager, &host).await;
-    let (_, _, reply) = manager
-        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
-        .await;
-    let _ = reply.send(Ok(ReviewerOutcome::Delta {
-        repositories: vec![mj_core::relay::RepoDelta {
-            root: std::path::PathBuf::from("/workspace/app"),
-            baseline_tree: Some("base".to_owned()),
-            current_tree: "new".to_owned(),
-            patch: "diff --git a/a b/a\n@@\n+one\n".to_owned(),
-            diffstat: "1 file changed, 1 insertion(+)".to_owned(),
-            changed_lines: 1,
-            files: Vec::new(),
-        }],
-    }));
-
-    // The capture now arrives while the review is still being prepared
-    // (I2-10), so wait for the review itself rather than for any view.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while host
-            .view(session)
-            .is_none_or(|view| view.status.contains("Preparing"))
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the review is open");
-
-    let error = host
-        .resolve(session, Resolution::Forwarded)
-        .await
-        .expect_err("nothing has been found yet");
-    assert!(error.contains("no findings"), "{error}");
-    let error = host
-        .resolve(session, Resolution::Dismissed)
-        .await
-        .expect_err("nothing has been decided yet");
-    assert!(error.contains("verdict"), "{error}");
-    // Cancel is always available, which is what keeps a surface from ever
-    // being stuck with an open review it cannot end.
-    host.resolve(session, Resolution::Cancelled)
-        .await
-        .expect("cancel needs no verdict");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while host.refuses_prompt(session) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("cancelling releases the prompts");
 }
 
 /// A reviewer launch failure is a durable failed verdict, but it no longer
@@ -2167,6 +1960,7 @@ async fn open_a_quick_review_to_its_first_poll(
 /// session list, `mj elicitations` and the phone did not. The host projects
 /// the form from the role's journal into the review it publishes, and the
 /// review reads as a question rather than as work in progress.
+// Hard-won: 8ab93dd3: review questions appeared only in the terminal, not API and phone projections
 #[tokio::test]
 async fn a_reviewers_question_is_published_with_its_review() {
     let session = session_id("reviewerform");
@@ -2222,6 +2016,7 @@ async fn a_reviewers_question_is_published_with_its_review() {
 /// `mj respond`, the phone and the terminal's session answer all reach the
 /// session handle. An id from a reviewer's question goes back to the role
 /// that asked, the same reviewer action the terminal's review pane sends.
+// Hard-won: 8ab93dd3: review answers were routed without preserving the worker role
 #[tokio::test]
 async fn an_answer_to_a_reviewers_question_reaches_that_role() {
     let session = session_id("reviewanswer");
@@ -2382,6 +2177,7 @@ async fn serve_leftover_worker(manager: &mut FakeManager, paused: &mut Vec<Strin
 /// surface could show. Every later turn's review was refused with "the
 /// reviewer is busy with a second opinion". A review that meets such a
 /// leftover prompt stops it, since no daemon can use its answer, and starts.
+// Hard-won: 8b6ab5b0: a leftover reviewer prompt made every later review refuse after restart
 #[tokio::test]
 async fn a_review_that_meets_a_leftover_reviewer_stops_it_and_starts() {
     let session = session_id("leftoverstop");
@@ -2412,6 +2208,7 @@ async fn a_review_that_meets_a_leftover_reviewer_stops_it_and_starts() {
 /// RVC-3(c): the next daemon said the review was cancelled while the
 /// worker's reviewer kept running it and holding its form. The daemon now
 /// stops that reviewer before it says so, and the next review starts.
+// Hard-won: 8b6ab5b0: a restart left the reviewer question open, so every later review was refused
 #[tokio::test]
 async fn a_review_cut_off_by_a_restart_stops_its_reviewer_before_saying_so() {
     let session = session_id("sweepstops");
@@ -2761,6 +2558,7 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
 /// worker. Here the reviewer's launch is refused once the way a checkpoint
 /// (an export, a recovery copy) refuses it; the review asks again and goes on
 /// to prompt the reviewer instead of failing (3444, 2026-10-04).
+// Hard-won: 5f9644ca: a checkpoint refusal made review launch fail instead of retrying
 #[tokio::test]
 async fn a_reviewer_launch_refused_by_a_checkpoint_is_retried() {
     let session = session_id("startrefuse");

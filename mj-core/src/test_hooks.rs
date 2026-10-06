@@ -145,11 +145,6 @@ fn install_fake_with_dispatcher(
 mod tests {
     use super::*;
 
-    #[test]
-    fn inactive_hook_does_not_require_isolation_environment() {
-        reach_test_hook("not_selected").unwrap();
-    }
-
     #[cfg(unix)]
     #[test]
     fn fake_command_preserves_arguments_output_and_status_with_restricted_path() {

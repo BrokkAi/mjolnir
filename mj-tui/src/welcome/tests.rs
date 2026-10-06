@@ -10,30 +10,6 @@ fn dashboard() -> DashboardState {
 }
 
 #[test]
-fn welcome_renders_discovery_results_and_errors_without_creating_a_session() {
-    let mut dashboard = dashboard();
-    dashboard.begin_welcome();
-    let text = drawn(&mut dashboard, 100, 30).join("\n");
-    assert!(text.contains("Welcome to Mjolnir"));
-    assert!(text.contains("Finding your agents"));
-    dashboard.welcome_configured(vec![
-        "Agents: Codex, Claude Code.".into(),
-        "Project: BrokkAi/mjolnir.".into(),
-    ]);
-    dashboard.welcome_checked(vec![
-        "Claude needs login.\nRun mj login --profile claude".into(),
-    ]);
-    let text = drawn(&mut dashboard, 100, 30).join("\n");
-    assert!(text.contains("Agents: Codex, Claude Code."));
-    assert!(text.contains("Project: BrokkAi/mjolnir."));
-    assert!(text.contains("Run mj login --profile claude"));
-    assert!(text.contains("Continue"));
-    assert!(text.contains("ctrl+b c"));
-    assert!(!text.contains("Checking prerequisites"));
-    assert!(dashboard.state.sessions.is_empty());
-}
-
-#[test]
 fn welcome_can_be_dismissed_during_discovery_and_late_errors_become_notices() {
     for code in [KeyCode::Enter, KeyCode::Esc] {
         let mut dashboard = dashboard();

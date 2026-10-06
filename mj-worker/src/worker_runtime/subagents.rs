@@ -162,17 +162,36 @@ const WORKER_REPLY_MARGIN: Duration = Duration::from_secs(10);
 /// carries the daemon's result back here; past it, answering late helps nobody.
 const WORKER_WAIT_GRACE: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueueState {
     #[serde(default)]
     requests: BTreeMap<String, SubagentToolRequest>,
     #[serde(default)]
     results: BTreeMap<String, SubagentToolResult>,
+    /// Protected by the same lock as `requests`, making gate closure atomic
+    /// with queue admission. Old queue files default to the open state.
+    #[serde(default = "default_mutating_admission")]
+    mutating_admission_open: bool,
     /// The daemon's reads of this queue since this worker started. It lives
     /// under the queue's lock so a request is either in a read or after it.
     #[serde(skip)]
     collections: Collections,
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            requests: BTreeMap::new(),
+            results: BTreeMap::new(),
+            mutating_admission_open: true,
+            collections: Collections::default(),
+        }
+    }
+}
+
+fn default_mutating_admission() -> bool {
+    true
 }
 
 /// How often and how recently the daemon has read the queue.
@@ -267,6 +286,21 @@ impl SubagentEndpoint {
         )
     }
 
+    /// Serialize an admission change with every enqueue and persist it before
+    /// reporting success. A request that raced the close is either already in
+    /// `requests` for the controller to drain, or is rejected by that enqueue.
+    pub fn set_mutating_admission(&self, open: bool) -> Result<()> {
+        let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
+        if state.mutating_admission_open == open {
+            return Ok(());
+        }
+        let mut next = state.clone();
+        next.mutating_admission_open = open;
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
+    }
+
     /// Whether the daemon has read the queue after the read numbered `mark`,
     /// and how long ago it last read it.
     fn daemon_contact(&self, mark: u64) -> DaemonContact {
@@ -283,7 +317,7 @@ impl SubagentEndpoint {
 
     #[cfg(test)]
     pub fn enqueue(&self, request: SubagentToolRequest) -> Result<Option<SubagentToolResult>> {
-        self.enqueue_marked(request).map(|(result, _)| result)
+        self.enqueue_marked(request).map(|(_, result, _)| result)
     }
 
     /// Queue `request`. Also return any result already recorded for it, and
@@ -291,7 +325,7 @@ impl SubagentEndpoint {
     fn enqueue_marked(
         &self,
         mut request: SubagentToolRequest,
-    ) -> Result<(Option<SubagentToolResult>, u64)> {
+    ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
         let relay = self
@@ -304,7 +338,20 @@ impl SubagentEndpoint {
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         let mark = state.collections.count;
         if let Some(result) = state.results.get(&request.request_id) {
-            return Ok((Some(result.clone()), mark));
+            return Ok((true, Some(result.clone()), mark));
+        }
+        // A retry of a request already accepted before the gate closed is not
+        // a new admission. Keep it attached to the original queued operation.
+        if state.requests.contains_key(&request.request_id) {
+            return Ok((true, None, mark));
+        }
+        if request.action.mutates_child_state() && !state.mutating_admission_open {
+            return Ok((false, Some(SubagentToolResult {
+                request_id: request.request_id,
+                completed_at_ms: mj_core::clock::epoch_millis(),
+                is_error: true,
+                message: "Sub-agent request was not accepted: the parent is replacing its harness. Retry after Move finishes.".into(),
+            }), mark));
         }
         let mut next = state.clone();
         next.requests
@@ -312,7 +359,7 @@ impl SubagentEndpoint {
             .or_insert(request);
         self.persist(&next)?;
         *state = next;
-        Ok((None, mark))
+        Ok((true, None, mark))
     }
 
     pub fn complete(&self, result: SubagentToolResult) -> Result<()> {
@@ -628,6 +675,98 @@ enabled = false
     }
 
     #[test]
+    fn closed_mutation_admission_rejects_changes_but_keeps_observations_open() {
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(root.path()).unwrap();
+        assert!(endpoint.state.lock().unwrap().mutating_admission_open);
+        endpoint.set_mutating_admission(false).unwrap();
+        let reopened = SubagentEndpoint::open(root.path()).unwrap();
+        assert!(!reopened.state.lock().unwrap().mutating_admission_open);
+
+        let mutations = [
+            SubagentToolAction::Spawn {
+                task_name: "task".into(),
+                instructions: "work".into(),
+                profile_id: None,
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                context: None,
+                files: Vec::new(),
+            },
+            SubagentToolAction::SendInput {
+                child_session_id: "child".into(),
+                message: "continue".into(),
+            },
+            SubagentToolAction::InterruptAgent {
+                child_session_id: "child".into(),
+            },
+            SubagentToolAction::CloseAgent {
+                child_session_id: "child".into(),
+            },
+        ];
+        for (index, action) in mutations.into_iter().enumerate() {
+            let mut request = request(&format!("mutation-{index}"));
+            request.action = action;
+            let (accepted, result, _) = reopened.enqueue_marked(request).unwrap();
+            assert!(!accepted);
+            assert!(result.unwrap().is_error);
+        }
+        for (id, action) in [
+            ("list", SubagentToolAction::ListAgents),
+            (
+                "wait",
+                SubagentToolAction::WaitAgents {
+                    child_session_ids: vec!["child".into()],
+                    timeout_seconds: Some(30),
+                    return_when: Default::default(),
+                },
+            ),
+        ] {
+            let mut request = request(id);
+            request.action = action;
+            let (accepted, result, _) = reopened.enqueue_marked(request).unwrap();
+            assert!(accepted);
+            assert_eq!(result, None);
+        }
+        let (queued, _) = reopened.snapshot();
+        assert_eq!(queued.len(), 2);
+        reopened.set_mutating_admission(true).unwrap();
+        let mut request = request("reopened");
+        request.action = SubagentToolAction::InterruptAgent {
+            child_session_id: "child".into(),
+        };
+        assert!(reopened.enqueue_marked(request).unwrap().0);
+    }
+
+    #[test]
+    fn accepted_mutation_retry_remains_attached_after_admission_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(root.path()).unwrap();
+        let mut accepted = request("accepted-before-close");
+        accepted.action = SubagentToolAction::CloseAgent {
+            child_session_id: "child".into(),
+        };
+        assert!(endpoint.enqueue_marked(accepted.clone()).unwrap().0);
+        endpoint.set_mutating_admission(false).unwrap();
+
+        let (admitted, result, _) = endpoint.enqueue_marked(accepted).unwrap();
+        assert!(admitted);
+        assert!(result.is_none());
+        let (queued, _) = endpoint.snapshot();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].request_id, "accepted-before-close");
+
+        let mut new_request = request("new-after-close");
+        new_request.action = SubagentToolAction::CloseAgent {
+            child_session_id: "child".into(),
+        };
+        let (admitted, result, _) = endpoint.enqueue_marked(new_request).unwrap();
+        assert!(!admitted);
+        assert!(result.unwrap().is_error);
+    }
+
+    #[test]
     fn admission_stamps_worker_turn_and_replay_cannot_retarget_it() {
         use crate::relay::test_support::{prompt, submit_relay};
         let root = tempfile::tempdir().unwrap();
@@ -875,6 +1014,7 @@ enabled = false
         );
     }
 
+    // Hard-won: 131223a: sub-agent MCP calls returned accepted placeholders instead of their daemon result.
     #[tokio::test]
     async fn a_waiting_socket_call_returns_the_daemon_result_when_it_lands() {
         let directory = tempfile::tempdir().unwrap();
@@ -894,6 +1034,7 @@ enabled = false
         assert_eq!(waiter.await.unwrap(), Some(done("r1")));
     }
 
+    // Hard-won: 96b9154: the worker waited past the deadline requested by the model.
     #[tokio::test(start_paused = true)]
     async fn a_wait_the_daemon_never_answers_is_answered_here_at_the_callers_deadline() {
         #[cfg(test)]
@@ -967,6 +1108,7 @@ enabled = false
     /// `REPLY_TIMEOUT`. This worker answers first, and says whether the daemon
     /// has read the queue since the request joined it; a read before the
     /// request does not count.
+    // Hard-won: dfd2e32: a stalled daemon launched a queued child after the parent had moved on.
     #[tokio::test(start_paused = true)]
     async fn an_unanswered_request_is_answered_here_with_whether_the_daemon_picked_it_up() {
         use tokio::io::{AsyncWriteExt, BufReader};
@@ -1017,17 +1159,6 @@ enabled = false
             assert!(contact.last_collected_seconds_ago.is_some(), "{reply}");
         }
     }
-
-    #[tokio::test]
-    async fn a_waiting_socket_call_gives_up_at_its_deadline() {
-        let directory = tempfile::tempdir().unwrap();
-        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
-        assert_eq!(endpoint.enqueue(request("r1")).unwrap(), None);
-        let result = endpoint
-            .await_result("r1", Instant::now() + Duration::from_millis(50))
-            .await;
-        assert_eq!(result, None);
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1047,6 +1178,8 @@ pub(super) fn serve(
     relay: Arc<Mutex<crate::relay::DurableRelay>>,
 ) -> Result<(SubagentEndpoint, SubagentSocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;
+    // Preserve a closed gate if this worker restarts during Move recovery. A
+    // replacement worker explicitly reopens admission after it reconnects.
     endpoint.relay = Some(relay);
     let path = root.join(SUBAGENT_SOCKET);
     let _ = std::fs::remove_file(&path);
@@ -1217,7 +1350,18 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         _ => None,
     };
     let started = Instant::now();
-    let (queued, mark) = endpoint.enqueue_marked(request)?;
+    let (accepted, queued, mark) = endpoint.enqueue_marked(request)?;
+    if !accepted {
+        return write_reply(
+            &mut write,
+            SocketReply {
+                accepted: false,
+                result: queued,
+                daemon: None,
+            },
+        )
+        .await;
+    }
     let result = match queued {
         Some(cached) => Some(cached),
         None if queued_input.is_some() => queued_input,

@@ -1,0 +1,17 @@
+=== decision pending (session transcript) ===
+Session: session-1
+1: 1. Read the code
+2. Change it
+pending decisions: 1
+
+=== proposal remains after accepting (session transcript) ===
+Session: session-1
+1: 1. Read the code
+2. Change it
+pending decisions: 0
+
+=== proposal stays between its conversation (session transcript) ===
+Session: session-1
+1: here is my plan
+2: do the work
+3: starting now

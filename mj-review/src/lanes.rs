@@ -635,206 +635,72 @@ mod tests {
     }
 
     #[test]
-    fn every_lane_has_a_distinct_id_label_and_at_least_one_analyzer() {
-        let mut ids = BTreeSet::new();
-        for lane in &REVIEW_LANES {
-            assert!(ids.insert(lane.id), "lane ids are unique: {}", lane.id);
-            assert!(!lane.label.is_empty());
-            assert!(!lane.focus.is_empty());
-            assert!(
-                !lane.bifrost_tools.is_empty(),
-                "{} has the analyzers that are its identity",
-                lane.id
-            );
-            assert!(!lane.guidance.is_empty());
+    fn golden_review_prompt_coverage() {
+        use std::fmt::Write as _;
+
+        fn append(output: &mut String, label: &str, text: &str) {
+            use std::fmt::Write as _;
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            writeln!(output, "=== {label} ({} bytes) ===", text.len()).unwrap();
+            output.push_str(text);
+            output.push('\n');
         }
-        assert!(
-            lane_by_id(QUICK_LANE.id).is_none(),
-            "the quick reviewer is never dispatchable as a specialist lane"
-        );
-    }
 
-    #[test]
-    fn lane_prompt_scopes_to_one_lane_and_the_diff() {
-        let job = job();
-        let lane = lane_by_id("error_handling").expect("the roster carries error handling");
-        let prompt = lane_prompt(lane, &lane_context(&job), &job.repository_roots);
-        assert!(prompt.contains("`error_handling` (Error handling)"));
-        assert!(prompt.contains("Stay inside your lane"));
-        assert!(prompt.contains("report_exception_handling_smells"));
-        assert!(prompt.contains("- `bifrost`: /w/app"));
-        assert!(prompt.contains("<workspace_diff scope=\"same-user-turn; cumulative\">"));
-        assert!(prompt.contains("+retry"));
-        assert!(prompt.contains(LANE_CLEAN_SENTINEL));
-        assert!(
-            !prompt.contains("compute_cognitive_complexity"),
-            "a lane advertises only its own analyzers"
-        );
-    }
-
-    #[test]
-    fn quick_review_prompt_carries_intent_and_never_advertises_specialists() {
-        let prompt = quick_review_prompt(&job());
-        assert!(prompt.contains("sole reviewer"));
-        assert!(prompt.contains(INTENT_CONTEXT));
-        assert!(prompt.contains("<primary_user_messages order=\"chronological\">"));
-        assert!(prompt.contains("current_outer_turn=\"true\""));
-        assert!(prompt.contains(&format!("at most {QUICK_TOOL_STEP_BUDGET} tool steps")));
-        assert!(
-            !prompt.contains("spawn_specialist"),
-            "the quick tier has no specialists to dispatch"
-        );
-        assert!(prompt.starts_with(QUICK_REVIEWER_PREAMBLE));
-        assert!(
-            prompt.contains("Nobody verifies them before that"),
-            "the reviewer knows its findings reach the agent unchecked"
-        );
-        assert!(
-            !prompt.to_ascii_lowercase().contains("validator"),
-            "no validator follows the quick reviewer"
-        );
-        assert!(
-            !prompt.contains("`lead`"),
-            "unverified leads are not reported"
-        );
-    }
-
-    #[test]
-    fn supervisor_prompt_advertises_the_roster_and_the_dispatch_rules() {
-        let mut job = job();
-        job.tier = ReviewTier::Extended;
-        let prompt = supervisor_prompt(&job);
-        assert!(prompt.contains("spawn_specialist"));
-        for lane in &REVIEW_LANES {
-            assert!(prompt.contains(lane.id), "roster names {}", lane.id);
-        }
-        assert!(prompt.contains("Zero specialists is a normal outcome"));
-        assert!(!prompt.contains("intent_brief"), "no intent analyst runs");
-        assert!(prompt.contains("Never poll or wait inside a tool call"));
-        assert!(prompt.contains(CLEAN_SENTINEL));
-    }
-
-    #[test]
-    fn a_large_change_reaches_the_supervisor_as_its_per_file_line_counts() {
-        let mut job = job();
-        job.changed_lines = SMALL_DIFF_CHANGED_LINES + 1;
-        let packet = change_packet(&job);
-        assert!(packet.contains("<changed_files"));
-        assert!(packet.contains("+1      -0  src/lib.rs"));
-        assert!(!packet.contains("<workspace_diff"));
-        job.changed_lines = SMALL_DIFF_CHANGED_LINES;
-        let small = change_packet(&job);
-        assert!(small.contains("<workspace_diff"));
-        assert!(small.contains("+retry"));
-        assert!(
-            small.contains("<changed_files"),
-            "a small change carries the table too"
-        );
-        assert!(!small.contains("changed_functions"));
-    }
-
-    /// Every role that reads the shared evidence sees every changed file, even
-    /// when its copy of the diff is cut short.
-    #[test]
-    fn the_shared_lane_context_lists_every_changed_file() {
-        let context = lane_context(&job());
-        assert!(context.contains("<changed_files"));
-        assert!(context.contains("src/lib.rs"));
-        assert!(quick_review_prompt(&job()).contains("<changed_files"));
-    }
-
-    /// Every reviewing role sees what the user asked and nothing the primary
-    /// agent wrote: no closing report and no trajectory of its work, so a
-    /// reviewer judges the change against the requirements rather than the
-    /// author's framing of it.
-    #[test]
-    fn every_review_prompt_carries_the_user_messages_and_none_of_the_primarys() {
-        let mut job = job();
-        job.user_messages
+        let mut output = String::new();
+        let mut review_job = job();
+        review_job
+            .user_messages
             .push(UserMessage::prompt("also log each attempt"));
-        job.task = "also log each attempt".to_string();
+        review_job.changed_files = concat!(
+            "Repository: /w/app -- 2 files changed, 2 insertions(+)\n",
+            "       +1      -0  src/lib.rs\n",
+            "       +1      -0  src/retry.rs"
+        )
+        .to_owned();
+
         let lane = lane_by_id("error_handling").expect("the roster carries error handling");
-        let mut supervisor_job = job.clone();
-        supervisor_job.tier = ReviewTier::Extended;
-        for (role, prompt) in [
-            ("quick reviewer", quick_review_prompt(&job)),
-            (
-                "lane",
-                lane_prompt(lane, &lane_context(&job), &job.repository_roots),
+        append(
+            &mut output,
+            "error handling lane prompt",
+            &lane_prompt(
+                lane,
+                &lane_context(&review_job),
+                &review_job.repository_roots,
             ),
-            ("supervisor", supervisor_prompt(&supervisor_job)),
-        ] {
-            assert!(
-                prompt.contains(INTENT_CONTEXT),
-                "{role} gets the intent note"
-            );
-            assert!(
-                prompt.contains("<primary_user_messages order=\"chronological\">"),
-                "{role} gets the user's messages"
-            );
-            assert!(
-                prompt.contains("add a retry"),
-                "{role} sees the first message"
-            );
-            assert!(
-                prompt.contains("also log each attempt"),
-                "{role} sees the latest message"
-            );
-            assert!(
-                !prompt.contains("<initial_result"),
-                "{role} is not given the primary's closing message"
-            );
-            assert!(
-                !prompt.contains("<trajectory"),
-                "{role} is not given the primary's trajectory"
-            );
-            assert!(
-                !prompt.contains("intent_brief"),
-                "{role} gets no intent brief"
-            );
-        }
-    }
+        );
+        append(
+            &mut output,
+            "quick reviewer prompt",
+            &quick_review_prompt(&review_job),
+        );
 
-    /// Callers are found with `scan_usages_by_location`; `usage_graph` builds a
-    /// whole-file reference graph and is named only to rule it out.
-    #[test]
-    fn every_review_prompt_steers_caller_analysis_away_from_usage_graph() {
-        let job = job();
-        let lane = lane_by_id("control_flow").expect("the roster carries control flow");
-        let mut supervisor_job = job.clone();
+        let mut supervisor_job = review_job.clone();
         supervisor_job.tier = ReviewTier::Extended;
-        for (role, prompt, guidance) in [
-            ("quick reviewer", quick_review_prompt(&job), CALLER_GUIDANCE),
-            (
-                "lane",
-                lane_prompt(lane, &lane_context(&job), &job.repository_roots),
-                CALLER_GUIDANCE,
-            ),
-            (
-                "supervisor",
-                supervisor_prompt(&supervisor_job),
-                SUPERVISOR_CALLER_GUIDANCE,
-            ),
-        ] {
-            assert!(prompt.contains(guidance), "{role} gets the caller guidance");
-            assert!(
-                guidance.contains("scan_usages_by_location"),
-                "{role}'s caller sentence names scan_usages_by_location"
-            );
-            let without_guidance = prompt.replace(guidance, "");
-            assert!(
-                !without_guidance.contains("usage_graph"),
-                "{role} names usage_graph only to rule it out"
-            );
-        }
-        assert!(CALLER_GUIDANCE.contains("Do not use `usage_graph`"));
-        assert!(SUPERVISOR_CALLER_GUIDANCE.contains("Do not use `mcp.bifrost.usage_graph`"));
-    }
+        append(
+            &mut output,
+            "extended supervisor prompt",
+            &supervisor_prompt(&supervisor_job),
+        );
 
-    #[test]
-    fn a_corrective_pass_verifies_prior_findings_instead_of_sweeping_again() {
-        let mut job = job();
-        job.prior_review = Some(PriorReviewContext {
+        let mut large_job = review_job.clone();
+        large_job.changed_lines = SMALL_DIFF_CHANGED_LINES + 1;
+        append(
+            &mut output,
+            "large change packet",
+            &change_packet(&large_job),
+        );
+        let small_packet = change_packet(&review_job);
+        append(&mut output, "small change packet", &small_packet);
+        append(
+            &mut output,
+            "shared lane context",
+            &lane_context(&review_job),
+        );
+
+        let mut corrective_job = review_job.clone();
+        corrective_job.prior_review = Some(PriorReviewContext {
             synthesis: "[P1] src/lib.rs:1 -- retry never terminates".to_string(),
             evidence: ReviewPassEvidence {
                 lanes: vec![super::super::verdict::ReviewLaneEvidence {
@@ -843,14 +709,52 @@ mod tests {
                 }],
             },
         });
-        let context = review_pass_context(&job);
-        assert!(context.contains("This is a verification pass"));
-        assert!(context.contains("[P1] src/lib.rs:1 -- retry never terminates"));
-        assert!(context.contains("- `error_handling`: completed"));
-        assert!(lane_context(&job).contains("<corrective_pass_context>"));
-        assert!(
-            lane_context(&job).contains("cumulative-corrective"),
-            "a corrective pass says its diff is still cumulative"
+        append(
+            &mut output,
+            "corrective pass context",
+            &review_pass_context(&corrective_job),
+        );
+        append(
+            &mut output,
+            "corrective lane context",
+            &lane_context(&corrective_job),
+        );
+
+        // The full prompts expose caller lookup guidance and user intent, while
+        // these relationships keep the rendered lane evidence in one packet.
+        writeln!(output, "\n=== prompt assertions (review output) ===").unwrap();
+        for (label, prompt) in [
+            ("quick", quick_review_prompt(&review_job)),
+            (
+                "lane",
+                lane_prompt(
+                    lane,
+                    &lane_context(&review_job),
+                    &review_job.repository_roots,
+                ),
+            ),
+            ("supervisor", supervisor_prompt(&supervisor_job)),
+        ] {
+            let guidance = if label == "supervisor" {
+                SUPERVISOR_CALLER_GUIDANCE
+            } else {
+                CALLER_GUIDANCE
+            };
+            writeln!(
+                output,
+                "{label}: carries both user messages: {}; excludes primary trajectory: {}; caller lookup is narrow: {}",
+                prompt.contains("also log each attempt"),
+                !prompt.contains("<trajectory"),
+                prompt.contains("scan_usages_by_location")
+                    && !prompt.replace(guidance, "").contains("usage_graph")
+            )
+            .unwrap();
+        }
+
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "review-prompt-coverage",
+            &output,
         );
     }
 

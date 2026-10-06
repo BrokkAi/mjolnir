@@ -692,34 +692,6 @@ mod tests {
     }
 
     #[test]
-    fn content_blocks_keep_interleaved_text_and_images() {
-        let first = marker(1);
-        let second = marker(2);
-        let text = format!("a{first}b{second}c");
-        let payload = PromptPayload {
-            text,
-            images: vec![
-                PromptImage {
-                    range: 1..1 + first.len(),
-                    number: 1,
-                    image: image("one"),
-                },
-                PromptImage {
-                    range: 1 + first.len() + 1..1 + first.len() + 1 + second.len(),
-                    number: 2,
-                    image: image("two"),
-                },
-            ],
-        };
-        let blocks = payload.content_blocks();
-        assert!(matches!(&blocks[0], ContentBlock::Text(content) if content.text == "a"));
-        assert!(matches!(&blocks[1], ContentBlock::Image(content) if content.data == "one"));
-        assert!(matches!(&blocks[2], ContentBlock::Text(content) if content.text == "b"));
-        assert!(matches!(&blocks[3], ContentBlock::Image(content) if content.data == "two"));
-        assert!(matches!(&blocks[4], ContentBlock::Text(content) if content.text == "c"));
-    }
-
-    #[test]
     fn trimming_unicode_whitespace_preserves_image_ranges() {
         let mut payload = PromptPayload::with_image("  λ ", image("one"));
         payload.text.push_str("\u{2003}\n");

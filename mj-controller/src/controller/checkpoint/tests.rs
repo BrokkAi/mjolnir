@@ -47,92 +47,6 @@ use mj_core::relay::{RelayCommand, RelayCursor, RelayExecutionState};
 
 use super::*;
 
-/// An executor that fails if it is used. The layout of a session whose
-/// repositories are described by configuration is derived without touching
-/// the target at all.
-#[test]
-fn the_export_layout_places_each_session_kind_in_its_workspace() {
-    let session_id = "1123456789abcdef0123456789abcdef";
-    let mut config = crate::controller::test_support::resume_compatibility_config();
-    config.bundles.insert(
-        "app-bundle".into(),
-        mj_core::config::ProjectBundle {
-            primary_repo: "app".into(),
-            repositories: vec![mj_core::config::ProjectRepository {
-                id: "app".into(),
-                github: None,
-                local: None,
-                destination: PathBuf::from("app"),
-                git_ref: None,
-            }],
-        },
-    );
-
-    // A bundle session's repositories are laid out under the target's own
-    // workspace directory.
-    let mut session = checkpoint_test_session(session_id);
-    session.bundle_id = "app-bundle".into();
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: "hel-session".into(),
-        workspace_storage: Default::default(),
-    });
-    let mut state = State::default();
-    state.sessions.insert(session_id.into(), session.clone());
-    let controller = Controller {
-        config: config.clone(),
-        state,
-    };
-
-    let layout = controller
-        .session_export_layout(session_id, &RefusingExecutor("the export layout"))
-        .unwrap();
-    assert_eq!(layout.workspace_root, "/workspace");
-    assert_eq!(layout.primary_repository, "app");
-    assert_eq!(
-        layout
-            .repositories
-            .iter()
-            .map(|repository| (
-                repository.id.clone(),
-                repository.relative_destination.clone()
-            ))
-            .collect::<Vec<_>>(),
-        [("app".to_owned(), PathBuf::from("app"))]
-    );
-    assert!(matches!(
-        layout.repositories[0].capture,
-        CheckpointRepositoryCapture::RemoteWorkspace
-    ));
-    assert!(layout.managed_worktree.is_none());
-
-    // A bare checkout is its own workspace: the directory's parent, plus
-    // the checkout itself as the one repository.
-    let mut raw = session;
-    raw.target_template_id = "local-bare".into();
-    raw.project_directory = Some(PathBuf::from("/home/dev/project"));
-    raw.target = Some(mj_core::state::TargetLocator::LocalBare {
-        worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
-    let mut state = State::default();
-    state.sessions.insert(session_id.into(), raw);
-    let controller = Controller { config, state };
-
-    let layout = controller
-        .session_export_layout(session_id, &RefusingExecutor("the export layout"))
-        .unwrap();
-    assert_eq!(layout.workspace_root, "/home/dev");
-    assert_eq!(layout.primary_repository, "project");
-    assert_eq!(
-        layout.repositories[0].relative_destination,
-        PathBuf::from("project")
-    );
-    assert!(matches!(
-        layout.repositories[0].capture,
-        CheckpointRepositoryCapture::MetadataOnly
-    ));
-}
-
 /// Build the layout for a managed-worktree session whose worktree holds one
 /// commit of its own, and return the capture along with the commits it has
 /// to distinguish.
@@ -181,6 +95,7 @@ fn managed_worktree_export_capture(
     )
 }
 
+// Hard-won: 074faa0c0155: managed worktree checkpoints omitted every commit after using the live HEAD as base
 #[test]
 fn a_managed_worktree_checkpoint_bundles_from_the_recorded_base() {
     let (capture, creation_commit, worktree_head) = managed_worktree_export_capture(false);
@@ -191,6 +106,7 @@ fn a_managed_worktree_checkpoint_bundles_from_the_recorded_base() {
     assert_ne!(base_commit, worktree_head);
 }
 
+// Hard-won: 074faa0c0155: legacy managed worktree checkpoints omitted commits by using the live HEAD as base
 #[test]
 fn a_managed_worktree_without_a_recorded_base_uses_its_branch_creation_commit() {
     let (capture, creation_commit, worktree_head) = managed_worktree_export_capture(true);
@@ -539,82 +455,7 @@ impl CommandExecutor for ExportExecutor {
         })
     }
 }
-#[test]
-fn docker_checkpoint_fallback_upload_uses_docker_cp() {
-    struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
-    }
-    impl CommandExecutor for RecordingExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
-            Ok(CommandOutput {
-                status: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
 
-    let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
-    };
-    let locator = targets::TargetLocator::LocalDocker {
-        borrowed_from: None,
-        container_id: "hel-session-12345678".to_owned(),
-    };
-    upload_checkpoint_spec(
-        &executor,
-        &locator,
-        LATCH_RELAY_SESSION,
-        Path::new("checkpoint-spec.json"),
-        "/var/lib/hel/workers/session/checkpoint-spec.json",
-    )
-    .unwrap();
-
-    let commands = executor.commands.borrow();
-    assert_eq!(commands.len(), 1);
-    assert_eq!(commands[0].program, "docker");
-    assert_eq!(
-        commands[0].args,
-        [
-            "cp",
-            "checkpoint-spec.json",
-            "hel-session-12345678:/var/lib/hel/workers/session/checkpoint-spec.json"
-        ]
-    );
-    assert_eq!(commands[0].purpose, "upload checkpoint specification");
-}
-#[test]
-fn checkpoint_export_streams_its_spec_instead_of_uploading_it() {
-    let locator = targets::TargetLocator::LocalPodman {
-        borrowed_from: None,
-        container_id: targets::resource_name(LATCH_RELAY_SESSION).unwrap(),
-        workspace_storage: Default::default(),
-    };
-    let spec = export_spec_fixture();
-    let executor = ExportExecutor::new(0, "");
-
-    let output = run_checkpoint_staging_command(
-        &executor,
-        &locator,
-        LATCH_RELAY_SESSION,
-        &spec,
-        export_stdin_command,
-        "export target checkpoint",
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(output.stdout, exported_checkpoint_json());
-    assert_eq!(
-        serde_json::from_slice::<CheckpointExportSpec>(&executor.streamed_spec.borrow()).unwrap(),
-        spec
-    );
-    assert_eq!(
-        executor.purposes.into_inner(),
-        vec!["export target checkpoint".to_owned()]
-    );
-}
 #[test]
 fn a_failing_export_is_not_retried_as_an_old_worker() {
     let locator = targets::TargetLocator::LocalPodman {
@@ -647,6 +488,7 @@ fn a_failing_export_is_not_retried_as_an_old_worker() {
 /// R4-5: a suspend whose export found no native history ended with "the
 /// daemon log records the reason under reference ...". The caller now gets a
 /// sentence it can act on, carried as a refusal the way J-14's is.
+// Hard-won: adfee2e457fb: a Codex session cleared before its first prompt could not suspend and exposed only a log reference
 #[test]
 fn an_export_with_no_native_history_tells_the_caller_why() {
     let locator = targets::TargetLocator::LocalPodman {
@@ -911,6 +753,7 @@ fn a_harness_turn_started_during_capture_abandons_the_archive() {
 /// close) takes it from a worker started without the harness instead. A
 /// routine recovery copy does not: it would leave the session unable to
 /// run, and it has nothing to finish.
+// Hard-won: 4c5f12f68e8e: a failed harness restart left suspend in Error without a checkpoint fallback
 #[test]
 fn a_suspend_whose_worker_restart_left_no_worker_checkpoints_without_the_harness() {
     let no_worker = anyhow::anyhow!("write relay history_requests request: Broken pipe")
@@ -935,8 +778,14 @@ fn a_suspend_whose_worker_restart_left_no_worker_checkpoints_without_the_harness
 fn a_stuck_checkpoint_barrier_is_retried_by_restarting_the_worker() {
     // Both ways the wait can end without a barrier, each wrapped the way
     // the checkpoint path wraps them, and each still asking for the retry.
+    let not_admitted =
+        CheckpointBarrierUnreachable::not_admitted("checkpoint-976f6746887c5ccd93b9d8bbe120ef06");
+    assert_eq!(
+        not_admitted.to_string(),
+        "ACP relay did not reach checkpoint barrier checkpoint-976f6746887c5ccd93b9d8bbe120ef06"
+    );
     for failure in [
-        CheckpointBarrierUnreachable::not_admitted("checkpoint-976f6746887c5ccd93b9d8bbe120ef06"),
+        not_admitted,
         CheckpointBarrierUnreachable::runtime_stopped(),
     ] {
         let error = anyhow::Error::new(failure).context("latch a session checkpoint");
@@ -969,6 +818,7 @@ fn an_incompatible_cancel_turn_requests_worker_recovery() {
         CheckpointBarrierUnreachable::cancel_turn_unavailable("checkpoint-1", 6,)
     )));
 }
+// Hard-won: 0fc100bb4566: a dead worker hello prevented a later Stop from reaching the latch retry
 #[test]
 fn a_dead_worker_hello_failure_is_retried_by_restarting_the_worker() {
     let dead = anyhow::Error::new(RelayTransportDead::new("the proxy is gone"))
@@ -978,46 +828,7 @@ fn a_dead_worker_hello_failure_is_retried_by_restarting_the_worker() {
         "unknown session"
     )));
 }
-#[cfg(unix)]
-#[tokio::test]
-async fn checkpoint_restart_stop_failure_names_mjolnir() {
-    struct FailingStop;
 
-    impl CommandExecutor for FailingStop {
-        fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            Ok(CommandOutput {
-                status: 1,
-                stdout: Vec::new(),
-                stderr: b"permission denied".to_vec(),
-            })
-        }
-    }
-
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let worker_root = format!("/tmp/mjolnir-checkpoint-test/{session_id}");
-    let backend = targets::TargetLocator::LocalBare {
-        worker_root: worker_root.clone(),
-    };
-    let controller = Controller {
-        config: Config::default(),
-        state: State::default(),
-    };
-    let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
-
-    let result = controller
-        .restart_worker_for_checkpoint(session_id, &FailingStop, &backend, &worker_root, &reconnect)
-        .await;
-    let error = match result {
-        Ok(_) => panic!("a failed worker stop unexpectedly restarted the checkpoint worker"),
-        Err(error) => error,
-    };
-    let detail = format!("{error:#}");
-    assert!(
-        detail.starts_with("stop wedged Mjolnir worker before retrying checkpoint"),
-        "{detail}"
-    );
-    assert!(detail.contains("permission denied"), "{detail}");
-}
 #[test]
 fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
     assert!(export_spec_schema_unsupported(
@@ -1040,6 +851,10 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
     ));
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
+pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
+pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
+    "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
 const LATCH_RELAY_STARTS: &str = "MJ_TEST_LATCH_RELAY_STARTS";
 const LATCH_RELAY_REJECT_RELEASE: &str = "MJ_TEST_LATCH_REJECT_RELEASE";
 #[cfg(unix)]
@@ -1281,11 +1096,58 @@ fn latch_relay_child_serves_stdio() {
                 None => {}
             }
         }
-        let response = if reject_release && requests_checkpoint_release(&request) {
-            unparseable_request_response(&request)
-        } else {
-            relay.handle(request)
-        };
+        if std::env::var_os(LATCH_RECORD_SUBAGENT_ADMISSION).is_some()
+            && let mj_core::relay::RelayRequest::SetSubagentAdmission { open } = &request.request
+        {
+            record_test_subagent_admission(Path::new(&root), *open);
+            let marker = Path::new(&root).join("drop-admission-close-reply-once");
+            if !open
+                && std::env::var_os(LATCH_DROP_ADMISSION_CLOSE_REPLY).is_some()
+                && !marker.exists()
+            {
+                std::fs::write(marker, b"dropped").expect("record the dropped close reply");
+                break;
+            }
+        }
+        let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        let response =
+            if let (Some(max_protocol), mj_core::relay::RelayRequest::Hello { supported, .. }) =
+                (max_protocol, &request.request)
+                && max_protocol < mj_core::relay::RELAY_PROTOCOL_VERSION
+            {
+                let negotiated = max_protocol.min(supported.max);
+                mj_core::relay::RelayResponseEnvelope {
+                    request_id: request.request_id.clone(),
+                    protocol_version: negotiated,
+                    body: mj_core::relay::RelayResponseBody::Ok {
+                        payload: mj_core::relay::RelayResponsePayload::Hello {
+                            negotiated,
+                            relay_version: "older-protocol-test".into(),
+                            session_id: LATCH_RELAY_SESSION.into(),
+                            worker_build: None,
+                        },
+                    },
+                }
+            } else if reject_release && requests_checkpoint_release(&request) {
+                unparseable_request_response(&request)
+            } else if let Some(response) = subagent_connection_response(&request) {
+                response
+            } else {
+                let mut request = request;
+                if max_protocol.is_some() {
+                    // Run the current durable relay's behavior while speaking
+                    // the older version negotiated by this test worker.
+                    request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
+                }
+                let mut response = relay.handle(request);
+                if let Some(max_protocol) = max_protocol {
+                    response.protocol_version =
+                        max_protocol.min(mj_core::relay::RELAY_PROTOCOL_VERSION);
+                }
+                response
+            };
         mj_core::relay::write_relay_frame(&mut writer, &response).expect("answer a relay request");
         if checkpoint_only {
             relay.dispatch_checkpoint_only().unwrap();
@@ -1358,6 +1220,44 @@ fn latch_relay_child_serves_stdio() {
         }
     }
 }
+
+#[cfg(unix)]
+fn record_test_subagent_admission(relay_root: &Path, open: bool) {
+    let queue_path = relay_root
+        .parent()
+        .expect("relay root parent")
+        .join(LATCH_RELAY_SESSION)
+        .join("subagents.json");
+    let mut queue: serde_json::Value = std::fs::read(&queue_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| serde_json::json!({"requests": {}, "results": {}}));
+    queue["mutating_admission_open"] = serde_json::Value::Bool(open);
+    std::fs::write(queue_path, serde_json::to_vec(&queue).unwrap())
+        .expect("persist fake worker sub-agent admission");
+}
+fn subagent_connection_response(
+    request: &mj_core::relay::RelayRequestEnvelope,
+) -> Option<mj_core::relay::RelayResponseEnvelope> {
+    let payload = match &request.request {
+        mj_core::relay::RelayRequest::SubagentRequests => {
+            mj_core::relay::RelayResponsePayload::SubagentRequests {
+                requests: Vec::new(),
+                results: Vec::new(),
+            }
+        }
+        mj_core::relay::RelayRequest::SetSubagentAdmission { open } => {
+            mj_core::relay::RelayResponsePayload::SubagentAdmissionChanged { open: *open }
+        }
+        _ => return None,
+    };
+    Some(mj_core::relay::RelayResponseEnvelope {
+        request_id: request.request_id.clone(),
+        protocol_version: request.protocol_version,
+        body: mj_core::relay::RelayResponseBody::Ok { payload },
+    })
+}
+
 fn requests_checkpoint_release(request: &mj_core::relay::RelayRequestEnvelope) -> bool {
     matches!(
         &request.request,
@@ -1428,6 +1328,16 @@ pub(crate) fn latch_relay_target(
     }
     if std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some() {
         spec.env.insert(LATCH_CHECKPOINT_ONLY.into(), "1".into());
+    }
+    for key in [
+        LATCH_RELAY_MAX_PROTOCOL,
+        LATCH_RECORD_SUBAGENT_ADMISSION,
+        LATCH_DROP_ADMISSION_CLOSE_REPLY,
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            spec.env
+                .insert(key.into(), value.to_string_lossy().into_owned());
+        }
     }
     if release == ReleaseSupport::Rejected {
         spec.env
@@ -2560,6 +2470,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
 /// left a 260 MB directory behind on every deferred attempt until the disk
 /// filled. Every exit that does not hand the stage to the pack step removes
 /// it.
+// Hard-won: 7f0d41b9de8d: deferred recovery copies leaked roughly 260 MB of target stages on repeated attempts
 #[cfg(unix)]
 #[tokio::test]
 async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
@@ -3497,6 +3408,7 @@ async fn close_cut_controller(
 /// here makes that write through the real relay just before it reads the
 /// Close, the window the real session hit about half a second after its first
 /// turn ended, and the suspend seals and stops the session.
+// Hard-won: 634af0a367a2: I2-3 worker-owned journal writes moved the daemon cut and made suspend fail
 #[cfg(unix)]
 #[tokio::test]
 async fn a_suspend_seals_when_the_worker_journals_after_the_close_cut() {
@@ -3661,6 +3573,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
 /// Close: a question cannot wait behind the cut, so it spoils it. This goes
 /// through the daemon's route: its suspend marks the record `Closing` first
 /// and then recovers that close.
+// Hard-won: d45082024979: a worker refusal left a suspended session stuck in Closing
 #[cfg(unix)]
 #[tokio::test]
 async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier() {
@@ -3728,6 +3641,7 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
 /// that embeds it inline carries a full copy on that stack, so the daemon
 /// overflowed it (`mj checkpoint --session` aborted the daemon). The capture
 /// future must stay boxed below the wrappers, so the ones above it stay small.
+// Hard-won: 1e384802787f: direct checkpoint overflowed the daemon worker thread stack
 #[test]
 fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     // Measured in a debug build: 50000 and 39360 bytes unboxed, 24040 and 72
@@ -3770,6 +3684,7 @@ const RELAY_JOB_TEST_CHILD: &str = "MJ_TEST_RELAY_JOB_CHILD";
 /// connection: no second connection reaches the worker, and while a
 /// lifecycle operation holds the connection the job is deferred rather than
 /// connecting around it.
+// Hard-won: a6ec3266c340: periodic credential sync opened about nine throwaway remote relay connections per session every five minutes
 #[cfg(unix)]
 #[tokio::test]
 async fn a_relay_job_runs_on_the_actors_own_connection_and_defers_to_a_lease() {

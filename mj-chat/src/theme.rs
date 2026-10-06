@@ -828,6 +828,11 @@ pub fn footer_items_text<T>(groups: &[Vec<T>; 3], label: impl Fn(&T) -> &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::Paragraph;
+    use std::fmt::Write as _;
 
     #[test]
     fn theme_scopes_restore_colors_after_nested_rendering_and_panics() {
@@ -871,15 +876,107 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    fn rendered_theme_rows(
+        label: &str,
+        width: u16,
+        rows: Vec<Line<'static>>,
+        metadata: &str,
+    ) -> String {
+        let height = u16::try_from(rows.len()).expect("theme rows fit");
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(rows), frame.area()))
+            .expect("render theme samples");
+        let mut output = format!("=== {label} ({width}x{height}) ===\n{metadata}\n");
+        output.push_str(&crate::golden::buffer_lines(terminal.backend().buffer()).join("\n"));
+        output.push('\n');
+        output
+    }
+
     #[test]
-    fn no_color_selects_the_monochrome_theme_and_mono_uses_reverse_video() {
-        assert_eq!(theme_for(UiTheme::Light, true), UiTheme::Mono);
-        assert_eq!(theme_for(UiTheme::Light, false), UiTheme::Light);
-        with_theme(UiTheme::Mono, || {
-            assert_eq!(base().bg, Some(Color::Reset));
-            assert!(selection(true).add_modifier.contains(Modifier::REVERSED));
-            assert!(active_control().add_modifier.contains(Modifier::REVERSED));
+    fn golden_theme_rendering() {
+        let mut output = String::new();
+
+        let mono = theme_for(UiTheme::Light, true);
+        let mono_styles = with_theme(mono, || {
+            format!(
+                "NO_COLOR theme: {mono:?}; color-enabled light remains: {:?}; base: {:?}; selection: {:?}; active control: {:?}",
+                theme_for(UiTheme::Light, false),
+                base(),
+                selection(true),
+                active_control()
+            )
         });
+        let mono_rows = with_theme(mono, || {
+            vec![Line::from(vec![
+                Span::styled("selected", selection(true)),
+                Span::raw(" "),
+                Span::styled("active", active_control()),
+                Span::raw(" "),
+                Span::styled("canvas", base()),
+            ])]
+        });
+        output.push_str(&rendered_theme_rows(
+            "NO_COLOR monochrome controls",
+            40,
+            mono_rows,
+            &mono_styles,
+        ));
+
+        for theme in UiTheme::ALL {
+            if theme == UiTheme::Mono {
+                continue;
+            }
+            let palette = palette_for(theme);
+            let foregrounds = [
+                ("text", palette.text),
+                ("muted", palette.muted),
+                ("accent", palette.accent),
+                ("secondary", palette.secondary),
+                ("success", palette.success),
+                ("warning", palette.warning),
+                ("error", palette.error),
+                ("session_error", palette.session_error),
+                ("session_activity", palette.session_activity),
+                ("session_attention", palette.session_attention),
+                ("session_idle", palette.session_idle),
+            ];
+            let backgrounds = [
+                ("background", palette.background),
+                ("surface", palette.surface),
+                ("surface_raised", palette.surface_raised),
+                ("selection", palette.selection),
+            ];
+            let mut rows = Vec::new();
+            let mut details = String::new();
+            writeln!(
+                details,
+                "landmarks: background={:?}; surface={:?}; raised={:?}; selection={:?}",
+                palette.background, palette.surface, palette.surface_raised, palette.selection
+            )
+            .expect("write palette landmarks");
+            for (foreground_name, foreground) in foregrounds {
+                for (background_name, background) in backgrounds {
+                    rows.push(Line::from(Span::styled(
+                        format!("{foreground_name} on {background_name}: Aa"),
+                        Style::default().fg(foreground).bg(background),
+                    )));
+                    writeln!(
+                        details,
+                        "{foreground_name}/{background_name}: fg={foreground:?} bg={background:?} contrast={:.2}",
+                        contrast(foreground, background)
+                    )
+                    .expect("write palette contrast");
+                }
+            }
+            output.push_str(&rendered_theme_rows(
+                &format!("{theme:?} palette and contrast surfaces"),
+                56,
+                rows,
+                &details,
+            ));
+        }
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "theme-rendering", &output);
     }
 
     #[test]
@@ -922,52 +1019,6 @@ mod tests {
             assert_eq!(line.spans[1].content, "Shift-Enter");
         });
         assert_eq!(footer_separator(), " · ");
-    }
-
-    #[test]
-    fn palette_text_is_legible_on_its_painted_surfaces() {
-        for theme in UiTheme::ALL {
-            if theme == UiTheme::Mono {
-                // No colors to measure: the terminal's own are in force.
-                continue;
-            }
-            let colors = palette_for(theme);
-            for foreground in [
-                colors.text,
-                colors.muted,
-                colors.accent,
-                colors.secondary,
-                colors.success,
-                colors.warning,
-                colors.error,
-                colors.session_error,
-                colors.session_activity,
-                colors.session_attention,
-                colors.session_idle,
-            ] {
-                for background in [
-                    colors.background,
-                    colors.surface,
-                    colors.surface_raised,
-                    colors.selection,
-                ] {
-                    assert!(
-                        contrast(foreground, background) >= 4.5,
-                        "{theme:?}: {foreground:?} on {background:?} has insufficient contrast"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn high_contrast_uses_black_canvas_and_distinct_raised_controls() {
-        let colors = palette_for(UiTheme::HighContrast);
-        assert_eq!(colors.background, rgb(0, 0, 0));
-        assert_eq!(colors.surface, rgb(0, 0, 0));
-        assert_eq!(colors.surface_raised, rgb(32, 32, 32));
-        assert!(contrast(colors.text, colors.surface_raised) >= 7.0);
-        assert!(contrast(colors.accent, colors.selection) >= 4.5);
     }
 }
 

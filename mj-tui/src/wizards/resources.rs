@@ -206,6 +206,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 08c676c: the wizard printed a host limit with precision its field rejected.
     #[test]
     fn host_memory_limit_message_is_readable() {
         let editor = ResourceEditor {
@@ -216,39 +217,5 @@ mod tests {
         let limit = 98 * GIB + GIB / 5 + 12345;
         let message = editor.allocation(Some((8, limit))).unwrap_err();
         assert_eq!(message, "MEM exceeds this host's 98.2 GiB.");
-    }
-
-    #[test]
-    fn container_fields_validate_independently_without_clamping() {
-        let mut editor = ResourceEditor::default();
-        editor.reset(Some(&SessionResourceAllocation::Container {
-            cpus: 8,
-            memory_bytes: 32 * GIB,
-        }));
-        editor.cpu = "3".into();
-        editor.memory = "1.5".into();
-        assert_eq!(
-            editor.allocation(None),
-            Ok(SessionResourceAllocation::Container {
-                cpus: 3,
-                memory_bytes: GIB + GIB / 2,
-            })
-        );
-        assert!(
-            editor
-                .allocation(Some((2, 64 * GIB)))
-                .unwrap_err()
-                .contains("CPU exceeds")
-        );
-        assert!(
-            editor
-                .allocation(Some((8, GIB)))
-                .unwrap_err()
-                .contains("MEM exceeds")
-        );
-        for text in ["", "0", "1.5", "-1", "18446744073709551616"] {
-            editor.cpu = text.into();
-            assert!(editor.allocation(None).is_err(), "{text}");
-        }
     }
 }

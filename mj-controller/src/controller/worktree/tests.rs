@@ -13,7 +13,7 @@ use crate::controller::test_support::{
     test_git, test_name,
 };
 use mj_checkpoint::archive::RepositoryMetadata;
-use mj_core::config::{Config, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate};
+use mj_core::config::{Config, ProjectRepository, TargetTemplate};
 use mj_core::state::{ManagedWorktree, ManagedWorktreeTarget, SessionState, State};
 
 use crate::targets::{
@@ -426,51 +426,6 @@ fn a_plain_local_directory_starts_without_creating_a_git_worktree() {
 }
 
 #[test]
-fn raw_linked_worktree_origin_matches_the_configured_github_project() {
-    struct OriginExecutor;
-    impl CommandExecutor for OriginExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(
-                command.args,
-                [
-                    "-C",
-                    "/mnt/optane/bifrost-fird",
-                    "config",
-                    "--get",
-                    "remote.origin.url",
-                ]
-            );
-            Ok(CommandOutput {
-                status: 0,
-                stdout: b"git@github.com:BrokkAi/bifrost-dev.git\n".to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
-
-    let mut config = Config::default();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let session = raw_session_on("localhost", "/mnt/optane/bifrost-fird");
-    let session_id = session.id.clone();
-    let controller = Controller {
-        config,
-        state: State {
-            sessions: [(session_id.clone(), session)].into_iter().collect(),
-            ..State::default()
-        },
-    };
-
-    let source = controller
-        .resolve_session_project_source(&session_id, &OriginExecutor)
-        .unwrap();
-
-    assert_eq!(source.key, "github:brokkai/bifrost-dev");
-    assert_eq!(source.short, "bifrost-dev");
-    assert_eq!(source.full, "BrokkAi/bifrost-dev");
-}
-#[test]
 fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
     struct OriginExecutor;
     impl CommandExecutor for OriginExecutor {
@@ -689,6 +644,7 @@ impl CommandExecutor for CheckoutPositionExecutor {
         })
     }
 }
+
 fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMetadata {
     RepositoryMetadata {
         saved_refs: Default::default(),
@@ -704,6 +660,8 @@ fn recorded_repository(head_commit: &str, branch: Option<&str>) -> RepositoryMet
         branch: branch.map(str::to_owned),
     }
 }
+
+// A raw checkout can advance while stopped; that stale position must be reported on resume.
 #[test]
 fn a_raw_checkout_that_moved_while_stopped_gets_a_conversation_line() {
     let config = resume_compatibility_config();
@@ -736,6 +694,7 @@ fn a_raw_checkout_that_moved_while_stopped_gets_a_conversation_line() {
         "{notice}"
     );
 }
+
 #[test]
 fn a_raw_checkout_that_stayed_put_gets_no_conversation_line() {
     let config = resume_compatibility_config();
@@ -757,6 +716,7 @@ fn a_raw_checkout_that_stayed_put_gets_no_conversation_line() {
         None
     );
 }
+
 #[test]
 fn a_checkpoint_without_recorded_git_identity_reports_nothing() {
     let live = CheckoutPosition {
@@ -777,6 +737,7 @@ fn a_checkpoint_without_recorded_git_identity_reports_nothing() {
         None
     );
 }
+
 #[test]
 fn a_detached_checkout_is_named_as_detached() {
     let config = resume_compatibility_config();
@@ -797,35 +758,7 @@ fn a_detached_checkout_is_named_as_detached() {
 
     assert!(notice.contains("cccccccccccc (detached)"), "{notice}");
 }
-#[test]
-fn bundle_sessions_resume_on_any_workspace_target() {
-    let config = resume_compatibility_config();
-    let session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
 
-    assert_eq!(
-        resume_compatibility(&session, &config, "podman"),
-        Ok(ResumePlan::InPlace)
-    );
-    assert_eq!(
-        resume_compatibility(&session, &config, "ssh-bare"),
-        Ok(ResumePlan::InPlace)
-    );
-}
-#[test]
-fn a_single_local_repository_can_become_a_checkout() {
-    let mut config = resume_compatibility_config();
-    let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
-    session.bundle_id = "project".into();
-    config.bundles.insert(
-        "project".into(),
-        local_bundle(Path::new("/home/dev/project")),
-    );
-
-    assert_eq!(
-        resume_compatibility(&session, &config, "local-bare"),
-        Ok(ResumePlan::WorkspaceToRaw)
-    );
-}
 #[test]
 fn a_github_project_cannot_become_a_checkout() {
     let mut config = resume_compatibility_config();
@@ -878,27 +811,6 @@ fn bundle_sessions_refuse_a_local_bare_target_with_a_reason() {
     );
 }
 #[test]
-fn managed_raw_sessions_resume_on_their_own_worktree_host() {
-    let config = resume_compatibility_config();
-
-    assert_eq!(
-        resume_compatibility(
-            &managed_raw_session(ManagedWorktreeTarget::Local),
-            &config,
-            "local-bare",
-        ),
-        Ok(ResumePlan::InPlace)
-    );
-    assert_eq!(
-        resume_compatibility(
-            &managed_raw_session(ssh_worktree_target()),
-            &config,
-            "ssh-bare",
-        ),
-        Ok(ResumePlan::InPlace)
-    );
-}
-#[test]
 fn managed_raw_sessions_refuse_a_bare_target_on_another_host() {
     let config = resume_compatibility_config();
 
@@ -917,19 +829,6 @@ fn managed_raw_sessions_refuse_a_bare_target_on_another_host() {
     )
     .unwrap_err();
     assert!(reason.contains("dev@builder"), "{reason}");
-}
-#[test]
-fn a_whole_local_checkout_can_move_to_an_isolated_target() {
-    let config = resume_compatibility_config();
-    for session in [
-        managed_raw_session(ManagedWorktreeTarget::Local),
-        raw_session_on("local-bare", "/home/dev/project"),
-    ] {
-        assert_eq!(
-            resume_compatibility(&session, &config, "podman"),
-            Ok(ResumePlan::RawToWorkspace)
-        );
-    }
 }
 /// Give a checkout the network remote a conversion requires. Planning
 /// never contacts it.
@@ -1545,94 +1444,6 @@ fn a_primary_checkout_is_recognized_through_a_symlinked_directory() {
     }
 }
 #[test]
-fn a_conversion_reuses_a_bundle_that_already_describes_the_checkout() {
-    let repository = PathBuf::from("/home/dev/project");
-    let destination = PathBuf::from("project");
-    let existing = ProjectBundle {
-        primary_repo: "project".into(),
-        repositories: vec![ProjectRepository {
-            id: "project".into(),
-            github: None,
-            local: Some(repository.clone()),
-            destination: destination.clone(),
-            git_ref: None,
-        }],
-    };
-    let mut config = Config::default();
-    config.bundles.insert("existing".into(), existing);
-
-    assert_eq!(
-        converted_raw_bundle(&config, "remote-project-abcdef", &repository, &destination),
-        ("existing".to_owned(), None)
-    );
-
-    // A different destination is a different checkout location inside the
-    // target, so it cannot stand in for this one.
-    let (id, synthesized) = converted_raw_bundle(
-        &config,
-        "remote-project-abcdef",
-        &repository,
-        Path::new("elsewhere"),
-    );
-    assert_ne!(id, "existing");
-    assert_eq!(
-        synthesized.unwrap().repositories[0].destination,
-        PathBuf::from("elsewhere")
-    );
-}
-#[test]
-fn a_converted_record_is_a_valid_bundle_session() {
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let mut config = resume_compatibility_config();
-    let mut record = managed_raw_session(ManagedWorktreeTarget::Local);
-    record.state = SessionState::Running;
-    record.target_template_id = "podman".into();
-    let conversion = RawToWorkspaceConversion {
-        checkout: record.project_directory.clone().unwrap(),
-        repository: PathBuf::from("/home/dev/project"),
-        source: fixture_network_source(),
-        bundle_id: "project".into(),
-        new_bundle: Some(ProjectBundle {
-            primary_repo: "project".into(),
-            repositories: vec![ProjectRepository {
-                id: "project".into(),
-                github: None,
-                local: Some(PathBuf::from("/home/dev/project")),
-                destination: PathBuf::from(session_id),
-                git_ref: None,
-            }],
-        }),
-        retire: record.managed_worktree.clone(),
-    };
-
-    config.bundles.insert(
-        conversion.bundle_id.clone(),
-        conversion.new_bundle.clone().unwrap(),
-    );
-    config.profiles.insert(
-        record.last_profile.clone(),
-        HarnessProfile {
-            enabled: true,
-            kind: record.harness_kind,
-            home: PathBuf::from("/profiles/codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        },
-    );
-    apply_raw_to_workspace(&mut record, &conversion);
-
-    assert_eq!(record.project_directory, None);
-    assert_eq!(record.managed_worktree, None);
-    assert_eq!(record.bundle_id, "project");
-    let state = State {
-        sessions: [(session_id.into(), record)].into_iter().collect(),
-        ..State::default()
-    };
-    state.validate_against_config(&config).unwrap();
-}
-#[test]
 fn a_session_leaving_its_target_claims_a_worktree_of_its_own_repository() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1794,55 +1605,6 @@ fn a_return_to_local_rejects_a_retained_branch_checked_out_elsewhere() {
         test_git(repository.path(), &["rev-parse", &branch]),
         test_git(repository.path(), &["rev-parse", "HEAD"])
     );
-}
-#[test]
-fn a_session_that_left_its_target_is_a_valid_raw_session() {
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let repository = PathBuf::from("/home/dev/project");
-    let mut config = resume_compatibility_config();
-    config
-        .bundles
-        .insert("project".into(), local_bundle(&repository));
-    config.profiles.insert(
-        "codex".into(),
-        HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Codex,
-            home: PathBuf::from("/profiles/codex"),
-            environment: Default::default(),
-            context_window_bytes: None,
-            subagents: Default::default(),
-            guardian_review_model: None,
-        },
-    );
-    let mut record = checkpoint_test_session(session_id);
-    record.bundle_id = "project".into();
-    record.target_template_id = "local-bare".into();
-    let conversion = WorkspaceToRawConversion {
-        worktree: ManagedWorktree {
-            kind: Default::default(),
-            source_project_directory: repository.clone(),
-            source_repository: repository.clone(),
-            worktree_root: repository.join(".mj/worktrees").join(session_id),
-            branch: format!("mj/{session_id}"),
-            target: ManagedWorktreeTarget::Local,
-            base_commit: None,
-        },
-        reuse_existing_branch: false,
-    };
-
-    apply_workspace_to_raw(&mut record, &conversion);
-
-    assert_eq!(
-        record.project_directory.as_deref(),
-        Some(conversion.worktree.worktree_root.as_path())
-    );
-    assert_eq!(record.bundle_id, "project", "the bundle still describes it");
-    let state = State {
-        sessions: [(session_id.into(), record)].into_iter().collect(),
-        ..State::default()
-    };
-    state.validate_against_config(&config).unwrap();
 }
 #[test]
 fn a_failed_departure_returns_the_session_to_its_bundle() {

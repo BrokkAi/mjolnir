@@ -19,48 +19,6 @@ fn click(form: &mut Form<u8>, x: u16, y: u16) -> Option<Interaction<u8>> {
         .action
 }
 
-fn row_text(width: u16, align: RowAlign) -> String {
-    let mut form = Form::<u8>::new();
-    form.declare(1, ControlKind::Button);
-    form.declare(2, ControlKind::Button);
-    form.end_frame(1);
-    let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            ButtonRow::render_aligned(
-                frame,
-                frame.area(),
-                &[(1, "First", true), (2, "Last", true)],
-                &mut form,
-                align,
-            );
-            form.end_frame(1);
-        })
-        .unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
-}
-
-#[test]
-fn a_right_aligned_row_that_fits_ends_flush_with_the_area() {
-    // "  First  " and "  Last  " are 9 and 8 cells, plus one separator
-    // between them, so an 18-cell row leaves 12 dead cells on the left.
-    let text = row_text(30, RowAlign::Right);
-    assert!(text.ends_with("  First     Last  "), "{text:?}");
-    assert_eq!(&text[..12], " ".repeat(12), "{text:?}");
-}
-
-#[test]
-fn a_row_wider_than_its_area_ignores_right_alignment() {
-    assert_eq!(row_text(10, RowAlign::Right), row_text(10, RowAlign::Left));
-}
-
 fn column_lines(width: u16, height: u16, focused: u8) -> Vec<String> {
     let mut form = Form::<u8>::new();
     form.declare(1, ControlKind::Button);
@@ -88,20 +46,6 @@ fn column_lines(width: u16, height: u16, focused: u8) -> Vec<String> {
                 .collect()
         })
         .collect()
-}
-
-#[test]
-fn a_stacked_column_gives_every_button_one_row_of_the_widest_label() {
-    // "  Widest  " is the widest button at 10 cells, so the 16-cell area
-    // leaves six cells on the left of every row.
-    assert_eq!(
-        column_lines(16, 3, 1),
-        [
-            format!("{}  First   ", " ".repeat(6)),
-            format!("{}  Widest  ", " ".repeat(6)),
-            format!("{}  Last    ", " ".repeat(6)),
-        ]
-    );
 }
 
 #[test]
@@ -318,46 +262,6 @@ fn multiline_field_click_tracks_wrapped_newlines_and_unicode() {
 }
 
 #[test]
-fn multiline_field_click_scales_with_a_large_pasted_prompt() {
-    let mut form = Form::new();
-    let mut input = TextInput::multiline();
-    input.set_value("x".repeat(70_000));
-    input.set_cursor(input.value().len());
-    form.declare(1, ControlKind::TextField);
-    form.end_frame(1);
-    let area = Rect::new(1, 1, 20, 3);
-    let mut terminal = Terminal::new(TestBackend::new(24, 6)).unwrap();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            TextField::render_multiline(frame, area, &input, true, true, &mut form, 1);
-            form.end_frame(1);
-        })
-        .unwrap();
-
-    let result = form.handle(&Event::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: area.right() - 1,
-        row: area.bottom() - 1,
-        modifiers: KeyModifiers::NONE,
-    }));
-    assert_eq!(
-        result.action,
-        Some(Interaction::Edit(1, FieldEdit::Cursor(70_000)))
-    );
-    let Some(Interaction::Edit(1, edit)) = result.action else {
-        panic!("large prompt click should edit the field");
-    };
-    TextField::apply(&mut input, edit);
-    TextField::apply(
-        &mut input,
-        FieldEdit::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)),
-    );
-    assert_eq!(input.value().len(), 70_001);
-    assert_eq!(&input.value()[69_995..], "xxxxx!");
-}
-
-#[test]
 fn multiline_field_click_after_a_zero_width_tab_keeps_the_byte_offset() {
     let mut form = Form::new();
     let mut input = TextInput::multiline();
@@ -457,347 +361,339 @@ fn clipped_list_click_selects_the_visible_row_after_scrolling() {
     assert_eq!(click(&mut form, 1, 0), Some(Interaction::Select(1, 17)));
 }
 
-#[test]
-fn combobox_state_consumes_preview_and_returns_commit_or_dismissal() {
-    let mut state = ComboBoxState::default();
-    state.open(1, 0);
-    assert_eq!(state.selection(1, 2), 0);
-    assert_eq!(state.route(Some(Interaction::Select(1, 2))), None);
-    assert_eq!(state.selection(1, 0), 2);
-    assert_eq!(
-        state.route(Some(Interaction::ComboBoxCommit(1, 1))),
-        Some(Interaction::ComboBoxCommit(1, 1))
-    );
-    assert_eq!(state.open_id(), None);
-
-    state.open(1, 1);
-    assert_eq!(
-        state.route(Some(Interaction::ComboBoxDismiss(1))),
-        Some(Interaction::ComboBoxDismiss(1))
-    );
-    assert!(!state.is_open(1));
-    assert_eq!(
-        state.route(Some(Interaction::Activate(2))),
-        Some(Interaction::Activate(2))
-    );
-}
-
-#[test]
-fn combobox_collapsed_value_keeps_a_visible_dropdown_glyph() {
-    assert_eq!(clipped_display("long value", 1), ComboBox::GLYPH);
-    let mut terminal = Terminal::new(TestBackend::new(12, 1)).expect("terminal");
+// The fixed renderer needs each visible control and viewport option together.
+#[allow(clippy::too_many_arguments)]
+fn combobox_golden_buffer(
+    form: &mut Form<u8>,
+    value: &str,
+    options: &[Line<'_>],
+    selected: usize,
+    expanded: bool,
+    width: u16,
+    height: u16,
+    focus: u8,
+    with_button: bool,
+) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
         .draw(|frame| {
-            let mut form = Form::new();
             form.begin_frame();
+            let field_y = if height <= 1 { 0 } else { 1 };
             ComboBox::render(
                 frame,
                 frame.area(),
-                Rect::new(0, 0, 6, 1),
-                "long value",
-                &[Line::raw("one"), Line::raw("two")],
-                0,
-                false,
+                Rect::new(0, field_y, 12, 1),
+                value,
+                options,
+                selected,
+                expanded,
                 true,
                 " choices ",
                 PopupSide::Below,
-                &mut form,
+                form,
                 1,
             );
-            form.end_frame(1);
+            if with_button {
+                Button::render(frame, Rect::new(14, 1, 14, 1), "Continue", true, form, 2);
+            }
+            form.end_frame(focus);
         })
         .expect("draw combobox");
-    let rendered = (0..6)
-        .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
-        .collect::<String>();
-    assert!(rendered.contains(ComboBox::GLYPH), "{rendered}");
+    terminal.backend().buffer().clone()
 }
 
-#[test]
-fn rendered_combobox_popup_rows_commit_with_a_mouse_click() {
-    let mut terminal = Terminal::new(TestBackend::new(20, 10)).expect("terminal");
-    let mut form = Form::new();
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            ComboBox::render(
-                frame,
-                frame.area(),
-                Rect::new(0, 1, 10, 1),
-                "one",
-                &[Line::raw("one"), Line::raw("two")],
-                0,
-                true,
-                true,
-                " choices ",
-                PopupSide::Below,
-                &mut form,
-                1,
-            );
-            form.end_frame(1);
-        })
-        .expect("draw popup");
-    assert_eq!(
-        click(&mut form, 1, 4),
-        Some(Interaction::ComboBoxCommit(1, 1))
-    );
-}
+fn append_component_golden_state(
+    output: &mut String,
+    label: &str,
+    width: u16,
+    height: u16,
+    buffer: &ratatui::buffer::Buffer,
+    details: &[String],
+) {
+    use std::fmt::Write as _;
 
-/// Renders a focused path field at row 1 of a 40x14 screen and returns the
-/// whole buffer as text.
-fn path_field_screen(input: &crate::path_input::PathInput) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(40, 14)).expect("terminal");
-    let mut form = Form::new();
-    // The popup only follows focus, which a form settles at the end of a pass.
-    form.declare(1, input.control_kind());
-    form.end_frame(1);
-    terminal
-        .draw(|frame| {
-            form.begin_frame();
-            crate::components::PathField::render(
-                frame,
-                Rect::new(0, 1, 12, 1),
-                input,
-                &mut form,
-                1,
-            );
-            form.end_frame(1);
-        })
-        .expect("draw path field");
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
-}
-
-#[test]
-fn path_field_popup_shows_candidates_a_wait_or_nothing() {
-    let mut input = crate::path_input::PathInput::from("~/p");
-    assert!(!path_field_screen(&input).contains("Completing"));
-
-    input.request_completion();
-    assert!(path_field_screen(&input).contains("Completing"));
-
-    assert!(input.apply_completion(
-        "~/p",
-        mj_core::path_completion::PathCompletion {
-            candidates: vec!["~/projects/".into(), "~/provision/".into()],
-            insert: None,
-            truncated: false,
-        },
-    ));
-    let text = path_field_screen(&input);
-    assert!(text.contains("matches"), "{text}");
-    assert!(!text.contains("Enter accept"), "{text}");
-    assert!(text.contains("~/projects/"), "{text}");
-    assert!(text.contains("~/provision/"), "{text}");
-    assert!(!text.contains("Completing"), "{text}");
-}
-
-#[test]
-fn idle_buttons_are_neutral_but_focus_and_primary_actions_stay_distinct() {
-    for palette in theme::UiTheme::ALL {
-        theme::with_theme(palette, || {
-            let mut form = Form::new();
-            for id in 0..3 {
-                form.declare(id, ControlKind::Button);
-            }
-            form.set_default_action(1);
-            form.end_frame(0);
-            let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
-            terminal
-                .draw(|frame| {
-                    form.begin_frame();
-                    for (id, label) in [(0, "Focused"), (1, "Primary"), (2, "Ordinary")] {
-                        Button::render(frame, Rect::new(0, id, 20, 1), label, true, &mut form, id);
-                    }
-                    form.end_frame(0);
-                })
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let idle = &buffer[(8, 2)];
-            let primary = &buffer[(8, 1)];
-            let focus = &buffer[(8, 0)];
-            assert_eq!(idle.fg, theme::palette().text);
-            assert!(!idle.modifier.contains(Modifier::BOLD));
-            assert!(focus.modifier.contains(Modifier::BOLD));
-            assert!(primary.modifier.contains(Modifier::BOLD));
-            if theme::is_mono() {
-                assert!(idle.modifier.contains(Modifier::REVERSED));
-                assert!(!primary.modifier.contains(Modifier::REVERSED));
-            } else {
-                assert_eq!(idle.bg, theme::palette().selection);
-                assert_eq!(primary.fg, theme::palette().accent);
-                assert_eq!(focus.bg, theme::palette().accent);
-            }
-        });
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+    output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+    output.push('\n');
+    for detail in details {
+        writeln!(output, "{detail}").expect("write state detail");
     }
 }
 
-/// Draws a combobox popup of `rows` options with `selected` highlighted and
-/// returns the symbols in the popup's rightmost inner column, one per row.
-fn popup_track_column(selected: usize, rows: usize) -> Vec<String> {
-    let options = (0..rows)
-        .map(|n| Line::raw(format!("model-{n:02}")))
-        .collect::<Vec<_>>();
-    let mut terminal = Terminal::new(TestBackend::new(30, 14)).expect("terminal");
-    let mut outer = Rect::default();
-    terminal
-        .draw(|frame| {
-            let mut form = Form::new();
-            form.begin_frame();
-            let popup = ComboBox::render(
-                frame,
-                frame.area(),
-                Rect::new(0, 0, 12, 1),
-                "model",
-                &options,
-                selected,
-                true,
-                true,
-                " choices ",
-                PopupSide::Below,
-                &mut form,
-                1,
-            );
-            outer = popup.expect("popup").0;
-            form.end_frame(1);
-        })
-        .expect("draw popup");
-    let x = outer.right() - 2;
-    (outer.y + 1..outer.bottom() - 1)
-        .map(|y| terminal.backend().buffer()[(x, y)].symbol().to_owned())
-        .collect()
-}
-
-fn thumb_start(column: &[String], thumb: &str) -> usize {
-    column.iter().position(|s| s == thumb).expect("thumb drawn")
-}
-
 #[test]
-fn combobox_popup_draws_a_scrollbar_that_follows_the_selection() {
-    let glyphs = crate::theme::glyphs();
-    let top = popup_track_column(0, 20);
-    let middle = popup_track_column(10, 20);
-    let bottom = popup_track_column(19, 20);
-    for column in [&top, &middle, &bottom] {
-        assert_eq!(column.len(), 8);
-        assert!(
-            column.iter().any(|s| s == glyphs.scroll_track),
-            "{column:?}"
-        );
-    }
-    let (t, m, b) = (
-        thumb_start(&top, glyphs.scroll_thumb),
-        thumb_start(&middle, glyphs.scroll_thumb),
-        thumb_start(&bottom, glyphs.scroll_thumb),
+fn golden_combobox_popup() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+
+    let mut output = String::new();
+    let options = [Line::raw("one"), Line::raw("two"), Line::raw("three")];
+
+    let mut form = Form::new();
+    let mut state = ComboBoxState::default();
+    let mut committed = 0;
+    let buffer = combobox_golden_buffer(
+        &mut form, "one", &options, committed, false, 20, 10, 1, true,
     );
-    assert_eq!(t, 0);
-    assert!(t < m && m < b, "{t} {m} {b}");
-    assert_eq!(bottom.last().map(String::as_str), Some(glyphs.scroll_thumb));
-}
+    let opened = form.handle(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    state.open(1, committed);
+    append_component_golden_state(
+        &mut output,
+        "collapsed field opens",
+        20,
+        10,
+        &buffer,
+        &[format!("action: {:?}", opened.action)],
+    );
+    let buffer = combobox_golden_buffer(
+        &mut form,
+        "one",
+        &options,
+        state.selection(1, committed),
+        state.is_open(1),
+        20,
+        10,
+        1,
+        true,
+    );
+    append_component_golden_state(&mut output, "popup opened", 20, 10, &buffer, &[]);
+    let preview = form.handle(&Event::Key(KeyEvent::new(
+        KeyCode::Down,
+        KeyModifiers::NONE,
+    )));
+    let routed_preview = state.route(preview.action);
+    let selected = state.selection(1, committed);
+    let buffer =
+        combobox_golden_buffer(&mut form, "one", &options, selected, true, 20, 10, 1, true);
+    append_component_golden_state(
+        &mut output,
+        "keyboard preview leaves committed value",
+        20,
+        10,
+        &buffer,
+        &[
+            format!("routed preview: {routed_preview:?}"),
+            format!("committed selection: {committed}"),
+            format!("preview selection: {selected}"),
+        ],
+    );
+    let commit = form.handle(&Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    let routed_commit = state.route(commit.action);
+    if let Some(Interaction::ComboBoxCommit(_, selection)) = routed_commit.as_ref() {
+        committed = *selection;
+    }
+    let buffer = combobox_golden_buffer(
+        &mut form, "two", &options, committed, false, 20, 10, 1, true,
+    );
+    append_component_golden_state(
+        &mut output,
+        "tab commits highlighted option",
+        20,
+        10,
+        &buffer,
+        &[
+            format!("routed action: {routed_commit:?}"),
+            format!("committed selection: {committed}"),
+        ],
+    );
+    form.focus(2);
+    let button = combobox_golden_buffer(
+        &mut form, "two", &options, committed, false, 30, 10, 2, true,
+    );
+    let action = form.handle(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let routed = state.route(action.action);
+    append_component_golden_state(
+        &mut output,
+        "unrelated button action passes through",
+        30,
+        10,
+        &button,
+        &[format!("routed action: {routed:?}")],
+    );
 
-#[test]
-fn combobox_popup_scrollbar_is_ascii_under_the_ascii_glyph_set() {
-    crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
-        let top = popup_track_column(0, 20);
-        let bottom = popup_track_column(19, 20);
-        for column in [&top, &bottom] {
-            assert!(column.iter().any(|s| s == "|"), "{column:?}");
-            assert!(column.iter().any(|s| s == "#"), "{column:?}");
-            assert!(column.iter().all(|s| s.is_ascii()), "{column:?}");
-        }
-        assert!(thumb_start(&top, "#") < thumb_start(&bottom, "#"));
+    let mut tiny_form = Form::new();
+    let tiny = combobox_golden_buffer(
+        &mut tiny_form,
+        "long value",
+        &options,
+        0,
+        false,
+        6,
+        1,
+        1,
+        false,
+    );
+    append_component_golden_state(
+        &mut output,
+        "collapsed glyph at minimum width",
+        6,
+        1,
+        &tiny,
+        &[],
+    );
+
+    let mut form = Form::new();
+    let opened = form.handle(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let _ = opened;
+    let popup = combobox_golden_buffer(&mut form, "one", &options, 0, true, 20, 10, 1, false);
+    let selected = click(&mut form, 1, 4);
+    append_component_golden_state(
+        &mut output,
+        "mouse click commits popup row",
+        20,
+        10,
+        &popup,
+        &[format!("action: {selected:?}")],
+    );
+
+    let mut form = Form::new();
+    let buffer = combobox_golden_buffer(&mut form, "model", &options, 0, true, 20, 10, 1, false);
+    let event = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 1,
+        row: 3,
+        modifiers: KeyModifiers::NONE,
     });
-}
-
-#[test]
-fn combobox_popup_without_overflow_draws_no_scrollbar() {
-    let glyphs = crate::theme::glyphs();
-    let column = popup_track_column(2, 5);
-    assert!(
-        column
-            .iter()
-            .all(|s| s != glyphs.scroll_track && s != glyphs.scroll_thumb),
-        "{column:?}"
+    let selected = form.handle(&event);
+    append_component_golden_state(
+        &mut output,
+        "popup scroll selects an option",
+        20,
+        10,
+        &buffer,
+        &[format!("action: {:?}", selected.action)],
     );
-}
+    let dismissed = form.handle(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    let dismissed_buffer =
+        combobox_golden_buffer(&mut form, "model", &options, 1, false, 20, 10, 1, false);
+    append_component_golden_state(
+        &mut output,
+        "escape dismisses expanded popup",
+        20,
+        10,
+        &dismissed_buffer,
+        &[format!("action: {:?}", dismissed.action)],
+    );
 
-/// The popup's inner rows as text, top to bottom.
-fn popup_rows_text(selected: usize, rows: usize) -> Vec<String> {
-    let options = (0..rows)
-        .map(|n| Line::raw(format!("model-{n:02}")))
+    let mut form = Form::new();
+    let _ = combobox_golden_buffer(&mut form, "one", &options, 0, true, 20, 10, 1, false);
+    let dismissed = click(&mut form, 1, 1);
+    let collapsed = combobox_golden_buffer(&mut form, "one", &options, 0, false, 20, 10, 1, false);
+    append_component_golden_state(
+        &mut output,
+        "outside click dismisses expanded popup",
+        20,
+        10,
+        &collapsed,
+        &[format!("action: {dismissed:?}")],
+    );
+
+    let large_options = (0..30)
+        .map(|index| Line::raw(format!("model-{index:02}")))
         .collect::<Vec<_>>();
-    let mut terminal = Terminal::new(TestBackend::new(30, 14)).expect("terminal");
-    let mut outer = Rect::default();
-    terminal
-        .draw(|frame| {
-            let mut form = Form::new();
-            form.begin_frame();
-            outer = ComboBox::render(
-                frame,
-                frame.area(),
-                Rect::new(0, 0, 12, 1),
-                "model",
-                &options,
-                selected,
-                true,
-                true,
-                " choices ",
-                PopupSide::Below,
-                &mut form,
-                1,
-            )
-            .expect("popup")
-            .0;
-            form.end_frame(1);
-        })
-        .expect("draw popup");
-    (outer.y + 1..outer.bottom() - 1)
-        .map(|y| {
-            (outer.x + 1..outer.right() - 1)
-                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect()
-}
-
-#[test]
-fn combobox_popup_centres_the_selection_and_pins_the_list_ends() {
-    // Eight rows are visible: the selection sits on row 4 while there is
-    // room above and below, then the list pins to its first or last item.
-    for selected in 4..=25 {
-        let rows = popup_rows_text(selected, 30);
-        assert!(
-            rows[4].contains(&format!("model-{selected:02}")),
-            "{rows:?}"
+    for selected in 0..30 {
+        let mut form = Form::new();
+        let buffer = combobox_golden_buffer(
+            &mut form,
+            "model",
+            &large_options,
+            selected,
+            true,
+            30,
+            14,
+            1,
+            false,
+        );
+        append_component_golden_state(
+            &mut output,
+            &format!("selection centered or list pinned ({selected})"),
+            30,
+            14,
+            &buffer,
+            &[],
         );
     }
-    for selected in 0..4 {
-        let rows = popup_rows_text(selected, 30);
-        assert!(
-            rows[selected].contains(&format!("model-{selected:02}")),
-            "{rows:?}"
-        );
-        assert!(rows[0].contains("model-00"), "{rows:?}");
-    }
-    for selected in 26..30 {
-        let rows = popup_rows_text(selected, 30);
-        assert!(rows[7].contains("model-29"), "{rows:?}");
-        assert!(
-            rows[selected - 22].contains(&format!("model-{selected:02}")),
-            "{rows:?}"
-        );
-    }
-}
-
-#[test]
-fn combobox_popup_that_fits_never_scrolls() {
     for selected in 0..6 {
-        let rows = popup_rows_text(selected, 6);
-        assert!(rows[0].contains("model-00"), "{rows:?}");
+        let options = (0..6)
+            .map(|index| Line::raw(format!("model-{index:02}")))
+            .collect::<Vec<_>>();
+        let mut form = Form::new();
+        let buffer = combobox_golden_buffer(
+            &mut form, "model", &options, selected, true, 30, 14, 1, false,
+        );
+        append_component_golden_state(
+            &mut output,
+            &format!("fitting list selection ({selected})"),
+            30,
+            14,
+            &buffer,
+            &[],
+        );
     }
+
+    crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        for selected in [0, 19] {
+            let options = (0..20)
+                .map(|index| Line::raw(format!("model-{index:02}")))
+                .collect::<Vec<_>>();
+            let mut form = Form::new();
+            let buffer = combobox_golden_buffer(
+                &mut form, "model", &options, selected, true, 30, 14, 1, false,
+            );
+            append_component_golden_state(
+                &mut output,
+                &format!("ASCII scrollbar thumb ({selected})"),
+                30,
+                14,
+                &buffer,
+                &[],
+            );
+        }
+    });
+
+    let options = (0..5)
+        .map(|index| Line::raw(format!("model-{index:02}")))
+        .collect::<Vec<_>>();
+    let mut form = Form::new();
+    let buffer = combobox_golden_buffer(&mut form, "model", &options, 2, true, 30, 14, 1, false);
+    append_component_golden_state(
+        &mut output,
+        "no scrollbar without overflow",
+        30,
+        14,
+        &buffer,
+        &[],
+    );
+
+    crate::theme::with_symbols(crate::theme::SymbolSet::Unicode, || {
+        for selected in [0, 10, 19] {
+            let options = (0..20)
+                .map(|index| Line::raw(format!("model-{index:02}")))
+                .collect::<Vec<_>>();
+            let mut form = Form::new();
+            let buffer = combobox_golden_buffer(
+                &mut form, "model", &options, selected, true, 30, 14, 1, false,
+            );
+            append_component_golden_state(
+                &mut output,
+                &format!("Unicode scrollbar thumb ({selected})"),
+                30,
+                14,
+                &buffer,
+                &[format!("selected option: model-{selected:02}")],
+            );
+        }
+    });
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "combobox-popup", &output);
 }

@@ -248,12 +248,15 @@ fn build_cache_checks(
             match host.status {
                 crate::controller::DoctorHostMbxStatus::Unsupported(reason) =>
                     DoctorCheck::unsupported(id, title, reason),
-                crate::controller::DoctorHostMbxStatus::Absent => DoctorCheck::ready(
+                crate::controller::DoctorHostMbxStatus::Absent => DoctorCheck::warning(
                     id,
                     title,
                     format!(
-                        "No native mbx is installed; targets {targets} can use Mjolnir's mbx {}.",
-                        crate::controller::MBX_VERSION
+                        "No native mbx is installed; targets {targets} run without the shared build cache."
+                    ),
+                    format!(
+                        "Install mbx on {} from Settings › Setup › Machines to enable the shared build cache.",
+                        host.host
                     ),
                 ),
                 crate::controller::DoctorHostMbxStatus::Compatible(version) => DoctorCheck::ready(
@@ -268,11 +271,11 @@ fn build_cache_checks(
                     id,
                     title,
                     format!(
-                        "Host mbx {version} is older than Mjolnir's mbx {}; sessions on targets {targets} run without the shared build cache.",
+                        "Host mbx {version} is older than the minimum supported version {}; sessions on targets {targets} run without the shared build cache.",
                         crate::controller::MBX_VERSION
                     ),
                     format!(
-                        "Upgrade mbx on {} to {} or newer, then rerun `mj doctor`.",
+                        "Upgrade mbx on {} to {} or newer from Settings › Setup › Machines, then rerun `mj doctor`.",
                         host.host,
                         crate::controller::MBX_VERSION
                     ),
@@ -282,7 +285,7 @@ fn build_cache_checks(
                     title,
                     format!("Could not check host mbx for targets {targets}: {error}"),
                     format!(
-                        "Check access to {} and run `mbx --version` there, then rerun `mj doctor`.",
+                        "Check access to {} and install or upgrade mbx from Settings › Setup › Machines, then rerun `mj doctor`.",
                         host.host
                     ),
                 ),

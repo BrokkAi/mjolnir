@@ -78,6 +78,9 @@ pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
 pub(crate) use backend::{LocalEngineReadiness, local_engine_readiness};
+pub use mbx::install::{
+    MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
+};
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
 pub(crate) use mbx::{DoctorHostMbxStatus, MBX_VERSION, doctor_host_mbx};

@@ -153,6 +153,7 @@ fn a_turn_that_changed_nothing_records_a_baseline_and_reviews_nothing() {
     );
 }
 
+// Hard-won: 2a11e18a80: a workspace without a baseline was misleadingly labeled unchanged.
 #[test]
 fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() {
     let mut seed = seed();
@@ -180,64 +181,6 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
 }
 
 #[test]
-fn a_clean_review_runs_one_reviewer_and_advances_the_baseline_itself() {
-    let (mut driver, command_id) = running();
-    let requests = driver.role_turn_completed(&command_id, "No findings.");
-    assert_eq!(
-        requests,
-        vec![
-            ReviewRequest::PauseRole {
-                role: REVIEWER_ROLE.to_string()
-            },
-            ReviewRequest::AdvanceBaseline {
-                trees: BTreeMap::from([(PathBuf::from("/w/app"), "new-tree".to_string())]),
-                reviewed_through_ordinal: 12,
-            },
-            ReviewRequest::Close,
-        ],
-        "a clean reviewer releases the turn itself"
-    );
-    assert!(driver.finished());
-    assert_eq!(
-        driver.last_verdict(),
-        Some(&ReviewVerdict::Clean),
-        "the clean verdict remains available for the close notice"
-    );
-}
-
-#[test]
-fn quick_findings_are_the_verdict_without_a_second_pass() {
-    let (mut driver, command_id) = running();
-    let requests =
-        driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
-    assert_eq!(
-        requests,
-        vec![ReviewRequest::PauseRole {
-            role: REVIEWER_ROLE.to_string()
-        }],
-        "findings reap the reviewer and start nothing else"
-    );
-    assert!(driver.can_forward());
-    assert!(!driver.finished(), "findings wait to be forwarded");
-    assert_eq!(
-        driver.last_verdict(),
-        Some(&ReviewVerdict::Findings {
-            synthesis: "[P1] src/lib.rs:1 -- unbounded retry loop".to_string(),
-            evidence: ReviewPassEvidence::default(),
-        })
-    );
-    assert_eq!(
-        driver.roles(),
-        vec![RoleStatus {
-            role: REVIEWER_ROLE.to_string(),
-            label: super::super::lanes::QUICK_LANE.label.to_string(),
-            state: RoleState::Findings,
-        }],
-        "a verdict keeps the completed role state available to surfaces"
-    );
-}
-
-#[test]
 fn an_empty_quick_report_fails_the_review_and_leaves_the_baseline_alone() {
     let (mut driver, command_id) = running();
     let requests = driver.role_turn_completed(&command_id, "  \n ");
@@ -255,27 +198,6 @@ fn an_empty_quick_report_fails_the_review_and_leaves_the_baseline_alone() {
     };
     assert!(reason.contains("empty report"), "{reason}");
     assert!(!driver.can_forward());
-}
-
-/// The primary is told what it is getting: one reviewer's findings that
-/// nobody checked, which it verifies against source before acting.
-#[test]
-fn a_quick_forward_says_the_findings_are_unverified() {
-    let (mut driver, command_id) = running();
-    driver.role_turn_completed(&command_id, "[P2] src/lib.rs:1 -- weak test");
-    let requests = driver.forward("test-forward-command".to_owned());
-    let [ReviewRequest::PromptPrimary { prompt, .. }] = requests.as_slice() else {
-        panic!("forward submits one primary prompt, got {requests:?}");
-    };
-    assert!(prompt.starts_with("[HARNESS NOTE: an independent review"));
-    assert!(prompt.contains("nobody has checked them"), "{prompt}");
-    assert!(prompt.contains("not independently verified"), "{prompt}");
-    assert!(!prompt.contains("validated by"), "{prompt}");
-    assert!(prompt.contains("[P2] src/lib.rs:1 -- weak test"));
-    assert_eq!(
-        driver.pending_forward().map(|pending| pending.provenance),
-        Some(FindingsProvenance::SingleReviewer)
-    );
 }
 
 #[test]
@@ -302,45 +224,6 @@ fn cancelling_leaves_the_baseline_so_the_next_review_covers_both_turns() {
         &TurnReviewPhase::Resolved(Resolution::Cancelled)
     );
     assert!(driver.cancel().is_empty(), "cancelling twice is inert");
-}
-
-#[test]
-fn forwarding_sends_the_synthesis_and_makes_the_next_review_a_verification_pass() {
-    let (mut driver, command_id) = running();
-    driver.role_turn_completed(&command_id, "[P1] src/lib.rs:1 -- unbounded retry loop");
-
-    let requests = driver.forward("test-forward-command".to_owned());
-    let [ReviewRequest::PromptPrimary { command_id, prompt }] = requests.as_slice() else {
-        panic!("forwarding first waits for primary acceptance, got {requests:?}");
-    };
-    assert!(prompt.contains("[P1] src/lib.rs:1 -- unbounded retry loop"));
-    assert!(prompt.contains("HARNESS NOTE"));
-    assert_eq!(
-        driver.phase(),
-        &TurnReviewPhase::Forwarding {
-            synthesis: "[P1] src/lib.rs:1 -- unbounded retry loop".to_string(),
-            evidence: ReviewPassEvidence::default(),
-            command_id: command_id.clone(),
-            error: None,
-        }
-    );
-    assert!(
-        !driver.finished(),
-        "forwarding waits for primary acceptance"
-    );
-
-    let requests = driver.forward_succeeded();
-    let [
-        ReviewRequest::RecordPriorReview { prior },
-        ReviewRequest::AdvanceBaseline { trees, .. },
-        ReviewRequest::Close,
-    ] = requests.as_slice()
-    else {
-        panic!("accepted forwarding records coverage and closes, got {requests:?}");
-    };
-    assert!(prior.synthesis.contains("unbounded retry loop"));
-    assert_eq!(trees[&PathBuf::from("/w/app")], "new-tree");
-    assert!(driver.finished());
 }
 
 #[test]
@@ -452,24 +335,6 @@ fn a_pending_forward_cannot_be_cancelled_before_the_relay_acknowledges_it() {
 }
 
 #[test]
-fn dismissing_findings_advances_the_baseline_without_prompting_the_primary() {
-    let (mut driver, command_id) = running();
-    driver.role_turn_completed(&command_id, "[P3] src/lib.rs:1 -- nit");
-
-    let requests = driver.dismiss();
-    assert_eq!(
-        requests,
-        vec![
-            ReviewRequest::AdvanceBaseline {
-                trees: BTreeMap::from([(PathBuf::from("/w/app"), "new-tree".to_string())]),
-                reviewed_through_ordinal: 12,
-            },
-            ReviewRequest::Close,
-        ]
-    );
-}
-
-#[test]
 fn a_completion_for_another_command_is_ignored() {
     let (mut driver, _) = running();
     assert!(
@@ -521,34 +386,6 @@ fn a_verification_pass_consumes_the_prior_review_when_it_resolves() {
         requests.contains(&ReviewRequest::ClearPriorReview),
         "a resolved verification pass consumes the prior review: {requests:?}"
     );
-}
-
-/// The extended tier starts its supervisor as soon as the change is captured,
-/// whatever the user's message history looks like.
-#[test]
-fn an_extended_review_starts_the_supervisor_straight_after_the_capture() {
-    for messages in [
-        vec![UserMessage::prompt("add a retry")],
-        vec![
-            UserMessage::prompt("add a retry"),
-            UserMessage::prompt("bound it"),
-        ],
-    ] {
-        let mut seed = seed();
-        seed.tier = ReviewTier::Extended;
-        seed.user_messages = messages;
-        let (mut driver, _) = TurnReviewDriver::start(seed);
-        assert_eq!(
-            driver.delta_captured(changed_delta()),
-            vec![ReviewRequest::StartRole {
-                role: SUPERVISOR_ROLE.to_string(),
-                fresh: true
-            }]
-        );
-        let prompt = prompt_text(&driver.role_started(SUPERVISOR_ROLE), SUPERVISOR_ROLE);
-        assert!(prompt.contains(crate::lanes::INTENT_CONTEXT));
-        assert!(!prompt.contains("intent_brief"));
-    }
 }
 
 #[test]

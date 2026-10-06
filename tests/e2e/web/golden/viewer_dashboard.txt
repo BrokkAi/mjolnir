@@ -1,0 +1,1663 @@
+=== dashboard responsive 390 (390x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":370,"first":{"x":10,"y":183,"width":370,"height":99},"second":{"x":10,"y":294},"documentWidth":390}
+=== dashboard responsive 900 (900x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":760,"first":{"x":70,"y":196,"width":760,"height":99},"second":{"x":70,"y":307},"documentWidth":900}
+=== dashboard responsive 1024 (1024x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":960,"first":{"x":32,"y":196,"width":474,"height":99},"second":{"x":518,"y":196},"documentWidth":1024}
+=== dashboard desktop actions open (1440x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Changed files…
+Rename
+Copy session ID
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":1376,"first":{"x":32,"y":196,"width":451,"height":99},"second":{"x":495,"y":196},"documentWidth":1440}
+=== dashboard responsive 1920 (1920x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":1600,"first":{"x":160,"y":196,"width":391,"height":99},"second":{"x":563,"y":196},"documentWidth":1920}
+=== dashboard responsive 2560 (2560x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":1600,"first":{"x":480,"y":196,"width":391,"height":99},"second":{"x":883,"y":196},"documentWidth":2560}
+=== dashboard responsive 390 (390x900) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Session 0: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 1: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 2: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 3: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 4: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+Session 5: investigate the desktop layout and validate responsive behavior
+⋯
+Mjolnir
+·
+/work/project
+·
+codex
+
+Idle
+
+other-project
+⋯
+Other project
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"appWidth":370,"first":{"x":10,"y":183,"width":370,"height":99},"second":{"x":10,"y":294},"documentWidth":390}
+=== compact cards with attention and activity clocks (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+A long session title that occupies one ellipsized line on a narrow phone screen
+!
+?
+2
+⋯
+Beta
+·
+/work/attention
+·
+codex
+
+Turn 1m05s · Step 1m05s
+
+beta-step
+⋯
+Beta
+·
+/work/project
+·
+codex
+
+Step 1h00m
+
+alpha-background
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Indexing 1m05s
+
+alpha-idle
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle since 14:58
+
+alpha-yesterday
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle since yesterday 14:58
+
+lifecycle
+⋯
+Lifecycle
+·
+/work/project
+·
+codex
+
+Starting target
+
+unknown-idle
+⋯
+Unknown
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"A long session title that occupies one ellipsized line on a narrow phone screen","attention":[{"text":"!","label":"Error"},{"text":"?","label":"Input needed"},{"text":"2","label":"2 queued prompts"}],"meta":["Beta","/work/attention","codex"],"activity":"Turn 1m05s · Step 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"beta-step","attention":[],"meta":["Beta","/work/project","codex"],"activity":"Step 1h00m","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-background","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Indexing 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-idle","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-yesterday","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since yesterday 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"lifecycle","attention":[],"meta":["Lifecycle","/work/project","codex"],"activity":"Starting target","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"unknown-idle","attention":[],"meta":["Unknown","/work/project","codex"],"activity":"Idle","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}}]}
+=== flat live dashboard sorted by latest message (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+beta-activity
+⋯
+Beta
+·
+/work/project
+·
+codex
+
+Idle
+
+gamma-message
+⋯
+Gamma
+·
+/work/project
+·
+codex
+
+Idle
+
+delta-tie
+⋯
+Delta
+·
+/work/project
+·
+codex
+
+Idle
+
+echo-tie
+⋯
+Echo
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-created
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"cards":[{"title":"beta-activity","meta":"Beta\n·\n/work/project\n·\ncodex"},{"title":"gamma-message","meta":"Gamma\n·\n/work/project\n·\ncodex"},{"title":"delta-tie","meta":"Delta\n·\n/work/project\n·\ncodex"},{"title":"echo-tie","meta":"Echo\n·\n/work/project\n·\ncodex"},{"title":"alpha-created","meta":"Alpha\n·\n/work/project\n·\ncodex"}]}
+=== target capacity omits a missing default candidate (390x844) ===
+Browser tests
+Other workspace
+Targets
+Local workstation
+
+container, configured-remote
+
+CPU
+32%
+Memory
+50% of 16 GiB
+Cores
+8
+Disk
+512 GiB
+Refresh
+layout: {"listedTargets":"container, configured-remote"}
+=== initial activity order (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+alpha-first
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-second
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+beta
+⋯
+Beta
+·
+/work/project
+·
+codex
+
+Idle
+layout: ["alpha-first","alpha-second","beta"]
+=== later sessions inserted in order (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+alpha-late
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-first
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+gamma-late
+⋯
+Gamma
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-second
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+beta
+⋯
+Beta
+·
+/work/project
+·
+codex
+
+Idle
+layout: ["alpha-late","alpha-first","gamma-late","alpha-second","beta"]
+=== reappearing session re-sorted while focus stays put (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+beta
+⋯
+Beta
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-late
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-first
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+
+gamma-late
+⋯
+Gamma
+·
+/work/project
+·
+codex
+
+Idle
+
+alpha-second
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Idle
+layout: {"titles":["beta","alpha-late","alpha-first","gamma-late","alpha-second"],"focused":"gamma-late"}
+=== reload uses latest activity order (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+second
+⋯
+Second
+·
+/work/project
+·
+codex
+
+Idle
+
+first
+⋯
+First
+·
+/work/project
+·
+codex
+
+Idle
+layout: ["second","first"]
+=== desktop conversation with fixed header and composer (1440x900) ===
+desktop
+Live
+Earlier messages
+●
+Agent
+3:00:00 PM
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+Queued prompts (20)
+Queued prompts
+1. queued
+Remove
+2. queued
+Remove
+3. queued
+Remove
+4. queued
+Remove
+5. queued
+Remove
+6. queued
+Remove
+7. queued
+Remove
+8. queued
+Remove
+9. queued
+Remove
+10. queued
+Remove
+11. queued
+Remove
+12. queued
+Remove
+13. queued
+Remove
+14. queued
+Remove
+15. queued
+Remove
+16. queued
+Remove
+17. queued
+Remove
+18. queued
+Remove
+19. queued
+Remove
+20. queued
+Edit
+Remove
+Keep this draft while resizing the window.
+Queue
+layout: {"header":{"x":32,"y":49,"width":1376,"height":57},"composer":{"x":120,"y":729,"width":1200,"height":155},"conversation":{"x":120,"y":106,"width":1200,"height":778},"scroll":{"top":2996,"height":318,"scrollHeight":3314},"fixedWhileScrolling":{"header":true,"composer":true},"draft":"Keep this draft while resizing the window.","documentHeight":900}
+=== desktop conversation with fixed header and composer (1920x1080) ===
+desktop
+Live
+Earlier messages
+●
+Agent
+3:00:00 PM
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+Queued prompts (20)
+Queued prompts
+1. queued
+Remove
+2. queued
+Remove
+3. queued
+Remove
+4. queued
+Remove
+5. queued
+Remove
+6. queued
+Remove
+7. queued
+Remove
+8. queued
+Remove
+9. queued
+Remove
+10. queued
+Remove
+11. queued
+Remove
+12. queued
+Remove
+13. queued
+Remove
+14. queued
+Remove
+15. queued
+Remove
+16. queued
+Remove
+17. queued
+Remove
+18. queued
+Remove
+19. queued
+Remove
+20. queued
+Edit
+Remove
+Keep this draft while resizing the window.
+Queue
+layout: {"header":{"x":192,"y":49,"width":1536,"height":57},"composer":{"x":360,"y":909,"width":1200,"height":155},"conversation":{"x":360,"y":106,"width":1200,"height":958},"scroll":{"top":2861,"height":453,"scrollHeight":3314},"fixedWhileScrolling":{"header":true,"composer":true},"draft":"Keep this draft while resizing the window.","documentHeight":1080}
+=== desktop conversation with fixed header and composer (1024x768) ===
+desktop
+Live
+Earlier messages
+●
+Agent
+3:00:00 PM
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+A long transcript paragraph to exercise scrolling.
+
+Queued prompts (20)
+Queued prompts
+1. queued
+Remove
+2. queued
+Remove
+3. queued
+Remove
+4. queued
+Remove
+5. queued
+Remove
+6. queued
+Remove
+7. queued
+Remove
+8. queued
+Remove
+9. queued
+Remove
+10. queued
+Remove
+11. queued
+Remove
+12. queued
+Remove
+13. queued
+Remove
+14. queued
+Remove
+15. queued
+Remove
+16. queued
+Remove
+17. queued
+Remove
+18. queued
+Remove
+19. queued
+Remove
+20. queued
+Edit
+Remove
+Keep this draft while resizing the window.
+Queue
+layout: {"header":{"x":32,"y":49,"width":960,"height":57},"composer":{"x":32,"y":597,"width":960,"height":155},"conversation":{"x":32,"y":106,"width":960,"height":646},"scroll":{"top":3095,"height":219,"scrollHeight":3314},"fixedWhileScrolling":{"header":true,"composer":true},"draft":"Keep this draft while resizing the window.","documentHeight":768}
+=== ordinary checkpoint keeps conversation and composer readable (390x844) ===
+checkpoint
+Live
+Earlier messages
+●
+Agent
+3:00:00 PM
+
+checkpoint conversation remains readable
+=== parent dashboard hides child sessions (390x844) ===
+Browser tests
+Other workspace
+New session
+Resume a session
+Parent session
+⋯
+Parent project
+·
+/work/project
+·
+codex
+
+Idle
+=== named subagent workspace lists child sessions (390x844) ===
+Parent session
+×
+New session
+Resume a session
+Grok helper
+⋯
+Parent project
+·
+/work/project
+·
+codex
+
+Idle
+
+Muse helper
+⋯
+Parent project
+·
+/work/project
+·
+codex
+
+Idle
+=== closing subagent workspace returns to parent conversation (390x844) ===
+Parent session
+Live
+Earlier messages
+Subagents · 0/2

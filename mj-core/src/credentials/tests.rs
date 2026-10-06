@@ -89,33 +89,6 @@ fn snapshot(fingerprint: &str, freshness: Option<i64>) -> CredentialSnapshot {
 }
 
 #[test]
-fn claude_freshness_reads_oauth_expiry_milliseconds() {
-    assert_eq!(
-        credential_freshness(HarnessKind::Claude, &claude_credentials(1_755_000_000_000)),
-        Some(1_755_000_000_000)
-    );
-}
-
-#[test]
-fn codex_freshness_converts_last_refresh_to_milliseconds() {
-    assert_eq!(
-        credential_freshness(
-            HarnessKind::Codex,
-            &codex_credentials("2026-08-05T02:51:00.864587231Z")
-        ),
-        Some(1_785_898_260_864)
-    );
-}
-
-#[test]
-fn kimi_freshness_converts_expiry_seconds_to_milliseconds() {
-    assert_eq!(
-        credential_freshness(HarnessKind::Kimi, &kimi_credentials(1_755_000_000)),
-        Some(1_755_000_000_000)
-    );
-}
-
-#[test]
 fn grok_freshness_reads_the_latest_rfc3339_grant_expiry() {
     assert_eq!(
         credential_freshness(
@@ -145,35 +118,7 @@ fn grok_freshness_reads_the_latest_rfc3339_grant_expiry() {
     );
 }
 
-#[test]
-fn every_harness_reports_freshness_from_its_own_credential_shape() {
-    let fixtures = [
-        (HarnessKind::Claude, claude_credentials(1_755_000_000_000)),
-        (
-            HarnessKind::Codex,
-            codex_credentials("2026-08-05T02:51:00.864587231Z"),
-        ),
-        (HarnessKind::Kimi, kimi_credentials(1_755_000_000)),
-        (
-            HarnessKind::Grok,
-            grok_credentials(&["2026-08-17T02:19:01.724226598Z"]),
-        ),
-    ];
-    for kind in HarnessKind::ALL
-        .into_iter()
-        .filter(|kind| *kind != HarnessKind::Muse)
-    {
-        let (_, bytes) = fixtures
-            .iter()
-            .find(|(fixture, _)| *fixture == kind)
-            .unwrap_or_else(|| panic!("{kind:?} needs a credential fixture"));
-        assert!(
-            credential_freshness(kind, bytes).is_some(),
-            "{kind:?} freshness"
-        );
-    }
-}
-
+// Hard-won: c94c68c0: single-use OAuth refresh tokens made concurrent container turns fail; this checks token-derived expiry used for proactive refresh
 #[test]
 fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
     let fixtures = [
@@ -181,46 +126,44 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             HarnessKind::Claude,
             claude_credentials(1_755_000_000_000),
             Some(1_755_000_000_000),
+            Some(1_755_000_000_000),
         ),
         (
             HarnessKind::Codex,
             codex_credentials("2026-08-05T02:51:00.864587231Z"),
+            Some(1_785_898_260_864),
             Some(CODEX_FIXTURE_EXPIRY_SECONDS * 1_000),
         ),
         (
             HarnessKind::Kimi,
             kimi_credentials(1_755_000_000),
             Some(1_755_000_000_000),
+            Some(1_755_000_000_000),
         ),
         (
             HarnessKind::Grok,
             grok_credentials(&["2026-08-17T02:19:01.724226598Z"]),
+            Some(1_786_933_141_724),
             None,
         ),
-        (HarnessKind::Muse, b"{}".to_vec(), None),
+        (HarnessKind::Muse, b"{}".to_vec(), None, None),
     ];
     for kind in HarnessKind::ALL {
-        let (_, bytes, expected) = fixtures
+        let (_, bytes, expected_freshness, expected_expiry) = fixtures
             .iter()
-            .find(|(fixture, _, _)| *fixture == kind)
+            .find(|(fixture, _, _, _)| *fixture == kind)
             .unwrap_or_else(|| panic!("{kind:?} needs a credential fixture"));
-        assert_eq!(credential_expiry(kind, bytes), *expected, "{kind:?} expiry");
+        assert_eq!(
+            credential_freshness(kind, bytes),
+            *expected_freshness,
+            "{kind:?} freshness"
+        );
+        assert_eq!(
+            credential_expiry(kind, bytes),
+            *expected_expiry,
+            "{kind:?} expiry"
+        );
     }
-}
-
-#[test]
-fn codex_expiry_comes_from_the_access_token_rather_than_the_refresh_time() {
-    // `last_refresh` orders two copies; only the token itself says when the
-    // grant runs out, and the two are not the same number.
-    let bytes = codex_credentials("2026-08-05T02:51:00.864587231Z");
-    assert_eq!(
-        credential_freshness(HarnessKind::Codex, &bytes),
-        Some(1_785_898_260_864)
-    );
-    assert_eq!(
-        credential_expiry(HarnessKind::Codex, &bytes),
-        Some(CODEX_FIXTURE_EXPIRY_SECONDS * 1_000)
-    );
 }
 
 #[test]
@@ -281,18 +224,7 @@ fn identical_or_absent_copies_need_no_sync() {
     );
 }
 
-#[test]
-fn a_missing_side_takes_the_other_side_copy() {
-    assert_eq!(
-        reconcile(&snapshot("a", Some(1)), &CredentialSnapshot::absent()),
-        SyncAction::Push
-    );
-    assert_eq!(
-        reconcile(&CredentialSnapshot::absent(), &snapshot("b", Some(1))),
-        SyncAction::Pull
-    );
-}
-
+// Hard-won: 4e5d6566: stale session copies caused live sessions to die after another copy consumed a single-use refresh token
 #[test]
 fn the_fresher_copy_wins_and_a_known_time_beats_an_unknown_one() {
     assert_eq!(
@@ -417,6 +349,7 @@ fn auth_failure_phrases_match_and_near_misses_do_not() {
 /// this error (reverify-14 cli/011, cli/013). Neither its sentence nor its
 /// `codexErrorInfo` counted as an auth failure, so no credential
 /// reconciliation ran and no `mj login` notice appeared.
+// Hard-won: 1fb50fe0: R14-1 Codex refresh refusals skipped credential reconciliation and produced a duplicate unreadable warning
 #[test]
 fn a_codex_refresh_failure_is_an_auth_failure() {
     const SENTENCE: &str =
@@ -625,39 +558,6 @@ fn a_typed_login_failure_record_asks_for_a_credential_sync() {
 }
 
 #[test]
-fn login_commands_match_each_harness_cli() {
-    let profile = |kind: HarnessKind| HarnessProfile {
-        enabled: true,
-        kind,
-        home: PathBuf::from("/home/user/.config"),
-        environment: Default::default(),
-        context_window_bytes: None,
-        subagents: Default::default(),
-        guardian_review_model: None,
-    };
-    let command = |kind: HarnessKind| login_command(&profile(kind)).expect("login command");
-    assert_eq!(
-        command(HarnessKind::Codex),
-        ("codex".to_owned(), vec!["login".to_owned()])
-    );
-    assert_eq!(
-        command(HarnessKind::Claude),
-        (
-            "claude".to_owned(),
-            vec!["auth".to_owned(), "login".to_owned()]
-        )
-    );
-    assert_eq!(
-        command(HarnessKind::Kimi),
-        ("kimi".to_owned(), vec!["login".to_owned()])
-    );
-    assert_eq!(
-        command(HarnessKind::Grok),
-        ("grok".to_owned(), vec!["login".to_owned()])
-    );
-}
-
-#[test]
 fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
     let home = tempfile::tempdir().expect("temporary home");
     std::fs::write(
@@ -828,6 +728,7 @@ fn github_token_install_and_remove_refuse_symlink_destinations() {
 /// children were spawned on it and died the same way. A sync that answers an
 /// auth failure with nothing fresher to push shows the profile's own login is
 /// the one refused, and it stays refused until the login file changes.
+// Hard-won: 1b077959: ten more children reused a profile after its login had already been refused
 #[test]
 fn a_refused_login_is_known_until_the_login_file_changes() {
     let home = tempfile::tempdir().unwrap();
@@ -952,6 +853,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
 /// #1132: Kimi's refusal of its stored OAuth token, as its journal states it:
 /// the turn's error message, and the agent's error line with the error name.
 /// A sub-agent child whose turn failed this way failed on its login.
+// Hard-won: 8d4f80ad: Kimi journalled an OAuth refusal but Mjolnir reported prompt_unanswered and suggested resending
 #[test]
 fn a_kimi_token_refusal_is_an_auth_failure() {
     const MESSAGE: &str = "Stored token for \"kimi-code\" was rejected; re-login required.";

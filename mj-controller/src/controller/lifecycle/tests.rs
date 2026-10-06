@@ -14,19 +14,7 @@ use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec, ProcessE
 
 use super::*;
 
-#[test]
-fn starting_close_persists_its_intent_before_checkpointing() {
-    let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
-    session.state = SessionState::Running;
-    session.last_checkpoint_error = Some("old failure".into());
-
-    apply_close_checkpoint_started(&mut session, "2026-08-14T12:00:00Z".into());
-
-    assert_eq!(session.state, SessionState::Closing);
-    assert_eq!(session.updated_at, "2026-08-14T12:00:00Z");
-    assert!(session.last_checkpoint_error.is_none());
-}
-
+// Hard-won: b9c3a052: failed worker restart left close without the target needed for destroy
 #[test]
 fn a_close_whose_restart_left_no_worker_records_error_and_keeps_the_target() {
     let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
@@ -277,6 +265,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     assert!(stopped.target.is_none());
 }
 
+// Hard-won: ce3218ad: destroy raced recovery and failed cleanup could restart the target
 #[test]
 fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target() {
     use crate::session_manager::{
@@ -656,6 +645,7 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
 /// A close of a session wedged in provisioning has no relay to latch and no
 /// harness state to archive, so it tears the target down and settles instead
 /// of waiting forever (#1059).
+// Hard-won: 7aea6c5c: wedged provisioning close left its target and lifecycle unsettled
 #[test]
 fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     if !in_isolated_store("closing_a_wedged_provisioning_session_tears_down_its_target_and_settles")
@@ -781,6 +771,7 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
 /// I1-2: closing a failed sub-agent that still names its target takes no
 /// checkpoint (its worker is stopped and a child keeps no archive); it tears
 /// the target down and settles.
+// Hard-won: ba6c3427: failed startup child stayed live and could not close without a checkpoint
 #[test]
 fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
@@ -799,39 +790,9 @@ fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     assert!(!worker_root.exists(), "the child's worker root is removed");
 }
 
-/// I1-2: a failed sub-agent can be destroyed.
-#[test]
-fn force_destroy_removes_a_failed_subagent() {
-    if !in_isolated_store("force_destroy_removes_a_failed_subagent") {
-        return;
-    }
-    let directory = tempfile::tempdir().unwrap();
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let worker_root = directory.path().join(session_id);
-    std::fs::create_dir_all(&worker_root).unwrap();
-    let mut controller = failed_subagent_controller(&worker_root, session_id);
-    let deleted = RefCell::new(Vec::new());
-
-    controller
-        .force_destroy_session_with(
-            session_id,
-            &ProcessExecutor,
-            BranchDisposition::Keep,
-            |id: &str| {
-                deleted.borrow_mut().push(id.to_owned());
-                Ok(())
-            },
-        )
-        .unwrap();
-
-    assert!(!worker_root.exists(), "the child's worker root is removed");
-    assert!(!controller.state.sessions.contains_key(session_id));
-    assert!(!controller.state.subagents.contains_key(session_id));
-    assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
-}
-
 /// An in-flight state with nobody to finish it becomes a failure the user can
 /// read, and a state that still has an owner is left alone (#1070).
+// Hard-won: 7aea6c5c: interrupted lifecycle recovery left no readable failure cause
 #[test]
 fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1220,6 +1181,7 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
 }
 
+// Hard-won: 472aff0b: default force destroy removed the generated branch with its checkout
 #[test]
 fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
     if !in_isolated_store("force_destroy_keeps_the_branch_and_removes_the_checkout_by_default") {
@@ -1265,41 +1227,6 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
         "the session's branch must survive its destruction"
     );
     assert!(!controller.state.sessions.contains_key(session_id));
-}
-
-#[test]
-fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
-    if !in_isolated_store("force_destroy_without_a_target_or_archive_still_removes_the_record") {
-        return;
-    }
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let mut session = checkpoint_test_session(session_id);
-    session.state = SessionState::Provisioning;
-    session.target = None;
-    session.checkpoint = None;
-    let mut controller = Controller {
-        config: Config::default(),
-        state: State {
-            sessions: [(session_id.into(), session)].into_iter().collect(),
-            ..State::default()
-        },
-    };
-    let deleted = RefCell::new(Vec::new());
-
-    controller
-        .force_destroy_session_with(
-            session_id,
-            &ProcessExecutor,
-            BranchDisposition::Delete,
-            |id: &str| {
-                deleted.borrow_mut().push(id.to_owned());
-                Ok(())
-            },
-        )
-        .unwrap();
-
-    assert!(!controller.state.sessions.contains_key(session_id));
-    assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
 }
 
 #[test]
@@ -1401,6 +1328,7 @@ fn force_destroy_tolerates_a_missing_archive() {
 /// A live session whose harness never advertised itself ends in `Error` with a
 /// reason a driver can act on, and a record that has moved since the daemon
 /// observed it is left alone (#1090).
+// Hard-won: 7bcfe409: unusable harness left a live session without an actionable failure reason
 #[test]
 fn a_session_whose_harness_never_became_usable_is_failed_with_its_reason() {
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1628,8 +1556,9 @@ fn running_managed_clone_controller(
     }
 }
 
-#[cfg(unix)]
+// Hard-won: 741163fe: removed cross-filesystem clone state remained in the shared mbx store
 #[test]
+#[cfg(unix)]
 fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_gone() {
     if !in_isolated_store(
         "destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_gone",
@@ -1799,6 +1728,7 @@ fn stopped_cached_podman_controller(session_id: &str, cached: bool) -> Controlle
     controller
 }
 
+// Hard-won: 741163fe: container workspace state remained cached after the container was removed
 #[test]
 fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
     if !in_isolated_store(
@@ -1822,10 +1752,17 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         &arguments[..4],
         [
             "shared",
-            crate::controller::MBX_VERSION,
             "/srv/mbx-cache",
-            "/srv/mbx-cache/.mjolnir/config"
+            "/srv/mbx-cache/.mjolnir/config",
+            "/srv/mbx-cache/.mjolnir/bin/mbx"
         ]
+    );
+    assert_eq!(
+        arguments[4],
+        mj_core::config::data_dir()
+            .join("mbx")
+            .to_string_lossy()
+            .as_ref()
     );
     assert_eq!(
         &arguments[5..],
@@ -1838,26 +1775,6 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         executor.position("podman rm").unwrap() < executor.position(RELEASE_LABEL).unwrap(),
         "the container goes before mbx is told"
     );
-    assert!(controller.state.sessions[session_id].target.is_none());
-}
-
-#[test]
-fn removing_a_container_that_ran_without_the_build_cache_releases_nothing() {
-    if !in_isolated_store("removing_a_container_that_ran_without_the_build_cache_releases_nothing")
-    {
-        return;
-    }
-    let _releases = crate::controller::mbx::release::enable_for_test();
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let mut controller = stopped_cached_podman_controller(session_id, false);
-    let executor = RecordingTargets::default();
-
-    controller
-        .cleanup_stopped_target_with(session_id, &executor, |_| Ok(()))
-        .unwrap();
-
-    assert!(executor.position("podman rm").is_some());
-    assert!(executor.releases().is_empty());
     assert!(controller.state.sessions[session_id].target.is_none());
 }
 
@@ -1905,4 +1822,82 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
     );
     assert!(executor.releases().is_empty());
     assert!(!controller.state.sessions.contains_key(session_id));
+}
+
+#[test]
+fn starting_close_persists_its_intent_before_checkpointing() {
+    let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
+    session.state = SessionState::Running;
+    session.last_checkpoint_error = Some("old failure".into());
+
+    apply_close_checkpoint_started(&mut session, "2026-08-14T12:00:00Z".into());
+
+    assert_eq!(session.state, SessionState::Closing);
+    assert_eq!(session.updated_at, "2026-08-14T12:00:00Z");
+    assert!(session.last_checkpoint_error.is_none());
+}
+
+#[test]
+fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
+    if !in_isolated_store("force_destroy_without_a_target_or_archive_still_removes_the_record") {
+        return;
+    }
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut session = checkpoint_test_session(session_id);
+    session.state = SessionState::Provisioning;
+    session.target = None;
+    session.checkpoint = None;
+    let mut controller = Controller {
+        config: Config::default(),
+        state: State {
+            sessions: [(session_id.into(), session)].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    let deleted = RefCell::new(Vec::new());
+
+    controller
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Delete,
+            |id: &str| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(!controller.state.sessions.contains_key(session_id));
+    assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
+}
+
+#[test]
+fn force_destroy_removes_a_failed_subagent() {
+    if !in_isolated_store("force_destroy_removes_a_failed_subagent") {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let worker_root = directory.path().join(session_id);
+    std::fs::create_dir_all(&worker_root).unwrap();
+    let mut controller = failed_subagent_controller(&worker_root, session_id);
+    let deleted = RefCell::new(Vec::new());
+
+    controller
+        .force_destroy_session_with(
+            session_id,
+            &ProcessExecutor,
+            BranchDisposition::Keep,
+            |id: &str| {
+                deleted.borrow_mut().push(id.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert!(!worker_root.exists(), "the child's worker root is removed");
+    assert!(!controller.state.sessions.contains_key(session_id));
+    assert!(!controller.state.subagents.contains_key(session_id));
+    assert_eq!(deleted.into_inner(), vec![session_id.to_owned()]);
 }

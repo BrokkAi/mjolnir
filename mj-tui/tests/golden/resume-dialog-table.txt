@@ -1,0 +1,743 @@
+=== Hel records with project targets (140x34) ===
+╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Session                                                                                                                                  │
+│ Create                                                                                                                                   │
+│No sessi  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│Create n  │                                                                                                                   │           │
+│          │  Live   Mjolnir   Import   Archived                                                                               │           │
+│          │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Mjolnir sessions · newest first ──────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │codex-1         localhost/bifrost-fird    Aug 8, 2026     ACP pretty name                                      │ │           │
+│          │ │codex-1         precision-3260/bifrost    Aug 8, 2026     ACP pretty name                                      │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │  ─────────╯
+│          │                                                                                                                   │  ── ▁   ▪ ╮
+│          │                                                   bifrost-fird                                                    │           │
+│          │                                                                                                                   │  ─────────╯
+│          │   Cancel     Destroy     Resume                                                                                   │  ── ▁   ▪ ╮
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== native import target (140x34) ===
+╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Session                                                                                                                                  │
+│ Create                                                                                                                                   │
+│No sessi  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│Create n  │                                                                                                                   │           │
+│          │  Live   Mjolnir   Import   Archived                                                                               │           │
+│          │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Importable sessions · newest first ───────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │codex-1         local/hel                 just now        Native project                                       │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │  ─────────╯
+│          │                                                                                                                   │  ── ▁   ▪ ╮
+│          │                                          master · 1.0KB · ~/Projects/hel                                          │           │
+│          │                                                                                                                   │  ─────────╯
+│          │   Cancel     Import                                                                                               │  ── ▁   ▪ ╮
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== stored target after config removal (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         retired-target            Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · : palette · ? keys
+ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pretty name"]
+=== cross-source activity order (140x34) ===
+╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Session                                                                                                                                  │
+│ Create                                                                                                                                   │
+│No sessi  ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│Create n  │                                                                                                                   │           │
+│          │  Live   Mjolnir   Import   Archived                                                                               │           │
+│          │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Mjolnir sessions · newest first ──────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
+│          │ │codex-1         podman                    May 31, 2026    ? Newest record                                      │ │           │
+│          │ │codex-1         podman                    Dec 31, 2025    ? ACP pretty name                                    │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │  ─────────╯
+│          │ │                                                                                                               │ │  ─────────╮
+│          │ │                                                                                                               │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │  ─────────╯
+│          │                                                                                                                   │  ── ▁   ▪ ╮
+│          │                                         hel · Publication status unknown                                          │           │
+│          │                                                                                                                   │  ─────────╯
+│          │   Cancel     Destroy     Resume                                                                                   │  ── ▁   ▪ ╮
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│                                                                                                                                          │
+│                                                                                                                                          │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== history including older archived records (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         podman                    Aug 8, 2026     ? Archived record                   │ │         │
+│         │ │codex-1         podman                    Aug 8, 2026     ? Current record                    │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+native archive metadata: true
+=== native archived conversation (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         local/hel                 Dec 31, 1969    Archived in Codex                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Import                                                                              │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+archive shortcut action: None
+=== native archived conversation remains listed (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         local/hel                 Dec 31, 1969    Archived in Codex                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Import                                                                              │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+d key action: None
+=== resume dialog before destroy button (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+Destroy button action: None
+=== destroy confirmation (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                                                                                                      │
+│                                                                                                                      │
+│                ╭ × Destroy suspended session? ──────────────────────────────────────────────────────╮                │
+│                │Session: ACP pretty name                                                            │                │
+│                │                                                                                    │                │
+│                │Mjolnir will permanently destroy the recovery archive and session record.           │                │
+│                │The managed clone and any unpublished work in its recovery copy will be removed.    │                │
+│                │                                                                                    │                │
+│                │c Cancel  ·  d Destroy session                                                      │                │
+│                │                                                                                    │                │
+│                │                                                                                    │                │
+│                │                                                                                    │  ──────────────╯
+│                │                                                                                    │  ──────────────╮
+│                │  Cancel     Destroy session                                                        │                │
+│                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
+│                                                                                                        ──────────────╯
+│                                                                                                        ─────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+archived row archived bare profile/origin: ("codex-2", "localhost/project")
+archived row archived container profile/origin: ("codex-2", "podman")
+archived row archived nested profile/origin: ("codex-2", "local/sub")
+archived row archived retired profile/origin: ("codex-2", "was-a-target")
+archived row archived untagged profile/origin: ("mjolnir", "local/project")
+archived row archived worktree profile/origin: ("codex-2", "localhost/project")
+=== archived rows with indexed profile and target (140x40) ===
+╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│No sessions yet                             ││                                                                                            │
+│Create n                                                                                                                                  │
+│                                                                                                                                          │
+│          ╭ × Sessions ───────────────────────────────────────────────────────────────────────────────────────────────────────╮           │
+│          │                                                                                                                   │           │
+│          │  Live   Mjolnir   Import   Archived                                                                               │           │
+│          │                                                                                                                   │           │
+│          │ Search:                                                                                                           │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Archived sessions · newest first ─────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            ▐ │           │
+│          │ │codex-2         localhost/project         Aug 31, 2026    archived bare                                        │ │           │
+│          │ │codex-2         podman                    Aug 31, 2026    archived container                                   │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
+│          │                                                                                                                   │           │
+│          │ ╭ Archived transcript ──────────────────────────────────────────────────────────────────────────────────────────╮ │           │
+│          │ │Loading the archived transcript…                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ │                                                                                                               │ │           │
+│          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │  ─────────╯
+│          │                                                                                                                   │  ─────────╮
+│          │                                                                                                                   │           │
+│          │                                  archived · 7 messages · the last thing it said                                   │           │
+│          │                                                                                                                   │  ─────────╯
+│          │   Cancel     Restore                                                                                              │  ── ▁   ▪ ╮
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
+│                                                                                                                                 ─────────╯
+│                                                                                                                                 ── ▁   ▪ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== Hel tab (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== Import tab (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         local/hel                 just now        Native                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Import                                                                              │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== Left returns to Hel (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== select resumable Hel row (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Destroy     Resume                                                                  │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+resume selection action: None
+mode after selecting Hel row: "Resume wizard"
+=== resume wizard (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                                                                                                      │
+│                                                                                                                      │
+│                  ╭ × Resume · 1/3 profile (cross-harness supported) ─────────────────────────────╮                   │
+│                  │                                                                               │                   │
+│                  │   PROFILE   HARNESS      WEEKLY      5H                                       │                   │
+│                  │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)        │                   │
+│                  │   codex-1   Codex        refreshing                                           │                   │
+│                  │   codex-2   Codex        refreshing                                           │                   │
+│                  │                                                                               │                   │
+│                  │ Same agent: the conversation continues natively.                              │                   │
+│                  │                                                                               │  ─────────────────╯
+│                  │   Cancel     Next                                                             │  ─────────────────╮
+│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
+│                                                                                                                      │
+│                                                                                                     ─────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== select importable native row (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessio                                                                                                               │
+│ Create                                                                                                               │
+│No sess  ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│Create   │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│         │                                                                                                  │         │
+│         │ Search:                                                                                          │         │
+│         │                                                                                                  │         │
+│         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │codex-1         local/hel                 just now        Native                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │  ───────╯
+│         │ │                                                                                              │ │  ───────╮
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
+│         │                                                                                                  │  ───────╯
+│         │                                                                                                  │   ▁   ▪ ╮
+│         │                                  master · 1.0KB · ~/Projects/hel                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Import                                                                              │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+native import action: ImportSession { profile_id: "codex-1", native_session_id: "native-2", display_title: "Native" }
+=== dashboard after importing native row (120x34) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                      Create a session to start building.                     │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                            │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== Live tab across workspaces (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ Default  Other                     ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│  · Swe                                                                                                               │
+│  Idle                                                                                                                │
+│  │ No   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│  │      │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│  · Cou  │                                                                                                  │         │
+│  Idle   │ Search:                                                                                          │         │
+│  │ No   │                                                                                                  │         │
+│  │      │ ╭ Running sessions · every workspace · newest first ───────────────────────────────────────────╮ │         │
+│         │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
+│         │ │Default                   Aug 8, 2026     ? Sweep the hearth                                  │ │         │
+│         │ │Default                   Aug 8, 2026     ? Count the coins                                   │ │         │
+│         │ │Other                     Aug 8, 2026     ? Raise the mast                                    │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │  ───────╯
+│         │                                                                                                  │  ───────╮
+│         │                                                                                                  │         │
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Open                                                                                │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== left wraps to Archived tab (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ Default  Other                     ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│  · Swe                                                                                                               │
+│  Idle                                                                                                                │
+│  │ No   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│  │      │                                                                                                  │         │
+│         │  Live   Mjolnir   Import   Archived                                                              │         │
+│  · Cou  │                                                                                                  │         │
+│  Idle   │ Search:                                                                                          │         │
+│  │ No   │                                                                                                  │         │
+│  │      │ ╭ Archived sessions · newest first ────────────────────────────────────────────────────────────╮ │         │
+│         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
+│         │ │No archived sessions                                                                          │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │  ───────╯
+│         │                                                                                                  │  ───────╮
+│         │                                                                                                  │         │
+│         │                                                                                                  │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Restore                                                                             │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+focus Live search action: None
+search key m action: SearchArchivedSessions { request_id: 2, query: "m" }
+search key a action: SearchArchivedSessions { request_id: 3, query: "ma" }
+search key s action: SearchArchivedSessions { request_id: 4, query: "mas" }
+search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
+=== Live search result (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ Default  Other                     ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│  · Swe                                                                                                               │
+│  Idle                                                                                                                │
+│  │ No   ╭ × Sessions ──────────────────────────────────────────────────────────────────────────────────────╮         │
+│  │      │                                                                                                  │         │
+│         │  Live   Mjolnir · 0   Import · 0   Archived · 0                                                  │         │
+│  · Cou  │                                                                                                  │         │
+│  Idle   │ Search: mast                                                                                     │         │
+│  │ No   │                                                                                                  │         │
+│  │      │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
+│         │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
+│         │ │Other                     Aug 8, 2026     ? Raise the mast                                    │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ │                                                                                              │ │         │
+│         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │  ───────╯
+│         │                                                                                                  │  ───────╮
+│         │                                                                                                  │         │
+│         │                                 hel · Publication status unknown                                 │         │
+│         │                                                                                                  │  ───────╯
+│         │   Cancel     Open                                                                                │   ▁   ▪ ╮
+│         ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯         │
+│                                                                                                               ───────╯
+│                                                                                                                ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys

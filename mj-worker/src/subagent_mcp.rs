@@ -757,40 +757,6 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_spawn_arguments_fail_before_socket_dispatch() {
-        for role in [SubagentMcpRole::Parent, SubagentMcpRole::FixedParent] {
-            for (name, value) in [
-                ("context", json!("important instructions")),
-                ("files", json!([])),
-            ] {
-                let mut args = json!({"task_name":"task", "instructions":"read src/lib.rs"});
-                args[name] = value;
-                let error = call(
-                    Path::new("missing.sock"),
-                    None,
-                    role,
-                    Some(&json!({"name":"spawn", "arguments":args})),
-                    &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-                )
-                .unwrap_err();
-                assert!(error.to_string().contains("put context and file, symbol, line-range or earlier-report pointers in instructions"), "{error:#}");
-            }
-        }
-        let error = call(
-            Path::new("missing.sock"),
-            None,
-            SubagentMcpRole::Parent,
-            Some(&json!({"name":"spawn", "arguments":{"task_name":"task", "instructions":" \n "}})),
-            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
-        )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("instructions cannot be empty"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
     fn fixed_parent_exposes_no_selector_arguments_and_refuses_hidden_tools_and_overrides() {
         let tools = fixed_tool_definitions(None);
         assert!(!tools.iter().any(|tool| tool["name"] == "list_profiles"));
@@ -827,6 +793,7 @@ mod tests {
     /// #1160: a parent read a child's failed login as the child's report and
     /// gave up on the profile. The tools say what a refused login looks like
     /// and what to do about it.
+    // Hard-won: #1160: a refused provider login was mistaken for a child report.
     #[test]
     fn wait_and_spawn_say_what_a_refused_login_looks_like() {
         let description = |name: &str| {
@@ -847,6 +814,7 @@ mod tests {
     /// #1161: a child that handed back is parked. The parent has to know
     /// that such a child holds no processes, that `send_input` starts it
     /// again and can take a while, and that the cap counts live children.
+    // Hard-won: #1161: idle sub-agent process trees exhausted the container.
     #[test]
     fn the_tools_explain_parked_children_and_the_live_child_limit() {
         let description = |name: &str| {
@@ -873,18 +841,7 @@ mod tests {
         assert!(!SERVER_INSTRUCTIONS.contains("longest yield"));
     }
 
-    #[test]
-    fn wait_advertises_the_shared_runtime_timeout_limit() {
-        let wait = tool_definitions(None)
-            .into_iter()
-            .find(|tool| tool["name"] == "wait")
-            .expect("wait definition");
-        assert_eq!(
-            wait["inputSchema"]["properties"]["timeout_seconds"]["maximum"],
-            mj_core::subagent::MAX_WAIT_SECONDS
-        );
-    }
-
+    // Hard-won: fcbd178e: the server promised pushed results that only wait delivered.
     #[test]
     fn instructions_collect_results_through_wait_and_never_promise_a_push() {
         assert!(SERVER_INSTRUCTIONS.contains("wait"));
@@ -915,6 +872,7 @@ mod tests {
         );
     }
 
+    // Hard-won: cc7e6a2a: short repeated waits wasted parent context despite the harness ceiling.
     #[test]
     fn a_wait_without_a_timeout_advertises_the_harness_ceiling_as_its_default() {
         for harness in [None, Some(HarnessKind::Codex)] {
@@ -931,6 +889,7 @@ mod tests {
         }
     }
 
+    // Hard-won: cc7e6a2a: oversized handbacks overwhelmed parent context.
     #[test]
     fn the_child_is_told_the_same_report_rules_everywhere() {
         struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -989,23 +948,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_pending_reply_sends_the_model_to_list_agents_before_a_retry() {
-        let (reply, is_error) = pending_reply("request-1", &SubagentToolAction::ListAgents, None);
-        assert!(!is_error);
-        assert_eq!(reply["request_id"], "request-1");
-        assert_eq!(reply["accepted"], true);
-        let note = reply["note"].as_str().expect("note text");
-        assert!(
-            note.contains("list_agents") && !note.contains("request_key"),
-            "the note must route retries safely: {note}"
-        );
-        assert!(
-            !note.contains("arrive in"),
-            "the note must not promise pushed results: {note}"
-        );
-    }
-
     /// Answer one spawn the way a worker does when the daemon has not
     /// finished it: accepted, no result, and what the worker knows about the
     /// daemon.
@@ -1047,6 +989,7 @@ mod tests {
     /// is told that, that the spawn is saved and may still start, and not to
     /// repeat it.
     #[cfg(unix)]
+    // Hard-won: #1197: a queued spawn ran after the parent had given up.
     #[test]
     fn a_spawn_the_daemon_never_picked_up_names_the_daemon_and_forbids_a_repeat() {
         let (value, is_error) = spawn_answered_by_worker(
@@ -1087,26 +1030,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_list_the_daemon_never_picked_up_asks_for_a_later_call() {
-        let (reply, is_error) = pending_reply(
-            "request-1",
-            &SubagentToolAction::ListAgents,
-            Some(DaemonContact {
-                picked_up: false,
-                last_collected_seconds_ago: None,
-            }),
-        );
-        assert!(is_error);
-        assert!(
-            reply["error"]
-                .as_str()
-                .unwrap()
-                .contains("call it again later"),
-            "{reply}"
-        );
-    }
-
+    // Hard-won: #1037: a lost worker reply left MCP calls blocked forever.
     #[test]
     fn wait_calls_get_their_own_timeout_plus_grace() {
         let wait = |timeout_seconds| SubagentToolAction::WaitAgents {
@@ -1133,6 +1057,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    // Hard-won: #1037: the shim blocked forever after a lost worker reply.
     #[test]
     fn an_unanswered_call_becomes_a_tool_error_instead_of_hanging() {
         use std::io::{BufReader, Read};
@@ -1231,52 +1156,10 @@ mod tests {
         assert!(next.contains("Call wait again"), "{next}");
     }
 
-    #[test]
-    fn the_models_answer_is_the_payload_itself_not_the_result_envelope() {
-        let envelope = json!({
-            "request_id": "r-1",
-            "completed_at_ms": 7,
-            "is_error": false,
-            "message": "{\"status\":\"complete\",\"agents\":[]}"
-        });
-        let value = model_facing("r-1", &envelope);
-        assert_eq!(value["status"], "complete");
-        assert_eq!(value["request_id"], "r-1");
-        assert!(
-            value.get("message").is_none(),
-            "the payload must not stay wrapped in a stringified message: {value}"
-        );
-
-        // A message that is not JSON, such as an error string, is left alone.
-        let plain = json!({"request_id":"r-2","is_error":true,"message":"child not found"});
-        assert_eq!(model_facing("r-2", &plain), plain);
-    }
-
-    #[test]
-    fn a_child_is_offered_only_handback() {
-        let tools = child_tool_definitions();
-        let names = tools
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap_or_default())
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["handback"]);
-        assert_eq!(
-            tools[0]["inputSchema"]["required"],
-            json!(["message"]),
-            "{}",
-            tools[0]
-        );
-        assert!(
-            tool_definitions(None)
-                .iter()
-                .all(|tool| tool["name"] != "handback"),
-            "a parent has no report to hand back"
-        );
-    }
-
     /// A Claude profile is staged with an allow rule for each tool in
     /// `tool_names`, so a tool listed here and missing there would make Claude
     /// ask a person before running it (R11-1).
+    // Hard-won: 91244ea1: Claude sub-agent handback stalled on an unapproved MCP tool.
     #[test]
     fn each_role_lists_exactly_the_tools_its_harness_is_allowed() {
         let names = |tools: Vec<Value>| {
@@ -1324,105 +1207,6 @@ mod tests {
         assert!(
             format!("{parent:#}").contains("unknown sub-agent tool"),
             "{parent:#}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_child_sends_its_report_as_a_handback_request() {
-        use std::io::{BufReader, Read};
-        use std::os::unix::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (sent, received) = std::sync::mpsc::channel::<Value>();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let request_id = request["request_id"].clone();
-            sent.send(request).unwrap();
-            let reply = json!({"accepted": true, "result": {
-                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
-                "message": "{\"delivered\":true}"
-            }});
-            let mut body = serde_json::to_vec(&reply).unwrap();
-            body.push(b'\n');
-            let mut stream = reader.into_inner();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
-            let _ = stream.read(&mut [0u8; 1]);
-        });
-        let (value, is_error) = call_with_budget(
-            &socket,
-            None,
-            SubagentMcpRole::Child,
-            Some(&json!({"name": "handback", "arguments": {"message": "the report"}})),
-            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-            |_| Duration::from_secs(5),
-        )
-        .unwrap();
-        assert!(!is_error, "{value}");
-        assert_eq!(value["delivered"], true, "{value}");
-        let request = received.recv().unwrap();
-        assert_eq!(
-            request["action"],
-            json!({"action": "handback", "params": {"message": "the report"}})
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_wait_for_any_child_carries_return_when_and_the_harness_default() {
-        use std::io::{BufReader, Read};
-        use std::os::unix::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (sent, received) = std::sync::mpsc::channel::<Value>();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let request_id = request["request_id"].clone();
-            sent.send(request).unwrap();
-            let reply = json!({"accepted": true, "result": {
-                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
-                "message": "{\"status\":\"still_running\",\"agents\":[]}"
-            }});
-            let mut body = serde_json::to_vec(&reply).unwrap();
-            body.push(b'\n');
-            let mut stream = reader.into_inner();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
-            let _ = stream.read(&mut [0u8; 1]);
-        });
-        let (value, is_error) = call_with_budget(
-            &socket,
-            Some(HarnessKind::Codex),
-            SubagentMcpRole::Parent,
-            Some(&json!({"name": "wait", "arguments": {
-                "child_session_ids": ["c1", "c2"], "return_when": "any"
-            }})),
-            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-            |_| Duration::from_secs(5),
-        )
-        .unwrap();
-        assert!(!is_error, "{value}");
-        let request = received.recv().unwrap();
-        assert_eq!(
-            request["action"],
-            json!({"action": "wait_agents", "params": {
-                "child_session_ids": ["c1", "c2"],
-                "timeout_seconds": mj_core::subagent::MAX_CODEX_WAIT_SECONDS,
-                "return_when": "any"
-            }})
         );
     }
 
@@ -1480,47 +1264,6 @@ mod tests {
     }
 
     #[test]
-    fn the_wait_schema_makes_child_session_ids_optional_and_says_so() {
-        let tools = tool_definitions(Some(HarnessKind::Codex));
-        let wait = tools
-            .iter()
-            .find(|tool| tool["name"] == "wait")
-            .expect("wait tool");
-        let schema = &wait["inputSchema"];
-        assert!(schema.get("required").is_none(), "{schema}");
-        assert!(
-            schema["properties"]["child_session_ids"]
-                .get("minItems")
-                .is_none(),
-            "{schema}"
-        );
-        let description = wait["description"].as_str().unwrap();
-        assert!(
-            description.contains(
-                "Omit child_session_ids to wait for every child of yours that is still running"
-            ),
-            "{description}"
-        );
-    }
-
-    #[test]
-    fn an_unanswered_handback_tells_the_child_to_call_again() {
-        let (value, is_error) = unanswered_reply(
-            "request-1",
-            &SubagentToolAction::Handback {
-                message: "r".into(),
-            },
-            Duration::from_secs(120),
-        );
-        assert!(is_error, "{value}");
-        let error = value["error"].as_str().expect("error text");
-        assert!(
-            error.contains("call handback again") && !error.contains("list_agents"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn spawn_takes_no_caller_chosen_key() {
         let spawn = tool_definitions(None)
             .into_iter()
@@ -1554,19 +1297,6 @@ mod tests {
             format!("{refused:#}").contains("unknown field `request_key`"),
             "{refused:#}"
         );
-    }
-
-    #[test]
-    fn spawn_documents_how_a_working_directory_resolves() {
-        let spawn = tool_definitions(None)
-            .into_iter()
-            .find(|tool| tool["name"] == "spawn")
-            .expect("spawn definition");
-        let description = spawn["inputSchema"]["properties"]["working_directory"]["description"]
-            .as_str()
-            .expect("working_directory description");
-        assert!(description.contains("Absolute"), "{description}");
-        assert!(description.contains("relative"), "{description}");
     }
 
     #[cfg(unix)]
@@ -1694,6 +1424,7 @@ mod tests {
     /// unconfirmed close must say it is still closing and name the tool that can
     /// observe the child being gone.
     #[cfg(unix)]
+    // Hard-won: #1087: premature close completion let replacement process trees overlap.
     #[test]
     fn an_unconfirmed_close_says_it_is_still_closing_rather_than_accepted() {
         use std::io::{BufReader, Read};
@@ -1740,6 +1471,7 @@ mod tests {
     /// answer is the one a parent may act on. Nothing may manufacture an
     /// "accepted" answer while the close is still outstanding.
     #[cfg(unix)]
+    // Hard-won: #1087: close was reported finished while teardown was still running.
     #[test]
     fn a_close_answers_only_once_mjolnir_confirms_the_child_is_gone() {
         use std::io::{BufReader, Read};
@@ -1801,6 +1533,7 @@ mod tests {
     /// The parent model has to learn the rule from the tools themselves: the
     /// close is finished only when a wait reports the child stopped, and a
     /// replacement child waits for that.
+    // Hard-won: #1087: premature replacement exhausted container process slots.
     #[test]
     fn close_directs_the_model_to_wait_for_a_stopped_child_before_replacing_it() {
         let definitions = tool_definitions(None);

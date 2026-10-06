@@ -22,7 +22,10 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::reviewer::{ReviewerCancellation, ReviewerPlacement, ReviewerSidecar};
-use super::{AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig};
+use super::{
+    AcpSupervisorSpec, CredentialEndpoint, REVIEW_UNTRACKED_FILE, WorkerLaunchConfig,
+    acp_additional_directories, reviewer_workspace_directories,
+};
 
 use crate::acp::{self, CommandRequest, LaunchSpec, RuntimeEvent};
 use crate::relay::{
@@ -259,7 +262,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             worker_root: root.clone(),
             session_id: config.session_id.clone(),
             cwd: config.cwd.clone(),
-            additional_directories: config.additional_directories.clone(),
+            additional_directories: reviewer_workspace_directories(&config),
             worker_executable: worker_executable.clone(),
             harness_runtime: config.harness_runtime,
             review_capture: config.review_capture,
@@ -313,6 +316,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             })
         })),
     }));
+    let additional_directories = acp_additional_directories(&config);
     let acp_spec = LaunchSpec {
         clear_context_request: None,
         context_restore: None,
@@ -328,7 +332,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         environment: session_environment,
         bridge_spec_path: Some(supervisor_path.clone()),
         cwd: config.cwd,
-        additional_directories: config.additional_directories,
+        additional_directories,
         extra_mcp_servers: Vec::new(),
         subagent_policy: if config.handback_tool {
             mj_core::subagent::SubagentPolicy::None
@@ -1424,7 +1428,7 @@ async fn prepare_and_start_harness(
             .await?
         } else {
             let mut workspace_roots = vec![config.cwd.clone()];
-            workspace_roots.extend(config.additional_directories.iter().cloned());
+            workspace_roots.extend(reviewer_workspace_directories(&config));
             bounded_preparation_step(&budget, async move {
                 let git = crate::review::capture::BoundedGit::new(
                     crate::review::capture::WORKSPACE_STATE_TIMEOUT,
@@ -2111,7 +2115,9 @@ pub(super) async fn serve_client_with_memory(
             }
             if matches!(
                 &envelope.request,
-                RelayRequest::SubagentRequests | RelayRequest::CompleteSubagentRequest { .. }
+                RelayRequest::SubagentRequests
+                    | RelayRequest::CompleteSubagentRequest { .. }
+                    | RelayRequest::SetSubagentAdmission { .. }
             ) {
                 let operation = envelope.request.method_name();
                 let request_id = envelope.request_id.clone();
@@ -2139,6 +2145,17 @@ pub(super) async fn serve_client_with_memory(
                             ),
                         }
                     }
+                    (Some(endpoint), RelayRequest::SetSubagentAdmission { open }) => {
+                        match endpoint.set_mutating_admission(open) {
+                            Ok(()) => RelayResponseBody::Ok {
+                                payload: RelayResponsePayload::SubagentAdmissionChanged { open },
+                            },
+                            Err(error) => compaction_error(
+                                RelayErrorCode::Internal,
+                                &format!("change sub-agent admission: {error:#}"),
+                            ),
+                        }
+                    }
                     (None, RelayRequest::SubagentRequests) => RelayResponseBody::Ok {
                         payload: RelayResponsePayload::SubagentRequests {
                             requests: Vec::new(),
@@ -2146,6 +2163,10 @@ pub(super) async fn serve_client_with_memory(
                         },
                     },
                     (None, RelayRequest::CompleteSubagentRequest { .. }) => compaction_error(
+                        RelayErrorCode::InvalidRequest,
+                        "this session has no Mjolnir sub-agent tools",
+                    ),
+                    (None, RelayRequest::SetSubagentAdmission { .. }) => compaction_error(
                         RelayErrorCode::InvalidRequest,
                         "this session has no Mjolnir sub-agent tools",
                     ),

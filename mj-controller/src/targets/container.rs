@@ -707,6 +707,7 @@ mod pids_limit_tests {
     /// worker, an ACP supervisor and a harness process that all size their thread
     /// pools to the host. The engine default of 2048 fits about two sessions, so
     /// Mjolnir asks for room for the concurrency it allows (#1065).
+    // Hard-won: #1065: Concurrent child launches must have more than the engine’s default process slots.
     #[test]
     fn a_session_container_asks_for_more_processes_than_the_engine_default() {
         for engine in ["podman", "docker"] {

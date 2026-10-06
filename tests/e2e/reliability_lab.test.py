@@ -113,6 +113,7 @@ class LabCleanupTest(unittest.TestCase):
         self.addCleanup(self.discard, pathlib.Path(root))
         return driver, pathlib.Path(root), pathlib.Path(runtime), int(pid)
 
+    # Hard-won: 01c181f: one-time cleanup scans missed child processes started during teardown.
     def test_cleanup_stops_a_process_that_a_stopping_process_starts(self) -> None:
         lab = Lab(HEL, "cleanup-test", 1, watchdog=False)
         self.addCleanup(self.discard, lab.root)
@@ -142,6 +143,7 @@ class LabCleanupTest(unittest.TestCase):
 
         self.assertEqual(lab.owned_processes(), [])
 
+    # Hard-won: 01c181f: killed or timed-out drivers left lab processes and runtime files behind.
     def test_the_watchdog_stops_what_a_killed_driver_left_running(self) -> None:
         driver, root, runtime, sleeper = self.run_driver("time.sleep(300)")
 
@@ -167,6 +169,7 @@ class LabCleanupTest(unittest.TestCase):
         self.assertTrue(runtime.exists(), "the watchdog removed a runtime the driver kept")
         self.assertNotIn("watchdog", json.loads((root / "trace.json").read_text()))
 
+    # Hard-won: 01c181f: the cleanup runbook missed re-execed workers and removed no runtime state.
     def test_finishing_a_luna_lab_stops_its_processes_and_removes_its_runtime(self) -> None:
         lab = Lab(HEL, "luna-manual", 1, watchdog=False)
         self.addCleanup(self.discard, lab.root)

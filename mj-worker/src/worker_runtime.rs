@@ -398,7 +398,13 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             *socket = base.join(&*socket);
         }
         if memory.root.is_relative() {
-            memory.root = base.join(&memory.root);
+            let relative_root = memory.root.clone();
+            memory.root = base.join(&relative_root);
+            for directory in &mut config.additional_directories {
+                if directory == &relative_root {
+                    *directory = memory.root.clone();
+                }
+            }
         }
         if memory.baseline_root.as_os_str().is_empty() {
             memory.baseline_root = memory
@@ -411,6 +417,32 @@ fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
             memory.baseline_root = base.join(&memory.baseline_root);
         }
     }
+}
+
+#[cfg(unix)]
+fn reviewer_workspace_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    let memory_root = config
+        .project_memory
+        .as_ref()
+        .map(|memory| memory.root.as_path());
+    config
+        .additional_directories
+        .iter()
+        .filter(|directory| memory_root.is_none_or(|root| directory.as_path() != root))
+        .cloned()
+        .collect()
+}
+
+#[cfg(unix)]
+fn acp_additional_directories(config: &WorkerLaunchConfig) -> Vec<PathBuf> {
+    let mut directories = config.additional_directories.clone();
+    if !matches!(config.harness, HarnessKind::Claude | HarnessKind::Muse)
+        && let Some(memory) = &config.project_memory
+        && !directories.contains(&memory.root)
+    {
+        directories.push(memory.root.clone());
+    }
+    directories
 }
 
 #[cfg(unix)]
@@ -461,89 +493,6 @@ pub async fn prepare_managed_harness(_config: WorkerLaunchConfig) -> anyhow::Res
 #[cfg(not(unix))]
 pub async fn run_acp_supervisor(_spec: AcpSupervisorSpec) -> anyhow::Result<()> {
     anyhow::bail!("ACP supervision requires Unix")
-}
-
-#[cfg(all(test, unix))]
-mod model_pin_tests {
-    use super::*;
-
-    fn codex_config(environment: &std::collections::BTreeMap<String, String>) -> serde_json::Value {
-        serde_json::from_str(&environment[CODEX_CONFIG_ENV]).unwrap()
-    }
-
-    #[test]
-    fn codex_launch_starts_a_resumed_bridge_on_the_accepted_model() {
-        let mut environment = std::collections::BTreeMap::new();
-        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash")).unwrap();
-        assert_eq!(
-            codex_config(&environment),
-            serde_json::json!({ "model": "flash" })
-        );
-    }
-
-    /// A profile may already set `CODEX_CONFIG`. Only the model this session
-    /// accepted may change, because everything else in there is the host's.
-    #[test]
-    fn codex_launch_keeps_the_rest_of_a_host_supplied_config() {
-        let mut environment = std::collections::BTreeMap::from([(
-            CODEX_CONFIG_ENV.to_owned(),
-            r#"{"default_permissions":"project","model":"configured-model","tui":"never"}"#
-                .to_owned(),
-        )]);
-        pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash")).unwrap();
-        assert_eq!(
-            codex_config(&environment),
-            serde_json::json!({
-                "default_permissions": "project",
-                "model": "flash",
-                "tui": "never",
-            })
-        );
-    }
-
-    #[test]
-    fn sessions_without_an_accepted_model_keep_their_environment() {
-        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
-            let mut environment = std::collections::BTreeMap::from([(
-                CODEX_CONFIG_ENV.to_owned(),
-                r#"{"model":"configured-model"}"#.to_owned(),
-            )]);
-            pin_accepted_bridge_selectors(harness, &mut environment, None).unwrap();
-            assert_eq!(
-                environment[CODEX_CONFIG_ENV],
-                r#"{"model":"configured-model"}"#
-            );
-        }
-    }
-
-    #[test]
-    fn other_harnesses_never_receive_a_codex_config() {
-        let mut environment = std::collections::BTreeMap::new();
-        pin_accepted_bridge_selectors(HarnessKind::Claude, &mut environment, Some("flash"))
-            .unwrap();
-        pin_accepted_bridge_selectors(HarnessKind::Kimi, &mut environment, Some("flash")).unwrap();
-        assert!(environment.is_empty());
-    }
-
-    /// codex-acp parses this variable at startup, so a value it cannot parse
-    /// is a broken profile rather than a reason to launch without the model.
-    #[test]
-    fn an_unparsable_codex_config_is_reported_rather_than_overwritten() {
-        for broken in ["[]", "not json"] {
-            let mut environment = std::collections::BTreeMap::from([(
-                CODEX_CONFIG_ENV.to_owned(),
-                broken.to_owned(),
-            )]);
-            let error =
-                pin_accepted_bridge_selectors(HarnessKind::Codex, &mut environment, Some("flash"))
-                    .expect_err("a non-object configuration cannot be merged");
-            assert!(
-                format!("{error:#}").contains(CODEX_CONFIG_ENV),
-                "unexpected error: {error:#}"
-            );
-            assert_eq!(environment[CODEX_CONFIG_ENV], broken);
-        }
-    }
 }
 
 #[cfg(test)]

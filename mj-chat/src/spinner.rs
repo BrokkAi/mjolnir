@@ -518,43 +518,144 @@ fn build_scan() -> FrameSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::{SymbolSet, UiTheme};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+    use std::fmt::Write as _;
     use unicode_width::UnicodeWidthStr;
 
-    #[test]
-    fn rendering_uses_elapsed_time_and_keeps_idle_ornaments_still() {
-        for style in SpinnerStyle::ALL {
-            let first = activity_line(style, 0, true);
-            assert_eq!(
-                first,
-                activity_line(style, style.frame_interval_ms() - 1, true)
-            );
-            assert_ne!(
-                first,
-                activity_line(style, style.frame_interval_ms() * 3, true)
-            );
-            assert_eq!(
-                activity_line(style, 0, false),
-                activity_line(style, 100_000, false)
-            );
-            assert_eq!(first.width(), SPINNER_WIDTH);
-            assert_eq!(compact_span(style, 0).width(), 1);
-        }
+    fn append_activity(
+        output: &mut String,
+        label: &str,
+        style: SpinnerStyle,
+        elapsed: u128,
+        active: bool,
+        model: &str,
+    ) {
+        let line = activity_line(style, elapsed, active);
+        let spans = line
+            .spans
+            .iter()
+            .map(|span| format!("{:?} fg={:?}", span.content.as_ref(), span.style.fg))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let mut terminal =
+            Terminal::new(TestBackend::new(SPINNER_WIDTH as u16, 1)).expect("terminal");
+        terminal
+            .draw(|frame| frame.render_widget(Paragraph::new(line.clone()), frame.area()))
+            .expect("render activity line");
+        writeln!(output, "=== {label} ({}x1) ===", SPINNER_WIDTH).expect("write heading");
+        writeln!(output, "{model}\nspans: {spans}").expect("write frame state");
+        output.push_str(&crate::golden::buffer_lines(terminal.backend().buffer()).join("\n"));
+        output.push('\n');
+    }
+
+    fn append_compact_span(output: &mut String, style: SpinnerStyle) {
+        let span = compact_span(style, 0);
+        let mut terminal = Terminal::new(TestBackend::new(1, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new(Line::from(span.clone())), frame.area())
+            })
+            .expect("render compact activity span");
+        writeln!(
+            output,
+            "=== {style:?} compact styled span at zero (1x1) ===\nwidth: {}; style: {:?}\n{}\n",
+            span.width(),
+            span.style,
+            crate::golden::buffer_lines(terminal.backend().buffer()).join("\n")
+        )
+        .expect("write compact activity span");
     }
 
     #[test]
-    fn style_names_round_trip() {
-        for style in SpinnerStyle::ALL {
-            assert_eq!(style.as_str().parse::<SpinnerStyle>(), Ok(style));
-        }
-        assert!("spiral".parse::<SpinnerStyle>().is_err());
-    }
-
-    #[test]
-    fn default_is_scan_and_only_default_is_default() {
-        assert_eq!(SpinnerStyle::default(), SpinnerStyle::Scan);
-        for style in SpinnerStyle::ALL {
-            assert_eq!(style.is_default(), style == SpinnerStyle::Scan);
-        }
+    fn golden_activity_spinner() {
+        let mut output = String::new();
+        crate::theme::with_theme(UiTheme::Midnight, || {
+            crate::theme::with_symbols(SymbolSet::Unicode, || {
+                for style in SpinnerStyle::ALL {
+                    let frames = style.frames();
+                    let interval = style.frame_interval_ms();
+                    let loop_ms = frames.len() as u128 * interval;
+                    writeln!(
+                        output,
+                        "=== {:?} timing and compact frames ({}x1) ===\nframe interval: {interval}ms; loop: {loop_ms}ms; compact: {:?}",
+                        style,
+                        SPINNER_WIDTH,
+                        style.compact_frames()
+                    )
+                    .expect("write timing");
+                    append_compact_span(&mut output, style);
+                    for (index, frame) in frames.iter().enumerate() {
+                        let elapsed = index as u128 * interval;
+                        append_activity(
+                            &mut output,
+                            &format!("{:?} animated frame {index} at {elapsed}ms", style),
+                            style,
+                            elapsed,
+                            true,
+                            &format!("frame: {:?}; runs: {:?}", frame.text(), frame.runs()),
+                        );
+                    }
+                    append_activity(
+                        &mut output,
+                        &format!("{:?} first frame before cadence", style),
+                        style,
+                        interval.saturating_sub(1),
+                        true,
+                        "active at interval minus one",
+                    );
+                    append_activity(
+                        &mut output,
+                        &format!("{:?} frame after three intervals", style),
+                        style,
+                        interval * 3,
+                        true,
+                        "active after three intervals",
+                    );
+                    append_activity(
+                        &mut output,
+                        &format!("{:?} idle at zero", style),
+                        style,
+                        0,
+                        false,
+                        "idle frame",
+                    );
+                    append_activity(
+                        &mut output,
+                        &format!("{:?} idle at 100000ms", style),
+                        style,
+                        100_000,
+                        false,
+                        "idle frame at a later clock",
+                    );
+                    for (index, frame) in style.compact_frames().iter().enumerate() {
+                        let elapsed = index as u128 * SPINNER_FRAME_INTERVAL_MS;
+                        writeln!(
+                            output,
+                            "=== {:?} compact frame {index} at {elapsed}ms (1x1) ===\nsource: {frame}; rendered: {}",
+                            style,
+                            compact_frame(style, elapsed)
+                        )
+                        .expect("write compact frame");
+                    }
+                    if style == SpinnerStyle::Scan {
+                        let heads = scan_heads();
+                        let trail = (0..SPINNER_WIDTH as i64).map(scan_cell).collect::<Vec<_>>();
+                        writeln!(
+                            output,
+                            "scan crossing: {}ms; redraw interval: {}ms; heads: {heads:?}; first trail: {trail:?}",
+                            (SPINNER_WIDTH as u128 - 1) * style.frame_interval_ms(),
+                            SPINNER_REDRAW_INTERVAL_MS
+                        )
+                        .expect("write scan timing");
+                    }
+                }
+            });
+        });
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "activity-spinner", &output);
     }
 
     #[test]
@@ -584,94 +685,6 @@ mod tests {
     }
 
     #[test]
-    fn every_style_uses_a_solid_horizontal_line_when_idle() {
-        let expected = IDLE_GLYPH.to_string().repeat(SPINNER_WIDTH);
-        for style in SpinnerStyle::ALL {
-            assert_eq!(style.idle_frame().text(), expected, "{style} idle frame");
-            // A single muted run: the resting ornament must never look active.
-            assert_eq!(
-                style.idle_frame().runs(),
-                [(expected.clone(), SpinnerInk::Faint)],
-                "{style} idle ink"
-            );
-        }
-    }
-
-    #[test]
-    fn animation_loops_stay_within_their_intended_cadence() {
-        for style in SpinnerStyle::ALL {
-            let loop_ms = style.frames().len() as u128 * style.frame_interval_ms();
-            assert!(
-                (1_000..=4_250).contains(&loop_ms),
-                "{style} loop_ms = {loop_ms}"
-            );
-        }
-    }
-
-    #[test]
-    fn scan_crosses_the_rail_in_about_one_second() {
-        let crossing_ms = (SPINNER_WIDTH as u128 - 1) * SpinnerStyle::Scan.frame_interval_ms();
-        assert!(
-            (900..=1_100).contains(&crossing_ms),
-            "crossing_ms = {crossing_ms}"
-        );
-        assert_eq!(SPINNER_REDRAW_INTERVAL_MS, SCAN_FRAME_INTERVAL_MS);
-    }
-
-    #[test]
-    fn globe_spins_one_centred_sphere_through_every_phase() {
-        let frames = SpinnerStyle::Globe.frames();
-        assert_eq!(frames.len(), GLOBE_PHASES.len());
-        for (frame, phase) in frames.iter().zip(GLOBE_PHASES) {
-            // Exactly one sphere per frame, centred with a small clear gap.
-            let (left, rest) = frame
-                .text()
-                .split_once(phase)
-                .expect("frame shows its phase");
-            assert!(
-                !rest.contains(phase),
-                "{frame:?} shows more than one sphere"
-            );
-            let left: Vec<char> = left.chars().collect();
-            let right: Vec<char> = rest.chars().collect();
-            assert!(
-                left.ends_with(&[' '; GLOBE_CLEARANCE])
-                    && right.starts_with(&[' '; GLOBE_CLEARANCE]),
-                "{frame:?} should leave two spaces around the sphere"
-            );
-            assert!(
-                left[..left.len() - GLOBE_CLEARANCE]
-                    .iter()
-                    .chain(&right[GLOBE_CLEARANCE..])
-                    .all(|c| *c == IDLE_GLYPH),
-                "{frame:?} should retain the idle rule outside the gap"
-            );
-            assert!(
-                left.len().abs_diff(right.len()) <= 1,
-                "{frame:?} sphere is off-centre"
-            );
-        }
-    }
-
-    #[test]
-    fn globe_shows_both_a_fully_dark_and_a_fully_lit_face() {
-        // The point of the style: the sphere carries a dark side around with
-        // it, so a full rotation must pass through both extremes.
-        let frames = SpinnerStyle::Globe.frames();
-        for face in ['🌑', '🌕'] {
-            assert!(
-                frames.iter().any(|frame| frame.text().contains(face)),
-                "globe never shows {face}"
-            );
-        }
-        assert!(
-            SpinnerStyle::Globe.compact_frames().contains(&"○")
-                && SpinnerStyle::Globe.compact_frames().contains(&"●"),
-            "compact globe never reaches both extremes"
-        );
-    }
-
-    #[test]
     fn scan_bounces_off_both_walls_without_wrapping() {
         let heads: Vec<usize> = scan_heads().into_iter().map(|head| head as usize).collect();
         // The light must actually reach both walls before turning around…
@@ -692,178 +705,6 @@ mod tests {
                 head.abs_diff(*next) == 1,
                 "scan head jumps from {head} to {next}"
             );
-        }
-    }
-
-    #[test]
-    fn scan_sweeps_twice_then_holds_the_dim_rail_for_one_pass() {
-        let frames = SpinnerStyle::Scan.frames();
-        let sweep_ticks = scan_heads().len();
-        assert_eq!(frames.len(), sweep_ticks + SPINNER_WIDTH);
-        assert!(
-            frames[..sweep_ticks]
-                .iter()
-                .all(|frame| frame.text().contains('●')),
-            "both sweeps should stay continuously lit"
-        );
-        assert!(
-            frames[sweep_ticks..].len() == SPINNER_WIDTH
-                && frames[sweep_ticks..].iter().all(|frame| frame
-                    .text()
-                    .chars()
-                    .all(|glyph| glyph == '·')
-                    && frame
-                        .runs()
-                        .iter()
-                        .all(|(_, ink)| *ink == SpinnerInk::Red(0))),
-            "the quiet pass should hold only the dim red rail"
-        );
-    }
-
-    #[test]
-    fn scan_trail_drops_one_red_level_per_cell() {
-        let trail: Vec<(char, SpinnerInk)> = (0..SPINNER_WIDTH as i64).map(scan_cell).collect();
-        let levels: Vec<u8> = trail
-            .iter()
-            .map(|(_, ink)| match ink {
-                SpinnerInk::Red(level) => *level,
-                _ => panic!("scan cell is not red"),
-            })
-            .collect();
-
-        assert_eq!(levels, (0..=SCAN_RED_MAX).rev().collect::<Vec<_>>());
-        assert!(trail[1..=4].iter().all(|(glyph, _)| *glyph == '•'));
-        assert_eq!(levels.iter().filter(|level| **level > 0).count(), 11);
-    }
-
-    #[test]
-    fn scan_brightness_peak_trails_the_head_over_an_always_lit_rail() {
-        let mut longest_tail = 0;
-        for frame in SpinnerStyle::Scan
-            .frames()
-            .iter()
-            .filter(|frame| frame.text().contains('●'))
-        {
-            let cells: Vec<char> = frame.text().chars().collect();
-            let head = cells.iter().position(|c| *c == '●').expect("head");
-            let tail: Vec<usize> = cells
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| ['•', '∙'].contains(c))
-                .map(|(x, _)| x)
-                .collect();
-            longest_tail = longest_tail.max(tail.len());
-            // The comet is contiguous and entirely on one side of the head,
-            // so the tail reads as dragged behind rather than haloing it.
-            assert!(
-                tail.iter().all(|x| x.abs_diff(head) <= 8)
-                    && (tail.iter().all(|x| *x < head) || tail.iter().all(|x| *x > head)),
-                "{frame:?} tail {tail:?} should trail one side of head {head}"
-            );
-            assert!(
-                cells.iter().all(|c| ['●', '•', '∙', '·'].contains(c)),
-                "{frame:?} should keep every active cell visibly lit"
-            );
-        }
-        assert_eq!(longest_tail, 8, "scan should show eight shaped tail cells");
-    }
-
-    #[test]
-    fn scan_uses_red_ink_for_every_lit_cell() {
-        let mut seen_inks = Vec::new();
-        for frame in SpinnerStyle::Scan.frames() {
-            for (run, ink) in frame.runs() {
-                assert!(
-                    matches!(ink, SpinnerInk::Red(0..=SCAN_RED_MAX)),
-                    "scan run {run:?} in {frame:?} is not red"
-                );
-                seen_inks.push(*ink);
-            }
-        }
-        assert!(
-            seen_inks.contains(&SpinnerInk::Red(0)),
-            "scan has no dim glow"
-        );
-        assert!(
-            seen_inks.contains(&SpinnerInk::Red(SCAN_RED_MAX)),
-            "scan has no bright peak"
-        );
-    }
-
-    #[test]
-    fn every_frame_inks_every_cell() {
-        // `runs()` merges same-ink neighbours, so the only way to check that no
-        // cell was left uncolored is to confirm the runs reassemble the frame.
-        for style in SpinnerStyle::ALL {
-            for frame in style.frames().iter().chain([style.idle_frame()]) {
-                let reassembled: String =
-                    frame.runs().iter().map(|(text, _)| text.as_str()).collect();
-                assert_eq!(reassembled, frame.text(), "{style} frame {frame:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn animated_frames_reach_past_the_resting_ink() {
-        // Every style has to actually light up while a turn is in flight;
-        // an all-Faint animation would be indistinguishable from idle.
-        for style in SpinnerStyle::ALL {
-            assert!(
-                style
-                    .frames()
-                    .iter()
-                    .flat_map(|frame| frame.runs())
-                    .any(|(_, ink)| *ink != SpinnerInk::Faint),
-                "{style} never brightens past its idle rail"
-            );
-        }
-    }
-
-    #[test]
-    fn runs_merge_neighbours_that_share_an_ink() {
-        // Shimmer inks the whole row identically, so it must collapse to one
-        // span; pulse's falloff must not.
-        let shimmer = &SpinnerStyle::Shimmer.frames()[0];
-        assert_eq!(shimmer.runs().len(), 1, "{shimmer:?} should be one run");
-        assert!(
-            SpinnerStyle::Pulse.frames()[0].runs().len() > 1,
-            "pulse's falloff should span several inks"
-        );
-    }
-
-    #[test]
-    fn bars_reserves_its_hottest_ink_for_the_tallest_bar() {
-        // The meter reads as an audio meter only if red means "peak" — if a
-        // mid-height bar ever went Hot the ramp would look like an error.
-        let tallest = '█';
-        for frame in SpinnerStyle::Bars.frames() {
-            for (run, ink) in frame.runs() {
-                if *ink == SpinnerInk::Hot {
-                    assert!(
-                        run.chars().all(|glyph| glyph == tallest),
-                        "{frame:?} inked a short bar Hot"
-                    );
-                }
-            }
-        }
-        assert!(
-            SpinnerStyle::Bars
-                .frames()
-                .iter()
-                .flat_map(|frame| frame.runs())
-                .any(|(_, ink)| *ink == SpinnerInk::Hot),
-            "bars never peaks"
-        );
-    }
-
-    #[test]
-    fn each_style_maps_to_its_own_frames() {
-        // Guards against a frame_set_for mis-mapping (e.g. two arms building the
-        // same set) and against FRAME_SETS desyncing from ALL/index().
-        for (i, a) in SpinnerStyle::ALL.iter().enumerate() {
-            for b in &SpinnerStyle::ALL[i + 1..] {
-                assert_ne!(a.frames(), b.frames(), "{a} and {b} share frames");
-            }
         }
     }
 }

@@ -1,0 +1,229 @@
+target readiness request: Some(CheckTargetReadiness { generation: 1, target_ids: ["docker", "podman", "sandbox"] })
+checked target ids: ["docker", "podman", "sandbox"]
+=== Targets hides unavailable defaults (160x40) ===
+╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                         ☰ ││                                                                                                         │
+╰───────────────────────────────────────────────────╯│                                                                                                         │
+╭ Sessions ────────────────────────────── ▁   ▪   □ ╮│                                                                                                         │
+│ Create   Open   Filter: ________________________  ││                                                                                                         │
+│No sessions yet                                    ││                                                                                                         │
+│Create new work or open a session.                 ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                            ✦  M J O L N I R                                             │
+│                                                   ││                                                                                                         │
+│                                                   ││                                   Create a session to start building.                                   │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   ││                                                                                                         │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ No live session ────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                   ││No live session in this workspace.                                                                       │
+│                                                   ││Press ctrl+b c to create a session or ctrl+b g to find one.                                              │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                   ││  Host / fleet  Targets                                   In Use                                         │
+│                                                   ││  local         localhost, podman, sandbox (unavailable)  unavailable                                    │
+│                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                                   ││           Harness  Weekly Resets  5H Resets                                                             │
+╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
+=== grouped host load without sample clock (120x40) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                      Create a session to start building.                     │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                            │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets                In Use                                 │
+│                                      ││  local         podman, mac-container  37% CPU · 75% RAM                      │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== quota error with refresh age (120x28) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                      Create a session to start building.                     │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                            │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        unavailable                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== expired login quota (120x28) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                      Create a session to start building.                     │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                            │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly        Resets  5H Resets                      │
+│                                      ││  claude-1  Claude Code  login expired                                        │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== usage-priced API quota (120x28) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                               ✦  M J O L N I R                               │
+│No sessions yet                       ││                                                                              │
+│Create new work or open a session.    ││                      Create a session to start building.                     │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────────────────────────────────────────────╮
+│                                      ││No live session in this workspace.                                            │
+│                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly       Resets  5H Resets                       │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        ▕   API    ▏                                         │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+=== weekly and five-hour quota columns (140x28) ===
+╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ☰ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                      ✦  M J O L N I R                                      │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a session.          ││                             Create a session to start building.                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
+│                                            ││No live session in this workspace.                                                          │
+│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                            ││            Harness      Weekly          Resets  5H              Resets                     │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        ▕███████▎  ▏73% 2d 0h   ▕███████   ▏70% 1h 5m                      │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
+=== weekly and five-hour quota at 80 columns (80x28) ===
+╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+│ default                            ☰ ││                                      │
+╰──────────────────────────────────────╯│                                      │
+╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
+│ Create   Open   Filter: _____________││           ✦  M J O L N I R           │
+│No sessions yet                       ││                                      │
+│Create new work or open a session.    ││  Create a session to start building. │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      │╰──────────────────────────────────────╯
+│                                      │╭ No live session ─────────────────────╮
+│                                      ││No live session in this workspace.    │
+│                                      ││Press ctrl+b c to create a session or │
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│  Host / fleet  Targets  In Use                                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
+│            Harness      Weekly          Resets     5H              Resets    │
+│  claude-1  Claude Code  refreshing…                                          │
+│  codex-1   Codex        ▕███████▎  ▏73% 2d 0h [1]  ▕███████   ▏70% 1h 5m     │
+│  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys

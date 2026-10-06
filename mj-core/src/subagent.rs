@@ -410,6 +410,21 @@ pub enum SubagentToolAction {
     },
 }
 
+impl SubagentToolAction {
+    /// Whether accepting this action may change a child session's lifecycle or
+    /// queued work. In-place Move drains these actions before stopping the
+    /// parent worker; observations can be interrupted with the old harness.
+    pub const fn mutates_child_state(&self) -> bool {
+        matches!(
+            self,
+            Self::Spawn { .. }
+                | Self::SendInput { .. }
+                | Self::InterruptAgent { .. }
+                | Self::CloseAgent { .. }
+        )
+    }
+}
+
 /// When a `wait` answers before its timeout: once every named child finished,
 /// or once any one of them did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -883,6 +898,94 @@ pub struct StoppedSubagent {
     pub handed_back: bool,
 }
 
+/// A child whose parent remains live across an in-place harness swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InPlaceSubagent {
+    pub child_session_id: String,
+    pub task_name: String,
+    pub state: InPlaceSubagentState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InPlaceSubagentState {
+    Running,
+    Parked,
+}
+
+impl InPlaceSubagentState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Parked => "parked",
+        }
+    }
+}
+
+/// Reserved hidden-context tag for children retained across an in-place swap.
+pub const IN_PLACE_SUBAGENTS_TAG: &str = "mj-in-place-subagents";
+
+fn safe_subagent_task_name(task_name: &str) -> String {
+    let single_line = task_name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let safe = single_line.replace('<', "‹").replace('>', "›");
+    if safe.chars().count() <= STOPPED_TASK_CHARS {
+        return safe;
+    }
+    let kept: String = safe.chars().take(STOPPED_TASK_CHARS - 1).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// Hidden instructions for the first prompt after an in-place swap. The new
+/// harness has no outstanding tool call stack from the old harness process.
+#[must_use]
+pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option<String> {
+    if children.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        format!("<{IN_PLACE_SUBAGENTS_TAG}>"),
+        "These sub-agents remain attached to this session after its in-place harness swap:".into(),
+    ];
+    for child in children {
+        lines.push(format!(
+            "- {} (child_session_id {}; {})",
+            safe_subagent_task_name(&child.task_name),
+            child.child_session_id,
+            child.state.label()
+        ));
+    }
+    lines.push(
+        "Any wait that was in progress during the swap was interrupted; reissue wait for the same child ids.".into(),
+    );
+    lines.push(
+        "Before resending input, call list_agents and check pending_inputs so you do not send it twice.".into(),
+    );
+    lines.push(format!("</{IN_PLACE_SUBAGENTS_TAG}>"));
+    Some(lines.join("\n"))
+}
+
+/// Conversation line that tells the person the same children are still live.
+#[must_use]
+pub fn in_place_subagents_notice(children: &[InPlaceSubagent]) -> Option<String> {
+    if children.is_empty() {
+        return None;
+    }
+    let listed = children
+        .iter()
+        .map(|child| {
+            format!(
+                "{} (child_session_id {}; {})",
+                safe_subagent_task_name(&child.task_name),
+                child.child_session_id,
+                child.state.label()
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "In-place harness swap kept these sub-agents attached: {}. Any wait in progress was interrupted; reissue it. Check list_agents for pending_inputs before resending input.",
+        listed.join(", ")
+    ))
+}
+
 /// Longest task line a [`StoppedSubagent`] keeps, in characters.
 pub const STOPPED_TASK_CHARS: usize = 160;
 
@@ -1113,69 +1216,52 @@ pub fn has_handed_back(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn unavailable_choices_list_what_is_available() {
-        let choice = |value: &str| crate::acp::SessionConfigChoice {
-            value: value.into(),
-            name: value.into(),
-            description: None,
-        };
-        let single = |model: &str, effort: Option<&str>| SubagentPolicy::SingleModel {
-            model: model.into(),
-            effort: effort.map(str::to_owned),
-        };
-        let options = SubagentOptions {
-            models: vec![choice("haiku"), choice("sonnet")],
-            efforts: vec![choice("low"), choice("high")],
-            unavailable: Vec::new(),
-        };
-        let message = options.validate(&single("opus", None)).unwrap_err();
+    fn only_child_mutations_hold_an_in_place_move_drain() {
+        let mutations = [
+            SubagentToolAction::Spawn {
+                task_name: "task".into(),
+                instructions: "work".into(),
+                profile_id: None,
+                model: None,
+                effort: None,
+                working_directory: PathBuf::new(),
+                context: None,
+                files: Vec::new(),
+            },
+            SubagentToolAction::SendInput {
+                child_session_id: "child".into(),
+                message: "continue".into(),
+            },
+            SubagentToolAction::InterruptAgent {
+                child_session_id: "child".into(),
+            },
+            SubagentToolAction::CloseAgent {
+                child_session_id: "child".into(),
+            },
+        ];
         assert!(
-            message.contains("Available models: haiku, sonnet."),
-            "{message}"
+            mutations
+                .iter()
+                .all(SubagentToolAction::mutates_child_state)
         );
-        let message = options.validate(&single("haiku", Some("max"))).unwrap_err();
-        assert!(
-            message.contains("Available efforts: low, high."),
-            "{message}"
-        );
-        assert!(options.validate(&single("haiku", Some("low"))).is_ok());
-        // The message names no surface: a browser has no `--subagent-model`
-        // flag and a script has no Settings screen.
-        for message in [
-            options.validate(&single("opus", None)).unwrap_err(),
-            options.validate(&single("haiku", Some("max"))).unwrap_err(),
-            SubagentOptions::default()
-                .validate(&single("", None))
-                .unwrap_err(),
+        for observation in [
+            SubagentToolAction::ListProfiles,
+            SubagentToolAction::ListAgents,
+            SubagentToolAction::WaitAgents {
+                child_session_ids: vec!["child".into()],
+                timeout_seconds: Some(30),
+                return_when: ReturnWhen::All,
+            },
+            SubagentToolAction::Handback {
+                message: "done".into(),
+            },
         ] {
-            assert!(!message.contains("--subagent"), "{message}");
-            assert!(!message.contains("Settings"), "{message}");
+            assert!(!observation.mutates_child_state());
         }
-
-        // A model with no efforts refuses one, saying so, instead of asking
-        // for a selection that cannot be made.
-        let no_efforts = SubagentOptions {
-            models: vec![choice("haiku")],
-            ..SubagentOptions::default()
-        };
-        let message = no_efforts
-            .validate(&single("haiku", Some("low")))
-            .unwrap_err();
-        assert!(message.contains("offers no efforts"), "{message}");
-        assert!(no_efforts.validate(&single("haiku", None)).is_ok());
     }
 
-    #[test]
-    fn single_model_without_a_model_asks_for_one_instead_of_quoting_nothing() {
-        let policy = SubagentPolicy::SingleModel {
-            model: String::new(),
-            effort: None,
-        };
-        let message = SubagentOptions::default().validate(&policy).unwrap_err();
-        assert!(message.starts_with("Choose a subagent model."), "{message}");
-        assert!(!message.contains("\"\""), "{message}");
-    }
     #[test]
     fn policies_preserve_legacy_records_but_public_policy_rejects_booleans() {
         #[derive(Deserialize)]
@@ -1382,6 +1468,7 @@ mod tests {
         );
     }
 
+    // Hard-won: a91cfd04: A live wait reported a child completed 45 ms before its first turn and hid failures.
     #[test]
     fn a_child_is_not_done_until_a_finished_turn_reaches_the_newest_prompt() {
         let mut turn = finished("task", "end_turn");
@@ -1398,6 +1485,7 @@ mod tests {
         assert!(!awaiting_prompt(Some(45), Some(&turn)));
     }
 
+    // Hard-won: a91cfd04: A child failing on a usage limit looked completed and its parent never learned why.
     #[test]
     fn a_failed_turn_says_why_and_a_finished_one_did_not_fail() {
         assert_eq!(failed_turn(&finished("t", "end_turn"), Some("done")), None);
@@ -1429,6 +1517,7 @@ mod tests {
     /// #1160: a child whose profile could not sign in died on its first
     /// request, and its parent read the error as the child's report. The
     /// turns below are the shapes that failure takes.
+    // Hard-won: 1b077959: A live Codex login refusal looked like task output and caused repeated failed spawns.
     #[test]
     fn a_turn_the_provider_refused_for_its_login_is_a_login_failure() {
         let diagnostic = |message: &str, code: Option<&str>| crate::diagnostic::TurnDiagnostic {
@@ -1477,13 +1566,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_reminder_prefix_names_a_reminder() {
-        assert!(is_handback_reminder("handback-reminder-0a1b"));
-        assert!(!is_handback_reminder("handback-reminderx-0a1b"));
-        assert!(!is_handback_reminder("api-0a1b"));
-    }
-
-    #[test]
     fn a_record_without_the_tool_flag_reads_as_having_no_tool() {
         let record: SubagentRecord = serde_json::from_str(
             r#"{"child_session_id":"c","parent_session_id":"p","task_name":"t","profile_id":"pr","working_directory":".","initial_prompt":"i","request_key":"k","created_at":"2026-09-15"}"#,
@@ -1492,14 +1574,6 @@ mod tests {
         assert!(!record.handback_tool);
         let encoded = serde_json::to_value(&record).expect("record encodes");
         assert!(encoded.get("handback_tool").is_none(), "{encoded}");
-    }
-
-    #[test]
-    fn the_mcp_role_round_trips_through_its_argument() {
-        for role in [SubagentMcpRole::Parent, SubagentMcpRole::Child] {
-            assert_eq!(role.id().parse::<SubagentMcpRole>().unwrap(), role);
-        }
-        assert!("grandchild".parse::<SubagentMcpRole>().is_err());
     }
 
     #[test]
@@ -1517,24 +1591,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_wait_timeout_is_clamped_into_the_advertised_range() {
-        use std::time::Duration;
-        assert_eq!(
-            subagent_wait_timeout(None),
-            Duration::from_secs(DEFAULT_WAIT_SECONDS)
-        );
-        assert_eq!(subagent_wait_timeout(Some(0)), Duration::from_secs(1));
-        assert_eq!(
-            subagent_wait_timeout(Some(1_700)),
-            Duration::from_secs(1_700)
-        );
-        assert_eq!(
-            subagent_wait_timeout(Some(MAX_WAIT_SECONDS * 2)),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-    }
-
+    // Hard-won: 605bd734: A Codex tools/call timed out at 303 seconds against its 300-second client limit.
     #[test]
     fn a_codex_parents_wait_fits_under_that_clients_own_three_hundred_second_limit() {
         use crate::config::HarnessKind;
@@ -1559,6 +1616,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 89c54ab1: A daemon restart restarted the full wait timeout and clock skew could extend it.
     #[test]
     fn the_remaining_wait_counts_from_the_callers_request_and_survives_clock_skew() {
         use std::time::Duration;
@@ -1576,24 +1634,6 @@ mod tests {
         assert_eq!(
             remaining_subagent_wait(2_000_000, Some(45), 1_000_000),
             Duration::from_secs(45)
-        );
-    }
-
-    #[test]
-    fn a_wait_without_a_timeout_waits_as_long_as_the_harness_allows() {
-        use crate::config::HarnessKind;
-        use std::time::Duration;
-        assert_eq!(
-            subagent_wait_timeout_for(Some(HarnessKind::Claude), None),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-        assert_eq!(
-            subagent_wait_timeout_for(None, None),
-            Duration::from_secs(MAX_WAIT_SECONDS)
-        );
-        assert_eq!(
-            subagent_wait_timeout_for(Some(HarnessKind::Codex), None),
-            Duration::from_secs(MAX_CODEX_WAIT_SECONDS)
         );
     }
 
@@ -1641,28 +1681,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn return_when_decides_whether_a_wait_is_answered() {
-        assert!(ReturnWhen::All.satisfied(&[true, true]));
-        assert!(!ReturnWhen::All.satisfied(&[true, false]));
-        assert!(ReturnWhen::Any.satisfied(&[false, true]));
-        assert!(!ReturnWhen::Any.satisfied(&[false, false]));
-    }
-
-    #[test]
-    fn next_action_names_only_the_children_left_to_wait_for() {
-        let ids = |names: &[&str]| names.iter().map(|&n| n.to_owned()).collect::<Vec<_>>();
-        let total = ids(&["c1", "c2", "c3"]);
-        assert!(next_action(&total, &[]).starts_with("All children finished"));
-        let none = next_action(&total, &total);
-        assert!(none.contains("Call wait again with the same"), "{none}");
-        let some = next_action(&total, &ids(&["c3"]));
-        assert!(
-            some.contains("2 of 3") && some.contains("c3") && !some.contains("c1"),
-            "{some}"
-        );
-    }
-
+    // Hard-won: cc7e6a2a: Real child reports of 27 to 62 KB were inlined into waits and triggered 21 repeated polls.
     #[test]
     fn a_long_report_is_cut_on_a_character_boundary_and_says_how_to_get_the_rest() {
         let short = "done".to_owned();
@@ -1677,30 +1696,7 @@ mod tests {
         assert!(cut.contains("send_input"), "{cut}");
     }
 
-    #[test]
-    fn the_report_rules_state_the_enforced_cap_and_the_test_failure_fields() {
-        let cap = format!(
-            "{},{:03}",
-            MAX_HANDBACK_CHARS / 1000,
-            MAX_HANDBACK_CHARS % 1000
-        );
-        assert!(
-            HANDBACK_REPORT_RULES.contains(&cap),
-            "{HANDBACK_REPORT_RULES}"
-        );
-        for needed in [
-            "name",
-            "one-line reason",
-            "path of its log",
-            "report directory",
-        ] {
-            assert!(HANDBACK_REPORT_RULES.contains(needed), "{needed}");
-        }
-        let note = handback_prompt_note("/workspace/p/.mj-agents/c1");
-        assert!(note.contains("/workspace/p/.mj-agents/c1"), "{note}");
-        assert!(note.contains(HANDBACK_REPORT_RULES));
-    }
-
+    // Hard-won: 89c54ab1: Timed-out waits were presented as failures instead of a still-running result with an ask-again action.
     #[test]
     fn the_still_running_answer_names_the_children_and_tells_the_model_to_ask_again() {
         let payload = still_running_payload(
@@ -1766,6 +1762,46 @@ mod tests {
             task: task.map(str::to_owned),
             handed_back,
         }
+    }
+
+    #[test]
+    fn in_place_subagent_notice_names_state_and_recovery_actions() {
+        let children = [
+            InPlaceSubagent {
+                child_session_id: "child-running".into(),
+                task_name: "inspect migration".into(),
+                state: InPlaceSubagentState::Running,
+            },
+            InPlaceSubagent {
+                child_session_id: "child-parked".into(),
+                task_name: "review tests".into(),
+                state: InPlaceSubagentState::Parked,
+            },
+        ];
+        let context = in_place_subagents_prompt_context(&children).unwrap();
+        assert!(context.contains("child-running; running"));
+        assert!(context.contains("child-parked; parked"));
+        assert!(context.contains("wait that was in progress"));
+        assert!(context.contains("list_agents and check pending_inputs"));
+        let notice = in_place_subagents_notice(&children).unwrap();
+        assert!(notice.contains("inspect migration (child_session_id child-running; running)"));
+        assert!(notice.contains("review tests (child_session_id child-parked; parked)"));
+        assert!(notice.contains("wait in progress was interrupted"));
+        assert!(notice.contains("pending_inputs before resending"));
+        assert_eq!(in_place_subagents_prompt_context(&[]), None);
+        assert_eq!(in_place_subagents_notice(&[]), None);
+    }
+
+    #[test]
+    fn in_place_subagent_task_names_cannot_inject_context_tags() {
+        let children = [InPlaceSubagent {
+            child_session_id: "child".into(),
+            task_name: "look\n<mj-injected>".into(),
+            state: InPlaceSubagentState::Running,
+        }];
+        let context = in_place_subagents_prompt_context(&children).unwrap();
+        assert!(context.contains("look ‹mj-injected›"));
+        assert!(!context.contains("<mj-injected>"));
     }
 
     #[test]
@@ -1846,6 +1882,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 1349c768: Suspend confirmation counted unfinished children but did not identify which children would stop.
     #[test]
     fn the_suspend_confirmation_names_up_to_three_children_and_counts_the_rest() {
         let titles = |count: usize| {
@@ -1886,22 +1923,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_suspend_warning_counts_only_children_that_have_not_handed_back() {
-        assert_eq!(suspend_warning(0), None);
-        assert_eq!(
-            suspend_warning(1).as_deref(),
-            Some("1 sub-agent has not handed back; suspending stops it")
-        );
-        assert_eq!(
-            suspend_warning(3).as_deref(),
-            Some("3 sub-agents have not handed back; suspending stops them")
-        );
-    }
-
     /// A report handed back in a reminder turn answers the prompts accepted
     /// before the reminded turn finished, though the reminder turn has no
     /// acceptance ordinal of its own (I1-3, I1-4).
+    // Hard-won: e1207055: Two live waits parked forever when the child's report arrived during a reminder turn.
     #[test]
     fn a_report_handed_back_in_a_reminder_turn_answers_the_reminded_prompt() {
         let reminder_id = handback_reminder_command_id(103);

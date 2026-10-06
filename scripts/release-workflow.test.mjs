@@ -117,6 +117,7 @@ for (const { fail = '', neverReadable = false } of [{}, { fail: 'linux-x64-gnu' 
     : neverReadable
       ? 'the wrapper publishes while the registry still 404s the platform versions'
       : 'all platforms precede the wrapper';
+  // Hard-won: 99a2e52: registry reads lagged successful publishes, leaving prior releases behind.
   test(`npm uploads run concurrently and ${outcome}`, t => {
     const dir = fixture(t);
     mkdirSync(join(dir, 'bin'));

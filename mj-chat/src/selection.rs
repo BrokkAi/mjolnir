@@ -585,6 +585,7 @@ mod tests {
     use ratatui::style::Style;
     use ratatui::text::Line;
     use ratatui::widgets::{Paragraph, Widget};
+    use std::fmt::Write as _;
 
     fn registry(frames: &[SurfaceFrame]) -> FrameSurfaces {
         let mut surfaces = FrameSurfaces::new();
@@ -611,6 +612,261 @@ mod tests {
         buffer
     }
 
+    fn transcript_buffer(top_row: usize) -> (Buffer, SurfaceFrame) {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 14, 10));
+        let rows = (top_row..top_row + 4)
+            .map(|row| Line::from(format!("row{row:02} abcde")))
+            .collect::<Vec<_>>();
+        Paragraph::new(rows).render(Rect::new(2, 3, 10, 4), &mut buffer);
+        (
+            buffer,
+            SurfaceFrame::scrollable(
+                SurfaceId::Transcript,
+                Rect::new(2, 3, 10, 4),
+                top_row,
+                top_row + 20,
+            ),
+        )
+    }
+
+    fn append_selection_state(output: &mut String, label: &str, buffer: &Buffer, details: &str) {
+        writeln!(
+            output,
+            "=== {label} ({}x{}) ===",
+            buffer.area.width, buffer.area.height
+        )
+        .expect("write heading");
+        writeln!(output, "{details}").expect("write state details");
+        output.push_str(&crate::golden::buffer_lines(buffer).join("\n"));
+        output.push('\n');
+    }
+
+    #[test]
+    fn golden_text_selection() {
+        let mut output = String::new();
+
+        let frame = transcript(40, 200);
+        writeln!(
+            output,
+            "=== content coordinates through a scrolled transcript (10x4) ===\nscreen (2,3) -> {:?}; screen (5,5) -> {:?}; content row 42 -> {:?}; rows 39 and 44 -> {:?}, {:?}",
+            frame.content_pos(2, 3),
+            frame.content_pos(5, 5),
+            frame.screen_row(42),
+            frame.screen_row(39),
+            frame.screen_row(44)
+        )
+        .expect("write content coordinate mapping");
+
+        let surfaces = registry(&[transcript(0, 4)]);
+        let mut state = SelectionState::new();
+        state.on_mouse_down(5, 4, &surfaces);
+        state.on_mouse_drag(5, 4, &surfaces);
+        let action = state.on_mouse_up(5, 4, &surfaces);
+        let (buffer, _) = transcript_buffer(0);
+        append_selection_state(
+            &mut output,
+            "press and release in the same cell",
+            &buffer,
+            &format!(
+                "action: {action:?}; range: {:?}; active surface: {:?}",
+                state.range(),
+                state.active_surface()
+            ),
+        );
+
+        let surfaces = registry(&[transcript(10, 100)]);
+        let mut state = SelectionState::new();
+        let (mut buffer, frame) = transcript_buffer(10);
+        state.on_mouse_down(4, 4, &surfaces);
+        state.on_mouse_drag(7, 5, &surfaces);
+        let action = state.on_mouse_up(7, 5, &surfaces);
+        let range = state.range().expect("selection range");
+        highlight(&mut buffer, &frame, &range);
+        let copied = extract_rows(&buffer, &frame, &range);
+        append_selection_state(
+            &mut output,
+            "drag, highlight, and copy request",
+            &buffer,
+            &format!(
+                "action: {action:?}; range: {range:?}; active surface: {:?}; copied: {copied:?}",
+                state.active_surface()
+            ),
+        );
+
+        let surfaces = registry(&[transcript(0, 4)]);
+        let mut state = SelectionState::new();
+        let (mut buffer, frame) = transcript_buffer(0);
+        state.on_mouse_down(8, 5, &surfaces);
+        let action = state.on_mouse_up(3, 3, &surfaces);
+        let range = state.range().expect("reverse selection range");
+        highlight(&mut buffer, &frame, &range);
+        append_selection_state(
+            &mut output,
+            "backward drag normalized to content order",
+            &buffer,
+            &format!("action: {action:?}; normalized range: {range:?}"),
+        );
+
+        let surfaces = registry(&[transcript(10, 100)]);
+        let mut state = SelectionState::new();
+        state.on_mouse_down(5, 5, &surfaces);
+        let mut requests = vec![format!("inside: {:?}", state.autoscroll_request(&surfaces))];
+        state.on_mouse_drag(5, 4, &surfaces);
+        requests.push(format!(
+            "one row below top: {:?}",
+            state.autoscroll_request(&surfaces)
+        ));
+        state.on_mouse_drag(5, 3, &surfaces);
+        requests.push(format!(
+            "top edge: {:?}",
+            state.autoscroll_request(&surfaces)
+        ));
+        state.on_mouse_drag(5, 1, &surfaces);
+        requests.push(format!(
+            "above top edge: {:?}",
+            state.autoscroll_request(&surfaces)
+        ));
+        state.on_mouse_drag(5, 6, &surfaces);
+        requests.push(format!(
+            "bottom edge: {:?}",
+            state.autoscroll_request(&surfaces)
+        ));
+        state.on_mouse_up(5, 6, &surfaces);
+        requests.push(format!(
+            "after release: {:?}",
+            state.autoscroll_request(&surfaces)
+        ));
+        let (buffer, _) = transcript_buffer(10);
+        append_selection_state(
+            &mut output,
+            "autoscroll direction at viewport edges",
+            &buffer,
+            &requests.join("; "),
+        );
+
+        let surfaces = registry(&[transcript(0, 4)]);
+        let mut state = SelectionState::new();
+        state.on_mouse_down(5, 5, &surfaces);
+        state.on_mouse_drag(5, 9, &surfaces);
+        let request = state.autoscroll_request(&surfaces);
+        let (buffer, _) = transcript_buffer(0);
+        append_selection_state(
+            &mut output,
+            "no autoscroll when the whole surface fits",
+            &buffer,
+            &format!("request: {request:?}"),
+        );
+
+        let surfaces = registry(&[transcript(0, 4)]);
+        let mut state = SelectionState::new();
+        state.on_mouse_down(3, 3, &surfaces);
+        state.on_mouse_up(9, 5, &surfaces);
+        let before = state.range();
+        state.on_mouse_down(40, 40, &surfaces);
+        let after = state.range();
+        let action = state.on_mouse_up(40, 40, &surfaces);
+        let (buffer, _) = transcript_buffer(0);
+        append_selection_state(
+            &mut output,
+            "outside press clears the selection",
+            &buffer,
+            &format!(
+                "before: {before:?}; after: {after:?}; active: {:?}; action: {action:?}",
+                state.active_surface()
+            ),
+        );
+
+        let mut buffer = buffer_with_rows(&["abcdefgh", "ijklmnop", "qrstuvwx"], 8);
+        let frame = SurfaceFrame::fixed(SurfaceId::PromptInput, Rect::new(1, 0, 6, 3));
+        let range = SelectionRange {
+            start: ContentPos::new(0, 3),
+            end: ContentPos::new(1, 1),
+        };
+        highlight(&mut buffer, &frame, &range);
+        let reversed = (0..3)
+            .flat_map(|y| (0..8).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                buffer
+                    .cell(Position::new(x, y))
+                    .expect("cell")
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            })
+            .collect::<Vec<_>>();
+        append_selection_state(
+            &mut output,
+            "highlight only selected cells",
+            &buffer,
+            &format!("reverse-video cells: {reversed:?}"),
+        );
+
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buffer = Buffer::empty(area);
+        Paragraph::new(Line::from("bold").style(Style::new().bold())).render(area, &mut buffer);
+        let frame = SurfaceFrame::fixed(SurfaceId::ModalBody, area);
+        let range = SelectionRange {
+            start: ContentPos::new(0, 0),
+            end: ContentPos::new(0, 3),
+        };
+        highlight(&mut buffer, &frame, &range);
+        let modifiers = buffer
+            .content()
+            .iter()
+            .map(|cell| format!("{:?}", cell.modifier))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        append_selection_state(
+            &mut output,
+            "selection keeps existing bold style",
+            &buffer,
+            &format!("cell modifiers: {modifiers}"),
+        );
+
+        let buffer = buffer_with_rows(&["hello", "hi", "there"], 10);
+        let frame = SurfaceFrame::fixed(SurfaceId::ModalBody, Rect::new(0, 0, 10, 3));
+        let range = SelectionRange {
+            start: ContentPos::new(0, 0),
+            end: ContentPos::new(2, 9),
+        };
+        let copied = extract_rows(&buffer, &frame, &range);
+        append_selection_state(
+            &mut output,
+            "copy trims pad and joins rows",
+            &buffer,
+            &format!("copied: {copied:?}"),
+        );
+
+        let buffer = buffer_with_rows(&["abcdefgh", "ijklmnop", "qrstuvwx"], 8);
+        let frame = SurfaceFrame::fixed(SurfaceId::PromptInput, Rect::new(0, 0, 8, 3));
+        let range = SelectionRange {
+            start: ContentPos::new(0, 5),
+            end: ContentPos::new(2, 2),
+        };
+        let copied = extract_rows(&buffer, &frame, &range);
+        append_selection_state(
+            &mut output,
+            "copy reads partial first and last rows",
+            &buffer,
+            &format!("copied: {copied:?}"),
+        );
+
+        let buffer = buffer_with_rows(&["xxhello", "xxworld"], 7);
+        let frame = SurfaceFrame::fixed(SurfaceId::ResumeList, Rect::new(2, 0, 5, 2));
+        let range = SelectionRange {
+            start: ContentPos::new(0, 0),
+            end: ContentPos::new(1, 4),
+        };
+        let copied = extract_rows(&buffer, &frame, &range);
+        append_selection_state(
+            &mut output,
+            "copy is relative to the surface origin",
+            &buffer,
+            &format!("copied: {copied:?}"),
+        );
+
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "text-selection", &output);
+    }
+
     #[test]
     fn surface_at_picks_the_last_registered_overlapping_surface() {
         let pane = SurfaceFrame::fixed(SurfaceId::DashboardPane(0), Rect::new(0, 0, 20, 10));
@@ -626,31 +882,6 @@ mod tests {
             Some(SurfaceId::DashboardPane(0))
         );
         assert_eq!(surfaces.surface_at(30, 30), None);
-    }
-
-    #[test]
-    fn content_pos_maps_screen_rows_through_top_row() {
-        let frame = transcript(40, 200);
-
-        assert_eq!(frame.content_pos(2, 3), ContentPos::new(40, 0));
-        assert_eq!(frame.content_pos(5, 5), ContentPos::new(42, 3));
-        assert_eq!(frame.screen_row(42), Some(5));
-        assert_eq!(frame.screen_row(39), None);
-        assert_eq!(frame.screen_row(44), None);
-    }
-
-    #[test]
-    fn press_and_release_in_the_same_cell_reports_a_click() {
-        let surfaces = registry(&[transcript(0, 4)]);
-        let mut state = SelectionState::new();
-
-        state.on_mouse_down(5, 4, &surfaces);
-        state.on_mouse_drag(5, 4, &surfaces);
-        let action = state.on_mouse_up(5, 4, &surfaces);
-
-        assert_eq!(action, SelectionAction::Click { column: 5, row: 4 });
-        assert_eq!(state.range(), None);
-        assert_eq!(state.active_surface(), None);
     }
 
     #[test]
@@ -720,59 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn drag_to_another_cell_reports_a_copy_request() {
-        let surfaces = registry(&[transcript(10, 100)]);
-        let mut state = SelectionState::new();
-
-        state.on_mouse_down(4, 4, &surfaces);
-        state.on_mouse_drag(7, 5, &surfaces);
-        assert_eq!(state.active_surface(), Some(SurfaceId::Transcript));
-        assert_eq!(
-            state.range(),
-            Some(SelectionRange {
-                start: ContentPos::new(11, 2),
-                end: ContentPos::new(12, 5),
-            })
-        );
-
-        let action = state.on_mouse_up(7, 5, &surfaces);
-
-        assert_eq!(
-            action,
-            SelectionAction::CopyRequested {
-                surface: SurfaceId::Transcript,
-                range: SelectionRange {
-                    start: ContentPos::new(11, 2),
-                    end: ContentPos::new(12, 5),
-                },
-            }
-        );
-        // The highlight survives the release.
-        assert!(state.range().is_some());
-        assert_eq!(state.active_surface(), Some(SurfaceId::Transcript));
-    }
-
-    #[test]
-    fn dragging_backwards_normalizes_the_range() {
-        let surfaces = registry(&[transcript(0, 4)]);
-        let mut state = SelectionState::new();
-
-        state.on_mouse_down(8, 5, &surfaces);
-        let action = state.on_mouse_up(3, 3, &surfaces);
-
-        assert_eq!(
-            action,
-            SelectionAction::CopyRequested {
-                surface: SurfaceId::Transcript,
-                range: SelectionRange {
-                    start: ContentPos::new(0, 1),
-                    end: ContentPos::new(2, 6),
-                },
-            }
-        );
-    }
-
-    #[test]
     fn dragging_outside_the_rect_clamps_to_the_visible_rows() {
         let surfaces = registry(&[transcript(10, 100)]);
         let mut state = SelectionState::new();
@@ -798,39 +976,6 @@ mod tests {
     }
 
     #[test]
-    fn autoscroll_request_reports_a_direction_only_at_the_edges() {
-        let surfaces = registry(&[transcript(10, 100)]);
-        let mut state = SelectionState::new();
-
-        state.on_mouse_down(5, 5, &surfaces);
-        assert_eq!(state.autoscroll_request(&surfaces), None);
-
-        state.on_mouse_drag(5, 4, &surfaces);
-        assert_eq!(state.autoscroll_request(&surfaces), None);
-
-        state.on_mouse_drag(5, 3, &surfaces);
-        assert_eq!(
-            state.autoscroll_request(&surfaces),
-            Some((SurfaceId::Transcript, -1))
-        );
-
-        state.on_mouse_drag(5, 1, &surfaces);
-        assert_eq!(
-            state.autoscroll_request(&surfaces),
-            Some((SurfaceId::Transcript, -1))
-        );
-
-        state.on_mouse_drag(5, 6, &surfaces);
-        assert_eq!(
-            state.autoscroll_request(&surfaces),
-            Some((SurfaceId::Transcript, 1))
-        );
-
-        state.on_mouse_up(5, 6, &surfaces);
-        assert_eq!(state.autoscroll_request(&surfaces), None);
-    }
-
-    #[test]
     fn retrack_extends_the_selection_as_autoscroll_moves_rows_under_the_pointer() {
         let mut state = SelectionState::new();
         let before = registry(&[transcript(10, 100)]);
@@ -850,59 +995,6 @@ mod tests {
         state.retrack(&after);
 
         assert_eq!(state.range().expect("dragging").end, ContentPos::new(14, 3));
-    }
-
-    #[test]
-    fn autoscroll_request_ignores_surfaces_with_nothing_scrolled_out() {
-        let surfaces = registry(&[transcript(0, 4)]);
-        let mut state = SelectionState::new();
-
-        state.on_mouse_down(5, 5, &surfaces);
-        state.on_mouse_drag(5, 9, &surfaces);
-
-        assert_eq!(state.autoscroll_request(&surfaces), None);
-    }
-
-    #[test]
-    fn pressing_outside_every_surface_clears_the_selection() {
-        let surfaces = registry(&[transcript(0, 4)]);
-        let mut state = SelectionState::new();
-
-        state.on_mouse_down(3, 3, &surfaces);
-        state.on_mouse_up(9, 5, &surfaces);
-        assert!(state.range().is_some());
-
-        state.on_mouse_down(40, 40, &surfaces);
-        assert_eq!(state.range(), None);
-        assert_eq!(state.active_surface(), None);
-        assert_eq!(state.on_mouse_up(40, 40, &surfaces), SelectionAction::None);
-    }
-
-    #[test]
-    fn highlight_reverses_exactly_the_selected_cells() {
-        let mut buffer = buffer_with_rows(&["abcdefgh", "ijklmnop", "qrstuvwx"], 8);
-        let frame = SurfaceFrame::fixed(SurfaceId::PromptInput, Rect::new(1, 0, 6, 3));
-        let range = SelectionRange {
-            start: ContentPos::new(0, 3),
-            end: ContentPos::new(1, 1),
-        };
-
-        highlight(&mut buffer, &frame, &range);
-
-        let reversed: Vec<(u16, u16)> = (0..3)
-            .flat_map(|y| (0..8).map(move |x| (x, y)))
-            .filter(|&(x, y)| {
-                buffer
-                    .cell(Position::new(x, y))
-                    .expect("cell")
-                    .modifier
-                    .contains(Modifier::REVERSED)
-            })
-            .collect();
-
-        // First row: columns 3..=5 of the rect (screen x 4..=6).
-        // Second row: columns 0..=1 of the rect (screen x 1..=2).
-        assert_eq!(reversed, vec![(4, 0), (5, 0), (6, 0), (1, 1), (2, 1)]);
     }
 
     #[test]
@@ -928,48 +1020,6 @@ mod tests {
             .collect();
 
         assert_eq!(reversed, vec![(0, 0), (1, 0), (2, 0)]);
-    }
-
-    #[test]
-    fn highlight_preserves_the_styles_already_on_the_cells() {
-        let area = Rect::new(0, 0, 4, 1);
-        let mut buffer = Buffer::empty(area);
-        Paragraph::new(Line::from("bold").style(Style::new().bold())).render(area, &mut buffer);
-        let frame = SurfaceFrame::fixed(SurfaceId::ModalBody, area);
-        let range = SelectionRange {
-            start: ContentPos::new(0, 0),
-            end: ContentPos::new(0, 3),
-        };
-
-        highlight(&mut buffer, &frame, &range);
-
-        let modifier = buffer.cell(Position::new(0, 0)).expect("cell").modifier;
-        assert!(modifier.contains(Modifier::BOLD));
-        assert!(modifier.contains(Modifier::REVERSED));
-    }
-
-    #[test]
-    fn extract_rows_trims_trailing_pad_and_joins_with_newlines() {
-        let buffer = buffer_with_rows(&["hello", "hi", "there"], 10);
-        let frame = SurfaceFrame::fixed(SurfaceId::ModalBody, Rect::new(0, 0, 10, 3));
-        let range = SelectionRange {
-            start: ContentPos::new(0, 0),
-            end: ContentPos::new(2, 9),
-        };
-
-        assert_eq!(extract_rows(&buffer, &frame, &range), "hello\nhi\nthere");
-    }
-
-    #[test]
-    fn extract_rows_reads_a_partial_first_and_last_row() {
-        let buffer = buffer_with_rows(&["abcdefgh", "ijklmnop", "qrstuvwx"], 8);
-        let frame = SurfaceFrame::fixed(SurfaceId::PromptInput, Rect::new(0, 0, 8, 3));
-        let range = SelectionRange {
-            start: ContentPos::new(0, 5),
-            end: ContentPos::new(2, 2),
-        };
-
-        assert_eq!(extract_rows(&buffer, &frame, &range), "fgh\nijklmnop\nqrs");
     }
 
     #[test]
@@ -1004,17 +1054,5 @@ mod tests {
             end: ContentPos::new(0, 9),
         };
         assert_eq!(extract_rows(&buffer, &frame, &tail), "界 ok");
-    }
-
-    #[test]
-    fn extract_rows_offsets_by_the_surface_rect() {
-        let buffer = buffer_with_rows(&["xxhello", "xxworld"], 7);
-        let frame = SurfaceFrame::fixed(SurfaceId::ResumeList, Rect::new(2, 0, 5, 2));
-        let range = SelectionRange {
-            start: ContentPos::new(0, 0),
-            end: ContentPos::new(1, 4),
-        };
-
-        assert_eq!(extract_rows(&buffer, &frame, &range), "hello\nworld");
     }
 }

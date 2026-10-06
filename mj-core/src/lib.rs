@@ -18,6 +18,8 @@ pub mod elicitation;
 pub mod event_outcome;
 pub mod go;
 pub mod goal;
+#[cfg(feature = "golden")]
+pub mod golden;
 pub mod harness_runtime;
 pub mod help_search;
 pub mod hex;

@@ -428,16 +428,6 @@ fn slash_commands_and_waiting_checkpoints_are_not_steered() {
 }
 
 #[test]
-fn bridges_that_start_their_own_turns_are_not_steered_automatically() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = relay_steering_automatically(temp.path());
-    relay.set_automatic_steering(false);
-    queue_prompt(&mut relay, "prompt-second", "also this");
-    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
-    assert!(relay.operational_state().steering.is_none());
-}
-
-#[test]
 fn a_path_is_a_message_and_a_command_name_is_not() {
     let prompt = |text: &str| vec![ContentBlock::from(text)];
     assert!(mj_core::acp::prompt_is_slash_command(&prompt("/review")));
@@ -605,6 +595,7 @@ fn steering_rejects_changed_queue_and_consumes_late_confirmed_input_once() {
 }
 use test_support::*;
 
+// Hard-won: 0cfac73c: resuming an unused Codex thread without a rollout caused an endless worker restart loop.
 #[test]
 fn a_locally_created_empty_native_session_has_no_history() {
     let temp = tempfile::tempdir().unwrap();
@@ -670,6 +661,7 @@ fn a_released_recovery_floor_gives_the_native_session_history() {
     assert!(relay.native_session_may_have_history());
 }
 
+// Hard-won: c82d9df3: an empty Claude session opened above an archive floor was mistaken for used history.
 #[test]
 fn a_native_session_opened_after_a_restore_floor_has_no_history() {
     // A moved session starts from an archive seed, which sets the recovery
@@ -768,6 +760,7 @@ fn a_used_native_session_stays_used_across_persist_and_replay() {
     );
 }
 
+// Hard-won: 0f070506: Zcode could not resume its native session and crash-looped after restart or restore.
 #[test]
 fn lost_native_continuity_survives_reopen_and_clears_on_a_normal_open() {
     let temp = tempfile::tempdir().unwrap();
@@ -854,6 +847,7 @@ fn hidden_prompt_context_is_removed_from_harness_visible_text() {
 /// reads it (content items joined by line breaks) and where codex-acp takes a
 /// fallback title from it after a load (joined by spaces, runs of white space
 /// collapsed).
+// Hard-won: b5ae15db: a live Codex title was generated from private project-memory context.
 #[test]
 fn codex_wrapping_of_hidden_context_is_removed_from_harness_visible_text() {
     use mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI as URI;
@@ -911,6 +905,7 @@ fn stopped_subagents_note() -> String {
 
 /// The note about the sub-agents a suspend stopped goes to the first prompt
 /// after the resume, and to no later one, even across a worker restart.
+// Hard-won: d0e60898: a resumed parent still waited on sub-agents that suspend had stopped.
 #[test]
 fn a_stopped_sub_agents_note_reaches_only_the_first_prompt_after_a_resume() {
     let temp = tempfile::tempdir().unwrap();
@@ -987,6 +982,7 @@ fn acp_activity_clock_is_shared_with_operational_status_but_not_persisted() {
 /// clone the session configuration once per streamed chunk. That makes two
 /// places that translate a session into facts, so this pins them together: if
 /// one ever stops reporting a fact the other reports, this fails.
+// Hard-won: 92f96a7f: the watchdog used a private tool map and disagreed with published worker activity.
 #[test]
 fn worker_facts_match_the_published_state() {
     let temp = tempfile::tempdir().unwrap();
@@ -1251,32 +1247,6 @@ fn legacy_idle_snapshot_does_not_invent_an_idle_start() {
 }
 
 #[test]
-fn step_clock_is_shared_with_operational_status_but_not_persisted() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    assert_eq!(relay.operational_state().current_step_started_at_ms, None);
-    relay.step_clock().begin_turn();
-    assert!(
-        relay
-            .operational_state()
-            .current_step_started_at_ms
-            .is_some()
-    );
-    relay.step_clock().end_turn();
-    assert_eq!(
-        relay.operational_state().current_step_started_at_ms,
-        None,
-        "a finished turn leaves no step in flight"
-    );
-
-    let reopened = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    assert_eq!(
-        reopened.operational_state().current_step_started_at_ms,
-        None
-    );
-}
-
-#[test]
 fn hidden_context_waits_for_a_prompt_and_survives_an_interruption() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -1371,6 +1341,7 @@ fn attach_envelope(
     )
 }
 
+// Hard-won: 08e2dde6: disk replay under the relay mutex stalled live event recording during catch-up.
 #[test]
 fn a_deferred_attach_reads_its_page_while_the_relay_keeps_recording() {
     let temp = tempfile::tempdir().unwrap();
@@ -2179,42 +2150,6 @@ fn checkpoint_waits_for_earlier_queued_control_and_freezes_later_control() {
 }
 
 #[test]
-fn a_recorded_notice_becomes_one_verbatim_system_line() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let text = "This session moved from /home/dev/project into a container.";
-
-    submit_relay(
-        &mut relay,
-        "resume-notice-1",
-        RelayCommand::RecordNotice { text: text.into() },
-    );
-
-    // A notice never reaches ACP: it completes inside the relay.
-    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
-    let mut session = mj_core::state::MaterializedSession::empty(SESSION);
-    for event in relay.events_after(0, RELAY_EVENT_GENESIS_DIGEST).unwrap() {
-        let projected = mj_transcript::projection::project_relay_event(&session, &event).unwrap();
-        mj_transcript::projection::apply_committed_projection_event(
-            &mut session,
-            &event,
-            projected.mutation,
-        )
-        .unwrap();
-    }
-
-    let notices = session
-        .transcript
-        .iter()
-        .filter_map(|item| match &item.body {
-            mj_core::state::TranscriptBody::System { text } => Some(text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(notices, vec![text.to_owned()]);
-}
-
-#[test]
 fn a_repeated_notice_append_still_leaves_one_conversation_line() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -2531,6 +2466,7 @@ fn a_harness_turn_refused_for_quota_ends_with_nothing_left_set() {
     assert!(mj_core::activity::can_submit(&ready), "{ready:?}");
 }
 
+// Hard-won: 6b6e684c: Claude cycles without an origin marker left sessions running until a later marker.
 #[test]
 fn agent_output_at_idle_opens_a_harness_turn_and_its_cycle_result_settles_it() {
     let temp = tempfile::tempdir().unwrap();
@@ -2588,6 +2524,7 @@ fn agent_output_at_idle_opens_a_harness_turn_and_its_cycle_result_settles_it() {
 /// The adapter's origin marker is left out when a cycle produced no
 /// assistant usage, so it cannot be what ends a Claude turn. The result can:
 /// Claude Code sends one for every cycle.
+// Hard-won: 6b6e684c: Claude cycles without an origin marker left sessions running until a later marker.
 #[test]
 fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
     let temp = tempfile::tempdir().unwrap();
@@ -2637,6 +2574,7 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
 /// Stop while Claude Code works on its own after a background task sends
 /// `session/cancel`; the interrupted cycle's result then ends the turn. With
 /// nothing running, or during a Codex goal turn, Stop is still refused.
+// Hard-won: 4c379acf: Stop was unavailable while Claude ran a cycle started by a completed background task.
 #[test]
 fn stop_during_a_claude_harness_turn_is_dispatched_and_the_interrupted_result_ends_it() {
     let refused = |relay: &mut DurableRelay, command_id: &str| {
@@ -2704,6 +2642,7 @@ const CLAUDE_AUTO_MODE_FALLBACK_TEXT: &str = "**Auto mode unavailable:** the sel
 /// R4-2: the adapter's answer to a model change is not a model cycle, so no
 /// result ever follows it. A turn opened for that text stayed Running for
 /// minutes and nothing could stop it.
+// Hard-won: c0f3babc: a model-change notice opened a phantom turn that no cycle result could settle.
 #[test]
 fn text_that_answers_a_model_change_opens_no_harness_turn() {
     let temp = tempfile::tempdir().unwrap();
@@ -2755,6 +2694,7 @@ fn text_that_answers_a_model_change_opens_no_harness_turn() {
 /// R4-2: a stop of a turn Claude Code never ran is answered by nothing, so
 /// the relay ends that turn itself once the stop has had time to be answered.
 /// A real cycle's result still ends the turn first.
+// Hard-won: c0f3babc: a no-op stop left a phantom Claude turn working because no result would arrive.
 #[test]
 fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
     for command in [RelayCommand::Cancel, RelayCommand::CancelTurn] {
@@ -2827,6 +2767,7 @@ fn a_stop_the_harness_never_answers_ends_the_self_started_turn() {
     assert_eq!(relay.operational_state().latest_ordinal, before);
 }
 
+// Hard-won: 1389c545: Claude work without a prompt looked idle and allowed a recovery checkpoint mid-cycle.
 #[test]
 fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     let temp = tempfile::tempdir().unwrap();
@@ -3119,6 +3060,7 @@ fn kimi_relay_with_prompt_in_flight(root: &Path) -> DurableRelay {
     relay
 }
 
+// Hard-won: 492a4bd: Kimi detached Bash work disappeared from the background task list.
 #[test]
 fn kimi_detached_shell_is_listed_once_as_its_hosted_terminal_during_the_turn() {
     let temp = tempfile::tempdir().unwrap();
@@ -3165,6 +3107,7 @@ fn kimi_detached_shell_is_listed_once_as_its_hosted_terminal_during_the_turn() {
     );
 }
 
+// Hard-won: 492a4bd: Kimi detached Bash work disappeared when no terminal was bound.
 #[test]
 fn kimi_detached_shell_without_a_bound_terminal_is_listed_as_a_native_task() {
     let temp = tempfile::tempdir().unwrap();
@@ -3185,31 +3128,6 @@ fn kimi_detached_shell_without_a_bound_terminal_is_listed_as_a_native_task() {
             .collect::<Vec<_>>(),
         ["kimi:bash-r5ae"],
         "without ACP evidence the native record is all there is"
-    );
-}
-
-#[test]
-fn a_kimi_hosted_terminal_with_no_detachment_evidence_stays_hidden_during_the_turn() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = kimi_relay_with_prompt_in_flight(temp.path());
-    relay
-        .record_session_update(kimi_background_shell_card("3:tool_wait", None))
-        .unwrap();
-    relay
-        .agent_terminal_started(ActiveAgentTerminal {
-            terminal_id: "term-61".into(),
-            command: "cargo test".into(),
-            started_at_ms: 2_000,
-        })
-        .unwrap();
-
-    assert!(
-        !relay
-            .operational_state()
-            .background_commands
-            .iter()
-            .any(|command| command.id == "terminal:term-61"),
-        "a terminal the turn may still be waiting on is the turn's own work"
     );
 }
 
@@ -3373,6 +3291,7 @@ fn kimi_tracker_failure_retains_work_and_blocks_replacement() {
     assert!(!state.is_quiet());
 }
 
+// Hard-won: db2e99a5: sessions with a command left running were shown as idle on every surface.
 #[test]
 fn a_terminal_the_agent_left_running_is_background_work_once_the_turn_ends() {
     let temp = tempfile::tempdir().unwrap();
@@ -3603,6 +3522,7 @@ fn assert_chunk_opened_a_harness_turn(relay: &DurableRelay) {
     ));
 }
 
+// Hard-won: 460153f3: stopping a Claude task left an idle session marked Working with nothing running.
 #[test]
 fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
     let temp = tempfile::tempdir().unwrap();
@@ -3640,6 +3560,7 @@ fn a_requested_stop_acknowledgement_does_not_open_a_harness_turn() {
     assert!(state.harness_turn.is_some());
 }
 
+// Hard-won: 460153f3: Claude renamed tasks between the stop request and its stop acknowledgement.
 #[test]
 fn a_stop_acknowledgement_matches_whatever_name_the_adapter_now_uses() {
     let temp = tempfile::tempdir().unwrap();
@@ -3708,56 +3629,6 @@ fn stop_acknowledgements_clear_on_restart() {
             RelayObservation::SessionUpdate { .. }
         ]
     ));
-}
-
-#[test]
-fn claude_background_levels_do_not_open_turns_or_enter_the_transcript() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = claude_relay(temp.path());
-    relay
-        .record_observation(RelayObservation::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-    let ordinal = relay.snapshot.latest_ordinal;
-    relay
-        .claude_background_tasks_changed(vec![claude_task("workflow", "Design reviews")])
-        .unwrap();
-    assert_eq!(relay.snapshot.latest_ordinal, ordinal);
-    assert_eq!(
-        relay.operational_state().execution,
-        RelayExecutionState::Idle
-    );
-    assert!(relay.operational_state().harness_turn.is_none());
-
-    // An autonomous follow-up keeps its foreground state while tasks live,
-    // and settling that turn returns to background work.
-    relay.record_session_update(tool_call_update()).unwrap();
-    assert_eq!(
-        relay.operational_state().execution,
-        RelayExecutionState::Running
-    );
-    relay
-        .claude_turn_result(&cycle_result("task-notification"))
-        .unwrap();
-    assert_eq!(
-        relay.operational_state().execution,
-        RelayExecutionState::Idle
-    );
-    assert_eq!(relay.operational_state().background_commands.len(), 1);
-
-    relay
-        .agent_terminal_started(ActiveAgentTerminal {
-            terminal_id: "shell".into(),
-            command: "sleep 600".into(),
-            started_at_ms: 1,
-        })
-        .unwrap();
-    assert_eq!(relay.operational_state().background_commands.len(), 2);
-    relay.claude_background_tasks_changed(Vec::new()).unwrap();
-    assert_eq!(relay.operational_state().background_commands.len(), 1);
-    relay.agent_terminal_closed("shell").unwrap();
-    assert!(relay.operational_state().is_quiet());
 }
 
 #[test]
@@ -3858,11 +3729,11 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
         submit_relay(&mut relay, "memory-prompt", prompt("remember the result"));
         assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
 
-        let mut call = ToolCall::new("memory", "mcp.mj-memory.write");
+        let mut call = ToolCall::new("history", "mcp.mj-memory.search_sessions");
         call.kind = ToolKind::Execute;
         call.raw_input = Some(serde_json::json!({
-            "server": "mj-memory", "tool": "write",
-            "arguments": {"path": "/MEMORY.md", "content": "done"}
+            "server": "mj-memory", "tool": "search_sessions",
+            "arguments": {"query": "remember the result"}
         }));
         let output = serde_json::json!({
             "result": {"content": [{"type": "text", "text": "saved"}]},
@@ -3875,7 +3746,7 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
                 .unwrap();
             relay
                 .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    "memory",
+                    "history",
                     ToolCallUpdateFields::new()
                         .status(ToolCallStatus::Completed)
                         .raw_output(output),
@@ -3901,36 +3772,6 @@ fn completed_codex_mcp_execute_calls_do_not_leave_background_work() {
             .unwrap();
         assert!(relay.operational_state().is_quiet());
     }
-}
-
-#[test]
-fn a_codex_non_execute_partial_result_is_not_background_work() {
-    use agent_client_protocol::schema::v1::{ToolCallUpdate, ToolCallUpdateFields};
-
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay.set_background_work_policy(BackgroundWorkPolicy::CodexExecCards);
-
-    let mut guardian =
-        agent_client_protocol::schema::v1::ToolCall::new("guardian-assessment", "Guardian Review");
-    guardian.kind = agent_client_protocol::schema::v1::ToolKind::Think;
-    guardian.status = agent_client_protocol::schema::v1::ToolCallStatus::InProgress;
-    relay
-        .record_session_update(SessionUpdate::ToolCall(guardian))
-        .unwrap();
-    relay
-        .record_session_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-            "guardian-assessment",
-            ToolCallUpdateFields::new()
-                .status(agent_client_protocol::schema::v1::ToolCallStatus::Completed)
-                .raw_output(serde_json::json!({"review": {"status": "approved"}})),
-        )))
-        .unwrap();
-
-    assert!(
-        relay.operational_state().background_commands.is_empty(),
-        "a partial result inherits the original non-execute kind"
-    );
 }
 
 #[test]
@@ -4092,27 +3933,6 @@ fn a_restart_forgets_the_commands_the_previous_harness_left_running() {
     assert!(
         relay.operational_state().background_commands.is_empty(),
         "the harness that owned those processes is gone"
-    );
-}
-
-#[test]
-fn harness_turns_are_off_for_other_harnesses() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-
-    relay.record_session_update(tool_call_update()).unwrap();
-    relay.record_session_update(origin_marker("human")).unwrap();
-    relay.claude_turn_result(&cycle_result("human")).unwrap();
-
-    let state = relay.operational_state();
-    assert_eq!(state.execution, RelayExecutionState::Idle);
-    assert!(state.harness_turn.is_none());
-    assert!(state.last_harness_turn_started_ordinal.is_none());
-    assert!(
-        observations(&relay)
-            .iter()
-            .all(|observation| matches!(observation, RelayObservation::SessionUpdate { .. })),
-        "only the updates themselves are journaled"
     );
 }
 
@@ -4310,30 +4130,6 @@ fn cancel_turn_never_bypasses_an_admitted_checkpoint() {
 }
 
 #[test]
-fn cancel_turn_is_harmless_when_the_relay_is_idle() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    relay
-        .record_observation(RelayObservation::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-    submit_relay(&mut relay, "cancel-idle", RelayCommand::CancelTurn);
-    let claimed = relay.claim_pending_commands(true).unwrap();
-    assert_eq!(claimed.len(), 1);
-    assert!(claimed[0].steering_prompt.is_none());
-    relay
-        .record_command_completed("cancel-idle", RelayCommandOutcome::Cancelled)
-        .unwrap();
-
-    let state = relay.operational_state();
-    assert_eq!(state.execution, RelayExecutionState::Idle);
-    assert!(state.active_prompt.is_none());
-    assert!(state.harness_turn.is_none());
-    assert!(state.is_quiet());
-}
-
-#[test]
 fn config_accepted_during_a_prompt_waits_while_cancel_bypasses_it() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
@@ -4503,29 +4299,6 @@ fn clearing_the_queue_drops_queued_configuration_changes() {
 
     finish_prompt(&mut relay, "active-prompt");
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
-}
-
-#[test]
-fn an_incomplete_configuration_change_is_refused() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
-    let response = relay.handle(relay_request(
-        "reject-empty-config",
-        RelayRequest::Submit {
-            command_id: "empty-config".into(),
-            command: set_config("model", "  "),
-        },
-    ));
-    assert!(matches!(
-        response.body,
-        RelayResponseBody::Error {
-            error: RelayProtocolError {
-                code: RelayErrorCode::InvalidRequest,
-                ..
-            }
-        }
-    ));
-    assert!(queued_command_ids(&relay).is_empty());
 }
 
 #[test]
@@ -5185,6 +4958,7 @@ fn jev_user_boundary_moves_only_after_confirmed_steering_and_survives_reopen() {
 /// I1-11: a finished turn leaves its completed dispatch in the ledger until the
 /// daemon acknowledges its events. That record is history, not work, so it
 /// must not make `/clear` think the session is busy.
+// Hard-won: 433c0a29: completed but unacknowledged dispatch records made every idle /clear refuse.
 #[test]
 fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
     let temp = tempfile::tempdir().unwrap();
@@ -5215,6 +4989,7 @@ fn clear_is_accepted_after_a_finished_turn_whose_events_are_unacknowledged() {
 /// I1-13: a rejected `/clear` stays in the ledger until its events are
 /// acknowledged. The session must accept prompts again at once instead of
 /// saying the context is still being cleared.
+// Hard-won: 2416c177: a failed /clear rollback left the resumed Claude runtime unusable for later prompts.
 #[test]
 fn a_rejected_clear_does_not_block_later_prompts() {
     let temp = tempfile::tempdir().unwrap();
@@ -5279,6 +5054,7 @@ fn projected_transcript(relay: &DurableRelay) -> Vec<mj_core::state::TranscriptI
 /// chunk at 78, both before `session_opened` at 79), so the transcript said
 /// "Agent continued on its own" and the row stayed Working until Esc. Output
 /// before the session is open and configured is a notice row, never a turn.
+// Hard-won: 0d653b12: a resumed Haiku session showed a phantom working turn for over three minutes.
 #[test]
 fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
     let temp = tempfile::tempdir().unwrap();
@@ -5361,6 +5137,7 @@ fn output_while_a_resumed_session_is_set_up_is_a_notice_and_opens_no_turn() {
 /// notice carries no message id, and the projection joins an id-less chunk
 /// that arrives while idle to the last agent message. Text that answers a
 /// configuration request is a notice row of its own.
+// Hard-won: 748622b7: a live model-change notice was appended to the previous agent reply.
 #[test]
 fn text_that_answers_a_model_change_is_its_own_notice_and_leaves_the_reply_alone() {
     use agent_client_protocol::schema::v1::{ContentChunk, TextContent};

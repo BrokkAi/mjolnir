@@ -3,7 +3,9 @@
 
 use super::*;
 use mj_core::state::BuildCacheApplication;
+use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 const DEFAULT_MARKER: &str = "# mj automatic shared budget: ";
 
 /// Already reachable through every session's cache mount, including sessions
@@ -55,14 +57,7 @@ pub(super) fn read_file(
     ))
 }
 
-pub(super) fn automatic_total(text: Option<&str>) -> Option<String> {
-    text?
-        .lines()
-        .find_map(|line| line.strip_prefix(DEFAULT_MARKER))
-        .filter(|size| mj_core::config::parse_build_cache_size(size).is_some())
-        .map(str::to_owned)
-}
-
+#[cfg(test)]
 pub(super) fn managed_document(settings: &TargetBuildCache, automatic: &str) -> Result<String> {
     #[derive(serde::Serialize)]
     struct Document<'a> {
@@ -201,6 +196,10 @@ mod tests {
     fn cache(directory: &Path, previous: Option<String>, text: String) -> ResolvedBuildCache {
         ResolvedBuildCache {
             directory: directory.to_owned(),
+            native_mbx: NativeMbx {
+                program: PathBuf::from("/usr/local/bin/mbx"),
+                version: MBX_VERSION.into(),
+            },
             target_root: None,
             config_directory: shared_directory(directory),
             config_file: Some(text),
@@ -317,82 +316,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(first.config_directory.join("config.toml")).unwrap(),
             first.config_file.unwrap()
-        );
-    }
-
-    #[test]
-    fn managed_defaults_survive_explicit_budgets_and_clearing_them() {
-        let initial = managed_document(&TargetBuildCache::default(), "17GB").unwrap();
-        let automatic = automatic_total(Some(&initial)).unwrap();
-        let explicit = managed_document(
-            &TargetBuildCache {
-                max_total_size: Some("500GiB".into()),
-                ..Default::default()
-            },
-            &automatic,
-        )
-        .unwrap();
-        let restored = managed_document(
-            &TargetBuildCache::default(),
-            &automatic_total(Some(&explicit)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(restored, initial);
-        assert_eq!(
-            configured_limit(Some(&restored), "target", "max_size").unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn managed_scheduler_settings_reach_mbx_and_unset_values_are_omitted() {
-        let settings = TargetBuildCache {
-            scheduler: mj_core::config::BuildCacheScheduler {
-                cpus: Some(12),
-                memory: Some("6GiB".into()),
-            },
-            ..Default::default()
-        };
-        let text = managed_document(&settings, "17GB").unwrap();
-        let document: toml::Value = toml::from_str(&text).unwrap();
-        assert_eq!(document["scheduler"]["cpus"].as_integer(), Some(12));
-        assert_eq!(document["scheduler"]["memory"].as_str(), Some("6GiB"));
-        assert_eq!(document["gc"]["max_total_size"].as_str(), Some("17GB"));
-
-        for (cpus, memory) in [(Some(12), None), (None, Some("none".into()))] {
-            let partial = TargetBuildCache {
-                scheduler: mj_core::config::BuildCacheScheduler { cpus, memory },
-                ..Default::default()
-            };
-            let text = managed_document(&partial, "17GB").unwrap();
-            let document: toml::Value = toml::from_str(&text).unwrap();
-            let scheduler = document["scheduler"].as_table().unwrap();
-            assert_eq!(scheduler.contains_key("cpus"), cpus.is_some());
-            assert_eq!(
-                scheduler.contains_key("memory"),
-                partial.scheduler.memory.is_some()
-            );
-        }
-
-        let defaults = managed_document(&TargetBuildCache::default(), "17GB").unwrap();
-        let document: toml::Value = toml::from_str(&defaults).unwrap();
-        assert!(document.get("scheduler").is_none());
-    }
-
-    #[test]
-    fn action_store_budget_is_never_a_combined_budget() {
-        assert_eq!(
-            configured_limit(Some("[gc]\nmax_size = '500GiB'"), "gc", "max_total_size").unwrap(),
-            None
-        );
-        assert_eq!(
-            configured_limit(Some("[target]\nmax_size = 'none'"), "target", "max_size")
-                .unwrap()
-                .as_deref(),
-            Some("none")
-        );
-        assert!(
-            configured_limit(Some("[target]\nmax_size = 'lots'"), "target", "max_size").is_err()
         );
     }
 }

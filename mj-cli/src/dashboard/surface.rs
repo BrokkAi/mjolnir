@@ -470,9 +470,18 @@ mod tests {
         }
     }
 
-    /// The session menu's Copy session ID puts the full ID on both
-    /// clipboards and names its short form on the notice bar. When the
-    /// terminal clipboard refuses it, the notice bar says that instead.
+    #[test]
+    fn ssh_terminal_write_failure_is_reported_without_trying_the_remote_clipboard() {
+        let error = copy_selected_text(
+            "selection",
+            true,
+            |_| panic!("SSH selection must not open the remote desktop clipboard"),
+            |_| anyhow::bail!("terminal write failed"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "terminal write failed");
+    }
+
     #[test]
     fn copying_a_session_id_names_its_short_form_or_the_clipboard_failure() {
         let session_id = "0123456789abcdef";
@@ -514,17 +523,5 @@ mod tests {
             dashboard.notice().as_deref(),
             Some("Copy to the terminal clipboard failed: terminal write failed")
         );
-    }
-
-    #[test]
-    fn ssh_terminal_write_failure_is_reported_without_trying_the_remote_clipboard() {
-        let error = copy_selected_text(
-            "selection",
-            true,
-            |_| panic!("SSH selection must not open the remote desktop clipboard"),
-            |_| anyhow::bail!("terminal write failed"),
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "terminal write failed");
     }
 }

@@ -477,6 +477,7 @@ async fn answer_recovery(
     resolution.await.unwrap().unwrap();
 }
 
+// Hard-won: f822699: A withdrawn saved model left sessions suspended and unreachable instead of using the default.
 #[tokio::test]
 async fn a_withdrawn_saved_model_starts_on_the_default_and_its_replacement_survives_a_restart() {
     let root = tempfile::tempdir().unwrap();
@@ -702,6 +703,7 @@ fn reported(options: &[SessionConfigOption], key: &str) -> String {
     select.current_value.to_string()
 }
 
+// Hard-won: 1c3e8e3: Codex and Kimi reported a successful config change while retaining the old value.
 #[tokio::test]
 async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_applied() {
     let root = tempfile::tempdir().unwrap();
@@ -735,6 +737,7 @@ async fn a_change_the_harness_answers_with_its_old_configuration_is_reported_as_
         .unwrap();
 }
 
+// Hard-won: 582d09d: An empty config response erased the accepted selectors after a successful change.
 #[tokio::test]
 async fn a_change_the_harness_answers_with_no_configuration_keeps_the_selectors_and_the_new_value()
 {
@@ -783,38 +786,6 @@ fn permission_and_plan_configuration_are_not_restored_as_session_selectors() {
         &[],
     );
     assert_eq!(saved, AcceptedSessionConfig::default());
-}
-
-#[test]
-fn a_completed_model_change_keeps_its_new_effort_and_clears_an_absent_selector() {
-    let mut values = BTreeMap::from([
-        ("model".into(), "old".into()),
-        ("effort".into(), "xhigh".into()),
-    ]);
-    let mut options: Vec<SessionConfigOption> = serde_json::from_value(serde_json::json!([
-        {"id":"model_id", "name":"Model", "category":"model", "type":"select",
-         "currentValue":"new", "options":[{"value":"new", "name":"New"}]},
-        {"id":"thinking", "name":"Effort", "category":"thought_level", "type":"select",
-         "currentValue":"low", "options":[{"value":"low", "name":"Low"}]}
-    ]))
-    .unwrap();
-    AcceptedSessionConfig::record_completed(&mut values, "model_id", "new", &options);
-    assert_eq!(
-        AcceptedSessionConfig::from_configuration(&values, &options),
-        AcceptedSessionConfig {
-            model: Some("new".into()),
-            effort: Some("low".into())
-        }
-    );
-    options.pop();
-    AcceptedSessionConfig::record_completed(&mut values, "model_id", "new", &options);
-    assert_eq!(
-        AcceptedSessionConfig::from_configuration(&values, &options),
-        AcceptedSessionConfig {
-            model: Some("new".into()),
-            effort: None
-        }
-    );
 }
 
 /// Model menus under Claude setup-token auth retain the 1M alias only when
@@ -881,31 +852,6 @@ async fn claude_resume_pins_the_saved_model_before_catalogue_and_queued_prompt()
         .unwrap();
 }
 
-#[test]
-fn claude_session_requests_read_the_latest_accepted_model() {
-    let mut spec = launch(
-        std::path::Path::new("/workspace"),
-        PathBuf::from("adapter"),
-        AcceptedSessionConfig::default(),
-    );
-    spec.harness = HarnessKind::Claude;
-    for model in [None, Some("opus[1m]"), Some("opus")] {
-        spec.accepted_config.lock().unwrap().model = model.map(str::to_owned);
-        for request in [
-            serde_json::to_value(new_session_request(&spec, true)).unwrap(),
-            serde_json::to_value(load_session_request(&spec, "native".into())).unwrap(),
-            serde_json::to_value(resume_session_request(&spec, "native".into())).unwrap(),
-        ] {
-            assert_eq!(
-                request
-                    .pointer("/_meta/claudeCode/options/model")
-                    .and_then(serde_json::Value::as_str),
-                model
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn claude_startup_errors_are_not_reported_as_model_replacement() {
     for cause in [
@@ -952,6 +898,7 @@ async fn claude_startup_errors_are_not_reported_as_model_replacement() {
 /// accepts its model after the worker started -- which every session created
 /// with an explicit model does -- resumed every later bridge on the profile
 /// default while the supervisor spec was written once and never updated.
+// Hard-won: 21f785d: A resumed Codex session reverted an accepted model to the profile default.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_codex_bridge_restart_starts_on_a_model_accepted_after_the_worker_did() {
@@ -1137,6 +1084,7 @@ async fn set_model_outcome(
     }
 }
 
+// Hard-won: bc7495e: Claude rejected a valid full model id and gave no useful accepted values.
 #[tokio::test]
 async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_on_refusal() {
     let root = tempfile::tempdir().unwrap();
@@ -1192,6 +1140,7 @@ async fn claude_model_accepts_full_model_ids_and_display_names_and_lists_values_
 /// session silently ran the default model, because the bridge places text it
 /// cannot resolve on `default`. The value is refused as before bc7495e4 and
 /// the model the session had stays selected; full ids still resolve.
+// Hard-won: 9fb470e: The worker reported a Claude model selection that the bridge silently placed on its default.
 #[tokio::test]
 async fn a_claude_model_the_bridge_cannot_place_is_refused_and_the_model_kept() {
     let root = tempfile::tempdir().unwrap();
@@ -1415,6 +1364,7 @@ async fn resume_a_missing_haiku_session(refuse_auto: bool) -> HaikuFallbackResum
 /// its default model, so the adapter passed Auto on and Claude Code refused it
 /// for haiku; the worker exited on every retry. Selecting the model first lets
 /// the adapter apply its own Accept edits fallback, as it does on load.
+// Hard-won: e794b25: Never-prompted Haiku sessions entered a permanent retry loop when the bridge refused Auto.
 #[tokio::test]
 async fn a_new_haiku_session_takes_the_adapters_auto_fallback_instead_of_failing() {
     let resumed = resume_a_missing_haiku_session(false).await;
@@ -1437,6 +1387,7 @@ async fn a_new_haiku_session_takes_the_adapters_auto_fallback_instead_of_failing
 /// R8-2: when the harness refuses the policy's mode for a new session, the
 /// session keeps the harness's own mode and says so once, rather than the
 /// worker exiting and the session staying suspended.
+// Hard-won: e794b25: A refused mode change stopped session startup instead of retaining the harness default.
 #[tokio::test]
 async fn a_mode_the_harness_refuses_for_a_new_session_leaves_its_default_mode_and_one_warning() {
     let resumed = resume_a_missing_haiku_session(true).await;

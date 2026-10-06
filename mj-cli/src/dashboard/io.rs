@@ -295,6 +295,15 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         key: serde_json::Value,
         result: std::result::Result<Option<mj_core::state::BuildCachePreview>, String>,
+        install_mbx_available: bool,
+    },
+    MbxInstalled {
+        generation: u64,
+        key: serde_json::Value,
+        machine_id: String,
+        result: std::result::Result<String, String>,
+        preview: std::result::Result<Option<mj_core::state::BuildCachePreview>, String>,
+        install_mbx_available: bool,
     },
     ArchiveSpacePreviewed {
         generation: u64,
@@ -1283,9 +1292,28 @@ impl DashboardContext {
                 generation,
                 key,
                 result,
-            } => self
-                .dashboard
-                .build_cache_previewed(generation, &key, result),
+                install_mbx_available,
+            } => self.dashboard.build_cache_previewed(
+                generation,
+                &key,
+                result,
+                install_mbx_available,
+            ),
+            DashboardIoUpdate::MbxInstalled {
+                generation,
+                key,
+                machine_id,
+                result,
+                preview,
+                install_mbx_available,
+            } => self.dashboard.mbx_install_finished(
+                generation,
+                &key,
+                &machine_id,
+                result,
+                preview,
+                install_mbx_available,
+            ),
             DashboardIoUpdate::ArchiveSpacePreviewed {
                 generation,
                 older_than_days,
@@ -2028,6 +2056,7 @@ mod tests {
         ));
     }
 
+    // Hard-won: fa50a0ac: launch verification found lifecycle notices identifying titled sessions by ID.
     #[test]
     fn notices_name_a_titled_session_by_its_title_and_others_by_short_id() {
         let mut titled = lifecycle_session("5e0fb24c-titled", "default", SessionState::Stopped);
@@ -2050,6 +2079,7 @@ mod tests {
     /// A session the dashboard created has only the title it was created
     /// with ("project via fake"), which the session list shows; "Launching"
     /// and "is ready" named it by id (launch finding R5-5).
+    // Hard-won: b67f7811: lifecycle notices lost the creation title when the dashboard record reloaded.
     #[test]
     fn notices_name_an_unnamed_session_by_the_title_it_was_created_with() {
         let mut created = lifecycle_session("036b869b-created", "default", SessionState::Running);
@@ -2070,6 +2100,7 @@ mod tests {
     /// "gamma", launch finding R5-4). It uses the name taken when the
     /// operation began; a record that is still there wins, because it has
     /// the newest name.
+    // Hard-won: b67f7811: a destroyed record disappeared before its completion notice could name it.
     #[test]
     fn a_lifecycle_notice_keeps_the_name_taken_when_the_operation_began() {
         let empty = State::default();
@@ -2093,6 +2124,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 8d16bf96: configured API-key references were treated as missing and blocked unrelated Settings saves.
     #[test]
     fn setup_save_resolves_api_key_references_and_rejects_missing_keys_before_writing() {
         use mj_core::config::{SecretResolver, with_secret_resolver};
@@ -2216,6 +2248,7 @@ mod tests {
     /// `[targets.docker]` and `[targets.podman]` blocks into config.toml. The
     /// dialog edits the effective config, which includes them; the file must
     /// keep only what the user set.
+    // Hard-won: f15ebc51: saving unrelated Setup settings persisted built-in targets and made Doctor misreport Docker.
     #[test]
     fn setup_save_does_not_write_built_in_targets_the_user_never_configured() {
         let directory = tempfile::tempdir().unwrap();
@@ -2448,6 +2481,7 @@ mod tests {
 
     /// A job that dies must still answer, or the screen waits forever on work
     /// that is never coming back.
+    // Hard-won: ceb1f1b0: a blocking job panic sent no completion and left the screen waiting forever.
     #[tokio::test]
     async fn a_panicking_blocking_job_still_reports_its_failure() {
         let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
@@ -2466,6 +2500,7 @@ mod tests {
         assert!(error.contains("boom"), "{error}");
     }
 
+    // Hard-won: ceb1f1b0: a critical blocking job panic left both the operation and quit blocker unresolved.
     #[tokio::test]
     async fn a_panicking_critical_job_reports_its_failure_and_releases_quit() {
         let (tracker, _) = CriticalOperationTracker::new();
@@ -2490,6 +2525,7 @@ mod tests {
         );
     }
 
+    // Hard-won: ceb1f1b0: a cancellable blocking job panic left no failure update and retained quit admission.
     #[tokio::test]
     async fn a_panicking_cancellable_job_reports_its_failure_and_releases_quit() {
         let (tracker, _) = CriticalOperationTracker::new();

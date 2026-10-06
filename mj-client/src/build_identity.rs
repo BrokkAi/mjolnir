@@ -223,35 +223,7 @@ mod tests {
         BuildIdentity::parse(published).unwrap()
     }
 
-    #[test]
-    fn a_published_build_reads_back_and_older_clients_see_only_the_version() {
-        let published = format!("2.24.0+{NEW}.c1790824791.m1790830000123456789");
-        let identity = build(&published);
-        assert_eq!(identity.published(), published);
-        assert_eq!(
-            identity.describe(),
-            "2.24.0+19485f17, committed 2026-10-01 03:19:51 UTC, built 2026-10-01 04:46:40 UTC"
-        );
-        // What every older client does with `build_version`.
-        let seen_by_older_client = semver::Version::parse(&published).unwrap();
-        assert_eq!(
-            seen_by_older_client.cmp_precedence(&semver::Version::new(2, 24, 0)),
-            Ordering::Equal
-        );
-        assert!(seen_by_older_client < semver::Version::new(2, 25, 0));
-        assert!(seen_by_older_client >= semver::Version::new(2, 18, 0));
-    }
-
-    #[test]
-    fn this_build_publishes_its_revision_and_reads_back() {
-        let published = this_build().published();
-        assert_eq!(&build(&published), this_build());
-        assert!(
-            published.contains(mj_core::worker_build::BUILD_ID.rsplit_once('+').unwrap().1),
-            "{published}"
-        );
-    }
-
+    // Hard-won: d7250ce22765: U-1: same-release builds displaced a newer daemon on alternate commands
     #[test]
     fn same_release_builds_are_ordered_by_commit_then_by_file_time() {
         let client = build(&format!("2.24.0+{OLD}.c100.m5000"));

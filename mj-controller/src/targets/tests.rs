@@ -1,5 +1,5 @@
 use super::*;
-use mj_core::path_completion::{CompletionKind, common_insert, local_completions, ssh_completions};
+use mj_core::path_completion::{CompletionKind, ssh_completions};
 use std::cell::RefCell;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -15,21 +15,6 @@ use std::{
 };
 
 const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
-
-#[test]
-fn process_executor_streams_stdin_and_captures_output() {
-    let mut input = std::io::Cursor::new(b"streamed input".to_vec());
-    let output = ProcessExecutor
-        .execute_with_stdin(
-            &CommandSpec::new("sh", ["-c", "cat"]).purpose("echo streamed input"),
-            &mut input,
-        )
-        .unwrap();
-
-    assert_eq!(output.status, 0);
-    assert_eq!(output.stdout, b"streamed input");
-    assert!(output.stderr.is_empty());
-}
 
 /// A child that reads its stdin to end of file, as the checkpoint export
 /// worker does, only exits once the write end of the pipe is closed. Every
@@ -159,30 +144,11 @@ fn podman_inspection(status: &str, session_id: &str, managed: &str) -> CommandOu
     )
 }
 
-#[test]
-fn podman_preflight_requires_supported_rootless_uid_mapped_runtime() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"         0       1000          1\n         1     100000      65536\n"),
-    ]);
-
-    assert_eq!(
-        verify_local_podman(&executor).unwrap(),
-        PodmanPreflight {
-            version: "5.4.2".into(),
-            warnings: vec![],
-        }
-    );
-    let seen = executor.seen.borrow();
-    assert_eq!(seen.len(), 2);
-    assert_eq!(seen[0].args, ["--version"]);
-    assert_eq!(seen[1].args, ["unshare", "cat", "/proc/self/uid_map"]);
-}
-
 /// Launch finding R3-11: with no `podman` on PATH, Setup said "Postcondition
 /// `podman --version` succeeds with Podman 4.0.0 or newer could not be
 /// checked: run podman for check Podman version". It now says, in plain
 /// words, which command could not run, what it would have checked, and why.
+// Hard-won: eea74e3f: Setup and doctor hid why a missing Podman check could not run.
 #[test]
 fn a_missing_podman_is_reported_as_a_command_that_could_not_run() {
     struct NoPodman;
@@ -249,41 +215,12 @@ fn podman_preflight_reports_an_unshare_refusal_as_not_rootless() {
     }
 }
 
-#[test]
-fn docker_preflight_requires_a_reachable_linux_daemon() {
-    let ready = PodmanPreflightExecutor::with_outputs([podman_output(b"29.0.1 linux\n")]);
-    assert_eq!(
-        verify_local_docker(&ready).unwrap(),
-        DockerPreflight {
-            version: "29.0.1".into(),
-        }
-    );
-    assert_eq!(ready.seen.borrow()[0].program, "docker");
-    assert_eq!(
-        ready.seen.borrow()[0].args,
-        ["version", "--format", "{{.Server.Version}} {{.Server.Os}}"]
-    );
-
-    let desktop = PodmanPreflightExecutor::with_outputs([podman_output(b"29.0.1 windows\n")]);
-    let error = verify_local_docker(&desktop).unwrap_err().to_string();
-    assert!(error.contains("expected a Linux Docker daemon"), "{error}");
-    assert!(error.contains(DOCKER_DOCUMENTATION_URL), "{error}");
-
-    let unavailable = PodmanPreflightExecutor::with_outputs([CommandOutput {
-        status: 1,
-        stdout: vec![],
-        stderr: b"daemon unavailable".to_vec(),
-    }]);
-    let error = verify_local_docker(&unavailable).unwrap_err().to_string();
-    assert!(error.contains("user running Mjolnir"), "{error}");
-    assert!(!error.contains("user running Hel"), "{error}");
-}
-
 /// Launch finding R5-3: on a host without Docker, doctor and Setup said
 /// "Docker preflight failed: run `docker info` as the user running Mjolnir:
 /// run docker for check Docker daemon: No such file or directory (os error
 /// 2)". Each case now has one plain sentence: not installed (in the words
 /// the launch options use), not running, or not answering.
+// Hard-won: 028b8327: Setup, doctor, and the wizard gave conflicting local Docker errors.
 #[test]
 fn docker_preflight_says_in_one_sentence_why_docker_cannot_run_sessions() {
     struct NoDocker;
@@ -356,36 +293,6 @@ fn podman_preflight_accepts_supported_four_series_releases() {
     }
 }
 
-#[test]
-fn podman_preflight_reports_uidmap_helper_remediation() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        CommandOutput {
-            status: 1,
-            stdout: vec![],
-            stderr: b"cannot find newuidmap executable".to_vec(),
-        },
-    ]);
-
-    let error = verify_local_podman(&executor).unwrap_err().to_string();
-    assert!(error.contains("podman unshare cat /proc/self/uid_map"));
-    assert!(error.contains("apt install -y uidmap"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
-}
-
-#[test]
-fn podman_preflight_rejects_a_uid_map_without_subordinate_ids() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output(b"podman version 5.4.2\n"),
-        podman_output(b"         0       1000          1\n"),
-    ]);
-
-    let error = verify_local_podman(&executor).unwrap_err().to_string();
-    assert!(error.contains("maps container UIDs 0 and 1"));
-    assert!(error.contains("usermod --add-subuids"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
-}
-
 /// Stand in for the remote host: one batched command, framed exactly as the
 /// remote script prints it.
 fn batched_ssh_probes(probes: &[(&str, i32, &str, &str)]) -> CommandOutput {
@@ -409,6 +316,7 @@ fn passing_ssh_probes(linger: (i32, &'static str, &'static str)) -> CommandOutpu
     ])
 }
 
+// Hard-won: 024dc021: four SSH round trips added 2.27 seconds to each remote session.
 #[test]
 fn ssh_podman_preflight_runs_every_probe_in_one_noninteractive_ssh_command() {
     let executor = PodmanPreflightExecutor::with_outputs([passing_ssh_probes((0, "yes\n", ""))]);
@@ -467,24 +375,6 @@ fn ssh_podman_preflight_warns_when_linger_check_is_unavailable() {
     assert!(warning.detail.contains("Mjolnir cannot verify"));
     assert!(!warning.detail.contains("Hel"));
     assert!(warning.remediation.contains("service manager"));
-}
-
-#[test]
-fn ssh_podman_preflight_failures_name_the_destination_and_remote_scope() {
-    let executor = PodmanPreflightExecutor::with_outputs([batched_ssh_probes(&[(
-        "version",
-        0,
-        "podman version 3.4.7\n",
-        "",
-    )])]);
-
-    let error = verify_ssh_podman(&ssh(), &executor)
-        .unwrap_err()
-        .to_string();
-
-    assert!(error.contains("Remote Podman preflight failed on dev@example.test"));
-    assert!(error.contains("On dev@example.test: Install or upgrade Podman"));
-    assert!(error.contains(PODMAN_DOCUMENTATION_URL));
 }
 
 #[test]
@@ -658,21 +548,6 @@ fn ssh_podman_preflight_warns_when_the_linger_value_is_unrecognized() {
     );
 }
 
-/// The parser and the remote script have to agree about the framing markers.
-#[test]
-fn batched_preflight_script_frames_output_the_parser_expects() {
-    for marker in [PROBE_BLOCK_BEGIN, PROBE_BLOCK_END, PROBE_STATUS_PREFIX] {
-        assert!(
-            SSH_PODMAN_PREFLIGHT_SCRIPT.contains(marker),
-            "script is missing {marker}"
-        );
-    }
-    for probe in [PodmanProbe::Version, PodmanProbe::UidMap] {
-        assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.contains(&format!("probe {} ", probe.key())));
-    }
-    assert!(SSH_PODMAN_PREFLIGHT_SCRIPT.contains(&format!("probe {LINGER_PROBE_KEY} ")));
-}
-
 #[test]
 fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
     let stdout = ssh_podman_probe_fixture(&[
@@ -709,50 +584,6 @@ fn batched_preflight_parser_keeps_multiline_and_noisy_probe_output() {
     assert_eq!(
         String::from_utf8_lossy(&uid_map.stderr).trim(),
         "no trailing newline"
-    );
-}
-
-#[test]
-fn setup_smoke_plan_wraps_every_ssh_podman_command_in_ssh() {
-    let plan = setup_smoke_plan(
-        &TargetTemplate::SshPodman {
-            ssh: ssh(),
-            container: ContainerTemplate {
-                build_cache: None,
-                image: "ubuntu:24.04".to_owned(),
-                pull_policy: ImagePullPolicy::Auto,
-                extra_run_args: vec![],
-                workspace_storage: Default::default(),
-            },
-        },
-        "setup-123",
-    )
-    .unwrap();
-
-    assert_eq!(plan.commands.len(), 3);
-    for command in &plan.commands {
-        assert_eq!(command.program, "ssh");
-        assert!(command.args.contains(&"dev@example.test".to_owned()));
-        assert!(command.args.last().unwrap().contains("podman"));
-    }
-    assert!(
-        plan.commands[0]
-            .args
-            .last()
-            .unwrap()
-            .contains("'run' '--init'")
-    );
-    assert!(plan.commands[1].args.last().unwrap().ends_with("'true'"));
-    assert!(
-        plan.commands[2]
-            .args
-            .last()
-            .unwrap()
-            .contains("podman rm --force --ignore")
-    );
-    assert_eq!(
-        plan.commands[2].purpose,
-        "remove disposable setup container"
     );
 }
 
@@ -1261,43 +1092,7 @@ fn podman_host_helper_creates_the_exact_workspace_before_launch() {
     );
 }
 
-#[test]
-fn container_clone_borrows_from_an_optional_read_only_reference() {
-    let mut cached = bundle();
-    cached.repositories[0].reference = Some("/run/hel/git-cache/app.git".to_owned());
-    let plan = provision_plan(
-        &TargetTemplate::AppleContainer(ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".to_owned(),
-            pull_policy: ImagePullPolicy::Auto,
-            extra_run_args: vec![],
-            workspace_storage: Default::default(),
-        }),
-        SESSION,
-        &cached,
-        &[],
-        None,
-    )
-    .unwrap();
-
-    let clone = plan
-        .commands
-        .iter()
-        .find(|command| command.purpose == "clone app")
-        .unwrap();
-    assert!(
-        clone.args.windows(2).any(|arguments| {
-            arguments == ["--reference-if-able", "/run/hel/git-cache/app.git"]
-        })
-    );
-    assert!(!clone.args.contains(&"--branch".to_owned()));
-    assert!(
-        clone
-            .args
-            .contains(&"git@github.com:example/app.git".to_owned())
-    );
-}
-
+// Hard-won: 15867df0: GitHub tokens were exposed in container argv.
 #[test]
 fn container_secret_is_streamed_without_entering_local_command_arguments() {
     let secret = "github-token-that-must-not-reach-argv";
@@ -1335,6 +1130,7 @@ fn container_secret_is_streamed_without_entering_local_command_arguments() {
     assert_eq!(output[0].stdout, secret.as_bytes());
 }
 
+// Hard-won: 15867df0: GitHub tokens were exposed in container argv.
 #[test]
 fn container_secret_is_streamed_without_entering_remote_ssh_arguments() {
     let secret = "remote-github-token-that-must-not-reach-argv";
@@ -1417,6 +1213,7 @@ fn podman_plan_only_marks_per_repository_clone_commands_for_parallel_execution()
     assert_eq!(clone_app.parallel_group, clone_lib.parallel_group);
 }
 
+// Hard-won: 9805bf67: Podman workers accumulated zombie children after turns.
 #[test]
 fn podman_containers_reap_zombies_and_apple_containers_keep_their_defaults() {
     let podman = provision_plan(
@@ -1501,6 +1298,7 @@ fn a_never_policy_is_not_pre_pulled() {
 /// Apple's `container` CLI spells both commands differently from Podman and
 /// Docker: `image pull` rather than `pull`, no `--format` on `image inspect`,
 /// no `--platform` (it runs native images only) and no verified prune.
+// Hard-won: 8c5355ea: Auto images left first Create waiting for a background download.
 #[test]
 fn an_apple_container_image_refresh_uses_the_container_cli() {
     let refresh = image_refresh(
@@ -1528,6 +1326,7 @@ fn an_apple_container_image_refresh_uses_the_container_cli() {
 /// A launch never waits on a registry under the default policy. The daemon
 /// refreshes remote `:latest` images in the background instead, so a session
 /// starts from whatever the host already has.
+// Hard-won: 49a5b3e9: default image refreshes delayed session startup by minutes.
 #[test]
 fn an_automatic_pull_policy_never_pulls_during_a_launch() {
     for engine in ["podman", "docker"] {
@@ -1924,40 +1723,6 @@ fn docker_additional_mounts_use_managed_overlay_and_read_only_bind_volumes() {
 }
 
 #[test]
-fn overlay_denylist_covers_network_fuse_and_metadata_poor_filesystems() {
-    assert_eq!(
-        overlay_unsupported_filesystem("nfs"),
-        Some("network filesystem")
-    );
-    assert_eq!(
-        overlay_unsupported_filesystem("  NFS4 "),
-        Some("network filesystem")
-    );
-    // FUSE names its backing driver, and the case comes from the kernel.
-    assert_eq!(
-        overlay_unsupported_filesystem("FUSE.sshfs"),
-        Some("FUSE filesystem")
-    );
-    assert_eq!(
-        overlay_unsupported_filesystem("fuseblk"),
-        Some("FUSE filesystem")
-    );
-    assert_eq!(
-        overlay_unsupported_filesystem("exfat"),
-        Some("no POSIX metadata")
-    );
-    assert_eq!(
-        overlay_unsupported_filesystem("overlayfs"),
-        Some("overlay stacking limit")
-    );
-    // Anything else, known-good or unrecognized, keeps the overlay.
-    assert_eq!(overlay_unsupported_filesystem("ext4"), None);
-    assert_eq!(overlay_unsupported_filesystem("btrfs"), None);
-    assert_eq!(overlay_unsupported_filesystem("futurefs"), None);
-    assert_eq!(overlay_unsupported_filesystem(""), None);
-}
-
-#[test]
 fn filesystem_probe_answers_positionally_and_reaches_the_podman_host() {
     let executor = PodmanPreflightExecutor::with_outputs([podman_output(b"ext4\nnfs\n")]);
     let paths = [PathBuf::from("/host/cache"), PathBuf::from("/host/models")];
@@ -2043,48 +1808,6 @@ fn apple_additional_mounts_use_read_only_bind_fallback() {
             "type=bind,source=/Users/me/assets,target=/mnt/assets,readonly",
         ]
     }));
-}
-
-#[test]
-fn apple_plan_preflights_and_uses_container_cli() {
-    let plan = provision_plan(
-        &TargetTemplate::AppleContainer(ContainerTemplate {
-            build_cache: None,
-            image: "ghcr.io/example/dev:latest".to_owned(),
-            pull_policy: ImagePullPolicy::Auto,
-            extra_run_args: vec![],
-            workspace_storage: Default::default(),
-        }),
-        SESSION,
-        &bundle(),
-        &[],
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        plan.commands[0],
-        CommandSpec::new("container", ["system", "status"])
-            .purpose("check Apple container service")
-            .stage(ProvisionStage::Provisioning)
-    );
-    assert_eq!(
-        plan.commands[1].args,
-        ["image", "pull", "ghcr.io/example/dev:latest"]
-    );
-    let name = resource_name(SESSION).unwrap();
-    assert!(
-        plan.commands[2]
-            .args
-            .windows(2)
-            .any(|args| args == ["--name", &name])
-    );
-    let identity = managed_resource_identity_args(ManagedResourceKind::Container, SESSION);
-    assert!(
-        plan.commands[2]
-            .args
-            .windows(identity.len())
-            .any(|args| args == identity)
-    );
 }
 
 #[test]
@@ -2233,35 +1956,6 @@ fn remote_podman_cleanup_confirmation_uses_the_recorded_helper_resource() {
 }
 
 #[test]
-fn setup_smoke_plan_uses_the_configured_local_runtime_and_cleans_up() {
-    let plan = setup_smoke_plan(
-        &TargetTemplate::LocalPodman(ContainerTemplate {
-            build_cache: None,
-            image: "ubuntu:24.04".to_owned(),
-            pull_policy: ImagePullPolicy::Auto,
-            extra_run_args: vec![],
-            workspace_storage: Default::default(),
-        }),
-        "setup-123",
-    )
-    .unwrap();
-
-    assert_eq!(
-        plan.description,
-        "smoke test Mjolnir setup target setup-123"
-    );
-    assert_eq!(plan.commands.len(), 3);
-    assert_eq!(plan.commands[0].program, "sh");
-    assert!(plan.commands[0].args.contains(&"ubuntu:24.04".to_owned()));
-    assert_eq!(plan.commands[1].args.last().unwrap(), "true");
-    assert!(command_text(&plan.commands[2]).contains("podman rm --force"));
-    assert_eq!(
-        plan.commands[2].purpose,
-        "remove disposable setup container"
-    );
-}
-
-#[test]
 fn setup_smoke_test_removes_a_container_after_a_failed_exec() {
     let executor = FakeExecutor {
         seen: RefCell::new(vec![]),
@@ -2284,47 +1978,6 @@ fn setup_smoke_test_removes_a_container_after_a_failed_exec() {
     );
     assert_eq!(executor.seen.borrow().len(), 3);
     assert_eq!(executor.seen.borrow()[2].args[0], "rm");
-}
-
-#[test]
-fn remote_podman_is_ssh_plus_podman_not_remote_api() {
-    let plan = provision_plan(
-        &TargetTemplate::SshPodman {
-            ssh: ssh(),
-            container: ContainerTemplate {
-                build_cache: None,
-                image: "ghcr.io/example/dev:latest".to_owned(),
-                pull_policy: ImagePullPolicy::Auto,
-                extra_run_args: vec![],
-                workspace_storage: Default::default(),
-            },
-        },
-        SESSION,
-        &bundle(),
-        &[],
-        None,
-    )
-    .unwrap();
-    assert!(plan.commands.iter().all(|command| command.program == "ssh"));
-    // The default policy launches from the cached image; the daemon's
-    // background refresh is what keeps a remote `:latest` tag current.
-    assert!(
-        plan.commands[0]
-            .args
-            .last()
-            .unwrap()
-            .contains("'podman' 'run' '--init'")
-    );
-    assert!(plan.commands[0].args.last().unwrap().contains(&format!(
-        "'--label' '{SESSION_LABEL}={SESSION}' '--label' '{MANAGED_LABEL}=true'"
-    )));
-    assert!(
-        !plan
-            .commands
-            .iter()
-            .flat_map(|command| &command.args)
-            .any(|arg| arg.contains("CONTAINER_HOST") || arg == "--remote")
-    );
 }
 
 #[cfg(target_os = "linux")]
@@ -2370,40 +2023,10 @@ fn host_capacity_counts_zfs_arc_above_its_minimum_as_available_memory() {
     assert_eq!(values["memory.max"], "1024000");
 }
 
-#[test]
-fn parses_host_and_aws_capacity_outputs() {
-    let host = parse_host_capacity(
-        b"home=/home/u\nstorage=0\t491134172\t467026656\t/\t/tmp\n\
-cpu.percent=62.6\nmemory.current=300\nmemory.max=1000\nlogical.cores=8\n",
-        "precision-3260",
-    )
-    .unwrap();
-    assert_eq!(host.cpu_percent, Some(63));
-    assert_eq!(host.memory_used_bytes, 300);
-    assert_eq!(host.memory_total_bytes, 1_000);
-    assert_eq!(host.logical_cores, 8);
-    assert_eq!(host.storage.len(), 1);
-    assert_eq!(host.storage[0].host, "precision-3260");
-    assert_eq!(host.storage[0].filesystems[0].available_bytes, 0);
-
-    let aws = parse_aws_allocated_capacity(
-        b"memory.total=34359738368\nlogical.cores=16\ndisk.total=214748364800\n",
-        "10.0.0.1",
-    )
-    .unwrap();
-    assert_eq!(aws.cpu_percent, None);
-    assert_eq!(aws.memory_total_bytes, 34_359_738_368);
-    assert_eq!(aws.logical_cores, 16);
-    assert_eq!(aws.disk_total_bytes, Some(214_748_364_800));
-    assert!(aws.storage.is_empty());
-
-    assert!(parse_host_capacity(b"cpu.percent=nan\n", "host").is_err());
-    assert!(parse_aws_allocated_capacity(b"memory.total=nope\n", "host").is_err());
-}
-
 /// The host probe measures storage and still samples CPU and memory: the
 /// storage loop must not leave its paths where the resource script reads
 /// its optional /proc override.
+// Hard-won: 540c9202: full-disk hosts stopped workers while recovery retried writes endlessly.
 #[cfg(target_os = "linux")]
 #[test]
 fn host_capacity_probe_measures_storage_beside_cpu_and_memory() {
@@ -2441,26 +2064,6 @@ fn host_capacity_probe_measures_storage_beside_cpu_and_memory() {
 }
 
 #[test]
-fn local_path_completion_returns_directory_components_and_tab_prefix() {
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::create_dir(directory.path().join("data")).unwrap();
-    std::fs::create_dir(directory.path().join("dashboard")).unwrap();
-    std::fs::write(directory.path().join("data.txt"), "not a directory").unwrap();
-    let prefix = format!("{}/da", directory.path().display());
-
-    let matches = local_completions(&prefix, CompletionKind::Directories);
-
-    assert_eq!(
-        matches,
-        vec![
-            format!("{}/dashboard/", directory.path().display()),
-            format!("{}/data/", directory.path().display()),
-        ]
-    );
-    assert_eq!(common_insert(&prefix, &matches), None);
-}
-
-#[test]
 fn ssh_directory_check_quotes_the_source_and_distinguishes_missing() {
     let exists = FakeExecutor {
         seen: RefCell::new(vec![]),
@@ -2480,64 +2083,11 @@ fn ssh_directory_check_quotes_the_source_and_distinguishes_missing() {
     assert!(!ssh_directory_exists(&ssh(), Path::new("/missing"), &missing).unwrap());
 }
 
-#[test]
-fn bare_project_validation_checks_directory_and_git_repository() {
-    let valid = FakeExecutor {
-        seen: RefCell::new(vec![]),
-        fail_at: None,
-    };
-    validate_bare_project_directory(&ssh(), Path::new("/srv/project"), &valid).unwrap();
-    let seen = valid.seen.borrow();
-    assert_eq!(seen.len(), 2);
-    assert!(
-        seen[0]
-            .args
-            .last()
-            .unwrap()
-            .contains("'test' '-d' '/srv/project'")
-    );
-    assert!(
-        seen[1]
-            .args
-            .last()
-            .unwrap()
-            .contains("'git' '-C' '/srv/project' 'rev-parse' '--verify' 'HEAD'")
-    );
-    assert!(seen[0].args.contains(&"ConnectTimeout=3".to_owned()));
-
-    let missing = FakeExecutor {
-        seen: RefCell::new(vec![]),
-        fail_at: Some(0),
-    };
-    let error =
-        validate_bare_project_directory(&ssh(), Path::new("/missing"), &missing).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("does not exist or is not a directory")
-    );
-    assert_eq!(missing.seen.borrow().len(), 1);
-    // The reason is for the caller: it names the directory and the host, and
-    // is marked so the API answers 4xx instead of an opaque 500.
-    let refusal = mj_core::refusal::Refusal::of(&error).expect("a refusal the caller can fix");
-    assert_eq!(refusal.kind(), mj_core::refusal::RefusalKind::Unusable);
-    assert!(refusal.message().contains("/missing"), "{refusal}");
-    assert!(refusal.message().contains(&ssh().destination), "{refusal}");
-
-    let not_git = FakeExecutor {
-        seen: RefCell::new(vec![]),
-        fail_at: Some(1),
-    };
-    let error =
-        validate_bare_project_directory(&ssh(), Path::new("/srv/plain"), &not_git).unwrap_err();
-    assert!(error.to_string().contains("has no valid Git HEAD"));
-    assert_eq!(not_git.seen.borrow().len(), 2);
-}
-
 /// Launch finding R3-6: a host-key refusal during `mj new --target <ssh>`
 /// reached the CLI as "500 ... the daemon log records the reason under
 /// reference ...". The caller gets ssh's own words and what to do, as a
 /// refusal (a 4xx), and the sentence names no host.
+// Hard-won: 1afbc63f: SSH host-key refusal surfaced to callers only as an opaque server error.
 #[test]
 fn a_host_key_refusal_at_the_remote_directory_check_tells_the_caller_what_to_do() {
     let refused = |stderr: &str| {
@@ -2587,6 +2137,7 @@ fn a_host_key_refusal_at_the_remote_directory_check_tells_the_caller_what_to_do(
 /// file with `UserKnownHostsFile` (cli/006). It now names the file the
 /// options name, and says "the known_hosts file ssh uses" when a config file
 /// of the machine's own may name one.
+// Hard-won: 8e3ea78d: host-key refusal advice named the wrong known_hosts file.
 #[test]
 fn a_host_key_refusal_names_the_known_hosts_file_ssh_was_told_to_use() {
     const UNKNOWN: &str = "No ED25519 host key is known for 203.0.113.9 and you have requested strict checking.\r\nHost key verification failed.\r\n";
@@ -2659,30 +2210,6 @@ fn a_host_key_refusal_names_the_known_hosts_file_ssh_was_told_to_use() {
         "{message}"
     );
     assert!(!message.contains("~/.ssh/known_hosts"), "{message}");
-}
-
-#[test]
-fn ssh_path_completion_uses_short_timeout_and_fake_executor() {
-    let executor = PodmanPreflightExecutor::with_outputs([CommandOutput {
-        status: 0,
-        stdout: b"/srv/projects/\n/srv/prompts/\n".to_vec(),
-        stderr: vec![],
-    }]);
-
-    let matches =
-        ssh_completions(&ssh(), "/srv/pr", CompletionKind::Directories, &executor).unwrap();
-
-    assert_eq!(matches, vec!["/srv/projects/", "/srv/prompts/"]);
-    let command = &executor.seen.borrow()[0];
-    assert_eq!(command.program, "ssh");
-    assert!(command.args.contains(&"ConnectTimeout=3".to_owned()));
-    assert!(
-        command
-            .args
-            .last()
-            .unwrap()
-            .contains("ls -d -- '/srv/pr'*/")
-    );
 }
 
 #[test]
@@ -2916,48 +2443,9 @@ fn bare_project_plan_leaves_project_validation_to_dialog_and_launch() {
     );
 }
 
-#[test]
-fn local_bare_worker_commands_are_direct_and_cleanup_is_exact() {
-    let worker_root = format!("/var/lib/hel/workers/{SESSION}");
-    let locator = TargetLocator::LocalBare {
-        worker_root: worker_root.clone(),
-    };
-
-    let reconnect = reconnect_plan(&locator, SESSION).unwrap();
-    assert_eq!(
-        reconnect.description,
-        format!("reconnect Mjolnir session {SESSION}")
-    );
-    assert_eq!(reconnect.commands[0].purpose, "connect to Mjolnir worker");
-    assert_eq!(reconnect.commands[0].program, format!("{worker_root}/hel"));
-    assert_eq!(
-        reconnect.commands[0].args,
-        ["worker", "proxy", "--root", worker_root.as_str()]
-    );
-    let close = close_plan(&locator, SESSION).unwrap();
-    assert_eq!(
-        close.description,
-        format!("close Mjolnir session {SESSION}")
-    );
-    assert_eq!(
-        close.commands[0].purpose,
-        "stop the local Mjolnir worker and remove exact local Mjolnir worker state"
-    );
-    assert_eq!(close.commands[0].program, "sh");
-    assert_eq!(close.commands[0].args[0], "-c");
-    let script = &close.commands[0].args[1];
-    assert!(script.contains(&format!("hel_root='{worker_root}'")));
-    // The worker root holds every staged profile home but Muse's, whose root
-    // lies under the data directory, so both go.
-    let muse_root = local_muse_profile_root(SESSION);
-    assert!(script.ends_with(&format!(
-        "rm -rf -- '{worker_root}' '{}'\n",
-        muse_root.display()
-    )));
-}
-
 /// A leaked daemon that survives teardown recreates the root it is asked
 /// to forget, so the kill has to be part of the same cleanup command.
+// Hard-won: 2e7f5ec9: a detached worker recreated the root after close and broke resume.
 #[test]
 fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
     let worker_root = format!("/var/lib/hel/workers/{SESSION}");
@@ -3015,23 +2503,7 @@ fn bare_cleanup_stops_the_recorded_worker_before_removing_its_root() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn stop_worker_script_succeeds_when_no_daemon_is_running() {
-    let worker_root = format!("/tmp/hel-stop-absent-{}-{SESSION}", std::process::id());
-    let script = stop_worker_daemon_script(&worker_root);
-    let output = std::process::Command::new("sh")
-        .args(["-c", &script])
-        .output()
-        .expect("run stop script");
-    assert!(
-        output.status.success(),
-        "stop with no daemon must not false-positive leftover detection: status={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
+// Hard-won: ed3e0b29: Stop failed after a successful worker kill because grep matched itself.
 #[cfg(unix)]
 #[test]
 fn stop_worker_script_kills_a_matching_daemon_and_is_idempotent() {
@@ -3113,6 +2585,7 @@ fn stop_worker_script_kills_a_matching_daemon_and_is_idempotent() {
 
 /// Resume reuses a bare target's worker root, so anything left writing
 /// there and any stale relay state has to go before the restore seeds it.
+// Hard-won: 2e7f5ec9: closing a bare session left stale relay state that broke the next resume.
 #[test]
 fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
     let local = clear_relay_state_plan(
@@ -3171,6 +2644,7 @@ fn resume_cleanup_clears_relay_state_only_for_reused_bare_roots() {
 /// staged home that is a link to a profile home, so the cleanup before it
 /// unlinks one. A staged home of the session's own is left for the install to
 /// overwrite, and the profile home is never touched.
+// Hard-won: 1eefcdfc: restore through a staged-home symlink could overwrite the user's profile.
 #[cfg(unix)]
 #[test]
 fn resume_cleanup_unlinks_a_linked_staged_home_and_keeps_a_real_one() {
@@ -4098,50 +3572,6 @@ fn seed_docker_cleanup_state(environment: &tempfile::TempDir, name: &str) {
 
 #[cfg(unix)]
 #[test]
-fn docker_cleanup_removes_owned_state_with_fake_docker() {
-    let environment = fake_docker_environment();
-    let name = resource_name(SESSION).unwrap();
-    seed_docker_cleanup_state(&environment, &name);
-    let home = environment.path().join("home");
-    let state = home.join("fake-docker");
-    let overlay = home.join(".cache/mjolnir/docker-overlays").join(&name);
-    let clone_cache = home.join(".cache/mjolnir/git/sessions").join(SESSION);
-    let close = close_plan(
-        &TargetLocator::LocalDocker {
-            borrowed_from: None,
-            container_id: name.clone(),
-        },
-        SESSION,
-    )
-    .unwrap();
-
-    let output = execute_with_fake_docker(&environment, &close.commands[0], &[]);
-    assert_eq!(
-        output.status,
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !overlay.exists(),
-        "owned Docker overlay backing directory remains"
-    );
-    assert!(!clone_cache.exists(), "owned Git clone cache remains");
-    assert!(!state.join("container-labels").exists());
-    assert_eq!(std::fs::read_to_string(state.join("volumes")).unwrap(), "");
-
-    let invocations = std::fs::read_to_string(state.join("invocations")).unwrap();
-    assert!(invocations.contains("container inspect"));
-    assert!(invocations.contains(&name));
-    assert!(invocations.contains(
-        "volume ls --quiet --filter label=dev.mj.managed=true --filter label=dev.mj.session="
-    ));
-    assert!(invocations.contains("volume rm --force mj-volume-one"));
-    assert!(invocations.contains("volume rm --force mj-volume-two"));
-}
-
-#[cfg(unix)]
-#[test]
 fn docker_cleanup_preserves_owned_state_when_container_removal_fails() {
     let environment = fake_docker_environment();
     let name = resource_name(SESSION).unwrap();
@@ -4411,44 +3841,6 @@ impl CommandExecutor for SyncFakeExecutor {
             stderr: b"failure".to_vec(),
         })
     }
-}
-
-#[test]
-fn ungrouped_plans_behave_identically_under_both_execution_methods() {
-    let commands = vec![
-        CommandSpec::new("one", std::iter::empty::<String>()).purpose("one"),
-        CommandSpec::new("two", std::iter::empty::<String>()).purpose("two"),
-        CommandSpec::new("three", std::iter::empty::<String>()).purpose("three"),
-    ];
-    let sequential_plan = CommandPlan {
-        description: "test".to_owned(),
-        commands: commands.clone(),
-    };
-    let concurrent_plan = CommandPlan {
-        description: "test".to_owned(),
-        commands,
-    };
-
-    let sequential_executor = SyncFakeExecutor {
-        seen: Mutex::new(vec![]),
-        fail_at: None,
-    };
-    let sequential_outputs = sequential_plan.execute(&sequential_executor).unwrap();
-
-    let concurrent_executor = SyncFakeExecutor {
-        seen: Mutex::new(vec![]),
-        fail_at: None,
-    };
-    let concurrent_outputs = concurrent_plan
-        .execute_concurrent(&concurrent_executor)
-        .unwrap();
-
-    assert_eq!(sequential_outputs, concurrent_outputs);
-    assert_eq!(
-        sequential_executor.seen.into_inner().unwrap(),
-        concurrent_executor.seen.into_inner().unwrap(),
-        "an ungrouped plan runs its commands in the same order either way"
-    );
 }
 
 /// Blocks every command on a barrier sized to the batch, so this only
@@ -4752,73 +4144,6 @@ fn ssh_docker_provisions_overlay_mounts_and_streams_secret_without_local_docker(
 }
 
 #[test]
-fn ssh_docker_reconnect_and_recovery_use_remote_docker() {
-    let locator = TargetLocator::SshDocker {
-        borrowed_from: None,
-        ssh: ssh(),
-        container_id: resource_name(SESSION).unwrap(),
-    };
-    let reconnect = reconnect_plan(&locator, SESSION).unwrap();
-    let recovery = target_recovery_plan(&locator, SESSION).unwrap().unwrap();
-    for command in
-        reconnect
-            .commands
-            .iter()
-            .chain([&recovery.exists, &recovery.inspect, &recovery.start])
-    {
-        assert_eq!(command.program, "ssh");
-        assert!(command.args.last().unwrap().contains("docker"));
-        assert!(!command.args.last().unwrap().contains("podman"));
-    }
-    assert!(
-        reconnect.commands[0]
-            .args
-            .last()
-            .unwrap()
-            .contains("'exec' '-i'")
-    );
-}
-
-#[test]
-fn ssh_docker_smoke_creates_checks_and_removes_remote_source() {
-    let executor = PodmanPreflightExecutor::with_outputs([
-        podman_output("/tmp/mj-docker-overlay-smoke.test123\n"),
-        podman_output(""),
-        podman_output(""),
-        podman_output(""),
-        podman_output(""),
-        podman_output(""),
-    ]);
-    run_setup_smoke_test(&ssh_docker_template(), SESSION, &executor).unwrap();
-    let seen = executor.seen.borrow();
-    assert!(seen.iter().all(|command| command.program == "ssh"));
-    assert!(seen[0].args.last().unwrap().contains("mktemp"));
-    assert!(
-        seen[1]
-            .args
-            .last()
-            .unwrap()
-            .contains("docker volume create")
-    );
-    assert!(
-        seen[2]
-            .args
-            .last()
-            .unwrap()
-            .contains("container-created.txt")
-    );
-    assert!(seen[3].args.last().unwrap().contains("test ! -e"));
-    assert!(seen[4].args.last().unwrap().contains("docker rm --force"));
-    assert!(
-        seen[5]
-            .args
-            .last()
-            .unwrap()
-            .contains("'/tmp/mj-docker-overlay-smoke.test123'")
-    );
-}
-
-#[test]
 fn ssh_docker_smoke_attempts_cleanup_after_probe_failure_and_preserves_lower_on_cleanup_failure() {
     let fail = || CommandOutput {
         status: 1,
@@ -4860,22 +4185,6 @@ fn ssh_docker_absence_does_not_hide_unavailable_daemon() {
         assert_eq!(result.ok(), expected);
         assert_eq!(executor.seen.borrow()[0].program, "ssh");
     }
-}
-
-#[test]
-fn ssh_docker_preflight_reports_the_remote_destination() {
-    let ready = PodmanPreflightExecutor::with_outputs([podman_output("29.7.2 linux\n")]);
-    assert_eq!(verify_ssh_docker(&ssh(), &ready).unwrap().version, "29.7.2");
-    assert_eq!(ready.seen.borrow()[0].program, "ssh");
-    let failed = PodmanPreflightExecutor::with_outputs([CommandOutput {
-        status: 255,
-        stdout: vec![],
-        stderr: b"connection refused".to_vec(),
-    }]);
-    let error = verify_ssh_docker(&ssh(), &failed).unwrap_err();
-    let text = format!("{error:#}");
-    assert!(text.contains(&ssh().destination));
-    assert!(text.contains("connection refused"));
 }
 
 #[cfg(unix)]

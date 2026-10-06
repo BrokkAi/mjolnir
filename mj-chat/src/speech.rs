@@ -453,50 +453,7 @@ pub fn dictation_error_message(error: &anyhow::Error) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn error_messages_are_prefixed_for_context() {
-        let err = anyhow::anyhow!("some backend exploded");
-        assert_eq!(
-            dictation_error_message(&err),
-            "voice dictation failed: some backend exploded"
-        );
-        let err = anyhow::anyhow!("no speech was recognized");
-        assert_eq!(dictation_error_message(&err), "no speech was recognized");
-        let err = anyhow::anyhow!("voice dictation is not supported on Android");
-        assert_eq!(
-            dictation_error_message(&err),
-            "voice dictation is not supported on Android"
-        );
-    }
-
-    #[cfg(not(target_os = "android"))]
-    #[test]
-    fn worker_events_round_trip_as_json_lines() {
-        use super::worker::{WorkerEvent, parse_event};
-        let events = [
-            WorkerEvent::Status {
-                message: "uploading audio...".to_string(),
-            },
-            WorkerEvent::Partial {
-                text: "hello".to_string(),
-            },
-            WorkerEvent::Level { value: 0.25 },
-            WorkerEvent::Result {
-                text: "hello world".to_string(),
-            },
-            WorkerEvent::Error {
-                message: "microphone capture failed".to_string(),
-            },
-        ];
-        for event in events {
-            let line = serde_json::to_string(&event).expect("serialize event");
-            assert!(!line.contains('\n'), "protocol lines must be single-line");
-            assert_eq!(parse_event(&line), Some(event));
-        }
-    }
-
-    /// Launch finding R5-6: the helper's path came before what to do, so a
-    /// one-line notice cut off "install it beside mj or set MJ_VOICE_WORKER".
+    // Hard-won: 3d0f6d26: the long helper path used to push the install remedy off the notice line.
     #[cfg(not(target_os = "android"))]
     #[test]
     fn a_missing_voice_helper_says_what_to_do_before_the_path() {

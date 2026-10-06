@@ -739,8 +739,15 @@ instance. See [AWS EC2](/aws/).
 
 ### Build cache `[machines.<id>.build_cache]`
 
-Every container runtime on a machine shares one mbx build cache, so the
-settings belong to the machine. Caching is enabled by default where supported.
+Every container runtime on a machine can share one mbx build cache, so the
+settings belong to the machine. Caching is enabled by default only when the
+Linux host has mbx 1.22.0 or newer and its filesystem supports reflinks. A
+missing or older mbx leaves sessions uncached; install or upgrade it from
+**Settings › Setup › Machines**.
+The host executable is atomically refreshed at `<cache>/.mjolnir/bin/mbx` inside
+the read-write shared cache mount. Mjolnir checks that copy in the container
+before adding its marked Cargo and `mbx` launchers; periodic reconciliation
+refreshes it after host upgrades without interrupting running processes.
 In Settings, open **Machines → [machine] → Build cache (mbx)**, or search for
 **mbx**, **cache**, or **build cache**. The machine row shows its configured
 state and total budget; opening it resolves the host's actual defaults and
@@ -749,9 +756,9 @@ for cache prerequisites.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | unset (decided by the machine's filesystem) | `false` runs sessions on this machine without the cache. |
-| `directory` | path string | no | unset (the machine's native mbx cache, else `~/.cache/mbx`) | Must be absolute. It is a path on that machine, not on the controller. |
-| `max_size` | string | no | unset (the machine's own mbx limits, else `min(100 GB, ¼ of free space)`) | An mbx size such as `100GiB`. Caps the whole cache: build outputs, target directories, and incremental state together. |
+| `enabled` | boolean | no | unset (decided by host mbx compatibility and the machine's filesystem) | `false` runs sessions on this machine without the cache. |
+| `directory` | path string | no | the host's native mbx cache directory | Must be absolute. It is a path on that machine, not on the controller. New sessions use the directory reported by native mbx; a missing or too-old mbx does not get a fallback cache. |
+| `max_size` | string | no | the host's native mbx configuration | An mbx size such as `100GiB`. Configure limits on the machine with mbx. |
 
 The optional `scheduler` table controls mbx's shared compiler scheduler:
 
@@ -768,8 +775,9 @@ memory = "24GiB"
 
 mbx shares this pool across independent builds on the machine. Compiler work
 uses permits according to its estimated memory demand, so a compile can use
-more than one permit. Blank scheduler fields are omitted from mbx's managed
-configuration, leaving mbx's own defaults in effect.
+more than one permit. Configure scheduler values in the host's mbx
+configuration; Mjolnir does not install a private mbx or create a fallback
+cache configuration.
 
 A section with every field unset is the same as no section at all.
 
@@ -1065,6 +1073,10 @@ Session replicas sync with canonical project memory at checkpoints using a
 line-by-line three-way merge, including deletions. If sessions change the same
 lines, an available utility model merges them; otherwise the session being
 merged wins. Mjolnir does not create a conflicts folder.
+
+Claude Code uses native project memory. Other harnesses read and write their
+session replica directly with their own file tools; startup context gives them
+its path and describes the `MEMORY.md` index convention.
 
 Do not hand-edit the database or daemon files. Use the TUI, viewer, and commands
 in the [CLI reference](/cli-reference/). See [Durability and recovery](/durability/)

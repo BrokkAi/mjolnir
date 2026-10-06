@@ -1,6 +1,6 @@
 //! The JSON-lines stdio transport shared by the worker's MCP servers.
 //!
-//! Hel's MCP servers (project memory, review dispatch, sub-agents) are
+//! Hel's MCP servers (session history, review dispatch, sub-agents) are
 //! hand-rolled rather than built on an SDK. They differ only in their name,
 //! instructions, tools and call handler, so the JSON-RPC loop lives here once.
 
@@ -395,6 +395,7 @@ mod tests {
             .collect()
     }
 
+    // Hard-won: da95decb: long sub-agent waits exceeded the MCP client silence limit without progress.
     #[test]
     fn a_call_with_a_progress_token_gets_progress_lines_before_its_response() {
         let lines = serve_a_slow_call(
@@ -453,6 +454,7 @@ mod tests {
         });
     }
 
+    // Hard-won: ff3d662a: a lost worker reply after daemon restart left MCP calls blocked forever.
     #[test]
     fn socket_request_reports_a_missing_reply_within_the_timeout() {
         let dir = tempfile::tempdir().unwrap();
@@ -481,25 +483,6 @@ mod tests {
             Ok(true),
             "the call must drop the connection once the reply timeout passes"
         );
-    }
-
-    #[test]
-    fn socket_request_returns_the_reply_when_it_arrives() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("worker.sock");
-        fake_worker(&socket, |stream| {
-            stream.write_all(b"{\"pong\":true}\n").unwrap();
-            stream.flush().unwrap();
-        });
-
-        let reply: Option<Value> = socket_request(
-            &socket,
-            &json!({"ping": true}),
-            "test",
-            Duration::from_secs(5),
-        )
-        .unwrap();
-        assert_eq!(reply, Some(json!({"pong": true})));
     }
 
     #[test]

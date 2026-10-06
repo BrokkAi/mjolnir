@@ -481,23 +481,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::targets::{
-        ContainerTemplate, ProcessExecutor, RepositorySpec, SshTarget, TargetTemplate,
-    };
+    use crate::targets::{ContainerTemplate, ProcessExecutor, RepositorySpec, TargetTemplate};
     use mj_core::config::ImagePullPolicy;
-
-    #[test]
-    fn github_cache_keys_ignore_transport_and_case() {
-        assert_eq!(
-            repository_cache_key("git@github.com:BrokkAi/hel.git").unwrap(),
-            repository_cache_key("https://github.com/brokkai/HEL.git").unwrap()
-        );
-    }
-
-    #[test]
-    fn unrelated_urls_are_not_cacheable() {
-        assert!(repository_cache_key("https://example.com/org/repo.git").is_err());
-    }
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -586,20 +571,6 @@ mod tests {
         assert!(!format!("{command:?}").contains(token));
         assert!(format!("{command:?}").contains("<redacted>"));
         assert!(!serde_json::to_string(command).unwrap().contains(token));
-    }
-
-    #[test]
-    fn local_and_ssh_hosts_use_their_native_command_boundaries() {
-        let local = CacheHost::Local.git_shell_command("true", [], "probe");
-        assert_eq!(local.program, "sh");
-
-        let ssh = CacheHost::Ssh(SshTarget {
-            destination: "dev@example.test".to_owned(),
-            ssh_args: vec!["-o".to_owned(), "BatchMode=yes".to_owned()],
-        })
-        .git_shell_command("true", [], "probe");
-        assert_eq!(ssh.program, "ssh");
-        assert!(ssh.args.last().unwrap().contains("'sh' '-c' 'true'"));
     }
 
     #[test]

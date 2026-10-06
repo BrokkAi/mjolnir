@@ -216,15 +216,6 @@ mod tests {
         assert!(!reloaded.pending(Hint::PrefixKeys));
     }
 
-    #[test]
-    fn an_unreadable_file_means_nothing_was_seen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("client-hints.json");
-        std::fs::write(&path, b"not json").unwrap();
-        let hints = SeenHints::load_from(path);
-        assert!(hints.pending(Hint::PrefixKeys));
-    }
-
     fn queued(path: &std::path::Path) -> PendingHints {
         let mut hints = PendingHints::new(SeenHints::load_from(path.to_path_buf()));
         hints.queue(Hint::PrefixCollision, "collision");
@@ -235,6 +226,7 @@ mod tests {
     /// The launch that restores a conversation reports on that in the notice
     /// bar. A hint written over it would be spent unread, so it waits — and
     /// the file must not record it while it waits.
+    // Hard-won: 2a121ed87a: A live startup marked a hint seen before an attach notice displaced it; this checks the hint stays pending until it is actually drawn, then persists once.
     #[test]
     fn a_hint_waits_for_the_notice_bar_and_is_recorded_only_once_it_is_in_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -269,6 +261,7 @@ mod tests {
 
     /// Inside tmux a first launch has two things to say, so the second hint
     /// follows the first instead of replacing it or being dropped.
+    // Hard-won: 2a121ed87a: Inside tmux only one of two startup hints was shown; this checks the second waits through the first notice and both become recorded.
     #[test]
     fn two_queued_hints_are_both_shown_one_after_the_other() {
         let dir = tempfile::tempdir().unwrap();

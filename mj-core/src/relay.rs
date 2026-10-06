@@ -53,9 +53,10 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 ///
 /// 30 removed the reviewer's change-analysis request and added per-file line
 /// counts to a review capture. 31 added compare-and-replace for project memory
-/// trees. An older controller's requests are refused whole by a newer worker,
-/// rather than half-decoded.
-pub const RELAY_PROTOCOL_VERSION: u32 = 31;
+/// trees. 32 added worker-owned sub-agent mutation admission. An older
+/// controller's requests are refused whole by a newer worker, rather than
+/// half-decoded.
+pub const RELAY_PROTOCOL_VERSION: u32 = 32;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

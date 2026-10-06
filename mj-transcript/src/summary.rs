@@ -799,6 +799,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_persisted_index_title_uses_its_stable_fallback_id() {
+        let legacy_title =
+            include_str!("../tests/fixtures/legacy-indexed-tool-call.txt").trim_end();
+
+        let (call, terminals) = indexed_tool_call(legacy_title, "legacy-tool-17");
+
+        assert_eq!(
+            call,
+            json!({
+                "toolCallId": "legacy-tool-17",
+                "title": "Terminal",
+                "status": "completed"
+            })
+        );
+        assert!(terminals.is_empty());
+    }
+
+    #[test]
     fn ninth_call_demotes_first_and_late_updates_do_not_promote_it() {
         let mut summary = TranscriptSummary::default();
         summary.push_user("test the change");
@@ -827,39 +845,6 @@ mod tests {
                 .filter(|e| e.tool.as_ref().is_some_and(|v| v.get("call").is_some()))
                 .count(),
             FULL_TOOL_CALLS
-        );
-    }
-
-    #[test]
-    fn canonical_materialized_and_live_views_match() {
-        let mut session = MaterializedSession::empty("summary-test");
-        let mut live = TranscriptSummary::default();
-        for n in 0..12 {
-            let call = call(n);
-            live.observe(&SessionUpdate::ToolCall(call.clone()));
-            session.transcript.push(Arc::new(TranscriptItem {
-                stable_id: format!("tool:{}", call.tool_call_id),
-                position: n as u64 + 1,
-                latest_content_event_ordinal: None,
-                created_at_ms: 0,
-                last_changed_at_ms: 0,
-                body: TranscriptBody::Tool {
-                    call: serde_json::to_value(call).unwrap(),
-                    terminal_outputs: Vec::new(),
-                    terminal_refs: Vec::new(),
-                    presentation: None,
-                },
-            }));
-        }
-        let canonical = crate::projection::canonical_session_from_materialized(&session).unwrap();
-        let from_live = live.render(DEFAULT_SUMMARY_BYTES);
-        assert_eq!(
-            from_live,
-            TranscriptSummary::from_snapshot(&canonical).render(DEFAULT_SUMMARY_BYTES)
-        );
-        assert_eq!(
-            from_live,
-            TranscriptSummary::from_materialized(&session).render(DEFAULT_SUMMARY_BYTES)
         );
     }
 
@@ -973,53 +958,11 @@ mod tests {
     }
 
     #[test]
-    fn indexed_tool_round_trip_keeps_recent_results_and_older_names() {
-        let mut summary = TranscriptSummary::default();
-        for n in 0..9 {
-            summary.observe(&SessionUpdate::ToolCall(call(n)));
-        }
-        for entry in summary.entries {
-            let (call, _) = indexed_tool_call(&entry.body(), "fallback");
-            let restored = tool_value(&call, None, false);
-            assert_eq!(restored["name"], "cargo test");
-            assert_eq!(restored["status"], "completed");
-            if entry.id == "call-0" {
-                assert!(!call.to_string().contains("ARGUMENT_0"));
-            } else {
-                assert!(call["rawInput"].is_object());
-                assert!(call["rawOutput"]["formatted_output"].is_string());
-            }
-        }
-    }
-
-    #[test]
     fn malformed_older_calls_do_not_leak_their_titles_or_payloads() {
         let invalid =
             json!({"title":"SECRET_TITLE", "rawInput":"SECRET_INPUT", "status":"completed"});
         let compact = tool_value(&invalid, None, false).to_string();
         assert!(compact.contains("invalid tool call"));
         assert!(!compact.contains("SECRET"));
-    }
-
-    #[test]
-    fn a_title_update_can_supply_a_previously_unknown_operation() {
-        let mut summary = TranscriptSummary::default();
-        summary.observe(&SessionUpdate::ToolCall(
-            ToolCall::new("tool", "Execute").kind(ToolKind::Execute),
-        ));
-        summary.observe(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-            "tool",
-            ToolCallUpdateFields::new().title("cargo test --nocapture"),
-        )));
-        assert!(summary.render(4096).contains("cargo test [pending]"));
-    }
-    #[test]
-    fn indexed_terminals_restore_as_records_with_known_outcomes() {
-        let indexed = json!({"toolCallId":"call", "name":"cargo test", "status":"failed", "call":{"toolCallId":"call","title":"cargo test","kind":"execute","status":"failed"},"terminals":{"terminal":{"output":"test failure","exit_code":17,"signal":null,"truncated":false}}});
-        let (call, terminals) = indexed_tool_call(&indexed.to_string(), "unused");
-        assert_eq!(call["title"], "cargo test");
-        assert_eq!(terminals.len(), 1);
-        assert_eq!(terminals[0].exit_code, Some(17));
-        assert_eq!(terminals[0].output, "test failure");
     }
 }

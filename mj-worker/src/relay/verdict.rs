@@ -667,6 +667,7 @@ mod settled_task_tests {
         }
     }
 
+    // Hard-won: 295a3f85: a completed Claude task looked idle during the gap before its task-notification turn.
     #[test]
     fn a_completed_task_keeps_the_session_busy_until_its_turn_opens() {
         let dir = tempfile::tempdir().unwrap();
@@ -785,6 +786,7 @@ mod settled_task_tests {
     /// worker holds none. When the new harness reports leftover processes
     /// again (Kimi re-reads its task journal on attach), the worker asks Jev
     /// once more instead of leaving the session busy for good.
+    // Hard-won: 9cb9d651: after restart, leftover processes kept `mj wait` blocked because Jev was never asked again.
     #[test]
     fn a_restarted_worker_asks_again_about_leftover_processes_once() {
         use mj_core::assessment::{Background, Failure, Input, Judgment, Verdict, Work};
@@ -888,6 +890,7 @@ mod settled_task_tests {
         assert!(relay.pending_replied_verdict().is_none());
     }
 
+    // Hard-won: 1ee54bfa: a disabled continuation left its unconsumed Continue verdict holding `mj wait` open.
     #[test]
     fn a_continue_verdict_is_not_parked_when_nobody_will_act_on_it() {
         use crate::relay::test_support::{prompt, submit_relay};

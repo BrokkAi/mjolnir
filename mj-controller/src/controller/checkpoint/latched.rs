@@ -893,6 +893,7 @@ mod cancel_log_tests {
 
     /// A checkpoint the daemon cancelled is not a failure: it logs at info
     /// with the reason, never at warn (RVD-1).
+    // Hard-won: 8a851833009b: expected suspend cancellation was logged as duplicate warnings
     #[test]
     fn a_cancelled_checkpoint_leaves_an_info_line_not_a_warning() {
         let log = crate::test_log::CapturedLog::default();

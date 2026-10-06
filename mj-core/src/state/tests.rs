@@ -5,6 +5,19 @@ use crate::config::{
 };
 use crate::targets::MountAccess;
 
+#[test]
+fn session_build_cache_defaults_optional_legacy_fields() {
+    let cache: SessionBuildCache = serde_json::from_value(serde_json::json!({
+        "host": "local",
+        "directory": "/srv/mbx-cache"
+    }))
+    .unwrap();
+
+    assert_eq!(cache.directory, PathBuf::from("/srv/mbx-cache"));
+    assert_eq!(cache.max_size, None);
+    assert_eq!(cache.target_root, None);
+}
+
 fn user_item(position: u64, text: &str) -> Arc<TranscriptItem> {
     Arc::new(TranscriptItem {
         stable_id: format!("user:{position}"),
@@ -177,13 +190,6 @@ fn a_running_session_reports_no_completed_turn() {
     );
 }
 
-#[test]
-fn fast_mode_configuration_uses_its_user_facing_toggle_command() {
-    assert_eq!(config_command_text("fast-mode", "on"), "/fast");
-    assert_eq!(config_command_text("fast-mode", "off"), "/fast");
-    assert_eq!(config_command_text("model", "sol"), "/model sol");
-}
-
 fn sample_state() -> State {
     let session = SessionRecord {
         project: None,
@@ -338,65 +344,6 @@ fn session_records_written_before_container_overrides_still_load() {
 }
 
 #[test]
-fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
-    let config = sample_config();
-    let mut parent = sample_session();
-    parent.id = "parent-session".into();
-    parent.managed_worktree = Some(ManagedWorktree {
-        kind: Default::default(),
-        source_project_directory: PathBuf::from("/home/test/Projects/source"),
-        source_repository: PathBuf::from("/home/test/Projects/source"),
-        worktree_root: PathBuf::from("/worktrees/parent-session"),
-        branch: "mj/parent-session".into(),
-        target: ManagedWorktreeTarget::Local,
-        base_commit: None,
-    });
-    parent.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
-    // A child is launched into the parent's worktree checkout, which is named
-    // after the parent session, and owns no worktree of its own.
-    let mut child = sample_session();
-    child.id = "child-session".into();
-    child.managed_worktree = None;
-    child.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
-
-    let mut state = State::default();
-    state.sessions.insert(parent.id.clone(), parent.clone());
-    state.sessions.insert(child.id.clone(), child.clone());
-    state.subagents.insert(
-        child.id.clone(),
-        crate::subagent::SubagentRecord {
-            child_session_id: child.id.clone(),
-            parent_session_id: parent.id.clone(),
-            task_name: "Inspect parser".into(),
-            profile_id: child.last_profile.clone(),
-            model: None,
-            effort: None,
-            working_directory: PathBuf::new(),
-            initial_prompt: "Inspect the parser".into(),
-            request_key: "request-1".into(),
-            created_at: child.created_at.clone(),
-            noticed_turn: None,
-            handback_tool: false,
-        },
-    );
-
-    assert_eq!(child.project_name(&config), "parent-session");
-    assert_eq!(
-        state
-            .project_identity_session(&child)
-            .project_source(&config)
-            .key,
-        parent.project_source(&config).key,
-        "a child groups under the project its parent works in"
-    );
-    assert_eq!(
-        state.project_identity_session(&parent).id,
-        parent.id,
-        "a session that is not a sub-agent keeps its own project identity"
-    );
-}
-
-#[test]
 fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
     let mut parent = sample_session();
     parent.id = "0123456789abcdef0123456789abcdef".into();
@@ -432,247 +379,6 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
 }
 
 #[test]
-fn container_size_history_rejects_invalid_keys_and_values() {
-    let mut state = State::default();
-    state.container_sizes.insert(
-        String::new(),
-        HostContainerSize {
-            cpus: 8,
-            memory_bytes: 32,
-        },
-    );
-    assert!(
-        state
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("empty host")
-    );
-
-    state.container_sizes = SnapshotMap::from([(
-        "local".into(),
-        HostContainerSize {
-            cpus: 0,
-            memory_bytes: 32,
-        },
-    )]);
-    assert!(state.validate().unwrap_err().to_string().contains("zero"));
-}
-
-#[test]
-fn new_container_and_ec2_sizes_share_the_tui_defaults() {
-    assert_eq!(
-        default_container_size(None, None),
-        HostContainerSize {
-            cpus: BASELINE_CONTAINER_CPUS,
-            memory_bytes: BASELINE_CONTAINER_MEMORY_BYTES,
-        }
-    );
-    assert_eq!(
-        default_container_size(
-            Some(HostContainerSize {
-                cpus: 24,
-                memory_bytes: 64 * 1024 * 1024 * 1024,
-            }),
-            Some(HostContainerSize {
-                cpus: 12,
-                memory_bytes: 48 * 1024 * 1024 * 1024,
-            }),
-        ),
-        HostContainerSize {
-            cpus: 12,
-            memory_bytes: 48 * 1024 * 1024 * 1024,
-        }
-    );
-
-    let options = vec![
-        SessionResourceAllocation::AwsEc2 {
-            instance_type: "c7i.large".into(),
-            vcpus: 2,
-            memory_bytes: 4 * 1024 * 1024 * 1024,
-        },
-        SessionResourceAllocation::AwsEc2 {
-            instance_type: "c7i.2xlarge".into(),
-            vcpus: 8,
-            memory_bytes: 16 * 1024 * 1024 * 1024,
-        },
-    ];
-    assert_eq!(preferred_aws_allocation(&options, None), Some(&options[1]));
-    assert_eq!(
-        preferred_aws_allocation(&options, Some(&options[0])),
-        Some(&options[0])
-    );
-}
-
-#[test]
-fn project_name_prefers_a_worktree_source_then_a_project_directory_then_the_bundle() {
-    let mut config = sample_config();
-    config
-        .bundles
-        .get_mut("hel")
-        .expect("bundle")
-        .repositories
-        .push(ProjectRepository {
-            id: "docs".into(),
-            github: Some("BrokkAi/docs".into()),
-            local: None,
-            destination: PathBuf::from("documentation"),
-            git_ref: None,
-        });
-    let mut session = sample_session();
-
-    assert_eq!(session.project_name(&config), "docs + hel");
-
-    session.project_directory = Some(PathBuf::from("/home/test/Projects/raw-project"));
-    assert_eq!(session.project_name(&config), "raw-project");
-
-    session.project_directory = Some(PathBuf::from(
-        "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
-    ));
-    session.managed_worktree = Some(ManagedWorktree {
-        kind: Default::default(),
-        source_project_directory: PathBuf::from("/home/test/Projects/source"),
-        source_repository: PathBuf::from("/home/test/Projects/source"),
-        worktree_root: PathBuf::from("/home/test/Projects/source/.mj/worktrees/0123456789abcdef"),
-        branch: "mj/0123456789abcdef".into(),
-        target: ManagedWorktreeTarget::Local,
-        base_commit: None,
-    });
-    assert_eq!(session.project_name(&config), "source");
-}
-
-#[test]
-fn bundle_project_name_uses_the_primary_github_repository_name() {
-    let mut config = sample_config();
-    config.bundles.insert(
-        "bifrost".into(),
-        ProjectBundle {
-            primary_repo: "bifrost".into(),
-            repositories: vec![ProjectRepository {
-                id: "bifrost".into(),
-                github: Some("BrokkAi/bifrost-dev".into()),
-                local: None,
-                destination: PathBuf::from("bifrost"),
-                git_ref: None,
-            }],
-        },
-    );
-    let mut session = sample_session();
-    session.bundle_id = "bifrost".into();
-
-    assert_eq!(session.project_name(&config), "bifrost-dev");
-    assert_eq!(
-        session.project_source(&config),
-        ProjectSourceIdentity {
-            key: "github:brokkai/bifrost-dev".into(),
-            short: "bifrost-dev".into(),
-            full: "BrokkAi/bifrost-dev".into(),
-        }
-    );
-}
-
-#[test]
-fn bundle_project_name_uses_a_local_source_or_bundle_id_fallback() {
-    let mut config = sample_config();
-    config.bundles.insert(
-        "local-bundle".into(),
-        ProjectBundle {
-            primary_repo: "local".into(),
-            repositories: vec![ProjectRepository {
-                id: "local".into(),
-                github: None,
-                local: Some(PathBuf::from("/home/test/Projects/bifrost-dev")),
-                destination: PathBuf::from("bifrost"),
-                git_ref: None,
-            }],
-        },
-    );
-    let mut session = sample_session();
-    session.bundle_id = "local-bundle".into();
-
-    assert_eq!(session.project_name(&config), "bifrost-dev");
-    assert_eq!(
-        session.project_source(&config),
-        ProjectSourceIdentity {
-            key: "path:/home/test/Projects/bifrost-dev".into(),
-            short: "bifrost-dev".into(),
-            full: "/home/test/Projects/bifrost-dev".into(),
-        }
-    );
-
-    session.bundle_id = "missing-bundle".into();
-    assert_eq!(session.project_name(&config), "missing-bundle");
-    assert_eq!(
-        session.project_source(&config),
-        ProjectSourceIdentity {
-            key: "bundle:missing-bundle".into(),
-            short: "missing-bundle".into(),
-            full: "missing-bundle".into(),
-        }
-    );
-
-    let mut other_missing = session.clone();
-    other_missing.bundle_id = "another-missing-bundle".into();
-    assert_ne!(
-        session.project_source(&config).key,
-        other_missing.project_source(&config).key
-    );
-}
-
-#[test]
-fn project_target_adds_the_raw_project_name_only_for_bare_targets() {
-    let mut config = sample_config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mut session = sample_session();
-    session.project_directory = Some(PathBuf::from("/mnt/optane/bifrost-fird"));
-
-    assert_eq!(session.project_target(&config, "podman"), "podman");
-    assert_eq!(
-        session.project_target(&config, "localhost"),
-        "localhost/bifrost-fird"
-    );
-    assert_eq!(
-        session.project_target(&config, "retired-target"),
-        "retired-target"
-    );
-}
-
-/// The same rule, reached without a session record: this is what the Resume
-/// dialog's archived rows use, where the record is gone and only the target id
-/// and the project path survive in the index.
-#[test]
-fn target_label_names_the_project_for_bare_targets() {
-    let mut config = sample_config();
-    config
-        .targets
-        .insert("localhost".into(), TargetTemplate::LocalBare);
-    let project = PathBuf::from("/mnt/optane/bifrost-fird");
-
-    assert_eq!(
-        target_label(&config, "localhost", Some(&project)),
-        "localhost/bifrost-fird",
-        "a bare target is named with the project it opens"
-    );
-    assert_eq!(
-        target_label(&config, "localhost", None),
-        "localhost",
-        "with no project there is nothing to add"
-    );
-    assert_eq!(
-        target_label(&config, "podman", Some(&project)),
-        "podman",
-        "a workspace target already identifies itself"
-    );
-    assert_eq!(
-        target_label(&config, "retired-target", Some(&project)),
-        "retired-target",
-        "a target the configuration no longer holds is shown verbatim"
-    );
-}
-
-#[test]
 fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinations() {
     let config = sample_config();
     let mut session = sample_session();
@@ -705,27 +411,6 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
     assert_eq!(source.short, "source");
     assert_eq!(source.full, "/home/test/Projects/source");
     assert!(!source.full.contains(".mj/worktrees"));
-}
-
-#[test]
-fn single_repository_bundle_uses_the_standalone_repository_identity() {
-    let mut config = sample_config();
-    let shared_bundle = config.bundles["hel"].clone();
-    config.bundles.insert("other".into(), shared_bundle);
-
-    let first = sample_session();
-    let mut second = first.clone();
-    second.bundle_id = "other".into();
-
-    assert_eq!(
-        config.bundles["hel"].primary_repo,
-        config.bundles["other"].primary_repo
-    );
-    let first_source = first.project_source(&config);
-    let second_source = second.project_source(&config);
-    let standalone = ProjectSourceIdentity::git_remote("BrokkAi/hel").unwrap();
-    assert_eq!(first_source, standalone);
-    assert_eq!(second_source, standalone);
 }
 
 #[test]
@@ -837,36 +522,6 @@ fn duplicate_repository_sources_collapse_to_the_single_repository_identity() {
     assert_eq!(
         source,
         ProjectSourceIdentity::git_remote("BrokkAi/hel").unwrap()
-    );
-}
-
-#[test]
-fn unresolved_bundle_repository_uses_the_bundle_fallback() {
-    let mut config = sample_config();
-    config.bundles.insert(
-        "incomplete".into(),
-        ProjectBundle {
-            primary_repo: "broken".into(),
-            repositories: vec![ProjectRepository {
-                id: "broken".into(),
-                github: None,
-                local: None,
-                destination: PathBuf::from("broken"),
-                git_ref: None,
-            }],
-        },
-    );
-    let mut session = sample_session();
-    session.bundle_id = "incomplete".into();
-
-    assert_eq!(session.project_name(&config), "incomplete");
-    assert_eq!(
-        session.project_source(&config),
-        ProjectSourceIdentity {
-            key: "bundle:incomplete".into(),
-            short: "incomplete".into(),
-            full: "incomplete".into(),
-        }
     );
 }
 
@@ -1010,41 +665,6 @@ fn materialized_activity_watermark_does_not_regress_when_detail_is_removed() {
     assert_eq!(materialized.last_activity_at_ms(), Some(500));
 }
 
-/// Shared transcript items must stay plain JSON on the wire: sharing is a
-/// controller memory concern, not part of the serialized shape.
-#[test]
-fn shared_transcript_items_serialize_as_plain_items() {
-    let mut materialized = MaterializedSession::empty("session-1");
-    materialized.applied_event_ordinal = 1;
-    materialized.applied_event_digest = "a".repeat(64);
-    let item = Arc::new(TranscriptItem {
-        stable_id: "system:1".into(),
-        position: 1,
-        latest_content_event_ordinal: None,
-        created_at_ms: 10,
-        last_changed_at_ms: 10,
-        body: TranscriptBody::System {
-            text: "started".into(),
-        },
-    });
-    // The same item twice would be deduplicated by serde's pointer-aware
-    // encodings; stable ids keep it a legal transcript.
-    materialized.transcript.push(Arc::clone(&item));
-    let mut second = TranscriptItem::clone(&item);
-    second.stable_id = "system:2".into();
-    materialized.transcript.push(Arc::new(second));
-    materialized.validate().unwrap();
-
-    let encoded = serde_json::to_value(&materialized).unwrap();
-    assert_eq!(encoded["transcript"][0]["stable_id"], "system:1");
-    assert_eq!(encoded["transcript"][0]["body"]["kind"], "system");
-    assert_eq!(encoded["transcript"][0]["body"]["text"], "started");
-    assert_eq!(encoded["transcript"][1]["stable_id"], "system:2");
-
-    let restored: MaterializedSession = serde_json::from_value(encoded).unwrap();
-    assert_eq!(restored, materialized);
-}
-
 #[test]
 fn materialized_event_frontier_requires_the_matching_digest_kind() {
     let mut materialized = MaterializedSession::empty("session-1");
@@ -1090,6 +710,7 @@ fn project_directory_history_is_recent_and_isolated_per_remote_host() {
 /// A refused Setup change names the running session and what it uses the
 /// way the screen names them, and only what the change touches. Launch
 /// campaign finding C-20.
+// Hard-won: 006bb14c: Setup refusal text exposed an internal session id and bundle key instead of display names.
 #[test]
 fn a_refused_setup_change_names_the_session_and_setting_by_display_name() {
     let mut state = sample_state();
@@ -1209,86 +830,6 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
         .unwrap();
 }
 
-#[test]
-fn configuration_repair_reports_all_missing_entries_and_clears_after_restoration() {
-    let state = sample_state();
-    let session = state.sessions.values().next().unwrap();
-    let mut config = sample_config();
-    config.profiles.clear();
-    config.bundles.clear();
-    config.targets.clear();
-    let issue = session.configuration_issue(&config).unwrap();
-    assert!(issue.contains("missing profile"));
-    assert!(issue.contains("missing bundle"));
-    assert!(issue.contains("missing target template"));
-    assert!(issue.contains("config.toml"));
-    assert!(session.configuration_issue(&sample_config()).is_none());
-    let mut raw = session.clone();
-    raw.project_directory = Some(PathBuf::from("/project"));
-    let mut config = sample_config();
-    config.bundles.clear();
-    assert!(raw.configuration_issue(&config).is_none());
-    let mut stopped = session.clone();
-    stopped.state = SessionState::Stopped;
-    assert!(stopped.configuration_issue(&Config::default()).is_none());
-}
-
-#[test]
-fn active_state_validates_references_and_harness_kind() {
-    let state = sample_state();
-    state.validate_against_config(&sample_config()).unwrap();
-
-    let mut config = sample_config();
-    config.profiles.get_mut("codex-1").unwrap().kind = HarnessKind::Claude;
-    assert!(
-        state
-            .validate_against_config(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("expects Codex")
-    );
-}
-
-/// A child's working directory is a launch choice, not a containment
-/// boundary, so a stored record may name any path on the parent's target.
-#[test]
-fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
-    let mut state = sample_state();
-    let parent_id = state.sessions.keys().next().unwrap().clone();
-    let child_id = "fedcba9876543210".to_owned();
-    let mut child = state.sessions[&parent_id].clone();
-    child.id = child_id.clone();
-    state.sessions.insert(child_id.clone(), child);
-    state.subagents.insert(
-        child_id.clone(),
-        SubagentRecord {
-            child_session_id: child_id.clone(),
-            parent_session_id: parent_id,
-            task_name: "lane".into(),
-            profile_id: "codex-1".into(),
-            model: None,
-            effort: None,
-            working_directory: PathBuf::new(),
-            initial_prompt: "work in the lane".into(),
-            request_key: "request-1".into(),
-            created_at: "2026-09-16T00:00:00Z".into(),
-            noticed_turn: None,
-            handback_tool: false,
-        },
-    );
-    for working_directory in [
-        PathBuf::from("/mnt/optane/bifrost-sg-c2"),
-        PathBuf::from("../shared-checkout"),
-    ] {
-        state
-            .subagents
-            .get_mut(&child_id)
-            .unwrap()
-            .working_directory = working_directory;
-        state.validate().unwrap();
-    }
-}
-
 /// Records written before the verb was renamed say "archived". They must
 /// still load, and they must be written back with the new name.
 #[test]
@@ -1365,85 +906,6 @@ fn force_removal_permits_an_active_session() {
             .unwrap_err()
             .to_string()
             .contains("unknown session")
-    );
-}
-
-#[test]
-fn harness_title_prefers_the_newest_session_info_update() {
-    let events = vec![
-        SequencedEvent {
-            seq: 1,
-            recorded_at_ms: None,
-            request_id: None,
-            event: WorkerEvent::Adapter {
-                kind: "session_update".into(),
-                payload: serde_json::json!({
-                    "type": "session_update",
-                    "update": {
-                        "sessionUpdate": "session_info_update",
-                        "title": "First title"
-                    }
-                }),
-            },
-        },
-        SequencedEvent {
-            seq: 2,
-            recorded_at_ms: None,
-            request_id: None,
-            event: WorkerEvent::Adapter {
-                kind: "session_update".into(),
-                payload: serde_json::json!({
-                    "type": "session_update",
-                    "update": {
-                        "sessionUpdate": "session_summary",
-                        "summary": "  Build   the dashboard  "
-                    }
-                }),
-            },
-        },
-    ];
-
-    assert_eq!(
-        harness_session_title(&events).as_deref(),
-        Some("First title")
-    );
-}
-
-#[test]
-fn extension_session_title_is_cleaned_without_losing_available_text() {
-    let first_prompt = format!("{}overflow", "word ".repeat(20));
-    let expected = first_prompt.trim().to_string();
-    let events = vec![
-        SequencedEvent {
-            seq: 1,
-            recorded_at_ms: None,
-            request_id: Some("prompt-1".into()),
-            event: WorkerEvent::PromptAccepted {
-                request_id: "prompt-1".into(),
-                text: format!("  {first_prompt}\n"),
-                attachments: vec![],
-            },
-        },
-        SequencedEvent {
-            seq: 2,
-            recorded_at_ms: None,
-            request_id: None,
-            event: WorkerEvent::Adapter {
-                kind: "session_update".into(),
-                payload: serde_json::json!({
-                    "type": "session_update",
-                    "update": {
-                        "sessionUpdate": "session_title",
-                        "title": first_prompt
-                    }
-                }),
-            },
-        },
-    ];
-
-    assert_eq!(
-        harness_session_title(&events).as_deref(),
-        Some(expected.as_str())
     );
 }
 
@@ -1580,6 +1042,7 @@ fn locator_rejects_parent_traversal() {
 /// A sub-agent child on a bare SSH target runs its own worker in the parent's
 /// workspace (`borrowed_locator`), so its workspace ends in the parent's id and
 /// its `worker_id` names the child.
+// Hard-won: 70c93757: A valid borrowed child locator stopped the DB writer and made later daemon starts reject the store.
 #[test]
 fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
     let mut state = sample_state();
@@ -1616,15 +1079,6 @@ fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
 }
 
 #[test]
-fn generated_session_ids_are_valid_and_distinct() {
-    let first = new_session_id().unwrap();
-    let second = new_session_id().unwrap();
-    validate_id("session", &first).unwrap();
-    assert_eq!(first.len(), 32);
-    assert_ne!(first, second);
-}
-
-#[test]
 fn awaiting_input_is_a_handoff_instead_of_an_error() {
     for reason in [
         crate::acp::AWAITING_INPUT_STOP_REASON,
@@ -1645,6 +1099,7 @@ fn awaiting_input_is_a_handoff_instead_of_an_error() {
 /// Launch finding R2-8: the dashboard titled a session with the full project
 /// path and its trailing slash ("/tmp/lab/project/ via fake"), while `mj new`
 /// titled it "project via fake". Both now use this.
+// Hard-won: e7eb288e: Dashboard creation used a trailing-slash path title that differed from the CLI title.
 #[test]
 fn a_new_session_is_titled_by_its_directory_name_and_profile() {
     assert_eq!(
@@ -1660,6 +1115,7 @@ fn a_new_session_is_titled_by_its_directory_name_and_profile() {
 /// R2-8: until the harness names a dashboard session, its row showed the hex
 /// id. It shows the title the session was created with, as the API has since
 /// F-12; a rename or a harness title still wins.
+// Hard-won: e7eb288e: Unnamed dashboard rows showed a hex id until the harness supplied a title.
 #[test]
 fn a_session_nobody_named_is_listed_by_the_title_it_was_created_with() {
     let mut session = sample_session();

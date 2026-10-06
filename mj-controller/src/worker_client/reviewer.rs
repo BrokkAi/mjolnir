@@ -324,6 +324,26 @@ impl RelayClient {
         }
     }
 
+    pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {
+        let request = RelayRequest::SetSubagentAdmission { open };
+        if !request.supported_at(self.protocol_version) {
+            bail!(
+                "source worker does not support safe in-place sub-agent draining; update or restart the session worker, then retry Move"
+            );
+        }
+        match self.call(request).await? {
+            RelayResponsePayload::SubagentAdmissionChanged { open: returned }
+                if returned == open =>
+            {
+                Ok(())
+            }
+            RelayResponsePayload::SubagentAdmissionChanged { open: returned } => {
+                bail!("worker set sub-agent admission to {returned}, expected {open}")
+            }
+            _ => bail!("relay returned an unexpected sub-agent admission response"),
+        }
+    }
+
     pub async fn complete_subagent_request(
         &mut self,
         result: mj_core::subagent::SubagentToolResult,

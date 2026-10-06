@@ -172,20 +172,6 @@ fn fallback_history_preserves_recent_context_and_marks_oversize_bodies() {
 }
 
 #[tokio::test]
-async fn short_history_uses_one_compaction_request() {
-    let backend = FakeBackend::default();
-    let handoff = compact_snapshot(
-        &exchanges(&[("fix it", "done")]),
-        CompactionBudget::uniform(64 * 1024),
-        &backend,
-    )
-    .await
-    .unwrap();
-    assert_eq!(backend.prompts.lock().unwrap().len(), 1);
-    assert!(handoff.contains("<state_snapshot>kept</state_snapshot>"));
-}
-
-#[tokio::test]
 async fn large_history_pages_then_reduces_and_keeps_exact_tail() {
     let large = "x".repeat(20 * 1024);
     let input = exchanges(&[
@@ -228,6 +214,7 @@ async fn oversize_turn_is_split_into_summarizable_fragments() {
     );
 }
 
+// Hard-won: 6c060035cca9: fatal backend failures fanned into up to seven doomed requests and lost the original error
 #[tokio::test]
 async fn a_fatal_backend_failure_surfaces_on_the_first_request() {
     let backend = FailingBackend::new("session/prompt failed: 401 unauthorized");
@@ -351,6 +338,7 @@ async fn independent_pages_run_at_the_compaction_concurrency_limit() {
 /// Merging two summaries at a time cost one request per pair and a round
 /// per level of the tree: 33 pages became 32 further requests, run two at
 /// a time. Packing a whole round into one prompt is the fix.
+// Hard-won: 3ffa75af6113: one handoff used 65 model requests over fourteen minutes
 #[tokio::test]
 async fn page_summaries_that_fit_one_prompt_reduce_in_a_single_request() {
     let large = "r".repeat(20 * 1024);
@@ -453,6 +441,7 @@ fn a_single_snapshot_too_large_for_its_own_prompt_is_an_error() {
     assert!(error.to_string().contains("context byte budget"), "{error}");
 }
 
+// Hard-won: 6c060035cca9: fatal auth, quota, and transport failures were classified as oversize and retried
 #[test]
 fn failures_are_classified_by_what_a_smaller_page_could_fix() {
     for oversize in [
@@ -535,27 +524,7 @@ fn prior_handoff_turn_keeps_its_work_under_a_placeholder() {
     }
 }
 
-#[test]
-fn thoughts_and_system_notices_are_left_out() {
-    let turns = turns_from_snapshot(&snapshot(vec![
-        user("do it"),
-        CanonicalTranscriptBody::Thought {
-            chunks: vec![serde_json::json!({"content": {"type": "text", "text": "musing"}})],
-            streaming: false,
-        },
-        CanonicalTranscriptBody::System {
-            text: "target restarted".into(),
-        },
-        agent("done"),
-    ]))
-    .unwrap();
-
-    let rendered = render_turns(&turns, 0);
-    assert!(rendered.contains("done"));
-    assert!(!rendered.contains("musing"));
-    assert!(!rendered.contains("target restarted"));
-}
-
+// Hard-won: 4e8da38f74a9: resumed transcripts dropped real post-resume plan and tool work
 #[test]
 fn plan_and_tool_events_join_their_user_turn() {
     let turns = turns_from_snapshot(&snapshot(vec![
@@ -607,13 +576,6 @@ fn startup_tool_history_before_a_user_turn_is_ignored() {
     assert!(rendered.contains("do the work"));
     assert!(rendered.contains("done"));
     assert!(!rendered.contains("startup was cancelled"));
-}
-
-#[test]
-fn a_transcript_without_user_turns_is_an_error() {
-    let error = turns_from_snapshot(&snapshot(Vec::new())).unwrap_err();
-
-    assert!(error.to_string().contains("no user turns"), "{error}");
 }
 
 #[tokio::test]

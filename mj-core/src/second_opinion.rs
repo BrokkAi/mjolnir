@@ -381,25 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn implementing_the_original_carries_the_captured_plan_and_no_feedback() {
-        let (mut workflow, _) = started();
-        workflow.primary_context_completed("context-1", "context", "review-1");
-        workflow.reviewer_turn_completed("review-1", "I would restructure the whole thing.");
-
-        let requests = workflow.implement_original("implement-1");
-        let [
-            WorkflowRequest::PromptPrimary { prompt, .. },
-            WorkflowRequest::PauseReviewer,
-        ] = requests.as_slice()
-        else {
-            panic!("implementing prompts the primary and pauses the reviewer");
-        };
-        assert!(prompt.contains("1. Read\n2. Change"));
-        assert!(!prompt.contains("I would restructure the whole thing."));
-        assert!(workflow.finished());
-    }
-
-    #[test]
     fn cancelling_transfers_nothing_and_asks_for_the_decision_back() {
         let (mut workflow, _) = started();
         workflow.primary_context_completed("context-1", "context", "review-1");

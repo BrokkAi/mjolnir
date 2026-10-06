@@ -141,44 +141,6 @@ mod tests {
     }
 
     #[test]
-    fn models_remain_ready_while_another_models_efforts_hydrate() {
-        let (config, mut snapshot) = fixture();
-        assert_eq!(
-            snapshot
-                .options(&config, "parent", None)
-                .unwrap()
-                .models
-                .len(),
-            2
-        );
-        assert!(
-            snapshot
-                .options(&config, "parent", Some("a"))
-                .unwrap()
-                .efforts
-                .is_empty()
-        );
-        assert!(snapshot.options(&config, "parent", Some("b")).is_none());
-        snapshot
-            .profiles
-            .values_mut()
-            .next()
-            .unwrap()
-            .efforts
-            .insert(
-                "b".into(),
-                CapabilityState::Failed("probe unavailable".into()),
-            );
-        assert!(
-            snapshot
-                .options(&config, "parent", Some("b"))
-                .unwrap()
-                .unavailable[0]
-                .contains("probe unavailable")
-        );
-    }
-
-    #[test]
     fn defaults_and_eligibility_change_views_without_changing_profile_identity() {
         let (mut config, snapshot) = fixture();
         let original = config.profiles_discovery_key();

@@ -388,7 +388,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             "{} · sidebar {}",
             theme_report(
                 &choice_label(&["theme".to_owned()], &draft["theme"], draft),
-                mj_chat::theme::no_color_requested()
+                crate::no_color_requested()
             ),
             choice_label(
                 &["sessions_side".to_owned()],
@@ -763,10 +763,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Share Rust build caches on Linux hosts; on by default. On macOS, install and configure native mbx separately."
+            "Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup › Machines."
         }
         "directory" => {
-            "Cache directory on the machine. Blank uses its native mbx cache if installed, otherwise ~/.cache/mbx."
+            "The cache directory reported by the machine's native mbx installation. Configure its location on that machine."
         }
         "max_total_size" => {
             "Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial automatic budget."

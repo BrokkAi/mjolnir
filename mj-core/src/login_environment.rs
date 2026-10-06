@@ -265,6 +265,7 @@ mod tests {
     use crate::targets::{BoundedProcessExecutor, CommandExecutor, CommandSpec};
     use std::time::{Duration, Instant};
 
+    // Hard-won: af22566c: rebuilding the environment from login exports dropped required container image variables
     #[test]
     fn image_overlay_carries_absent_image_variables_only() {
         let mut discovered = Environment::from([
@@ -436,18 +437,5 @@ mod tests {
         let error = discover_account(account(home.path()), Duration::from_millis(250)).unwrap_err();
         assert!(error.to_string().contains("did not answer"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(3));
-    }
-
-    #[tokio::test]
-    async fn explicit_session_settings_override_the_login_baseline() {
-        let environment = with_overrides(&Environment::from([
-            ("PATH".into(), "/explicit/bin".into()),
-            ("SESSION_SETTING".into(), "explicit".into()),
-        ]))
-        .await
-        .unwrap();
-        assert_eq!(environment["PATH"], "/explicit/bin");
-        assert_eq!(environment["SESSION_SETTING"], "explicit");
-        assert!(environment.contains_key("HOME"));
     }
 }

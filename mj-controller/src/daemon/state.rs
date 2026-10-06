@@ -1409,6 +1409,7 @@ mod tests {
     /// RCL-1 (2026-09-29): the Sessions filter's conversation search asks for
     /// the same non-forced sync the resume dialog's search asks for, so a
     /// message sent since the last sync is found by the next keystroke.
+    // Hard-won: 13425c7c: session search missed messages newer than SessionWiki until it requested a sync.
     #[tokio::test]
     async fn a_session_text_search_asks_for_a_sync_like_the_resume_search() {
         let mut state = test_runtime_state();

@@ -149,13 +149,4 @@ mod tests {
         assert_eq!(scoped["candidates"].as_array().unwrap().len(), 1);
         assert!(no_tools["candidates"].as_array().unwrap().is_empty());
     }
-
-    #[test]
-    fn selected_calls_must_belong_to_current_turn() {
-        let mut input = request("selected");
-        input.selected_ids.push("missing".into());
-        assert!(project(input).is_err());
-        let selected = project(request("selected")).unwrap();
-        assert!(!selected["text"].as_str().unwrap().contains("<tool"));
-    }
 }

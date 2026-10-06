@@ -1,0 +1,15 @@
+=== controller text search response (3 matches) ===
+[
+  {
+    "session_id": "both",
+    "kind": "user"
+  },
+  {
+    "session_id": "said-by-agent",
+    "kind": "agent"
+  },
+  {
+    "session_id": "said-by-user",
+    "kind": "user"
+  }
+]

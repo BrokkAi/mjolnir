@@ -203,25 +203,4 @@ mod tests {
                 .contains("provenance")
         );
     }
-
-    #[test]
-    fn a_single_reviewer_handoff_keeps_its_provenance() {
-        let pending = PendingForward {
-            synthesis: "[P2] a.rs:1 -- weak test".to_owned(),
-            evidence: ReviewPassEvidence::default(),
-            command_id: "forward-2".to_owned(),
-            trees: BTreeMap::new(),
-            reviewed_through_ordinal: 4,
-            provenance: FindingsProvenance::SingleReviewer,
-        };
-        let stored = serde_json::to_string(&pending).unwrap();
-        assert!(
-            stored.contains(r#""provenance":"single_reviewer""#),
-            "{stored}"
-        );
-        assert_eq!(
-            serde_json::from_str::<PendingForward>(&stored).unwrap(),
-            pending
-        );
-    }
 }

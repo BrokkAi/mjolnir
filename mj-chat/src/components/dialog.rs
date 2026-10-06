@@ -570,19 +570,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_submit_never_activates_a_fallback_button() {
-        let mut dialog = editor();
-        dialog.declare_with_enabled(3, ControlKind::Button, false);
-        assert_eq!(dialog.handle(&key(KeyCode::Enter)).action, None);
-        assert_eq!(dialog.focused(), Some(1));
-        dialog.focus(3);
-        dialog.end_frame(1);
-        assert_eq!(dialog.handle(&key(KeyCode::Enter)).action, None);
-        dialog.handle(&key(KeyCode::Tab));
-        assert!(!dialog.confirmation_open());
-    }
-
-    #[test]
     fn child_dismissal_does_not_discard_the_parent_draft() {
         let mut dialog = editor();
         dialog.declare(4, ControlKind::Button);

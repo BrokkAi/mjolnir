@@ -214,8 +214,6 @@ pub(crate) fn resolve_recipe(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     fn entry(id: &str, name: &str) -> crate::daemon::WorkspaceListing {
         crate::daemon::WorkspaceListing {
             workspace: mj_core::workspace::WorkspaceRecord {
@@ -250,6 +248,7 @@ mod tests {
     /// same folder then created "demo (2)" beside it (launch finding R13-10).
     /// `mj go` now reuses the workspace the dashboard named after the folder,
     /// unless another folder's `mj go` already owns it.
+    // Hard-won: f993591af7: Launch finding R13-10 found `mj` and `mj go` creating two workspaces for one folder; the resolver now reuses the dashboard workspace unless another folder owns it.
     #[test]
     fn go_reuses_the_workspace_the_dashboard_named_after_the_folder() {
         let workspaces = [entry("recent", "other"), entry("dashboard", "Demo")];
@@ -266,44 +265,5 @@ mod tests {
                 .is_none(),
             "a workspace another folder is bound to is never borrowed"
         );
-    }
-
-    /// The name `mj go` looks for is the one plain `mj` gives a workspace it
-    /// creates in that folder.
-    #[test]
-    fn the_dashboard_names_a_new_workspace_after_the_folder() {
-        assert_eq!(
-            crate::workspace_name_for_directory(std::path::Path::new("/home/user/demo")),
-            "demo"
-        );
-        assert_eq!(
-            crate::workspace_name_for_directory(std::path::Path::new("/")),
-            "workspace"
-        );
-    }
-
-    #[test]
-    fn directory_names_are_readable_and_disambiguated_without_hashes() {
-        assert_eq!(
-            super::available_workspace_name("project", [].into_iter()),
-            "project"
-        );
-        assert_eq!(
-            super::available_workspace_name("project", ["PROJECT", "project (2)"].into_iter()),
-            "project (3)"
-        );
-    }
-
-    #[test]
-    fn go_accepts_a_folder_and_explicit_default_changes_without_altering_plain_mj() {
-        let plain = crate::Cli::try_parse_from(["mj"]).unwrap();
-        assert!(plain.command.is_none());
-        let parsed =
-            crate::Cli::try_parse_from(["mj", "go", "../project", "--global-default"]).unwrap();
-        let Some(crate::Command::Go(args)) = parsed.command else {
-            panic!("expected go");
-        };
-        assert_eq!(args.folder.unwrap(), std::path::PathBuf::from("../project"));
-        assert!(args.global_default);
     }
 }

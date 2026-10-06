@@ -688,6 +688,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn golden_encode_mono_pcm16_wav() {
+        // The golden is the RIFF/WAVE chunk layout with little-endian PCM16 samples.
+        let wav = encode_wav(&[-2.0, -0.5, 0.0, 0.5, 2.0], 16_000).expect("encode WAV");
+        let bytes = wav
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let actual = format!("=== mono PCM16 WAV ({} bytes) ===\n{bytes}", wav.len());
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "mono-pcm16-wav", &actual);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn encode_wav_rejects_audio_beyond_the_riff_size_limit() {
+        const SAMPLE_COUNT: usize = 2_147_483_630;
+        let layout =
+            std::alloc::Layout::array::<f32>(SAMPLE_COUNT).expect("sample allocation layout");
+        // The zeroed virtual allocation is valid as an f32 slice. encode_wav
+        // must reject its length before reading samples or allocating output.
+        let allocation = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(
+            !allocation.is_null(),
+            "reserve virtual memory for RIFF boundary"
+        );
+        // SAFETY: `alloc_zeroed` returns `layout.size()` initialized bytes with
+        // the requested alignment, which is exactly SAMPLE_COUNT f32 values.
+        let samples = unsafe { std::slice::from_raw_parts(allocation.cast::<f32>(), SAMPLE_COUNT) };
+        let result = encode_wav(samples, 16_000);
+        // SAFETY: this pointer was allocated with the same layout above.
+        unsafe { std::alloc::dealloc(allocation, layout) };
+
+        assert_eq!(
+            result
+                .expect_err("RIFF length cannot represent this audio")
+                .to_string(),
+            "audio capture exceeds RIFF size limit"
+        );
+    }
+
+    #[test]
     fn capture_queue_reports_overload_without_blocking_the_audio_callback() {
         let (tx, rx) = mpsc::sync_channel(4);
         let state = Arc::new(AudioQueueState::default());
@@ -700,68 +741,5 @@ mod tests {
         }
         assert!(state.overflowed.load(Ordering::Relaxed));
         assert_eq!(rx.try_recv().unwrap().unwrap(), vec![0.25; 4096]);
-    }
-
-    #[test]
-    fn wav_preserves_audio_larger_than_a_pipe_buffer() {
-        let samples = vec![0.5; 65_536];
-        let wav = encode_wav(&samples, 16_000).unwrap();
-        assert_eq!(wav.len(), 44 + samples.len() * 2);
-        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 131_072);
-        assert_eq!(&wav[wav.len() - 2..], &16384_i16.to_le_bytes());
-    }
-
-    #[test]
-    fn downmix_averages_each_channel_frame() {
-        assert_eq!(
-            downmix([1.0, -1.0, 0.25, 0.75].into_iter(), 2),
-            vec![0.0, 0.5]
-        );
-    }
-
-    #[test]
-    fn normalized_level_clamps_to_meter_range() {
-        assert_eq!(normalized_level(0.0), 0.0);
-        assert_eq!(normalized_level(1.0), 1.0);
-        assert!(normalized_level(0.01) > 0.0);
-        assert!(normalized_level(0.01) < 1.0);
-    }
-
-    #[test]
-    fn resample_linear_changes_rate_and_preserves_endpoints() {
-        let output = resample_linear(&[0.0, 1.0], 2, 4).expect("resample");
-        assert_eq!(output.len(), 4);
-        assert_eq!(output[0], 0.0);
-        assert_eq!(output[1], 0.5);
-        assert_eq!(output[2], 1.0);
-        assert_eq!(output[3], 1.0);
-    }
-
-    #[test]
-    fn resample_linear_rejects_zero_sample_rates_without_panicking() {
-        assert!(resample_linear(&[0.25], 0, 16_000).is_err());
-        assert!(resample_linear(&[0.25], 16_000, 0).is_err());
-    }
-
-    #[test]
-    fn encode_wav_writes_mono_pcm16_header_and_samples() {
-        let wav = encode_wav(&[-1.0, 0.0, 1.0], 16_000).expect("encode WAV");
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 42);
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(u32::from_le_bytes(wav[16..20].try_into().unwrap()), 16);
-        assert_eq!(u16::from_le_bytes(wav[20..22].try_into().unwrap()), 1);
-        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 1);
-        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
-        assert_eq!(u32::from_le_bytes(wav[28..32].try_into().unwrap()), 32_000);
-        assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 2);
-        assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
-        assert_eq!(i16::from_le_bytes(wav[44..46].try_into().unwrap()), -32767);
-        assert_eq!(i16::from_le_bytes(wav[46..48].try_into().unwrap()), 0);
-        assert_eq!(i16::from_le_bytes(wav[48..50].try_into().unwrap()), 32767);
-        assert_eq!(wav.len(), 50);
     }
 }

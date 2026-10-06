@@ -1,0 +1,131 @@
+=== search memory from Settings root (140x30) ===
+╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────  ╭ × Settings ─────────────────────────────────────────────────────────────────────── 1 setting ╮                     │
+╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
+│ Create   Open   Fi  │                                                                                              │                     │
+│hel ───────────────  │ memory                                                                                       │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │ Memory limit                    Runtimes › podman               No limit                     │                     │
+│  │ No messages yet  │                                                                                              │                     │
+│  │                  │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
+╰───────────────────                                                                                                    ───────────────────╯
+Enter open · / searc                                                                                                     : palette · ? keys
+matching paths: [["targets", "podman", "memory"]]
+
+=== memory result opens its nested editor (140x30) ===
+╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+╭ Sessions ─────────  │ Settings › Runtimes › podman › Memory limit                                                  │                     │
+│ Create   Open   Fi  │ Examples: 8g or 4096m. Leave blank for no limit.                                             │                     │
+│hel ───────────────  │                                                                                              │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │ Memory limit                                                                   Use default   │                     │
+│  │ No messages yet  │                                                                                Apply         │                     │
+│  │                  │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back                                                                                       │                     │
+│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+╰───────────────────                                                                                                    ───────────────────╯
+Enter open · / searc                                                                                                     : palette · ? keys
+landed page and editor: ["targets", "podman"] / Some(["targets", "podman", "memory"])
+
+=== help text finds context budget by compaction (140x30) ===
+╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────  ╭ × Settings ────────────────────────────────────────────────────────────────────── 3 settings ╮                     │
+╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
+│ Create   Open   Fi  │                                                                                              │                     │
+│hel ───────────────  │ compaction                                                                                   │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │ Context budget (bytes)          Agent Profiles › claude-1       262144 (256 KiB)             │                     │
+│  │ No messages yet  │ Context budget (bytes)          Agent Profiles › codex-1        262144 (256 KiB)             │                     │
+│  │                  │ Context budget (bytes)          Agent Profiles › codex-2        262144 (256 KiB)             │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
+╰───────────────────                                                                                                    ───────────────────╯
+Enter open · / searc                                                                                                     : palette · ? keys
+matching paths: [["profiles", "claude-1", "context_window_bytes"], ["profiles", "codex-1", "context_window_bytes"], ["profiles", "codex-2", "context_window_bytes"]]
+
+=== search result includes its section, label, and current value (140x30) ===
+╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────  ╭ × Settings ────────────────────────────────────────────────────────────────────── 2 settings ╮                     │
+╭ Sessions ─────────  │ Search every setting by name, by what it does, or by its value. Esc returns to the list.     │                     │
+│ Create   Open   Fi  │                                                                                              │                     │
+│hel ───────────────  │ image                                                                                        │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │ Container image                 Runtimes › podman               ubuntu:24.04                 │                     │
+│  │ No messages yet  │ Download image policy           Runtimes › podman               Pull if missing ▾            │                     │
+│  │                  │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰──────────────────────────────────────────────────────────────────────────────────────────────╯                     │
+╰───────────────────                                                                                                    ───────────────────╯
+Enter open · / searc                                                                                                     : palette · ? keys
+matching paths: [["targets", "podman", "image"], ["targets", "podman", "pull_policy"]]

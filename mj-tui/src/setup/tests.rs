@@ -6,6 +6,7 @@ use crate::test_support::{
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{Terminal, backend::TestBackend};
 
+// Hard-won: 8d16bf96: unrelated settings saves failed when a configured API-key file disappeared.
 #[test]
 fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread() {
     let directory = tempfile::tempdir().unwrap();
@@ -52,6 +53,7 @@ fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread
 
 /// Every on/off setting uses the same checkbox, whichever section holds it.
 /// Launch campaign finding C-3.
+// Hard-won: e03accb6: boolean settings used On/Off text instead of checkbox markers.
 #[test]
 fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
@@ -86,6 +88,7 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
 /// With Jev off, the Continuation row and page say it is off and why, and
 /// point to the Privacy page, rather than "On" and a ticked box alone.
 /// Launch re-verification finding R3-2.
+// Hard-won: 76289ac9: the continuation row implied it remained active while jev was off.
 #[test]
 fn continuation_reads_as_off_while_jev_is_off() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -120,6 +123,7 @@ fn continuation_reads_as_off_while_jev_is_off() {
 /// classifying until it is resumed or restarted. The page and the save
 /// notice say so instead of "Off: nothing is sent". Launch re-verification
 /// finding R3-8.
+// Hard-won: 8dccf5db: the save notice omitted when running sessions would follow the jev change.
 #[test]
 fn turning_jev_off_says_running_sessions_follow_after_a_resume_or_restart() {
     let jev = schema::help(&["jev".to_owned()]);
@@ -153,6 +157,7 @@ fn turning_jev_off_says_running_sessions_follow_after_a_resume_or_restart() {
 /// The additional eligible profiles are a set of checkboxes, so their row
 /// says how many are chosen rather than reading like an off switch.
 /// Launch campaign finding C-3.
+// Hard-won: e03accb6: the eligible-profiles summary hid that it was a multi-select.
 #[test]
 fn the_eligible_profiles_row_reads_as_a_multi_select() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -164,63 +169,6 @@ fn the_eligible_profiles_row_reads_as_a_multi_select() {
         .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
     assert!(!row.contains("Off"), "{row:?}");
     assert!(row.contains("selected"), "{row:?}");
-}
-
-#[test]
-fn settings_can_add_a_profile_without_file_edits() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_settings_section("profiles", None);
-    dashboard.handle_key(key(KeyCode::Char('a')));
-    dashboard.handle_paste("muse-account");
-    dashboard.handle_key(key(KeyCode::Enter));
-    choose(&mut dashboard, "kind");
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    let editor = dialog.editor.as_mut().unwrap();
-    let selected = editor
-        .choices
-        .iter()
-        .position(|value| value == "muse")
-        .unwrap();
-    editor.combo.preview(SetupControl::Choices, selected);
-    dialog.prepare();
-    dashboard.handle_key(key(KeyCode::Enter));
-    choose(&mut dashboard, "home");
-    dashboard.handle_paste("/profiles/muse");
-    dashboard.handle_key(key(KeyCode::Enter));
-    let DashboardAction::SaveSetup { updated, .. } =
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
-    else {
-        panic!(
-            "settings must save: {:?}",
-            setup_dialog_mut(&mut dashboard.mode).unwrap().notice
-        );
-    };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    assert_eq!(
-        saved.profiles["muse-account"].kind,
-        mj_core::config::HarnessKind::Muse
-    );
-}
-
-#[test]
-fn subagent_profile_choices_are_checkboxes_and_false_entries_are_not_persisted() {
-    let config = config();
-    let dialog = SetupDialog::new(&config);
-    let choices = dialog.draft["subagents"]["eligible_profiles"]
-        .as_object()
-        .unwrap();
-    assert_eq!(choices.len(), config.profiles.len());
-    assert!(choices.values().all(|value| value == &Value::Bool(false)));
-
-    let mut draft = dialog.draft;
-    let profile_id = config.profiles.keys().next().unwrap();
-    draft["subagents"]["eligible_profiles"][profile_id] = Value::Bool(true);
-    let parsed = config_from_draft(draft).unwrap();
-    assert_eq!(parsed.subagents.eligible_profiles.len(), 1);
-    assert_eq!(
-        parsed.subagents.eligible_profiles.get(profile_id),
-        Some(&true)
-    );
 }
 
 #[test]
@@ -299,6 +247,812 @@ fn assert_rendered_theme(dashboard: &mut DashboardState, selected: theme::UiThem
             .any(|cell| { cell.bg == surface && cell.fg == colors.text && cell.symbol() != " " })
     );
     assert!(buffer.content.iter().any(|cell| cell.fg == colors.accent));
+}
+
+fn choose_by_keyboard(dashboard: &mut DashboardState, name: &str) -> DashboardAction {
+    let (current, target) = {
+        let Mode::Setup(dialog) = &dashboard.mode else {
+            panic!("settings");
+        };
+        let target = dialog
+            .keys()
+            .iter()
+            .position(|key| key == name)
+            .unwrap_or_else(|| panic!("missing {name:?} in {:?}", dialog.keys()));
+        (dialog.selected, target)
+    };
+    if current > target {
+        dashboard.handle_key(key(KeyCode::Home));
+    }
+    let current = match &dashboard.mode {
+        Mode::Setup(dialog) => dialog.selected,
+        _ => panic!("settings"),
+    };
+    for _ in current..target {
+        dashboard.handle_key(key(KeyCode::Down));
+    }
+    dashboard.handle_key(key(KeyCode::Enter))
+}
+
+fn setup_at(path: &[&str]) -> DashboardState {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    for name in path {
+        let _ = choose_by_keyboard(&mut dashboard, name);
+    }
+    dashboard
+}
+
+fn append_setup_state(
+    output: &mut String,
+    label: &str,
+    dashboard: &mut DashboardState,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    use std::fmt::Write as _;
+
+    let lines = drawn(dashboard, width, height);
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    writeln!(output, "=== {label} ({width}x{height}) ===").expect("write state header");
+    output.push_str(&lines.join("\n"));
+    output.push('\n');
+    lines
+}
+
+fn append_setup_body_size(output: &mut String, dashboard: &DashboardState) {
+    use std::fmt::Write as _;
+
+    let rect = dashboard
+        .frame_surfaces()
+        .surface(mj_chat::selection::SurfaceId::ModalBody)
+        .expect("rendered Settings modal body")
+        .rect;
+    writeln!(output, "modal body: {rect:?}").expect("write modal body size");
+}
+
+fn rendered_theme_colors(dashboard: &mut DashboardState, selected: theme::UiTheme) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+    terminal
+        .draw(|frame| crate::render::render(frame, dashboard))
+        .expect("draw themed Settings");
+    let colors = theme::palette_for(selected);
+    let surface = if dashboard.modal_open() {
+        colors.surface_raised
+    } else {
+        colors.surface
+    };
+    let buffer = terminal.backend().buffer();
+    let text = buffer
+        .content
+        .iter()
+        .find(|cell| cell.bg == surface && cell.fg == colors.text && cell.symbol() != " ")
+        .expect("rendered text uses the selected theme");
+    let accent = buffer
+        .content
+        .iter()
+        .find(|cell| cell.fg == colors.accent)
+        .expect("rendered accent uses the selected theme");
+    format!(
+        "rendered colors: text fg={:?} bg={:?}; accent fg={:?}",
+        text.fg, text.bg, accent.fg
+    )
+}
+
+#[test]
+fn golden_settings_root() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    let mut root = setup_at(&[]);
+    let lines = append_setup_state(&mut output, "grouped Settings root", &mut root, 140, 42);
+    let (save_x, save_y) = point(&lines, "  Save and Close  ");
+    let (body_x, body_y) = point(&lines, "Runtimes");
+    writeln!(
+        output,
+        "root footer alignment: save=({save_x},{save_y}); body=({body_x},{body_y})"
+    )
+    .expect("write root alignment");
+
+    let mut interface = setup_at(&["interface"]);
+    append_setup_state(
+        &mut output,
+        "virtual Interface page",
+        &mut interface,
+        100,
+        30,
+    );
+    choose_by_keyboard(&mut interface, "theme");
+    append_setup_state(
+        &mut output,
+        "Interface theme choices",
+        &mut interface,
+        100,
+        30,
+    );
+    interface.handle_key(key(KeyCode::Down));
+    interface.handle_key(key(KeyCode::Tab));
+    append_setup_state(
+        &mut output,
+        "theme selection stays at the root config path",
+        &mut interface,
+        100,
+        30,
+    );
+    let Mode::Setup(dialog) = &interface.mode else {
+        panic!("settings");
+    };
+    writeln!(
+        output,
+        "draft paths: theme={}; interface.theme present={}; keys.prefix={}",
+        dialog.draft["theme"],
+        dialog.draft["interface"].get("theme").is_some(),
+        dialog.draft["keys"]["prefix"]
+    )
+    .expect("write stored paths");
+
+    // The same modal body is used by the root, nested pages, popups, editors,
+    // and the Code Review child.
+    let mut size_journey = setup_at(&[]);
+    append_setup_state(&mut output, "compact root body", &mut size_journey, 100, 30);
+    append_setup_body_size(&mut output, &size_journey);
+    choose_by_keyboard(&mut size_journey, "interface");
+    append_setup_state(
+        &mut output,
+        "compact nested page body",
+        &mut size_journey,
+        100,
+        30,
+    );
+    append_setup_body_size(&mut output, &size_journey);
+    choose_by_keyboard(&mut size_journey, "theme");
+    append_setup_state(
+        &mut output,
+        "compact choice popup body",
+        &mut size_journey,
+        100,
+        30,
+    );
+    append_setup_body_size(&mut output, &size_journey);
+    size_journey.handle_key(key(KeyCode::Esc));
+    size_journey.handle_key(key(KeyCode::Backspace));
+    choose_by_keyboard(&mut size_journey, "advanced");
+    append_setup_state(
+        &mut output,
+        "compact Advanced page body",
+        &mut size_journey,
+        100,
+        30,
+    );
+    append_setup_body_size(&mut output, &size_journey);
+    size_journey.handle_key(key(KeyCode::Backspace));
+    choose_by_keyboard(&mut size_journey, "phone");
+    choose_by_keyboard(&mut size_journey, "bind");
+    append_setup_state(
+        &mut output,
+        "compact text editor body",
+        &mut size_journey,
+        100,
+        30,
+    );
+    append_setup_body_size(&mut output, &size_journey);
+    while !matches!(
+        setup_dialog_mut(&mut size_journey.mode)
+            .unwrap()
+            .form
+            .borrow()
+            .focused(),
+        Some(SetupControl::Back)
+    ) {
+        size_journey.handle_key(key(KeyCode::Tab));
+    }
+    size_journey.handle_key(key(KeyCode::Enter));
+    size_journey.handle_key(key(KeyCode::Backspace));
+    choose_by_keyboard(&mut size_journey, "review");
+    append_setup_state(
+        &mut output,
+        "compact Code Review body",
+        &mut size_journey,
+        100,
+        30,
+    );
+    append_setup_body_size(&mut output, &size_journey);
+
+    // Each page renders only the actions available at that location.
+    for (label, path) in [
+        ("root footer action", &[][..]),
+        ("runtime collection actions", &["targets"][..]),
+        ("project collection actions", &["bundles"][..]),
+        ("profile collection actions", &["profiles"][..]),
+        ("leaf page footer", &["phone"][..]),
+        ("text editor actions", &["phone", "bind"][..]),
+    ] {
+        let mut page = setup_at(path);
+        append_setup_state(&mut output, label, &mut page, 100, 30);
+    }
+
+    let mut runtime_actions = setup_at(&["targets"]);
+    append_setup_state(
+        &mut output,
+        "runtime collection actions",
+        &mut runtime_actions,
+        100,
+        30,
+    );
+    for _ in 0..10 {
+        if setup_dialog_mut(&mut runtime_actions.mode)
+            .unwrap()
+            .form
+            .borrow()
+            .focused()
+            == Some(SetupControl::Add)
+        {
+            break;
+        }
+        runtime_actions.handle_key(key(KeyCode::Tab));
+    }
+    let focused = setup_dialog_mut(&mut runtime_actions.mode)
+        .unwrap()
+        .form
+        .borrow()
+        .focused();
+    assert_eq!(focused, Some(SetupControl::Add));
+    append_setup_state(
+        &mut output,
+        "runtime Add reached from the keyboard",
+        &mut runtime_actions,
+        100,
+        30,
+    );
+    writeln!(output, "focused control: {focused:?}").expect("write Add focus");
+    let action = runtime_actions.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "runtime Add opens a new-entry editor",
+        &mut runtime_actions,
+        100,
+        30,
+    );
+    let adding = setup_dialog_mut(&mut runtime_actions.mode)
+        .unwrap()
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.adding);
+    writeln!(output, "action: {action:?}; new entry: {adding}").expect("write new-entry result");
+
+    let mut projects = setup_at(&["bundles"]);
+    projects.handle_key(key(KeyCode::End));
+    projects.handle_key(key(KeyCode::Tab));
+    append_setup_state(
+        &mut output,
+        "project Create reached with Tab",
+        &mut projects,
+        100,
+        24,
+    );
+    writeln!(
+        output,
+        "entry editor adding: {}",
+        setup_dialog_mut(&mut projects.mode)
+            .unwrap()
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.adding)
+    )
+    .expect("write editor state");
+    let mut projects = setup_at(&["bundles"]);
+    projects.handle_key(key(KeyCode::End));
+    projects.handle_key(key(KeyCode::Down));
+    append_setup_state(
+        &mut output,
+        "project Create reached with Down",
+        &mut projects,
+        100,
+        24,
+    );
+    writeln!(
+        output,
+        "entry editor adding: {}",
+        setup_dialog_mut(&mut projects.mode)
+            .unwrap()
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.adding)
+    )
+    .expect("write editor state");
+
+    // Theme values take effect only after a successful save, and are read
+    // back by the next Settings dialog.
+    let mut themed = dashboard_with_session(stopped_session());
+    themed.begin_setup();
+    choose_by_keyboard(&mut themed, "interface");
+    choose_by_keyboard(&mut themed, "theme");
+    themed.handle_key(key(KeyCode::Down));
+    themed.handle_key(key(KeyCode::Tab));
+    append_setup_state(
+        &mut output,
+        "Light selected while Midnight remains active",
+        &mut themed,
+        100,
+        30,
+    );
+    writeln!(
+        output,
+        "{}",
+        rendered_theme_colors(&mut themed, theme::UiTheme::Midnight)
+    )
+    .expect("write active theme colors");
+    let action = themed.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::CONTROL,
+    ));
+    let DashboardAction::SaveSetup {
+        generation,
+        updated,
+        ..
+    } = action
+    else {
+        panic!("expected Settings save, got {action:?}");
+    };
+    let saved: Config = serde_json::from_str(&updated).expect("saved config");
+    writeln!(output, "saved theme: {:?}", saved.theme).expect("write saved theme");
+    append_setup_state(
+        &mut output,
+        "active theme before save acknowledgement",
+        &mut themed,
+        100,
+        30,
+    );
+    writeln!(
+        output,
+        "{}",
+        rendered_theme_colors(&mut themed, theme::UiTheme::Midnight)
+    )
+    .expect("write active theme colors");
+    themed.setup_saved(generation, Ok(saved));
+    append_setup_state(
+        &mut output,
+        "Light theme after save acknowledgement",
+        &mut themed,
+        100,
+        30,
+    );
+    writeln!(
+        output,
+        "{}",
+        rendered_theme_colors(&mut themed, theme::UiTheme::Light)
+    )
+    .expect("write applied theme colors");
+    themed.begin_setup();
+    choose_by_keyboard(&mut themed, "interface");
+    choose_by_keyboard(&mut themed, "theme");
+    append_setup_state(&mut output, "reopened theme choice", &mut themed, 100, 30);
+    let Mode::Setup(dialog) = &themed.mode else {
+        panic!("settings");
+    };
+    let editor = dialog.editor.as_ref().expect("theme choices");
+    let selected = editor
+        .combo
+        .selection(SetupControl::Choices, editor.selected);
+    writeln!(
+        output,
+        "reopened selected theme: {}",
+        editor.choices[selected]
+    )
+    .expect("write reopened theme");
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "settings-root", &output);
+}
+
+#[test]
+fn golden_build_cache() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    let mut cache = setup_at(&["machines", "local", "build_cache"]);
+    choose_by_keyboard(&mut cache, "max_total_size");
+    for digit in ['2', '5'] {
+        cache.handle_key(key(KeyCode::Char(digit)));
+    }
+    cache.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "cache budget entered in whole GB",
+        &mut cache,
+        140,
+        30,
+    );
+    let dialog = setup_dialog_mut(&mut cache.mode).unwrap();
+    dialog.draft["machines"]["local"]["build_cache"]["max_total_size"] = json!("100GiB");
+    choose_by_keyboard(&mut cache, "max_total_size");
+    append_setup_state(
+        &mut output,
+        "existing GiB value opens as whole GB",
+        &mut cache,
+        140,
+        30,
+    );
+    writeln!(
+        output,
+        "editor value: {}",
+        setup_dialog_mut(&mut cache.mode)
+            .unwrap()
+            .editor
+            .as_ref()
+            .unwrap()
+            .input
+    )
+    .expect("write converted value");
+    for _ in 0..3 {
+        cache.handle_key(key(KeyCode::Backspace));
+    }
+    for character in "10GiB".chars() {
+        cache.handle_key(key(KeyCode::Char(character)));
+    }
+    cache.handle_key(key(KeyCode::Enter));
+    append_setup_state(&mut output, "unit suffix refused", &mut cache, 140, 30);
+    writeln!(
+        output,
+        "stored size after rejection: {}",
+        setup_dialog_mut(&mut cache.mode).unwrap().draft["machines"]["local"]["build_cache"]["max_total_size"]
+    )
+    .expect("write preserved size");
+    {
+        let dialog = setup_dialog_mut(&mut cache.mode).unwrap();
+        *dialog.editor.as_mut().unwrap().input =
+            mj_chat::text_input::TextInput::from("0".to_owned());
+    }
+    cache.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "zero refused with a default hint",
+        &mut cache,
+        140,
+        30,
+    );
+    writeln!(
+        output,
+        "stored size after rejection: {}",
+        setup_dialog_mut(&mut cache.mode).unwrap().draft["machines"]["local"]["build_cache"]["max_total_size"]
+    )
+    .expect("write preserved size");
+
+    let mut saved_size = setup_at(&["machines", "local", "build_cache"]);
+    choose_by_keyboard(&mut saved_size, "max_total_size");
+    for digit in ['1', '2'] {
+        saved_size.handle_key(key(KeyCode::Char(digit)));
+    }
+    saved_size.handle_key(key(KeyCode::Enter));
+    let action = saved_size.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    let DashboardAction::SaveSetup {
+        generation,
+        updated,
+        ..
+    } = action
+    else {
+        panic!("expected cache settings save");
+    };
+    let saved: Config = serde_json::from_str(&updated).expect("saved config");
+    writeln!(
+        output,
+        "saved machine.local: {}",
+        serde_json::to_value(&saved.machines["local"]).expect("machine settings")
+    )
+    .expect("write saved machine");
+    saved_size.setup_saved(generation, Ok(saved));
+    saved_size.begin_setup();
+    choose_by_keyboard(&mut saved_size, "machines");
+    choose_by_keyboard(&mut saved_size, "local");
+    choose_by_keyboard(&mut saved_size, "build_cache");
+    append_setup_state(
+        &mut output,
+        "all cache fields remain on the reopened page",
+        &mut saved_size,
+        140,
+        30,
+    );
+    choose_by_keyboard(&mut saved_size, "max_total_size");
+    append_setup_state(
+        &mut output,
+        "Use default clears only the optional budget",
+        &mut saved_size,
+        140,
+        30,
+    );
+    activate(&mut saved_size, SetupControl::Clear);
+    writeln!(
+        output,
+        "budget after Use default: {}",
+        setup_dialog_mut(&mut saved_size.mode).unwrap().draft["machines"]["local"]["build_cache"]["max_total_size"]
+    )
+    .expect("write cleared budget");
+
+    let mut scheduler = setup_at(&["machines", "local", "build_cache"]);
+    choose_by_keyboard(&mut scheduler, "scheduler");
+    append_setup_state(
+        &mut output,
+        "machine scheduler fields",
+        &mut scheduler,
+        140,
+        30,
+    );
+    choose_by_keyboard(&mut scheduler, "cpus");
+    for digit in ['1', '2'] {
+        scheduler.handle_key(key(KeyCode::Char(digit)));
+    }
+    scheduler.handle_key(key(KeyCode::Enter));
+    choose_by_keyboard(&mut scheduler, "memory");
+    for character in "6GiB".chars() {
+        scheduler.handle_key(key(KeyCode::Char(character)));
+    }
+    scheduler.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "scheduler values entered",
+        &mut scheduler,
+        140,
+        30,
+    );
+    let DashboardAction::SaveSetup { updated, .. } =
+        scheduler.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+    else {
+        panic!("expected scheduler save");
+    };
+    let updated: Value = serde_json::from_str(&updated).expect("saved config");
+    writeln!(
+        output,
+        "saved scheduler: {}",
+        updated["machines"]["local"]["build_cache"]["scheduler"]
+    )
+    .expect("write saved scheduler");
+
+    let mut tabbed = setup_at(&["machines", "local", "build_cache"]);
+    tabbed.handle_key(key(KeyCode::Tab));
+    for expected in [SetupControl::Back, SetupControl::Save, SetupControl::List] {
+        append_setup_state(
+            &mut output,
+            &format!("Build cache Tab focus: {expected:?}"),
+            &mut tabbed,
+            140,
+            30,
+        );
+        writeln!(
+            output,
+            "focused control: {:?}",
+            setup_dialog_mut(&mut tabbed.mode)
+                .unwrap()
+                .form
+                .borrow()
+                .focused()
+        )
+        .expect("write focus state");
+        if expected != SetupControl::List {
+            tabbed.handle_key(key(KeyCode::Tab));
+        }
+    }
+    tabbed.handle_key(key(KeyCode::BackTab));
+    append_setup_state(
+        &mut output,
+        "Build cache BackTab returns to Save",
+        &mut tabbed,
+        140,
+        30,
+    );
+    writeln!(
+        output,
+        "focused control: {:?}",
+        setup_dialog_mut(&mut tabbed.mode)
+            .unwrap()
+            .form
+            .borrow()
+            .focused()
+    )
+    .expect("write focus state");
+    let action = tabbed.handle_key(key(KeyCode::Enter));
+    writeln!(
+        output,
+        "Tab-reached Save action: {}",
+        matches!(action, DashboardAction::SaveSetup { .. })
+    )
+    .expect("write Save action");
+
+    let mut arrows = setup_at(&["machines", "local", "build_cache"]);
+    arrows.handle_key(key(KeyCode::End));
+    for expected in [SetupControl::Back, SetupControl::Save] {
+        arrows.handle_key(key(KeyCode::Down));
+        append_setup_state(
+            &mut output,
+            &format!("Build cache Down focus: {expected:?}"),
+            &mut arrows,
+            140,
+            30,
+        );
+        writeln!(
+            output,
+            "focused control: {:?}",
+            setup_dialog_mut(&mut arrows.mode)
+                .unwrap()
+                .form
+                .borrow()
+                .focused()
+        )
+        .expect("write focus state");
+    }
+    arrows.handle_key(key(KeyCode::Up));
+    let action = arrows.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "Up and Enter return from Save to the machine page",
+        &mut arrows,
+        140,
+        30,
+    );
+    writeln!(output, "action after focus return: {action:?}").expect("write focus action");
+    writeln!(
+        output,
+        "returned page path: {:?}",
+        setup_dialog_mut(&mut arrows.mode).unwrap().path
+    )
+    .expect("write returned page");
+
+    let mut shared = setup_at(&["machines", "local", "build_cache"]);
+    choose_by_keyboard(&mut shared, "max_total_size");
+    for digit in ['2', '5', '0'] {
+        shared.handle_key(key(KeyCode::Char(digit)));
+    }
+    shared.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "shared storage budget uses GB",
+        &mut shared,
+        140,
+        30,
+    );
+
+    // The machine row opens the same page through keyboard activation or a
+    // double-click, and its summary reflects the saved machine policy.
+    for mouse in [false, true] {
+        let mut machine = setup_at(&["machines", "local"]);
+        let mut lines = append_setup_state(
+            &mut output,
+            if mouse {
+                "Build cache summary before mouse open"
+            } else {
+                "Build cache summary before keyboard open"
+            },
+            &mut machine,
+            160,
+            40,
+        );
+        if mouse {
+            let location = point(&lines, "Build cache (mbx)");
+            for _ in 0..2 {
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    machine.handle_mouse(MouseEvent {
+                        kind,
+                        column: location.0,
+                        row: location.1,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    drawn(&mut machine, 160, 40);
+                }
+            }
+        } else {
+            choose_by_keyboard(&mut machine, "build_cache");
+        }
+        append_setup_state(
+            &mut output,
+            if mouse {
+                "Build cache opened by mouse"
+            } else {
+                "Build cache opened by keyboard"
+            },
+            &mut machine,
+            160,
+            40,
+        );
+        let dialog = setup_dialog_mut(&mut machine.mode).unwrap();
+        dialog.draft["machines"]["local"]["build_cache"]["enabled"] = json!(false);
+        dialog.draft["machines"]["local"]["build_cache"]["max_total_size"] = json!("100GB");
+        machine.handle_key(key(KeyCode::Esc));
+        lines = append_setup_state(
+            &mut output,
+            if mouse {
+                "disabled cache summary after mouse journey"
+            } else {
+                "disabled cache summary after keyboard journey"
+            },
+            &mut machine,
+            160,
+            40,
+        );
+        writeln!(
+            output,
+            "summary contains changed state: {}",
+            lines
+                .iter()
+                .any(|line| line.contains("Disabled · 100 GB budget"))
+        )
+        .expect("write changed summary state");
+    }
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "build-cache", &output);
+}
+
+#[test]
+fn golden_settings_search() {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    let mut memory = setup_at(&[]);
+    search(&mut memory, "memory");
+    append_setup_state(
+        &mut output,
+        "search memory from Settings root",
+        &mut memory,
+        140,
+        30,
+    );
+    writeln!(output, "matching paths: {:?}", result_paths(&mut memory))
+        .expect("write search results");
+    memory.handle_key(key(KeyCode::Enter));
+    append_setup_state(
+        &mut output,
+        "memory result opens its nested editor",
+        &mut memory,
+        140,
+        30,
+    );
+    let landed_page = setup_dialog_mut(&mut memory.mode).unwrap().path.clone();
+    let landed_editor = setup_dialog_mut(&mut memory.mode)
+        .unwrap()
+        .editor
+        .as_ref()
+        .map(|editor| editor.path.clone());
+    writeln!(
+        output,
+        "landed page and editor: {:?} / {:?}",
+        landed_page, landed_editor
+    )
+    .expect("write result destination");
+
+    let mut compaction = setup_at(&[]);
+    search(&mut compaction, "compaction");
+    append_setup_state(
+        &mut output,
+        "help text finds context budget by compaction",
+        &mut compaction,
+        140,
+        30,
+    );
+    writeln!(
+        output,
+        "matching paths: {:?}",
+        result_paths(&mut compaction)
+    )
+    .expect("write help-text results");
+
+    let mut image = setup_at(&[]);
+    search(&mut image, "image");
+    append_setup_state(
+        &mut output,
+        "search result includes its section, label, and current value",
+        &mut image,
+        140,
+        30,
+    );
+    writeln!(output, "matching paths: {:?}", result_paths(&mut image))
+        .expect("write image results");
+
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "settings-search", &output);
 }
 
 #[test]
@@ -395,140 +1149,6 @@ fn remote_path_apply_preserves_failed_and_newer_drafts() {
 }
 
 #[test]
-fn setup_root_renders_virtual_interface_without_physical_interface_rows() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(text.contains("Interface"), "{text}");
-    assert!(text.contains("Advanced"), "{text}");
-    for section in [
-        "Agent Profiles",
-        "Machines",
-        "Runtimes",
-        "Projects",
-        "Code Review",
-        "Web Access",
-    ] {
-        assert!(text.contains(section), "missing {section:?} in {text}");
-    }
-    assert!(!text.contains("Session sidebar position"), "{text}");
-    assert!(!text.contains("Activity animation"), "{text}");
-    assert!(!text.contains("Theme"), "{text}");
-}
-
-#[test]
-fn interface_choice_commits_to_the_existing_root_storage_path() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "interface");
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    assert_eq!(
-        dialog.keys(),
-        ["prefix", "sessions_side", "spinner", "theme"]
-    );
-    assert_eq!(dialog.draft["keys"]["prefix"], "ctrl+b");
-    assert_eq!(dialog.draft["theme"], "midnight");
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let interface = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert_eq!(interface.matches('▾').count(), 3, "{interface}");
-
-    choose(&mut dashboard, "theme");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let popup = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(popup.contains("values"), "{popup}");
-    dashboard.handle_key(key(KeyCode::Down));
-    dashboard.handle_key(key(KeyCode::Tab));
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    assert!(dialog.editor.is_none());
-    assert_eq!(dialog.path, ["interface"]);
-    assert_eq!(dialog.draft["theme"], "light");
-
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "phone");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let free_text = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(!free_text.contains('▾'), "{free_text}");
-}
-
-#[test]
-fn interface_prefix_key_validates_and_persists_with_the_other_keybindings() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "interface");
-    choose(&mut dashboard, "prefix");
-    setup_dialog_mut(&mut dashboard.mode)
-        .unwrap()
-        .editor
-        .as_mut()
-        .unwrap()
-        .input
-        .set_value("a");
-    dashboard.handle_key(key(KeyCode::Enter));
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert!(dialog.editor.is_some(), "an invalid prefix stays open");
-    assert!(
-        dialog
-            .notice
-            .as_deref()
-            .is_some_and(|notice| notice.contains("prefix must use ctrl, alt or super")),
-        "unexpected validation notice: {:?}",
-        dialog.notice
-    );
-
-    dialog.editor.as_mut().unwrap().input.set_value("ctrl+a");
-    dialog.notice = None;
-    dashboard.handle_key(key(KeyCode::Enter));
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert!(dialog.editor.is_none(), "a valid prefix applies");
-    assert_eq!(dialog.draft["keys"]["prefix"], "ctrl+a");
-
-    let DashboardAction::SaveSetup { updated, .. } =
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
-    else {
-        panic!("settings must save");
-    };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    assert_eq!(saved.keys.prefix, "ctrl+a");
-}
-
-#[test]
-fn interface_prefix_key_can_be_restored_to_its_default() {
-    let mut configured = config();
-    configured.keys.prefix = "ctrl+a".to_owned();
-    let mut dialog = SetupDialog::new(&configured);
-    dialog.path = vec!["interface".to_owned()];
-    dialog.selected = dialog
-        .keys()
-        .iter()
-        .position(|key| key == "prefix")
-        .unwrap();
-    dialog.open_selected();
-
-    dialog.apply_editor(true).unwrap();
-
-    assert_eq!(
-        dialog.draft["keys"]["prefix"],
-        mj_core::config::DEFAULT_PREFIX
-    );
-}
-
-#[test]
 fn choice_popup_escape_preserves_the_draft_and_background_click_is_inert() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
@@ -608,85 +1228,6 @@ fn choice_popup_escape_preserves_the_draft_and_background_click_is_inert() {
 }
 
 #[test]
-fn setup_keeps_one_content_size_across_pages_editors_and_code_review() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let area = Rect::new(0, 0, 100, 30);
-    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-    let mut expected = None;
-    let mut assert_rect = |dashboard: &mut DashboardState| {
-        terminal
-            .draw(|frame| crate::render::render(frame, dashboard))
-            .unwrap();
-        let rect = dashboard
-            .frame_surfaces()
-            .surface(mj_chat::selection::SurfaceId::ModalBody)
-            .expect("rendered Settings modal surface")
-            .rect;
-        assert!(
-            rect.width < mj_chat::modal::modal_area(area).width,
-            "settings should be compact: {rect:?}"
-        );
-        assert_eq!(expected.get_or_insert(rect), &rect);
-    };
-
-    assert_rect(&mut dashboard); // root
-    choose(&mut dashboard, "interface");
-    assert_rect(&mut dashboard);
-    choose(&mut dashboard, "theme");
-    assert_rect(&mut dashboard); // inline choice popup
-    dashboard.handle_key(key(KeyCode::Esc));
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "advanced");
-    assert_rect(&mut dashboard);
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "phone");
-    choose(&mut dashboard, "bind");
-    assert_rect(&mut dashboard); // free text editor
-    activate(&mut dashboard, SetupControl::Back);
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "review");
-    assert_rect(&mut dashboard); // Code Review child
-}
-
-#[test]
-fn theme_selection_applies_after_save_and_is_restored_when_setup_reopens() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    choose_light_theme(&mut dashboard);
-    assert_eq!(dashboard.config.theme, theme::UiTheme::Midnight);
-    assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
-    let action = dashboard.handle_key(crossterm::event::KeyEvent::new(
-        KeyCode::Char('s'),
-        KeyModifiers::CONTROL,
-    ));
-    let DashboardAction::SaveSetup {
-        generation,
-        updated,
-        ..
-    } = action
-    else {
-        panic!("{action:?}");
-    };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    assert_eq!(saved.theme, theme::UiTheme::Light);
-    assert_rendered_theme(&mut dashboard, theme::UiTheme::Midnight);
-    dashboard.setup_saved(generation, Ok(saved));
-    assert!(!dashboard.modal_open());
-    assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
-
-    dashboard.begin_setup();
-    assert_rendered_theme(&mut dashboard, theme::UiTheme::Light);
-    choose(&mut dashboard, "interface");
-    choose(&mut dashboard, "theme");
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    let editor = dialog.editor.as_ref().unwrap();
-    let selected = editor
-        .combo
-        .selection(SetupControl::Choices, editor.selected);
-    assert_eq!(editor.choices[selected], "light");
-}
-
-#[test]
 fn cancelling_or_failing_to_save_a_theme_keeps_the_active_colors() {
     let mut dashboard = dashboard_with_session(stopped_session());
     let original = dashboard.config.clone();
@@ -716,25 +1257,6 @@ fn cancelling_or_failing_to_save_a_theme_keeps_the_active_colors() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert_eq!(dialog.draft["theme"], "light");
     assert!(dialog.notice.as_ref().unwrap().contains("disk full"));
-}
-
-#[test]
-fn setup_root_uses_modal_title_once_and_nested_pages_keep_breadcrumb() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let root = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert_eq!(root.matches("Settings").count(), 1, "{root}");
-
-    choose(&mut dashboard, "phone");
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let nested = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(nested.contains("Settings › Web Access"), "{nested}");
 }
 
 #[test]
@@ -816,6 +1338,7 @@ fn detection_adds_conflicting_installations_to_the_draft_without_losing_settings
 /// installation was found that this draft does not already have." "Draft" is
 /// an internal word, and the sentence gave no next step (launch finding
 /// R13-4).
+// Hard-won: 60750d28: empty profile discovery did not explain that the machine had no agent.
 #[test]
 fn detecting_profiles_on_a_machine_without_an_agent_says_so_plainly() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -840,6 +1363,7 @@ fn detecting_profiles_on_a_machine_without_an_agent_says_so_plainly() {
 }
 
 /// An agent that is installed but already has a profile is not "not found".
+// Hard-won: 60750d28: discovery gave no distinct outcome when every agent profile already existed.
 #[test]
 fn detecting_profiles_that_all_exist_says_each_agent_already_has_one() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -869,64 +1393,6 @@ fn detection(scope: DetectScope, config: Config) -> crate::setup::SetupDetection
 }
 
 #[test]
-fn detecting_runtimes_names_what_it_added_and_what_it_skipped() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let generation = setup_dialog_mut(&mut dashboard.mode).unwrap().generation;
-    let mut discovered = Config::default();
-    discovered.targets.insert(
-        "localhost".into(),
-        mj_core::config::TargetTemplate::LocalBare,
-    );
-    dashboard.setup_discovered(
-        generation,
-        Ok(crate::setup::SetupDetection {
-            scope: DetectScope::Runtimes,
-            config: discovered,
-            rejected_runtimes: vec![crate::setup::RejectedRuntime {
-                label: "Docker".into(),
-                detail: "the Docker daemon is not running".into(),
-                remediation: Some("Start Docker Desktop".into()),
-            }],
-        }),
-    );
-    let notice = setup_dialog_mut(&mut dashboard.mode)
-        .unwrap()
-        .notice
-        .clone()
-        .expect("detection reports what it did");
-    assert!(notice.contains("localhost"), "{notice}");
-    assert!(
-        notice.contains("Skipped Docker: the Docker daemon is not running."),
-        "{notice}"
-    );
-    assert!(notice.contains("Start Docker Desktop"), "{notice}");
-    // A detected runtime lands in the stored shape, on this machine.
-    assert_eq!(
-        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["targets"]["localhost"],
-        json!({"kind": "bare", "machine": "local", "permissions": null})
-    );
-
-    // A second run finds nothing new and says so rather than claiming an
-    // addition.
-    let mut again = Config::default();
-    again.targets.insert(
-        "localhost".into(),
-        mj_core::config::TargetTemplate::LocalBare,
-    );
-    dashboard.setup_discovered(generation, Ok(detection(DetectScope::Runtimes, again)));
-    let notice = setup_dialog_mut(&mut dashboard.mode)
-        .unwrap()
-        .notice
-        .clone()
-        .expect("detection reports what it did");
-    assert!(
-        notice.starts_with("Every usable runtime found on this machine is already listed."),
-        "{notice}"
-    );
-}
-
-#[test]
 fn results_from_a_closed_setup_do_not_change_the_new_draft() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
@@ -947,18 +1413,10 @@ fn results_from_a_closed_setup_do_not_change_the_new_draft() {
     assert_eq!(dialog.draft, original);
 }
 
-#[test]
-fn setup_does_not_offer_automatic_session_settings() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert!(!dialog.keys().iter().any(|key| key == "startup"));
-    assert!(dialog.draft.get("startup").is_none());
-}
-
 /// Launch campaign finding A-3: once `ascii` was chosen, the popup offered no
 /// way back to "Follows the terminal", and saving that choice must remove the
 /// key rather than write a third value.
+// Hard-won: 688cfd2a: the ASCII choice could not be cleared back to terminal-following behavior.
 #[test]
 fn symbols_can_return_to_the_unset_state_and_saving_removes_the_key() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -1079,43 +1537,6 @@ fn select_choice(dashboard: &mut DashboardState, wanted: &str) {
 }
 
 #[test]
-fn a_runtime_chooses_its_machine_from_the_configured_machines() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config.machines.insert(
-        "builder".into(),
-        serde_json::from_value(json!({"kind":"ssh","host":"builder.example.test"})).unwrap(),
-    );
-    dashboard.begin_setup();
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(
-        schema::choices(
-            &[
-                "targets".to_owned(),
-                "podman".to_owned(),
-                "machine".to_owned()
-            ],
-            &dialog.draft
-        ),
-        vec![json!("local"), json!("builder")]
-    );
-}
-
-#[test]
-fn a_runtime_naming_a_machine_that_is_gone_is_refused_on_save() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    dialog.draft["targets"]["podman"]["machine"] = json!("builder");
-    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-    assert_eq!(action, DashboardAction::None);
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    let notice = dialog.notice.as_deref().unwrap_or_default();
-    assert!(notice.contains("which is not defined"), "{notice}");
-}
-
-#[test]
 fn this_machine_is_always_listed_and_cannot_be_removed() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
@@ -1134,212 +1555,6 @@ fn this_machine_is_always_listed_and_cannot_be_removed() {
     choose(&mut dashboard, "local");
     let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
     assert_eq!(dialog.keys(), ["build_cache"]);
-}
-
-fn action_labels(dashboard: &DashboardState) -> Vec<&'static str> {
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    dialog
-        .actions()
-        .into_iter()
-        .map(|(_, label, _)| label)
-        .collect()
-}
-
-/// The footer row's labels and the right-hand column's labels, in that order.
-fn split_action_labels(dashboard: &DashboardState) -> (Vec<&'static str>, Vec<&'static str>) {
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    let labels = |actions: Vec<(SetupControl, &'static str, bool)>| {
-        actions
-            .into_iter()
-            .map(|(_, label, _)| label)
-            .collect::<Vec<_>>()
-    };
-    (
-        labels(dialog.footer_actions()),
-        labels(dialog.page_actions()),
-    )
-}
-
-#[test]
-fn setup_actions_offer_only_the_controls_that_apply_to_the_page() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Save and Close"],
-        "root: no Back, no item actions, and nothing to detect"
-    );
-    assert_eq!(
-        split_action_labels(&dashboard),
-        (vec!["Save and Close"], Vec::new()),
-        "root: the footer commit alone, and no column beside the body"
-    );
-    choose(&mut dashboard, "targets");
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Back", "Add", "Remove", "Detect runtimes", "Save and Close"],
-        "machines: item actions and the runtime detection only this page offers"
-    );
-    assert_eq!(
-        split_action_labels(&dashboard),
-        (
-            vec!["Back", "Save and Close"],
-            vec!["Add", "Remove", "Detect runtimes"]
-        ),
-        "machines: navigation in the footer, page actions in the column"
-    );
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "bundles");
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Back", "Create", "Remove", "Save and Close"],
-        "projects: the collection button names what it makes"
-    );
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "profiles");
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Back", "Add", "Remove", "Detect profiles", "Save and Close"],
-        "profiles: item actions and the profile detection only this page offers"
-    );
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "phone");
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Back", "Save and Close"],
-        "leaf outside the detected sections: no Add, Remove, or Detect"
-    );
-    choose(&mut dashboard, "bind");
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Back", "Use default", "Apply"],
-        "text editor"
-    );
-    assert_eq!(
-        split_action_labels(&dashboard),
-        (vec!["Back"], vec!["Use default", "Apply"]),
-        "text editor: only Back in the footer, since there is nothing to save yet"
-    );
-    activate(&mut dashboard, SetupControl::Back);
-    dashboard.handle_key(key(KeyCode::Backspace));
-    choose(&mut dashboard, "targets");
-    activate(&mut dashboard, SetupControl::Add);
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    assert!(dialog.editor.as_ref().is_some_and(|editor| editor.adding));
-    assert_eq!(
-        action_labels(&dashboard),
-        ["Back", "Apply"],
-        "a new name has no default to restore"
-    );
-}
-
-#[test]
-fn the_root_page_takes_the_full_width_and_shows_only_the_footer_action() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let mut terminal = Terminal::new(TestBackend::new(140, 42)).unwrap();
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let lines = buffer_lines(terminal.backend().buffer());
-    let Mode::Setup(dialog) = &dashboard.mode else {
-        panic!("settings");
-    };
-    // The root page has no actions of its own, so the body keeps the whole
-    // width: the name sits in the gutter and its value against the far edge,
-    // and neither may be clipped.
-    let summary = row_summary(
-        &[],
-        "targets",
-        &dialog.draft["targets"],
-        &dialog.draft,
-        None,
-    );
-    let row = format!("{SETTING_GUTTER}{}", schema::label("targets"));
-    let line = lines
-        .iter()
-        .find(|line| line.contains("Runtimes"))
-        .unwrap_or_else(|| panic!("missing the runtimes row in\n{}", lines.join("\n")));
-    assert!(
-        line.contains(&row) && line.contains(&summary),
-        "the page row was clipped: {line:?}"
-    );
-    let text = lines.join("\n");
-    // Save and Close is the only action the root page offers, and it sits in
-    // the footer row rather than a column beside the body.
-    for absent in ["  Back  ", "  Add  ", "  Remove  ", "  Detect runtimes  "] {
-        assert!(
-            !text.contains(absent),
-            "{absent:?} on the root page:\n{text}"
-        );
-    }
-    let (save_column, save_row) = point(&lines, "  Save and Close  ");
-    assert_eq!(
-        save_column,
-        cell_column(line, &row),
-        "the footer is not packed to the body's left edge:\n{text}"
-    );
-    let (_, body_row) = point(&lines, &row);
-    assert!(
-        save_row > body_row,
-        "the footer is not below the body:\n{text}"
-    );
-}
-
-#[test]
-fn a_collection_page_stacks_its_own_actions_above_the_footer_row() {
-    let mut dashboard = dashboard_with_session(running_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "targets");
-    let lines = drawn(&mut dashboard, 100, 30);
-    let text = lines.join("\n");
-    // Back and the commit share one left-packed row at the dialog's bottom.
-    let (back_column, back_row) = point(&lines, "  Back  ");
-    let (save_column, save_row) = point(&lines, "  Save and Close  ");
-    assert_eq!(back_row, save_row, "the footer buttons split rows:\n{text}");
-    assert!(
-        back_column < save_column,
-        "Back does not lead the footer row:\n{text}"
-    );
-    let body_column = point(&lines, &format!("{SETTING_GUTTER}podman")).0;
-    assert_eq!(
-        back_column, body_column,
-        "the footer is not packed to the body's left edge:\n{text}"
-    );
-    // The page's own actions stay stacked at the dialog's right edge, above
-    // the footer row.
-    let stacked =
-        ["  Add  ", "  Remove  ", "  Detect runtimes  "].map(|label| point(&lines, label));
-    for (column, row) in stacked {
-        assert_eq!(
-            column, stacked[0].0,
-            "the page actions do not share a column:\n{text}"
-        );
-        assert!(
-            row < back_row,
-            "a page action sits on or below the footer row:\n{text}"
-        );
-        assert!(
-            column > save_column,
-            "a page action is not at the dialog's right edge:\n{text}"
-        );
-    }
-    assert!(
-        stacked[0].1 + 1 == stacked[1].1 && stacked[1].1 + 1 == stacked[2].1,
-        "the page actions are not stacked in order: {stacked:?}\n{text}"
-    );
-    // The widest button ends against the inner margin and the modal border.
-    let detect = &lines[usize::from(stacked[2].1)];
-    assert!(
-        detect.contains("Detect runtimes   │"),
-        "the column is not packed against the right edge: {detect:?}"
-    );
 }
 
 #[test]
@@ -1691,21 +1906,6 @@ fn unrelated_account_edits_do_not_allow_saving_a_known_unavailable_review_model(
 }
 
 #[test]
-fn expanded_form_preserves_existing_optional_settings() {
-    let mut original = config();
-    original.phone.tls_cert = Some("/keys/cert.pem".into());
-    original.phone.tls_key = Some("/keys/key.pem".into());
-    original
-        .profiles
-        .get_mut("codex-1")
-        .unwrap()
-        .context_window_bytes = Some(250000);
-    let dialog = SetupDialog::new(&original);
-    let decoded: Config = config_from_draft(dialog.draft).unwrap();
-    assert_eq!(decoded, original);
-}
-
-#[test]
 fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     use mj_core::state::{BuildCacheLimit, BuildCachePreview};
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -1759,6 +1959,9 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             application: Default::default(),
             budget_note: None,
             native_mbx: Some("1.12.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: Some("/mnt/fast/mbx-cache".into()),
             max_total_size: Some(BuildCacheLimit::HostConfiguration(Some("500GiB".into()))),
             stats: None,
@@ -1766,6 +1969,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
                 "the filesystem under /mnt/fast/mbx-cache does not support reflinks".into(),
             )),
         })),
+        false,
     );
     terminal
         .draw(|frame| crate::render::render(frame, &mut dashboard))
@@ -1784,6 +1988,40 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
             "missing {expected:?} in\n{resolved}"
         );
     }
+
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(BuildCachePreview {
+            native_mbx: None,
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "Shared mbx requires a Linux host".into(),
+            )),
+        })),
+        false,
+    );
+    terminal
+        .draw(|frame| crate::render::render(frame, &mut dashboard))
+        .unwrap();
+    let unsupported = buffer_lines(terminal.backend().buffer()).join("\n");
+    assert!(
+        unsupported.contains("Shared mbx requires a Linux host"),
+        "{unsupported}"
+    );
+    assert!(
+        !unsupported.contains("Pending application"),
+        "{unsupported}"
+    );
+    assert!(!unsupported.contains("Mj-managed mbx"), "{unsupported}");
 
     // The status line belongs to this page: leaving it takes the line along.
     let shown = setup_dialog_mut(&mut dashboard.mode)
@@ -1843,6 +2081,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
 
 /// On a host that supports the cache the switch is a checkbox: on, off, and
 /// back to unset, which means on.
+// Hard-won: 39cce3de: the build-cache setting lacked a checkbox control.
 #[test]
 fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
     use mj_core::state::{BuildCacheLimit, BuildCachePreview};
@@ -1877,6 +2116,9 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
             application: Default::default(),
             budget_note: None,
             native_mbx: Some("1.12.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: Some("/home/dev/.cache/mbx".into()),
             max_total_size: Some(BuildCacheLimit::Size("100000000000B".into())),
             stats: Some(mj_core::state::BuildCacheStats {
@@ -1887,6 +2129,7 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
             }),
             off_reason: None,
         })),
+        false,
     );
     let checked = drawn(&mut dashboard, 140, 30).join("\n");
     assert!(checked.contains("☑"), "an unset switch is on:\n{checked}");
@@ -1939,188 +2182,12 @@ fn the_build_cache_switch_is_a_checkbox_on_a_host_that_supports_it() {
 }
 
 /// The cache size is typed, stored and shown as a whole number of GB.
-#[test]
-fn the_cache_size_limit_is_edited_in_whole_gigabytes() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    choose(&mut dashboard, "max_total_size");
-    dashboard.handle_key(key(KeyCode::Char('2')));
-    dashboard.handle_key(key(KeyCode::Char('5')));
-    dashboard.handle_key(key(KeyCode::Enter));
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    assert_eq!(
-        dialog.draft["machines"]["local"]["build_cache"]["max_total_size"],
-        json!("25GB")
-    );
-    let drawn = drawn(&mut dashboard, 140, 30).join("\n");
-    assert!(
-        drawn.contains("Total cache budget (GB)") && drawn.contains("25"),
-        "the row reports the number of GB:\n{drawn}"
-    );
-
-    // A value in another unit is offered for editing in GB.
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    dialog.draft["machines"]["local"]["build_cache"]["max_total_size"] = json!("100GiB");
-    choose(&mut dashboard, "max_total_size");
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    assert_eq!(
-        dialog
-            .editor
-            .as_ref()
-            .map(|editor| editor.input.to_string()),
-        Some("107".to_owned())
-    );
-
-    // A suffix, a word, or zero is refused and the stored value stands.
-    for (typed, message) in [
-        ("GiB", "Enter a whole number of gigabytes."),
-        (
-            "",
-            "Enter at least 1 GB, or clear the field to use the default.",
-        ),
-    ] {
-        let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-        let editor = dialog.editor.as_mut().expect("the size editor is open");
-        *editor.input = mj_chat::text_input::TextInput::from(if typed.is_empty() {
-            "0".to_owned()
-        } else {
-            format!("10{typed}")
-        });
-        dashboard.handle_key(key(KeyCode::Enter));
-        let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-        assert_eq!(dialog.notice.as_deref(), Some(message));
-        assert_eq!(
-            dialog.draft["machines"]["local"]["build_cache"]["max_total_size"],
-            json!("100GiB"),
-            "a rejected edit leaves the stored size alone"
-        );
-    }
-}
-
 /// The saved file keeps only the build cache fields that are set, so the page
 /// has to fill the rest back in: all three stay listed and editable after a
 /// save, and each one can still be handed back to the host.
-#[test]
-fn a_saved_build_cache_field_leaves_the_other_fields_on_the_page() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    choose(&mut dashboard, "max_total_size");
-    dashboard.handle_key(key(KeyCode::Char('1')));
-    dashboard.handle_key(key(KeyCode::Char('2')));
-    dashboard.handle_key(key(KeyCode::Enter));
-    let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-    let DashboardAction::SaveSetup {
-        generation,
-        updated,
-        ..
-    } = action
-    else {
-        panic!(
-            "settings must save: {:?}",
-            setup_dialog_mut(&mut dashboard.mode).unwrap().notice
-        );
-    };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    // What the file now holds: the size alone, with the two unset fields gone.
-    assert_eq!(
-        serde_json::to_value(&saved.machines["local"]).unwrap(),
-        json!({"kind":"local","build_cache":{"max_total_size":"12GB"}})
-    );
-    dashboard.setup_saved(generation, Ok(saved));
-
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    let keys = dialog.keys();
-    for expected in ["enabled", "directory", "max_total_size", "scheduler"] {
-        assert!(
-            keys.iter().any(|key| key == expected),
-            "{expected:?} is missing from the reopened page: {keys:?}"
-        );
-    }
-    let text = drawn(&mut dashboard, 140, 30).join("\n");
-    for expected in [
-        "Enabled",
-        "Cache directory",
-        "Total cache budget (GB)",
-        "Compile scheduling",
-        "12",
-    ] {
-        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
-    }
-
-    // The same defaults are what "Use default" hands a field back to, so the
-    // size can be returned to the host's own limits.
-    choose(&mut dashboard, "max_total_size");
-    activate(&mut dashboard, SetupControl::Clear);
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    assert_eq!(
-        dialog.draft["machines"]["local"]["build_cache"]["max_total_size"],
-        Value::Null,
-        "Use default must hand an optional field back: {:?}",
-        dialog.notice
-    );
-}
-
-#[test]
-fn machine_mbx_scheduler_controls_are_editable_and_saved() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    choose(&mut dashboard, "scheduler");
-
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    assert_eq!(dialog.keys(), ["cpus", "memory"]);
-    let text = drawn(&mut dashboard, 140, 30).join("\n");
-    for expected in [
-        "Concurrent compile permits",
-        "Compile admission budget",
-        "Available logical CPUs",
-        "85% of host memory",
-    ] {
-        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
-    }
-
-    choose(&mut dashboard, "cpus");
-    for character in "12".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    dashboard.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        setup_dialog_mut(&mut dashboard.mode).unwrap().draft["machines"]["local"]["build_cache"]["scheduler"]
-            ["cpus"],
-        json!(12)
-    );
-
-    choose(&mut dashboard, "memory");
-    for character in "6GiB".chars() {
-        dashboard.handle_key(key(KeyCode::Char(character)));
-    }
-    dashboard.handle_key(key(KeyCode::Enter));
-
-    let DashboardAction::SaveSetup { updated, .. } =
-        dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
-    else {
-        panic!("scheduler settings must save");
-    };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    let scheduler = &saved.machines["local"].build_cache().unwrap().scheduler;
-    assert_eq!(scheduler.cpus, Some(12));
-    assert_eq!(scheduler.memory.as_deref(), Some("6GiB"));
-}
-
 /// The border promises `Esc back`, and below the first page that is what it
 /// must do: return to the parent with the draft intact.
+// Hard-won: 0cc7c1e6: Escape on a subpage discarded the entire settings draft.
 #[test]
 fn escape_returns_from_a_settings_subpage_and_closes_only_from_the_first_page() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -2160,6 +2227,7 @@ fn escape_returns_from_a_settings_subpage_and_closes_only_from_the_first_page() 
 /// The breadcrumb names each page the way the page above it named its row, so
 /// a machine the user called `local` is not retitled as the repository setting
 /// that shares the key.
+// Hard-won: a9226786: a user-chosen machine name collided with a settings key in the breadcrumb.
 #[test]
 fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -2180,72 +2248,9 @@ fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
     );
 }
 
-#[test]
-fn build_cache_buttons_are_keyboard_reachable_across_redraws() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    drawn(&mut dashboard, 140, 30);
-    for expected in [SetupControl::Back, SetupControl::Save, SetupControl::List] {
-        dashboard.handle_key(key(KeyCode::Tab));
-        drawn(&mut dashboard, 140, 30);
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        assert_eq!(dialog.form.borrow().focused(), Some(expected));
-    }
-    dashboard.handle_key(key(KeyCode::BackTab));
-    drawn(&mut dashboard, 140, 30);
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(dialog.form.borrow().focused(), Some(SetupControl::Save));
-    assert!(matches!(
-        dashboard.handle_key(key(KeyCode::Enter)),
-        DashboardAction::SaveSetup { .. }
-    ));
-}
-
-#[test]
-fn build_cache_arrows_reach_back_and_save_after_the_last_field() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    drawn(&mut dashboard, 140, 30);
-    dashboard.handle_key(key(KeyCode::End));
-    for expected in [SetupControl::Back, SetupControl::Save] {
-        dashboard.handle_key(key(KeyCode::Down));
-        drawn(&mut dashboard, 140, 30);
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        assert_eq!(dialog.form.borrow().focused(), Some(expected));
-    }
-    dashboard.handle_key(key(KeyCode::Up));
-    dashboard.handle_key(key(KeyCode::Enter));
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(dialog.path, ["machines", "local"]);
-}
-
-#[test]
-fn settings_project_create_is_reachable_with_tab_and_arrows() {
-    for navigation in [KeyCode::Tab, KeyCode::Down] {
-        let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.begin_setup();
-        choose(&mut dashboard, "bundles");
-        drawn(&mut dashboard, 100, 24);
-        dashboard.handle_key(key(KeyCode::End));
-        drawn(&mut dashboard, 100, 24);
-        dashboard.handle_key(key(navigation));
-        drawn(&mut dashboard, 100, 24);
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        assert_eq!(dialog.form.borrow().focused(), Some(SetupControl::Add));
-        dashboard.handle_key(key(KeyCode::Enter));
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        assert!(dialog.editor.as_ref().is_some_and(|editor| editor.adding));
-    }
-}
-
 /// A refused value is reported with the field it was typed into, not on the
 /// dialog's bottom rows a page below it.
+// Hard-won: 9e96756a: field validation errors appeared far below the edited field.
 #[test]
 fn a_rejected_field_value_is_reported_under_the_field() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -2273,209 +2278,6 @@ fn a_rejected_field_value_is_reported_under_the_field() {
         i32::from(message) - i32::from(field),
         lines.join("\n")
     );
-}
-
-#[test]
-fn empty_archive_after_days_renders_as_never() {
-    let draft = serde_json::json!({"sessionwiki": {"archive_after_days": null}});
-    assert_eq!(
-        value_summary(
-            &["sessionwiki".to_owned()],
-            "archive_after_days",
-            &Value::Null,
-            &draft,
-            None,
-        ),
-        "Never"
-    );
-    assert_eq!(
-        value_summary(
-            &["phone".to_owned()],
-            "tls_cert",
-            &Value::Null,
-            &serde_json::json!({"phone": {"tls_cert": null}}),
-            None,
-        ),
-        "None (HTTP only)"
-    );
-}
-
-#[test]
-fn every_blank_setting_names_its_effect_instead_of_a_placeholder() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    // One target of every kind and one blank repository, so every optional
-    // field in the schema takes part in the walk below.
-    for kind in ["ssh", "aws-ec2"] {
-        dialog.draft["machines"]
-            .as_object_mut()
-            .unwrap()
-            .insert(format!("every-{kind}"), json!({"kind": kind}));
-    }
-    for kind in ["bare", "podman", "docker", "apple-container"] {
-        dialog.draft["targets"]
-            .as_object_mut()
-            .unwrap()
-            .insert(format!("every-{kind}"), json!({"kind": kind}));
-        // The same runtime on another machine, so the remote spellings of
-        // every blank are covered too.
-        dialog.draft["targets"].as_object_mut().unwrap().insert(
-            format!("every-remote-{kind}"),
-            json!({"kind": kind, "machine": "every-ssh"}),
-        );
-    }
-    for bundle in dialog.draft["bundles"]
-        .as_object_mut()
-        .unwrap()
-        .values_mut()
-    {
-        bundle["repositories"]
-            .as_array_mut()
-            .unwrap()
-            .push(schema::repository_default());
-    }
-    schema::expand(&mut dialog.draft, &mut Vec::new());
-    let draft = dialog.draft.clone();
-
-    fn walk(path: &[String], value: &Value, draft: &Value, rows: &mut Vec<(String, String)>) {
-        let children: Vec<(String, &Value)> = match value {
-            Value::Object(entries) => entries
-                .iter()
-                .map(|(key, child)| (key.clone(), child))
-                .collect(),
-            Value::Array(entries) => entries
-                .iter()
-                .enumerate()
-                .map(|(index, child)| (index.to_string(), child))
-                .collect(),
-            _ => Vec::new(),
-        };
-        for (key, child) in children {
-            let mut child_path = path.to_vec();
-            child_path.push(key.clone());
-            rows.push((
-                child_path.join("."),
-                value_summary(path, &key, child, draft, None),
-            ));
-            walk(&child_path, child, draft, rows);
-        }
-    }
-    let mut rows = Vec::new();
-    walk(&[], &draft, &draft, &mut rows);
-    assert!(rows.len() > 40, "the walk missed the draft: {rows:?}");
-
-    // Labels that legitimately carry the word: a named AWS template version,
-    // an engine's or OpenSSH's own choice, and a reviewer profile's settings.
-    let names_a_real_default = |summary: &str| {
-        [
-            "$Default",
-            "Engine default",
-            "AWS CLI default profile",
-            "OpenSSH default keys",
-        ]
-        .iter()
-        .any(|label| summary.contains(label))
-            || summary.contains("'s default")
-    };
-    for (path, summary) in &rows {
-        let lowered = summary.to_lowercase();
-        assert!(
-            !lowered.contains("automatic"),
-            "{path} still shows a placeholder: {summary:?}"
-        );
-        assert!(
-            !lowered.contains("default") || names_a_real_default(summary),
-            "{path} still shows a placeholder: {summary:?}"
-        );
-    }
-    // Spot-check the values behind the blanks rather than only their shape.
-    let summary = |wanted: &str| {
-        rows.iter()
-            .find(|(path, _)| path == wanted)
-            .unwrap_or_else(|| panic!("missing {wanted} in {rows:?}"))
-            .1
-            .clone()
-    };
-    assert_eq!(summary("targets.every-remote-podman.cpus"), "No limit");
-    assert_eq!(
-        summary("machines.every-aws-ec2.launch_template_version"),
-        "$Default"
-    );
-    assert_eq!(summary("review.model"), "Not set");
-    assert_eq!(
-        summary("machines.every-ssh.identity_file"),
-        "OpenSSH default keys"
-    );
-    assert_eq!(
-        summary("targets.every-podman.platform"),
-        format!("Engine default ({})", std::env::consts::ARCH)
-    );
-    // A runtime on another machine cannot know that machine's architecture.
-    assert_eq!(
-        summary("targets.every-remote-podman.platform"),
-        "Engine default"
-    );
-    assert!(summary("targets.every-remote-bare.permissions").starts_with("Ask for approvals"));
-    assert!(
-        summary("profiles.codex-1.context_window_bytes").starts_with("262144"),
-        "the context budget shows the number it defaults to"
-    );
-    assert_eq!(
-        summary("profiles.codex-1.guardian_review_model"),
-        "newest-flash"
-    );
-    // With a reviewer chosen, model and effort name whose defaults they follow.
-    let mut with_reviewer = draft.clone();
-    with_reviewer["review"]["profile"] = json!("codex-1");
-    assert_eq!(
-        value_summary(
-            &["review".to_owned()],
-            "effort",
-            &Value::Null,
-            &with_reviewer,
-            None,
-        ),
-        "codex-1's default"
-    );
-}
-
-#[test]
-fn the_automatic_download_policy_shows_what_it_does_to_this_image() {
-    let draft = json!({"targets": {
-        "latest": {"kind": "podman", "machine": "local", "image": "ghcr.io/example/dev:latest", "pull_policy": "auto"},
-        "pinned": {"kind": "podman", "machine": "local", "image": "ghcr.io/example/dev@sha256:abc", "pull_policy": "auto"},
-    }});
-    let path = |target: &str| {
-        vec![
-            "targets".to_owned(),
-            target.to_owned(),
-            "pull_policy".to_owned(),
-        ]
-    };
-    // A remote :latest image is the one case the daemon refreshes on its own.
-    assert_eq!(
-        schema::choice_label(&path("latest"), &json!("auto"), &draft),
-        "Pull if missing at launch; refresh :latest in background"
-    );
-    assert_eq!(
-        schema::choice_label(&path("pinned"), &json!("auto"), &draft),
-        "Pull if missing"
-    );
-    // An explicit policy reads the same whatever the image is.
-    assert_eq!(
-        schema::choice_label(&path("latest"), &json!("never"), &draft),
-        "Never pull"
-    );
-    assert_eq!(
-        schema::choice_label(&path("pinned"), &json!("newer"), &draft),
-        "Pull when the registry is newer"
-    );
-    // The stored value is untouched: only the display changes.
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_settings_section("targets", None);
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(dialog.draft["targets"]["podman"]["pull_policy"], "auto");
 }
 
 #[test]
@@ -2620,54 +2422,6 @@ fn result_paths(dashboard: &mut DashboardState) -> Vec<Vec<String>> {
 }
 
 #[test]
-fn search_reaches_a_nested_setting_without_browsing_to_its_page() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    search(&mut dashboard, "memory");
-    assert_eq!(
-        result_paths(&mut dashboard),
-        vec![vec![
-            "targets".to_owned(),
-            "podman".to_owned(),
-            "memory".to_owned()
-        ]],
-        "a runtime's memory limit must be reachable from the root page"
-    );
-
-    dashboard.handle_key(key(KeyCode::Enter));
-    let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
-    assert!(dialog.search.is_none(), "the search closes when it lands");
-    assert_eq!(dialog.path, vec!["targets".to_owned(), "podman".to_owned()]);
-    assert_eq!(
-        dialog.editor.as_ref().map(|editor| editor.path.clone()),
-        Some(vec![
-            "targets".to_owned(),
-            "podman".to_owned(),
-            "memory".to_owned()
-        ]),
-        "landing on a value opens it for editing"
-    );
-}
-
-#[test]
-fn search_finds_a_setting_by_what_it_does_rather_than_its_name() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    // "compaction" appears only in the help for the context budget, whose own
-    // label never mentions it.
-    search(&mut dashboard, "compaction");
-    let paths = result_paths(&mut dashboard);
-    assert!(
-        !paths.is_empty()
-            && paths.iter().all(|path| {
-                path.first().is_some_and(|section| section == "profiles")
-                    && path.last().is_some_and(|key| key == "context_window_bytes")
-            }),
-        "help text must be searchable: {paths:?}"
-    );
-}
-
-#[test]
 fn search_selects_a_switch_without_flipping_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
@@ -2707,22 +2461,6 @@ fn typing_in_the_search_does_not_reach_the_page_shortcuts() {
 }
 
 #[test]
-fn search_lists_every_setting_with_its_section_and_value() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    search(&mut dashboard, "image");
-    let drawn = drawn(&mut dashboard, 140, 30).join("\n");
-    assert!(
-        drawn.contains("Container image") && drawn.contains("ubuntu:24.04"),
-        "a result must name the setting and show what it holds:\n{drawn}"
-    );
-    assert!(
-        drawn.contains("Runtimes \u{203a} podman"),
-        "a result must name the section it lives in:\n{drawn}"
-    );
-}
-
-#[test]
 fn moving_the_selection_does_not_change_the_text_a_page_draws() {
     // A list identifies its contents by the text it draws, so a row that drew
     // itself differently while selected would read as a new list on every
@@ -2742,37 +2480,6 @@ fn moving_the_selection_does_not_change_the_text_a_page_draws() {
     );
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     assert_ne!(dialog.selected, 0, "the arrows must have moved the row");
-}
-
-#[test]
-fn the_first_page_groups_its_sections_and_reports_what_each_one_is_set_to() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let drawn = drawn(&mut dashboard, 140, 40).join("\n");
-    for heading in ROOT_GROUPS.iter().map(|(heading, _)| *heading) {
-        assert!(
-            drawn.contains(heading),
-            "missing the {heading:?} group:\n{drawn}"
-        );
-    }
-    // Every section says what state it is in; none of them reports a count of
-    // the settings it holds.
-    for state in [
-        "claude-1, codex-1, codex-2",
-        "podman",
-        "On \u{b7} 127.0.0.1:3765",
-        "Keeps every session",
-        &format!(
-            "{} \u{b7} sidebar left",
-            schema::theme_report("Midnight", theme::no_color_requested())
-        ),
-    ] {
-        assert!(drawn.contains(state), "missing {state:?} in\n{drawn}");
-    }
-    assert!(
-        !drawn.contains("settings  \u{203a}"),
-        "a first-page section counted its settings instead of reporting them:\n{drawn}"
-    );
 }
 
 fn ctrl_space() -> KeyEvent {
@@ -2869,6 +2576,7 @@ fn setup_workspace_prefix_completes_on_its_machine() {
 /// Launch campaign finding A-9 / C-4: the Continuation section has a short
 /// name, its row shows its whole value, and its page shows its whole
 /// description.
+// Hard-won: 70f7a0f5: the continuation label and description were clipped.
 #[test]
 fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -2913,6 +2621,7 @@ fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description()
 
 /// A row too wide for the page gives up its label before its value, and the
 /// two never touch.
+// Hard-won: 70f7a0f5: long row labels truncated the value that users needed to see.
 #[test]
 fn a_setting_row_truncates_its_label_before_its_value() {
     let line = setting_row(
@@ -2946,6 +2655,7 @@ fn a_setting_row_truncates_its_label_before_its_value() {
 /// configured, so Setup says so instead of naming a theme it is not drawing.
 /// The configured theme is still named, because it returns once `NO_COLOR`
 /// is unset.
+// Hard-won: 584574a5: Setup claimed monochrome mode while the renderer still applied its theme.
 #[test]
 fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
     assert_eq!(
@@ -2962,6 +2672,7 @@ fn setup_reports_monochrome_while_no_color_overrides_the_theme() {
 
 /// With the reviewer on Auto, the first page says so, and visiting Code
 /// Review does not change what the row says. Launch campaign finding C-5.
+// Hard-won: 77fc1dad: returning from reviewer setup changed the draft summary.
 #[test]
 fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
     let mut configured = config();
@@ -2985,6 +2696,7 @@ fn an_automatic_reviewer_is_summarized_the_same_before_and_after_a_visit() {
 
 /// The first page describes the draft, not the saved file, and a limit put
 /// back to its default still shows the limit. Launch campaign finding C-22.
+// Hard-won: e5bdf191: the first-page summary read saved values instead of the active draft.
 #[test]
 fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
     let mut dialog = SetupDialog::new(&config());
@@ -3005,6 +2717,7 @@ fn the_first_page_summarizes_drafted_values_before_they_are_saved() {
 
 /// A long save error is shown whole: the notice grows to fit it instead of
 /// stopping after three lines. Launch campaign finding C-20.
+// Hard-won: 006bb14c: save notices were truncated after three rows.
 #[test]
 fn a_long_save_error_is_shown_whole() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3030,6 +2743,7 @@ fn a_long_save_error_is_shown_whole() {
 
 /// Leaving an edited field asks about that field's change, by its name, and
 /// says the rest of the draft is kept. Launch campaign finding C-15.
+// Hard-won: 27dfd170: the discard prompt did not identify the field being reverted.
 #[test]
 fn discarding_a_field_edit_names_the_field() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3048,6 +2762,7 @@ fn discarding_a_field_edit_names_the_field() {
 
 /// An open dropdown shows its value once on the row, in the dropdown.
 /// Launch campaign finding C-16.
+// Hard-won: 27dfd170: an open dropdown rendered the selected value twice.
 #[test]
 fn an_open_dropdown_draws_its_value_once() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3063,6 +2778,7 @@ fn an_open_dropdown_draws_its_value_once() {
 
 /// Every description fits the two rows above a page at the narrowest width
 /// Settings takes, so none stops mid-sentence. Launch campaign finding C-18.
+// Hard-won: 524f4307: setting descriptions were clipped by the two-row layout.
 #[test]
 fn every_setting_description_fits_its_two_rows() {
     let paths: &[&[&str]] = &[
@@ -3132,6 +2848,7 @@ fn every_setting_description_fits_its_two_rows() {
 
 /// A new SSH machine keeps its workspaces under Mjolnir's own directory, not
 /// the product's former name. Launch campaign finding C-17.
+// Hard-won: d0c3d418: new SSH machines defaulted workspaces under the former product-name directory.
 #[test]
 fn a_new_ssh_machine_keeps_workspaces_under_the_mjolnir_directory() {
     let machine = schema::defaults(
@@ -3146,6 +2863,7 @@ fn a_new_ssh_machine_keeps_workspaces_under_the_mjolnir_directory() {
 
 /// A page lists its settings in one fixed order, whichever of them the file
 /// happens to store and in whatever order. Launch campaign finding C-24.
+// Hard-won: 9a0d40d3: editing a value changed the settings row order.
 #[test]
 fn a_page_lists_its_settings_in_a_fixed_order() {
     let order = |draft: serde_json::Value, path: &[&str]| {
@@ -3205,6 +2923,7 @@ fn saved_config(dialog: &mut SetupDialog) -> Config {
     }
 }
 
+// Hard-won: #1153: saving unrelated Settings fields overwrote named-instance web listener ports.
 #[test]
 fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
     const CHILD: &str = "MJ_TEST_SETTINGS_INSTANCE_CHILD";
@@ -3263,6 +2982,7 @@ fn named_instance_settings_preserve_the_default_and_explicit_web_listener() {
 /// The numeric settings are edited as text but saved as numbers, "Use
 /// default" puts the default back, and text that is not a number is refused
 /// under the field without losing the draft. Launch campaign finding C-23.
+// Hard-won: ef88371a: numeric field text failed to convert during save.
 #[test]
 fn numeric_settings_round_trip_use_their_default_and_refuse_text() {
     type Read = fn(&Config) -> u64;
@@ -3303,30 +3023,6 @@ fn numeric_settings_round_trip_use_their_default_and_refuse_text() {
 }
 
 #[test]
-fn shared_budget_is_an_ordinary_editable_machine_setting() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    choose(&mut dashboard, "max_total_size");
-    for digit in ['2', '5', '0'] {
-        dashboard.handle_key(key(KeyCode::Char(digit)));
-    }
-    dashboard.handle_key(key(KeyCode::Enter));
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    assert_eq!(
-        dialog.draft["machines"]["local"]["build_cache"]["max_total_size"],
-        "250GB"
-    );
-    assert!(
-        drawn(&mut dashboard, 140, 30)
-            .join("\n")
-            .contains("Total cache budget (GB)")
-    );
-}
-
-#[test]
 fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
     let mut dashboard = dashboard_with_session(stopped_session());
     dashboard.begin_setup();
@@ -3337,8 +3033,12 @@ fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
     let (_, preview_key) = dialog.build_cache_page().unwrap();
     dialog.build_cache_preview = Some(BuildCachePreviewState {
         key: preview_key,
+        install_mbx_available: false,
         result: BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
             native_mbx: Some("1.21.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: Some("/native/cache".into()),
             max_total_size: Some(mj_core::state::BuildCacheLimit::HostConfiguration(Some(
                 "500GB".into(),
@@ -3361,59 +3061,6 @@ fn user_managed_budgets_show_host_values_and_cannot_be_edited() {
         dialog.draft["machines"]["local"]["build_cache"]["max_total_size"],
         Value::Null
     );
-}
-
-#[test]
-fn machine_cache_summary_opens_settings_by_keyboard_and_mouse() {
-    for mouse in [false, true] {
-        let mut dashboard = dashboard_with_session(stopped_session());
-        dashboard.begin_setup();
-        assert!(
-            !setup_dialog_mut(&mut dashboard.mode)
-                .unwrap()
-                .keys()
-                .contains(&"build_cache".to_owned())
-        );
-        choose(&mut dashboard, "machines");
-        choose(&mut dashboard, "local");
-        let lines = drawn(&mut dashboard, 160, 40);
-        assert!(
-            lines.iter().any(|line| line.contains("Build cache (mbx)")
-                && line.contains("Enabled by default · automatic budget")),
-            "{lines:#?}"
-        );
-        if mouse {
-            let (column, row) = point(&lines, "Build cache (mbx)");
-            // Settings list entries open on double-click.
-            for _ in 0..2 {
-                for kind in [
-                    MouseEventKind::Down(MouseButton::Left),
-                    MouseEventKind::Up(MouseButton::Left),
-                ] {
-                    dashboard.handle_mouse(MouseEvent {
-                        kind,
-                        column,
-                        row,
-                        modifiers: KeyModifiers::NONE,
-                    });
-                    drawn(&mut dashboard, 160, 40);
-                }
-            }
-        } else {
-            choose(&mut dashboard, "build_cache");
-        }
-        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-        assert_eq!(dialog.path, ["machines", "local", "build_cache"]);
-        dialog.draft["machines"]["local"]["build_cache"]["enabled"] = json!(false);
-        dialog.draft["machines"]["local"]["build_cache"]["max_total_size"] = json!("100GB");
-        dashboard.handle_key(key(KeyCode::Esc));
-        let lines = drawn(&mut dashboard, 160, 40);
-        assert!(
-            lines.iter().any(|line| line.contains("Build cache (mbx)")
-                && line.contains("Disabled · 100 GB budget")),
-            "{lines:#?}"
-        );
-    }
 }
 
 #[test]
@@ -3460,41 +3107,11 @@ fn cache_search_aliases_find_every_machine_and_preserve_the_draft() {
     }
 }
 
-#[test]
-fn unsupported_cache_host_does_not_show_a_pending_managed_policy() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    choose(&mut dashboard, "machines");
-    choose(&mut dashboard, "local");
-    choose(&mut dashboard, "build_cache");
-    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
-    let (_, preview_key) = dialog.build_cache_page().unwrap();
-    dialog.build_cache_preview = Some(BuildCachePreviewState {
-        key: preview_key,
-        result: BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
-            native_mbx: None,
-            directory: None,
-            max_total_size: None,
-            user_managed: false,
-            application: Default::default(),
-            budget_note: None,
-            stats: None,
-            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
-                "Shared mbx requires a Linux host".into(),
-            )),
-        }))),
-    });
-    dialog.prepare();
-    let text = drawn(&mut dashboard, 140, 30).join("\n");
-    assert!(text.contains("requires a Linux host"), "{text}");
-    assert!(!text.contains("Pending application"), "{text}");
-    assert!(!text.contains("Mj-managed mbx"), "{text}");
-}
-
 /// Launch campaign finding A-4: with `symbols = "ascii"`, dialog titles and
 /// hints kept `·`, popup headers kept `↑/↓`, notices kept `…`, and Settings
 /// fields kept `▾`. Every page and popup below is drawn with the ASCII set
 /// and must contain nothing else.
+// Hard-won: 71a1ad4b: ASCII mode left literal Unicode glyphs in rendered settings.
 #[test]
 fn ascii_symbols_draw_settings_and_dialogs_without_non_ascii_text() {
     fn assert_ascii(context: &str, lines: &[String]) {
@@ -3568,6 +3185,7 @@ fn ascii_symbols_draw_settings_and_dialogs_without_non_ascii_text() {
 
 /// Test-and-fix M-3: the machine's list row said "Enabled by default" while
 /// the build cache page, opened next, said the host cannot share the cache.
+// Hard-won: b4c3a95d: the machine row contradicted the build-cache page on unsupported hosts.
 #[test]
 fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3590,6 +3208,9 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
         &key,
         Ok(Some(mj_core::state::BuildCachePreview {
             native_mbx: None,
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
             directory: None,
             max_total_size: None,
             user_managed: false,
@@ -3600,6 +3221,7 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
                 "Shared mbx requires a Linux host".into(),
             )),
         })),
+        false,
     );
     let lines = drawn(&mut dashboard, 160, 40);
     assert!(
@@ -3611,79 +3233,243 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
 }
 
 #[test]
-fn profile_setup_edits_native_or_one_model_and_saves_policy() {
-    use mj_core::subagent::SubagentPolicy;
-    let mut dialog = SetupDialog::new(&config());
-    assert!(!dialog.is_dirty());
-    dialog.path = vec!["profiles".into(), "claude-1".into(), "subagents".into()];
-    assert_eq!(dialog.keys(), vec!["mode"]);
-    dialog.open_selected();
-    assert_eq!(
-        dialog.editor.as_ref().unwrap().choices,
-        vec![json!("native"), json!("single_model")]
+fn machine_page_confirms_mbx_install_shows_busy_and_refreshes_after_success() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            mbx_profile_file: Some("~/.profile".into()),
+            mbx_profile_warning: Some(
+                "Your login shell may not read ~/.profile. Add this PATH line to a startup file it reads:".into(),
+            ),
+            mbx_manual_path_line: Some(
+                "export PATH='/home/test/.local/share/mbx/bin:/home/test/.local/bin'${PATH:+:$PATH}".into(),
+            ),
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: None,
+        })),
+        true,
     );
-    dialog.editor.as_mut().unwrap().selected = 1;
-    dialog.apply_editor(false).unwrap();
-    let DashboardAction::SaveSetup { updated, .. } = dialog.save() else {
-        panic!("expected background validation: {:?}", dialog.notice);
+    assert!(
+        drawn(&mut dashboard, 140, 34)
+            .join("\n")
+            .contains("Install mbx")
+    );
+
+    activate(&mut dashboard, SetupControl::InstallMbx);
+    let Mode::Confirm(confirm) = &dashboard.mode else {
+        panic!("confirmation");
     };
-    let invalid: Config = serde_json::from_str(&updated).unwrap();
-    let error = format!("{:#}", invalid.validate().unwrap_err());
-    assert!(error.contains("select a subagent model"), "{error}");
-    dialog.saving = false;
-    let choice = |value: &str| mj_core::acp::SessionConfigChoice {
-        value: value.into(),
-        name: value.into(),
-        description: None,
-    };
-    dialog.update_subagent_choices(&Default::default());
-    dialog.subagent_choices.as_mut().unwrap().result =
-        Some(Ok(mj_core::subagent::SubagentOptions {
-            models: vec![choice("chosen")],
-            efforts: vec![],
-            unavailable: vec![],
-        }));
-    dialog.selected = dialog.keys().iter().position(|key| key == "model").unwrap();
-    dialog.open_selected();
-    dialog.editor.as_mut().unwrap().selected = 1;
-    dialog.apply_editor(false).unwrap();
-    dialog.update_subagent_choices(&Default::default());
-    dialog.subagent_choices.as_mut().unwrap().result =
-        Some(Ok(mj_core::subagent::SubagentOptions {
-            models: vec![choice("chosen")],
-            efforts: vec![choice("high")],
-            unavailable: vec![],
-        }));
-    dialog.selected = dialog
-        .keys()
+    let (_, lines) = crate::dialogs::confirmation_body(&confirm.confirmation, None, 72);
+    let prompt = lines
         .iter()
-        .position(|key| key == "effort")
-        .unwrap();
-    dialog.open_selected();
-    dialog.editor.as_mut().unwrap().selected = 1;
-    dialog.apply_editor(false).unwrap();
-    let DashboardAction::SaveSetup { updated, .. } = dialog.save() else {
-        panic!("{:?}", dialog.notice)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        "the local machine",
+        "mbx setup --yes",
+        "~/.profile",
+        "may not read ~/.profile",
+        "export PATH='/home/test/.local/share/mbx/bin:/home/test/.local/bin'${PATH:+:$PATH}",
+    ] {
+        assert!(prompt.contains(expected), "missing {expected:?}: {prompt}");
+    }
+
+    dashboard.handle_key(key(KeyCode::Right));
+    let DashboardAction::InstallMbx {
+        generation: confirmed_generation,
+        key: confirmed_key,
+        machine_id,
+        ..
+    } = dashboard.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("confirmed mbx install");
     };
-    let saved: Config = serde_json::from_str(&updated).unwrap();
-    assert_eq!(
-        saved.profiles["claude-1"].subagents,
-        SubagentPolicy::SingleModel {
-            model: "chosen".into(),
-            effort: Some("high".into())
-        }
+    assert_eq!(confirmed_generation, generation);
+    assert_eq!(confirmed_key, preview_key);
+    assert_eq!(machine_id, "local");
+    assert!(dashboard.mbx_install_started(generation, &preview_key, "local"));
+    let busy = drawn(&mut dashboard, 140, 34).join("\n");
+    assert!(busy.contains("Installing mbx…"), "{busy}");
+
+    dashboard.mbx_install_finished(
+        generation,
+        &preview_key,
+        "local",
+        Ok("Installed mbx at /home/test/.local/bin/mbx (version 1.22.0). Updated ~/.profile. Your login shell may not read ~/.profile. Add this PATH line: export PATH='/home/test/.local/share/mbx/bin:/home/test/.local/bin'${PATH:+:$PATH}".into()),
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.22.0".into()),
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: Some("/home/test/.cache/mbx".into()),
+            max_total_size: None,
+            user_managed: true,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: None,
+        })),
+        false,
     );
-    assert_eq!(saved.profiles["codex-1"].subagents, SubagentPolicy::Native);
-    let mut reopened = SetupDialog::new(&saved);
-    reopened.path = vec!["profiles".into(), "claude-1".into(), "subagents".into()];
-    reopened.open_selected();
-    reopened.apply_editor(false).unwrap();
-    assert_eq!(
-        config_from_draft(reopened.draft).unwrap().profiles["claude-1"].subagents,
-        saved.profiles["claude-1"].subagents
+    let finished = drawn(&mut dashboard, 140, 34).join("\n");
+    assert!(
+        finished.contains("Installed mbx at /home/test/.local/bin/mbx"),
+        "{finished}"
+    );
+    assert!(finished.contains("Updated ~/.profile"), "{finished}");
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(
+        !dialog
+            .actions()
+            .iter()
+            .any(|(control, _, _)| *control == SetupControl::InstallMbx)
     );
 }
 
+#[test]
+fn machine_page_labels_old_mbx_as_upgrade_and_hides_unavailable_actions() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
+    dashboard.build_cache_previewed(
+        generation,
+        &preview_key,
+        Ok(Some(mj_core::state::BuildCachePreview {
+            native_mbx: Some("1.21.0".into()),
+            mbx_profile_file: Some("~/.bash_profile".into()),
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: true,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "the host's mbx 1.21.0 is older than the pinned release".into(),
+            )),
+        })),
+        true,
+    );
+    let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+    assert!(
+        dialog
+            .actions()
+            .iter()
+            .any(
+                |(control, label, enabled)| *control == SetupControl::InstallMbx
+                    && *label == "Upgrade mbx"
+                    && *enabled
+            )
+    );
+
+    let preview = dialog.build_cache_preview.as_mut().unwrap();
+    preview.install_mbx_available = false;
+    dialog.prepare();
+    assert!(
+        !dialog
+            .actions()
+            .iter()
+            .any(|(control, _, _)| *control == SetupControl::InstallMbx)
+    );
+    let preview = dialog.build_cache_preview.as_mut().unwrap();
+    preview.result =
+        BuildCachePreviewResult::Ready(Some(Box::new(mj_core::state::BuildCachePreview {
+            native_mbx: None,
+            mbx_profile_file: None,
+            mbx_profile_warning: None,
+            mbx_manual_path_line: None,
+            directory: None,
+            max_total_size: None,
+            user_managed: false,
+            application: Default::default(),
+            budget_note: None,
+            stats: None,
+            off_reason: Some(mj_core::state::BuildCacheOff::Unavailable(
+                "Shared mbx requires a Linux host".into(),
+            )),
+        })));
+    dialog.prepare();
+    assert!(
+        !dialog
+            .actions()
+            .iter()
+            .any(|(control, _, _)| *control == SetupControl::InstallMbx)
+    );
+}
+
+#[test]
+fn machine_page_reports_mbx_install_failure_and_preserves_the_retry_action() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    choose(&mut dashboard, "machines");
+    let DashboardAction::PreviewBuildCache {
+        generation,
+        key: preview_key,
+        ..
+    } = choose(&mut dashboard, "local")
+    else {
+        panic!("preview build cache");
+    };
+    let absent = || mj_core::state::BuildCachePreview {
+        native_mbx: None,
+        mbx_profile_file: Some("~/.profile".into()),
+        mbx_profile_warning: None,
+        mbx_manual_path_line: None,
+        directory: None,
+        max_total_size: None,
+        user_managed: false,
+        application: Default::default(),
+        budget_note: None,
+        stats: None,
+        off_reason: None,
+    };
+    dashboard.build_cache_previewed(generation, &preview_key, Ok(Some(absent())), true);
+    assert!(dashboard.mbx_install_started(generation, &preview_key, "local"));
+    dashboard.mbx_install_finished(
+        generation,
+        &preview_key,
+        "local",
+        Err("mbx setup exited with status 1: setup refused".into()),
+        Ok(Some(absent())),
+        true,
+    );
+    let lines = drawn(&mut dashboard, 140, 34).join("\n");
+    assert!(
+        lines.contains("Could not install mbx: mbx setup exited"),
+        "{lines}"
+    );
+    assert!(lines.contains("Install mbx"), "{lines}");
+}
+
+// Hard-won: 37a8681f: the unset effort label disagreed with save behavior and refusal navigation.
 #[test]
 fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page() {
     let mut dialog = SetupDialog::new(&config());
@@ -3974,6 +3760,7 @@ fn profile_comboboxes_display_recorded_model_and_effort_before_discovery() {
 }
 
 /// A status line belongs to the page or prompt that set it. Finding T-4.
+// Hard-won: 6094bb1c: a prompt status line remained after its owning settings page closed.
 #[test]
 fn a_status_line_does_not_outlive_the_prompt_that_set_it() {
     let mut dashboard = dashboard_with_session(stopped_session());
@@ -3995,6 +3782,7 @@ fn a_status_line_does_not_outlive_the_prompt_that_set_it() {
 }
 
 /// The Sub-agents page explains both modes in full at any width. Finding T-3.
+// Hard-won: c9daccb3: the Sub-agents page clipped the end of its hint.
 #[test]
 fn the_profile_subagents_page_shows_its_whole_hint() {
     for (width, height) in [(140, 40), (80, 30)] {

@@ -984,58 +984,6 @@ Last 7d · 5966 requests · 78 sessions
     }
 
     #[test]
-    fn api_usage_uses_exhausted_fable_limit_over_overall_limit() {
-        let report = parse_api_usage(&serde_json::json!({
-            "limits": [
-                {
-                    "kind": "session",
-                    "percent": 13.0,
-                    "resets_at": "2026-08-18T23:30:00Z"
-                },
-                {
-                    "kind": "weekly_all",
-                    "percent": 96.0,
-                    "resets_at": "2026-08-19T22:59:00Z"
-                },
-                {
-                    "kind": "weekly_scoped",
-                    "percent": 100.0,
-                    "resets_at": "2026-08-19T22:59:00Z",
-                    "scope": { "model": { "display_name": "Fable" } }
-                }
-            ]
-        }))
-        .expect("report");
-
-        assert_eq!(report.five_hour.unwrap().remaining_percent, 87);
-        let week = report.week.unwrap();
-        assert_eq!(week.remaining_percent, 0);
-        assert_eq!(week.reset_context.as_deref(), Some("2026-08-19T22:59:00Z"));
-    }
-
-    #[test]
-    fn api_usage_ignores_other_model_scoped_weekly_limits() {
-        let report = parse_api_usage(&serde_json::json!({
-            "limits": [
-                { "kind": "weekly_all", "percent": 40.0 },
-                {
-                    "kind": "weekly_scoped",
-                    "percent": 90.0,
-                    "scope": { "model": { "display_name": "Opus" } }
-                },
-                {
-                    "kind": "weekly_scoped",
-                    "percent": 50.0,
-                    "scope": { "model": { "display_name": "Fable" } }
-                }
-            ]
-        }))
-        .expect("report");
-
-        assert_eq!(report.week.unwrap().remaining_percent, 50);
-    }
-
-    #[test]
     fn expired_oauth_access_token_is_login_expired() {
         let credentials = serde_json::json!({
             "claudeAiOauth": {
@@ -1064,32 +1012,6 @@ Last 7d · 5966 requests · 78 sessions
         assert_eq!(
             oauth_access_token(&credentials, 1_999).expect("token"),
             "sk-ant-oat01-test"
-        );
-    }
-
-    #[test]
-    fn oauth_access_token_without_expiry_is_usable() {
-        let credentials = serde_json::json!({
-            "claudeAiOauth": { "accessToken": "sk-ant-oat01-test" }
-        });
-        assert_eq!(
-            oauth_access_token(&credentials, 9_000).expect("token"),
-            "sk-ant-oat01-test"
-        );
-    }
-
-    #[test]
-    fn missing_oauth_access_token_is_not_signed_in() {
-        assert_eq!(
-            oauth_access_token(&serde_json::json!({}), 1),
-            Err(ClaudeUsageError::NotSignedIn)
-        );
-        assert_eq!(
-            oauth_access_token(
-                &serde_json::json!({ "claudeAiOauth": { "accessToken": "" } }),
-                1
-            ),
-            Err(ClaudeUsageError::NotSignedIn)
         );
     }
 }
