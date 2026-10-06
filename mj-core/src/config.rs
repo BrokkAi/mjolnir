@@ -965,8 +965,9 @@ impl Config {
             workspace_storage: Default::default(),
         };
         let mut defaults: Vec<(&str, TargetTemplate)> = Vec::new();
-        #[cfg(unix)]
-        defaults.push(("localhost", TargetTemplate::LocalBare));
+        if crate::targets::HOST_RUNS_WORKERS {
+            defaults.push(("localhost", TargetTemplate::LocalBare));
+        }
         defaults.push((
             "podman",
             TargetTemplate::LocalPodman {

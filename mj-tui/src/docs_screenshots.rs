@@ -254,6 +254,7 @@ fn documentation_dashboard() -> DashboardState {
         kind: DeploymentCapacityKind::Host,
         local: true,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }]);
     dashboard.apply_deployment_capacity(

@@ -269,8 +269,14 @@ async fn serialized_until(
             result = &mut task => result,
         }
         .context("profile discovery task panicked")?;
-        if let Err(error) = &result {
-            tracing::warn!(error = %format!("{error:#}"), "profile discovery failed");
+        match &result {
+            Err(error) if discovery_is_unsupported(error) => {
+                tracing::debug!(error = %format!("{error:#}"), "profile discovery unsupported");
+            }
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "profile discovery failed");
+            }
+            Ok(_) => {}
         }
         result
     })
@@ -306,6 +312,11 @@ pub async fn observe(
         // Worker observations do not carry authentication provenance. Claude's
         // setup-token and login catalogues differ, so only probes may cache it.
         if profile.kind == mj_core::config::HarnessKind::Claude {
+            return Ok(choices);
+        }
+        // Only the local probe binary can vouch for an observing worker, and
+        // a machine that runs no worker has none.
+        if !mj_core::targets::HOST_RUNS_WORKERS {
             return Ok(choices);
         }
         let executor =
@@ -441,6 +452,29 @@ fn resolve_cached(
     Ok(choices)
 }
 
+/// Discovery that no retry can make succeed: this machine runs no local
+/// worker to probe a profile with. The profile's capabilities stay unknown;
+/// its sessions still offer the harness's own choices.
+#[derive(Debug)]
+pub(crate) struct DiscoveryUnsupported;
+
+impl std::fmt::Display for DiscoveryUnsupported {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "this machine runs no local Mjolnir worker, so it cannot discover the profile's models and efforts before a session starts",
+        )
+    }
+}
+
+impl std::error::Error for DiscoveryUnsupported {}
+
+/// Whether `error` is a discovery that no retry can make succeed.
+pub(crate) fn discovery_is_unsupported(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<DiscoveryUnsupported>())
+}
+
 fn probe_profile(
     profile_id: &str,
     profile: &HarnessProfile,
@@ -448,6 +482,11 @@ fn probe_profile(
     model: Option<String>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ProfileConfig> {
+    // Checked first, so a profile that is also not signed in is still
+    // reported as the failure no retry can fix.
+    if !mj_core::targets::HOST_RUNS_WORKERS {
+        return Err(DiscoveryUnsupported.into());
+    }
     profile.ensure_ready(profile_id)?;
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
     let home = root.path().join("profile");

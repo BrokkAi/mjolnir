@@ -35,6 +35,11 @@ pub const INSTANCE_TAG: &str = "dev.mj.instance";
 /// `container_workspace_root`.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
+/// Whether this machine runs Mjolnir workers itself. Windows is a controller
+/// only: its sessions run on Linux, in a container or on an SSH host, so it
+/// has no local bare target and no local worker to probe a profile with.
+pub const HOST_RUNS_WORKERS: bool = cfg!(unix);
+
 /// The launch phase a command belongs to, reported as launch progress.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProvisionStage {
@@ -350,7 +355,12 @@ pub struct DeploymentCapacityTarget {
     pub kind: DeploymentCapacityKind,
     pub local: bool,
     /// Alternative commands for a host, or one command per live AWS instance.
+    /// The local host has none: sysinfo reads its CPU and memory, and its
+    /// storage is measured over `local_storage_paths`.
     pub probes: Vec<CommandSpec>,
+    /// The paths on this machine whose filesystems local targets write to.
+    /// Empty for every other host, whose probes carry their own paths.
+    pub local_storage_paths: Vec<String>,
     /// Prevents a partial AWS fleet sample when one live instance cannot be probed yet.
     pub probe_error: Option<String>,
 }

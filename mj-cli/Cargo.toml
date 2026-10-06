@@ -28,6 +28,8 @@ mj-chat.workspace = true
 mj-tui.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
+# Encodes the PowerShell script that posts Windows desktop notifications.
+base64.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["env"] }
 crossterm = { workspace = true, features = ["osc52"] }
@@ -47,6 +49,10 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Stops an unresponsive daemon through a handle that pins its identity.
+windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
 mj-core = { workspace = true, features = ["test-hooks", "golden"] }

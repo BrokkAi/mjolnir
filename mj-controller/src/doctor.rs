@@ -1908,9 +1908,9 @@ fn ssh_podman_limits_check(
 }
 
 /// One check per host Mjolnir writes to: does the tightest filesystem it
-/// writes to there have room? The probe is the daemon capacity service's own
-/// host probe, and the verdict is the storage owner's rule, so doctor and the
-/// daemon judge a disk the same way.
+/// writes to there have room? The measurement is the daemon capacity
+/// service's own, and the verdict is the storage owner's rule, so doctor and
+/// the daemon judge a disk the same way.
 fn storage_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> Vec<DoctorCheck> {
     use mj_core::targets::storage::{StorageCondition, TargetStorageView};
     let Ok(config) = config else {
@@ -1925,37 +1925,48 @@ fn storage_checks(config: ConfigStatus<'_>, executor: &impl CommandExecutor) -> 
         .into_iter()
         .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
         .filter_map(|target| {
-            let probe = target.probes.first()?;
             let check_id = format!("storage.{}", target.id);
             let title = format!("Free space on {}", target.host);
-            let output = match executor.execute(probe) {
-                Ok(output) if output.status == 0 => output,
-                // An unreachable host is reported by its access check.
-                Ok(output) if probe.ssh_destination.is_some() && output.status == 255 => {
-                    return None;
+            let unmeasured = |detail: String, remediation: &str| {
+                Some(DoctorCheck::warning(
+                    check_id.clone(),
+                    title.clone(),
+                    format!("Could not measure free space: {detail}"),
+                    remediation,
+                ))
+            };
+            let (home, filesystems) = if target.local {
+                match crate::targets::measure_local_storage(&target.local_storage_paths, executor)
+                {
+                    Ok(measured) => measured,
+                    Err(error) => {
+                        return unmeasured(format!("{error:#}"), "Check that `df` runs here.");
+                    }
                 }
-                Ok(output) => {
-                    return Some(DoctorCheck::warning(
-                        check_id,
-                        title,
-                        format!(
-                            "Could not measure free space: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ),
-                        "Check that `df` runs on the host.",
-                    ));
-                }
-                Err(error) => {
-                    return Some(DoctorCheck::warning(
-                        check_id,
-                        title,
-                        format!("Could not measure free space: {error:#}"),
-                        "Check that the host is reachable and `df` runs on it.",
-                    ));
+            } else {
+                let probe = target.probes.first()?;
+                match executor.execute(probe) {
+                    Ok(output) if output.status == 0 => {
+                        mj_core::targets::storage::parse_storage_lines(&output.stdout)
+                    }
+                    // An unreachable host is reported by its access check.
+                    Ok(output) if probe.ssh_destination.is_some() && output.status == 255 => {
+                        return None;
+                    }
+                    Ok(output) => {
+                        return unmeasured(
+                            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                            "Check that `df` runs on the host.",
+                        );
+                    }
+                    Err(error) => {
+                        return unmeasured(
+                            format!("{error:#}"),
+                            "Check that the host is reachable and `df` runs on it.",
+                        );
+                    }
                 }
             };
-            let (home, filesystems) =
-                mj_core::targets::storage::parse_storage_lines(&output.stdout);
             let view =
                 TargetStorageView::evaluate(&target.host, home, &filesystems, None, |_| None, None);
             // Every filesystem, with its free space and root reserve, one
@@ -2393,10 +2404,15 @@ fn worker_freshness_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
         .ok()
         .filter(|metadata| mj_client::daemon::process_is_alive(metadata.pid));
     let pinned = pinned_worker_digests();
-    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = vec![(
-        "this host".to_owned(),
-        crate::controller::native_worker_binary_prerequisite(),
-    )];
+    let mut sources: Vec<(String, Result<WorkerBinaryAvailability>)> = Vec::new();
+    // A machine that runs no worker, such as Windows, has none of its own
+    // to resolve; its sessions use the Linux workers checked below.
+    if mj_core::targets::HOST_RUNS_WORKERS {
+        sources.push((
+            "this host".to_owned(),
+            crate::controller::native_worker_binary_prerequisite(),
+        ));
+    }
     for arch in container_worker_architectures(config) {
         sources.push((
             format!("{arch} Linux targets"),

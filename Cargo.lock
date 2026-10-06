@@ -754,6 +754,7 @@ dependencies = [
  "toml_edit 0.20.2",
  "tracing",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -892,6 +893,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "base64",
  "brokk-mj-chat",
  "brokk-mj-checkpoint",
  "brokk-mj-client",
@@ -919,6 +921,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vte",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -350,13 +350,15 @@ impl Controller {
                         kind: DeploymentCapacityKind::AwsFleet,
                         local: false,
                         probes,
+                        local_storage_paths: Vec::new(),
                         probe_error,
                     });
                 }
             }
         }
         if !local_ids.is_empty() {
-            // CPU and memory come from sysinfo; the one probe measures storage.
+            // CPU and memory come from sysinfo; storage is measured over the
+            // paths by `targets::measure_local_storage`.
             let mut paths = Vec::new();
             for target_id in &local_ids {
                 if let Some(template) = self.config.targets.get(target_id) {
@@ -364,23 +366,14 @@ impl Controller {
                 }
                 push_unique(&mut paths, self.session_storage_paths(target_id));
             }
-            let mut probe = CommandSpec::new(
-                "sh",
-                [
-                    "-c",
-                    mj_core::targets::storage::STORAGE_PROBE_SCRIPT,
-                    "mj-storage",
-                ],
-            )
-            .purpose("measure local free space");
-            probe.args.extend(paths);
             targets.push(DeploymentCapacityTarget {
                 id: "local".into(),
                 host: "local".into(),
                 target_ids: local_ids,
                 kind: DeploymentCapacityKind::Host,
                 local: true,
-                probes: vec![probe],
+                probes: Vec::new(),
+                local_storage_paths: paths,
                 probe_error: None,
             });
         }
@@ -398,6 +391,7 @@ impl Controller {
                             .iter()
                             .map(|(ssh, paths)| targets::ssh_host_capacity_command(ssh, paths))
                             .collect(),
+                        local_storage_paths: Vec::new(),
                         probe_error: None,
                     },
                 ),
