@@ -42,11 +42,19 @@ replaces the footer. Each session row has a **⋯** button for its actions.
 Displayed dashboard shortcut hints are clickable, including global shortcuts
 in the composer's footer. Help supports wheel scrolling and a **Close** button.
 
-Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula, High
-Contrast, or Monochrome. Saving applies the palette to the dashboard, conversation, and dialogs
-and preserves it for future launches. Monochrome paints no colors at all and
-carries focus and selection with bold and reverse video; setting the
-`NO_COLOR` environment variable selects it whatever the configuration says.
+Open Settings (`prefix+s`) to choose Midnight (the default), Light, Darcula,
+High Contrast, Campbell, One Half Dark, One Half Light, Solarized Dark,
+Solarized Light, Terminal Dark, Terminal Light, or Monochrome. Saving applies
+the palette to the dashboard, conversation, and dialogs and preserves it for
+future launches. Campbell, One Half, and Solarized match the Windows Terminal
+schemes of the same name, background included, so the dashboard blends into the
+window under WSL. Terminal Dark and Terminal Light paint no backgrounds and use
+the terminal's own 16 colors, with a neutral gray for secondary text, so they
+follow whatever scheme the terminal uses; pick the one that matches a dark or
+light scheme. Like Monochrome, they carry selection with reverse video.
+Monochrome paints no colors at all and carries focus and selection with bold and
+reverse video; setting the `NO_COLOR` environment variable selects it whatever
+the configuration says.
 **Settings → Advanced → Symbols** switches every status mark, border, chart bar,
 and footer separator to plain ASCII for a terminal that cannot show Unicode;
 left unset, the dashboard does this by itself on the Linux console or

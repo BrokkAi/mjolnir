@@ -77,7 +77,7 @@ The only accepted top-level keys are:
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
-| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, or `mono` (no colors). A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
+| `theme` | string enum | no | `"midnight"` | Terminal color palette: `midnight`, `light`, `darcula`, `high-contrast`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |

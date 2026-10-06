@@ -644,6 +644,65 @@ fn golden_settings_root() {
     )
     .expect("write reopened theme");
 
+    // The Windows Terminal and terminal-color themes save and apply through
+    // the same flow, starting from the reopened choice list.
+    for target in [
+        theme::UiTheme::Campbell,
+        theme::UiTheme::OneHalfDark,
+        theme::UiTheme::OneHalfLight,
+        theme::UiTheme::SolarizedDark,
+        theme::UiTheme::SolarizedLight,
+        theme::UiTheme::TerminalDark,
+        theme::UiTheme::TerminalLight,
+    ] {
+        let wanted = serde_json::to_value(target).expect("theme serializes");
+        let (current, position) = {
+            let Mode::Setup(dialog) = &themed.mode else {
+                panic!("settings");
+            };
+            let editor = dialog.editor.as_ref().expect("theme choices");
+            (
+                editor
+                    .combo
+                    .selection(SetupControl::Choices, editor.selected),
+                editor
+                    .choices
+                    .iter()
+                    .position(|choice| *choice == wanted)
+                    .expect("theme offered"),
+            )
+        };
+        for _ in current..position {
+            themed.handle_key(key(KeyCode::Down));
+        }
+        themed.handle_key(key(KeyCode::Tab));
+        let action = themed.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+        ));
+        let DashboardAction::SaveSetup {
+            generation,
+            updated,
+            ..
+        } = action
+        else {
+            panic!("expected Settings save, got {action:?}");
+        };
+        let saved: Config = serde_json::from_str(&updated).expect("saved config");
+        writeln!(output, "saved theme: {:?}", saved.theme).expect("write saved theme");
+        themed.setup_saved(generation, Ok(saved));
+        writeln!(
+            output,
+            "{} after save acknowledgement: {}",
+            target.label(),
+            rendered_theme_colors(&mut themed, target)
+        )
+        .expect("write applied theme colors");
+        themed.begin_setup();
+        choose_by_keyboard(&mut themed, "interface");
+        choose_by_keyboard(&mut themed, "theme");
+    }
+
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "settings-root", &output);
 }
 

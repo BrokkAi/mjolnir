@@ -701,7 +701,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
         }
         "theme" => {
-            "Colors for the terminal dashboard and conversation. Applies immediately after saving Settings."
+            "Dashboard and conversation colors. Terminal Dark and Light use the terminal's own colors. Applies after saving."
         }
         "profiles" => {
             "Add a profile for each agent you want to run, or use Detect profiles to find installed agents."

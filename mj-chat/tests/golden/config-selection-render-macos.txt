@@ -469,6 +469,188 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
+=== ASCII selector in Campbell theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in One Half Dark theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in One Half Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Solarized Dark theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Solarized Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Terminal Dark theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
+=== ASCII selector in Terminal Light theme (100x24) ===
++ Conversation ------------------------------------------------------------------------------------+
+| No messages yet — send a prompt to begin.                                                        |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|                                                                                                  |
+|      + model +                                                                                   |
+|      |  Auto |                                                                                   |
+|      |x Luna |                                                                                   |
+|      |  Terra|                                                                                   |
++------+-------+-----------------------------------------------------------------------------------+
++ mic  Luna v · high v ----------------------------------------------------------------------------+
+|> What would you like to build?                                                                   |
+|                                                                                                  |
++ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
+Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
+
 === ASCII selector in Monochrome theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
 | No messages yet — send a prompt to begin.                                                        |

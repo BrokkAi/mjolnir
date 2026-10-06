@@ -152,6 +152,197 @@ const HIGH_CONTRAST: Palette = Palette {
     reverse_video: false,
 };
 
+// The Windows Terminal palettes keep the scheme's own background so the
+// window padding the terminal paints matches the dashboard canvas. Scheme
+// colors that fall under 4.5:1 on a surface are lifted or deepened in hue.
+
+const CAMPBELL: Palette = Palette {
+    background: rgb(12, 12, 12),
+    surface_raised: rgb(34, 34, 34),
+    surface: rgb(19, 19, 19),
+    // Campbell's blue, darkened to carry every status color.
+    selection: rgb(23, 42, 84),
+    text: rgb(204, 204, 204),
+    muted: rgb(152, 152, 152),
+    border: rgb(78, 78, 78),
+    accent: rgb(97, 214, 214),
+    secondary: rgb(97, 156, 255),
+    success: rgb(22, 198, 12),
+    warning: rgb(193, 156, 0),
+    error: rgb(240, 108, 118),
+    session_error: rgb(240, 108, 118),
+    session_activity: rgb(193, 156, 0),
+    session_attention: rgb(249, 241, 165),
+    session_idle: rgb(97, 156, 255),
+    activity_dim: rgb(60, 20, 24),
+    pins: DARK_PINS,
+    reverse_video: false,
+};
+
+const ONE_HALF_DARK: Palette = Palette {
+    background: rgb(40, 44, 52),
+    surface_raised: rgb(50, 56, 66),
+    surface: rgb(44, 49, 58),
+    selection: rgb(52, 64, 84),
+    text: rgb(220, 223, 228),
+    muted: rgb(166, 173, 184),
+    border: rgb(90, 99, 116),
+    accent: rgb(94, 186, 197),
+    secondary: rgb(105, 179, 240),
+    success: rgb(152, 195, 121),
+    warning: rgb(229, 192, 123),
+    error: rgb(233, 149, 156),
+    session_error: rgb(233, 149, 156),
+    session_activity: rgb(229, 192, 123),
+    session_attention: rgb(240, 208, 150),
+    session_idle: rgb(105, 179, 240),
+    activity_dim: rgb(74, 48, 56),
+    pins: DARK_PINS,
+    reverse_video: false,
+};
+
+const ONE_HALF_LIGHT: Palette = Palette {
+    background: rgb(250, 250, 250),
+    surface_raised: rgb(240, 240, 241),
+    surface: rgb(255, 255, 255),
+    selection: rgb(222, 230, 242),
+    text: rgb(56, 58, 66),
+    muted: rgb(99, 101, 110),
+    border: rgb(160, 161, 167),
+    accent: rgb(1, 108, 154),
+    secondary: rgb(166, 38, 164),
+    success: rgb(56, 113, 55),
+    warning: rgb(135, 92, 1),
+    error: rgb(173, 65, 55),
+    session_error: rgb(173, 65, 55),
+    session_activity: rgb(135, 92, 1),
+    session_attention: rgb(135, 92, 1),
+    session_idle: rgb(7, 110, 131),
+    activity_dim: rgb(236, 200, 196),
+    pins: LIGHT_PINS,
+    reverse_video: false,
+};
+
+// Solarized keeps its base tones and accent hues. Its accents sit near 3:1 on
+// its own background, so each is lifted (dark) or deepened (light) to 4.5:1.
+
+const SOLARIZED_DARK: Palette = Palette {
+    background: rgb(0, 43, 54),
+    surface_raised: rgb(7, 54, 66),
+    surface: rgb(3, 47, 59),
+    selection: rgb(12, 66, 80),
+    text: rgb(238, 232, 213),
+    muted: rgb(159, 171, 171),
+    border: rgb(88, 110, 117),
+    accent: rgb(91, 183, 176),
+    secondary: rgb(105, 175, 224),
+    success: rgb(162, 177, 61),
+    warning: rgb(199, 165, 61),
+    error: rgb(236, 142, 141),
+    session_error: rgb(236, 142, 141),
+    session_activity: rgb(199, 165, 61),
+    session_attention: rgb(225, 151, 120),
+    session_idle: rgb(105, 175, 224),
+    activity_dim: rgb(58, 42, 50),
+    pins: DARK_PINS,
+    reverse_video: false,
+};
+
+const SOLARIZED_LIGHT: Palette = Palette {
+    background: rgb(253, 246, 227),
+    surface_raised: rgb(238, 232, 213),
+    surface: rgb(255, 250, 236),
+    selection: rgb(229, 222, 196),
+    text: rgb(7, 54, 66),
+    muted: rgb(81, 98, 105),
+    border: rgb(147, 161, 161),
+    accent: rgb(28, 108, 102),
+    secondary: rgb(28, 101, 153),
+    success: rgb(89, 103, 0),
+    warning: rgb(121, 92, 0),
+    error: rgb(183, 42, 39),
+    session_error: rgb(183, 42, 39),
+    session_activity: rgb(121, 92, 0),
+    session_attention: rgb(168, 62, 18),
+    session_idle: rgb(28, 101, 153),
+    activity_dim: rgb(240, 205, 195),
+    pins: LIGHT_PINS,
+    reverse_video: false,
+};
+
+// The Terminal palettes name slots of the terminal's 16-color table, so the
+// user's scheme decides the actual shades. Each slot takes the variant that
+// stays readable across the common schemes: Campbell's normal blue and
+// magenta are too dark on black, and Solarized maps several bright colors to
+// its grays. Muted text and borders take fixed grays from the 256-color ramp,
+// which no scheme redefines: bright black, the usual choice, is Solarized's
+// background highlight and too dim on One Half Dark and Tango. See [`ansi`]
+// for why every slot is a 256-color index.
+
+const TERMINAL_DARK: Palette = Palette {
+    background: Color::Reset,
+    surface_raised: Color::Reset,
+    surface: Color::Reset,
+    selection: Color::Reset,
+    text: Color::Reset,
+    muted: ansi(246),
+    border: ansi(243),
+    accent: ansi(6),
+    secondary: ansi(12),
+    success: ansi(2),
+    warning: ansi(3),
+    error: ansi(9),
+    session_error: ansi(9),
+    session_activity: ansi(3),
+    session_attention: ansi(3),
+    session_idle: ansi(12),
+    activity_dim: ansi(1),
+    pins: [
+        ansi(6),
+        ansi(13),
+        ansi(2),
+        ansi(3),
+        ansi(12),
+        ansi(9),
+        ansi(14),
+        ansi(7),
+    ],
+    reverse_video: true,
+};
+
+const TERMINAL_LIGHT: Palette = Palette {
+    background: Color::Reset,
+    surface_raised: Color::Reset,
+    surface: Color::Reset,
+    selection: Color::Reset,
+    text: Color::Reset,
+    muted: ansi(242),
+    border: ansi(248),
+    // Light schemes keep their bright colors pale, so only the normal eight
+    // and the two blacks carry text.
+    accent: ansi(4),
+    secondary: ansi(5),
+    success: ansi(2),
+    warning: ansi(3),
+    error: ansi(1),
+    session_error: ansi(1),
+    session_activity: ansi(3),
+    session_attention: ansi(3),
+    session_idle: ansi(4),
+    activity_dim: ansi(1),
+    pins: [
+        ansi(4),
+        ansi(5),
+        ansi(2),
+        ansi(1),
+        ansi(6),
+        ansi(3),
+        ansi(0),
+        ansi(8),
+    ],
+    reverse_video: true,
+};
+
 /// No colors: every slot is the terminal's own default, and the style
 /// functions below carry focus and selection with bold and reverse video.
 const MONO: Palette = Palette {
@@ -215,6 +406,13 @@ pub fn palette_for(theme: UiTheme) -> &'static Palette {
         UiTheme::Light => &LIGHT,
         UiTheme::Darcula => &DARCULA,
         UiTheme::HighContrast => &HIGH_CONTRAST,
+        UiTheme::Campbell => &CAMPBELL,
+        UiTheme::OneHalfDark => &ONE_HALF_DARK,
+        UiTheme::OneHalfLight => &ONE_HALF_LIGHT,
+        UiTheme::SolarizedDark => &SOLARIZED_DARK,
+        UiTheme::SolarizedLight => &SOLARIZED_LIGHT,
+        UiTheme::TerminalDark => &TERMINAL_DARK,
+        UiTheme::TerminalLight => &TERMINAL_LIGHT,
         UiTheme::Mono => &MONO,
     }
 }
@@ -521,6 +719,18 @@ pub fn with_theme<R>(theme: UiTheme, render: impl FnOnce() -> R) -> R {
 )]
 const fn rgb(red: u8, green: u8, blue: u8) -> Color {
     Color::Rgb(red, green, blue)
+}
+
+/// A 256-color index (`38;5;n`). Indexes 0-15 are the terminal's own scheme
+/// colors, written this way rather than as SGR 30-37 because Windows
+/// Terminal, xterm and Alacritty draw bold text in the bright variant of a
+/// 30-37 color; on a light scheme that turns a bold blue title pale.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The terminal palettes name the user's own scheme colors and leave the background to that scheme."
+)]
+const fn ansi(index: u8) -> Color {
+    Color::Indexed(index)
 }
 
 /// The canvas beneath panels and modal halos.
@@ -972,6 +1182,39 @@ mod tests {
             mono_rows,
             &mono_styles,
         ));
+
+        // A terminal palette's contrast belongs to the user's scheme, so its
+        // record is the styles that carry selection and focus.
+        for theme in [UiTheme::TerminalDark, UiTheme::TerminalLight] {
+            let (rows, styles) = with_theme(theme, || {
+                let styles = format!(
+                    "selection: {:?}; raised: {:?}; active control: {:?}; focus control: {:?}; field: {:?}; focused border: {:?}",
+                    selection(true),
+                    raised(),
+                    active_control(),
+                    focus_control(),
+                    field(true),
+                    border(true),
+                );
+                let palette = palette();
+                let rows = vec![Line::from(vec![
+                    Span::styled("selected", selection(true)),
+                    Span::raw(" "),
+                    Span::styled("focus", focus_control()),
+                    Span::raw(" "),
+                    Span::styled("muted", muted()),
+                    Span::raw(" "),
+                    Span::styled("error", Style::default().fg(palette.error)),
+                ])];
+                (rows, format!("{styles}\n{palette:?}"))
+            });
+            output.push_str(&rendered_theme_rows(
+                &format!("{theme:?} controls"),
+                40,
+                rows,
+                &styles,
+            ));
+        }
 
         for theme in UiTheme::ALL {
             if palette_for(theme).reverse_video {

@@ -97,6 +97,21 @@ pub enum UiTheme {
     #[serde(rename = "darcula", alias = "dracula")]
     Darcula,
     HighContrast,
+    /// Windows Terminal's default scheme.
+    Campbell,
+    /// Windows Terminal's One Half Dark scheme.
+    OneHalfDark,
+    /// Windows Terminal's One Half Light scheme.
+    OneHalfLight,
+    /// Solarized's dark scheme, as Windows Terminal ships it.
+    SolarizedDark,
+    /// Solarized's light scheme, as Windows Terminal ships it.
+    SolarizedLight,
+    /// The terminal's own background, foreground, and 16 ANSI colors, picked
+    /// for a dark scheme. Selection and focus use reverse video.
+    TerminalDark,
+    /// As [`Self::TerminalDark`], with ANSI colors picked for a light scheme.
+    TerminalLight,
     /// No colors at all: the terminal's own foreground and background, with
     /// bold and reverse video carrying focus and selection. Chosen
     /// automatically when the `NO_COLOR` environment variable is set.
@@ -104,11 +119,18 @@ pub enum UiTheme {
 }
 
 impl UiTheme {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 12] = [
         Self::Midnight,
         Self::Light,
         Self::Darcula,
         Self::HighContrast,
+        Self::Campbell,
+        Self::OneHalfDark,
+        Self::OneHalfLight,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::TerminalDark,
+        Self::TerminalLight,
         Self::Mono,
     ];
 
@@ -118,6 +140,13 @@ impl UiTheme {
             Self::Light => "Light",
             Self::Darcula => "Darcula",
             Self::HighContrast => "High Contrast",
+            Self::Campbell => "Campbell",
+            Self::OneHalfDark => "One Half Dark",
+            Self::OneHalfLight => "One Half Light",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::TerminalDark => "Terminal Dark",
+            Self::TerminalLight => "Terminal Light",
             Self::Mono => "Monochrome",
         }
     }
