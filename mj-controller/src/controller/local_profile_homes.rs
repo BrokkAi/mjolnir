@@ -32,7 +32,6 @@
 
 use std::path::{Path, PathBuf};
 
-use mj_core::config::HarnessKind;
 use mj_core::state::{State, TargetLocator};
 use mj_core::worker_launch::installed_harness_home;
 
@@ -59,8 +58,9 @@ pub fn link_profile_homes_of_earlier_sessions(state: &State) -> Vec<LinkedProfil
         let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
             continue;
         };
-        // Muse always ran from a per-session root under the data directory.
-        if session.harness_kind == HarnessKind::Muse {
+        // A harness with a nested home always ran from a per-session root
+        // under the data directory.
+        if session.harness_kind.nested_home() {
             continue;
         }
         match link_profile_home(worker_root) {
@@ -130,7 +130,7 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
     let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
         return true;
     };
-    if session.harness_kind == HarnessKind::Muse {
+    if session.harness_kind.nested_home() {
         return true;
     }
     std::fs::symlink_metadata(worker_root.join("profile")).is_ok_and(|metadata| metadata.is_dir())
@@ -167,6 +167,7 @@ pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use mj_core::config::HarnessKind;
 
     fn session(
         id: &str,

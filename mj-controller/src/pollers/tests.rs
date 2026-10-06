@@ -1138,10 +1138,10 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
             mj_core::skills::SkillsScope::Localhost
         );
 
-        // Muse's staged root lies under the data directory, and Muse never
-        // ran from its profile home, so it has no linked form.
+        // A nested home (Muse, OpenCode) always ran from a per-session root
+        // under the data directory, so it has no linked form.
         #[cfg(unix)]
-        if kind != mj_core::config::HarnessKind::Muse {
+        if !kind.nested_home() {
             std::fs::remove_dir(worker_root.join("profile")).unwrap();
             std::os::unix::fs::symlink(&home, worker_root.join("profile")).unwrap();
             assert!(credential_sync_targets(&controller).is_empty(), "{kind:?}");
