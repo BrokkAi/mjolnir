@@ -11,7 +11,7 @@ Users must be able to select native sub-agents in Move and retry a failed sealed
 - [x] (2026-10-06) Recover the live session with native sub-agents and opus, preserving original recovery data.
 - [x] Trace Move selection and Claude configuration ownership.
 - [x] (2026-10-06) Fix Move policy selection and retained retry settings. Controller suite passed (1875); TUI suite passed except the expected golden action change, which passed after updating and rechecking its fixture. Workspace Clippy passed. Commit this coherent checkpoint.
-- [ ] Reproduce and fix Claude model identity contamination; validate and commit.
+- [x] (2026-10-06) Fix effort-response model contamination and persist canonical aliases after successful startup restoration. Core tests passed (456 plus 2 integration tests), configuration regressions passed (15), worker binary/integration tests passed, and workspace plus final worker Clippy passed. Commit this coherent checkpoint.
 - [ ] Run final required checks and push both commits to upstream.
 
 ## Surprises & Discoveries
@@ -26,7 +26,7 @@ Keep the sealed Move as the owner of retry settings and reject an explicitly dif
 
 ## Outcomes & Retrospective
 
-The TUI now sends its displayed policy explicitly and checks that confirmation matches it. The daemon takes omitted retry defaults from the sealed Move and accepts legacy equivalent policy spellings. Controller tests passed (1875), and the TUI tests passed (521) after the expected golden action update. Live recovery is complete; no further live session mutation is needed. Model implementation is complete; its final full-suite validation remains in progress.
+The TUI now sends its displayed policy explicitly and checks that confirmation matches it. The daemon takes omitted retry defaults from the sealed Move and accepts legacy equivalent policy spellings. Controller tests passed (1875), and the TUI tests passed (521) after the expected golden action update. Live recovery is complete; no further live session mutation is needed. Model implementation is complete. The full worker unit run passed 635 cases and found two failures: the expanded raw-ID fake affected the pin test, fixed by making that behavior opt-in; and a separate checkpoint ownership test failed once under parallel load and passed twice in isolation. All affected configuration tests (15), worker binary and integration targets, core tests, formatting, and Clippy passed. Documentation-test checks and push remain.
 
 ## Context and Orientation
 
@@ -40,7 +40,7 @@ The original archive records an explicit model selection of claude-fable-5-1. Is
 
 ## Concrete Steps
 
-Work from `/home/jonathan/Projects/mjolnir`. Use normal mbx Cargo storage and elevated test commands. During each round run affected tests with `cargo test -p brokk-mj-controller <filter>`, `cargo test -p brokk-mjolnir <filter>`, or `cargo test -p brokk-mj-worker <filter>`. Once edits finish run the full suites of touched crates and `cargo clippy --all-targets -- -D warnings`, plus `cargo fmt --all -- --check` and `git diff --check`. Commit coherent fixes on the current branch and push upstream as requested.
+Work from `/home/jonathan/Projects/mjolnir`. Use normal mbx Cargo storage and elevated test commands. During each round run affected tests with `cargo test -p brokk-mj-controller <filter>`, `cargo test -p brokk-mjolnir <filter>`, or `cargo test -p brokk-mj-worker <filter>`. Once edits finish run the full suites of touched crates, recheck only failing tests after fixture corrections, complete any targets Cargo skipped after a failure, and `cargo clippy --all-targets -- -D warnings`, plus `cargo fmt --all -- --check` and `git diff --check`. Commit coherent fixes on the current branch and push upstream as requested.
 
 ## Validation and Acceptance
 
@@ -63,3 +63,5 @@ Revision: created after live recovery, documenting both authorized fixes and pus
 Revision: user confirmed explicit Native selection in the TUI. Discarded unrelated CLI work; the TUI now sends its draft policy explicitly and refuses an inconsistent confirmation. Installed SDK probes reproduced the catalogue spelling difference but both IDs were accepted, so the original API refusal remains unexplained.
 
 Revision: Move implementation validated with the full controller and TUI suites, including the expected golden request change. The model fix additionally persists aliases accepted during startup, after session readiness, and checks the recovered journal value.
+
+Revision: model identity regressions and remaining binary/integration targets passed. The original Fable API refusal remains unreproduced; the code fixes the verified ownership and canonicalization defects without inventing model-family mappings. Documentation checks and upstream push remain.

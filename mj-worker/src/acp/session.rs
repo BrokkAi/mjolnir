@@ -385,6 +385,7 @@ pub(super) async fn serve_session(
     // the wrong model and Claude Code refused it (R8-2).
     let mut dropped_selectors: Vec<(&'static str, String)> = Vec::new();
     let mut selector_failures = Vec::new();
+    let mut normalized_selectors = Vec::new();
     {
         let accepted = spec
             .accepted_config
@@ -403,6 +404,11 @@ pub(super) async fn serve_session(
                 &value,
             )
             .await;
+            if let Ok(applied) = &applied
+                && applied != &value
+            {
+                normalized_selectors.push((key, applied.clone()));
+            }
             if let Err(error) = applied {
                 // Model selection is recoverable even when the catalogue lists
                 // it: API validation can refuse a listed model. Keep the worker
@@ -611,6 +617,12 @@ pub(super) async fn serve_session(
         )
         .await?;
     }
+    for (key, value) in &normalized_selectors {
+        spec.accepted_config
+            .lock()
+            .map_err(|_| anyhow!("accepted session configuration lock was poisoned"))?
+            .remember(key, value, &config_options);
+    }
     emit_runtime_event(
         events,
         RuntimeEvent::SessionConfigured {
@@ -625,6 +637,22 @@ pub(super) async fn serve_session(
         },
     )
     .await?;
+
+    // A successful restore can map a saved transcript ID onto the current
+    // picker alias. Persist that accepted spelling only after startup is ready;
+    // ConfigApplied also publishes a configured session to the relay.
+    for (key, value) in normalized_selectors {
+        emit_runtime_event(
+            events,
+            RuntimeEvent::ConfigApplied {
+                request_id: String::new(),
+                key: key.to_owned(),
+                value,
+                config_options: config_options.clone(),
+            },
+        )
+        .await?;
+    }
 
     // The transcript keeps the evidence that this session changed selector
     // even after the question below is answered and gone.
