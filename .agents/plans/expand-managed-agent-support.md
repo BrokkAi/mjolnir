@@ -11,11 +11,12 @@ The result should feel like a managed Mjolnir session: installation, launch, app
 ## Progress
 
 - [x] (2026-09-23) Reassess the earlier per-agent plan against the registry and current product availability.
+- [x] (2026-10-06) Shipped OpenCode as a sixth built-in harness kind, reusing the existing pinned-harness, ACP bridge, staging, and continuity paths.
 - [ ] Build a cached, filterable registry catalog and a durable selected-agent profile.
-- [ ] Run one registry agent, starting with OpenCode, through a generic ACP worker path.
+- [ ] Run one registry agent through a generic ACP worker path; deferred behind the built-in OpenCode support.
 - [ ] Validate capabilities and continuity across daemon and worker lifecycles.
 - [ ] Add Antigravity through its official ACP server; evaluate other candidates afterward.
-- [ ] Complete isolated behavior tests, full Rust checks, and documentation; commit each validated milestone.
+- [x] (2026-10-06) Complete isolated behavior tests, documentation, and full Rust checks for OpenCode; commit each validated milestone.
 
 ## Surprises & Discoveries
 
@@ -23,6 +24,7 @@ The result should feel like a managed Mjolnir session: installation, launch, app
 - The [registry entry for Antigravity](https://github.com/agentclientprotocol/registry/blob/main/antigravity-acp/agent.json) supplies a separate `agy_acp_server` binary, not the `agy` CLI. It currently has platform downloads but no published SHA-256 in its manifest.
 - [Google announced](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) the end of Gemini CLI consumer free/Pro/Ultra access after June 18, 2026, while enterprise and paid API access remain. Gemini should therefore be hidden by default, not described as unavailable to everyone.
 - The registry describes launch artifacts. It does not certify authentication, approvals, session restore, checkpointing, quota visibility, or review integration.
+- OpenCode's release layout matches Kimi and Grok: a pinned GitHub release installed with curl and Bash, started with an ACP subcommand. Shipping it as a built-in kind avoided the registry catalog, pinning, and trust work the generic path still needs.
 
 ## Decision Log
 
@@ -38,10 +40,17 @@ The result should feel like a managed Mjolnir session: installation, launch, app
 - Decision: Gate lifecycle features on observed behavior and tested adapters.
   Rationale: Registry presence alone does not establish managed-session continuity, approvals, or authentication.
   Date/Author: 2026-09-23 / Codex.
+- Decision: Implement OpenCode as a sixth built-in harness now and keep the registry-backed generic ACP path deferred.
+  Rationale: OpenCode reuses the proven pinned-install and ACP bridge paths, so users get it without waiting on the registry catalog and manifest trust rules.
+  Date/Author: 2026-10-06 / Codex.
 
 ## Outcomes & Retrospective
 
-Planning revised; implementation has not begun under this revision. Update this section after each milestone with observed behavior and any changes to scope.
+2026-10-06: OpenCode is a supported built-in harness: profiles, `mj login`,
+pinned runtime installation, staged homes, checkpoints, quota visibility,
+nested-home cleanup, import exclusion, and a breaking database migration (74)
+that admits the new kind. The registry-backed generic ACP path from this
+revision remains unimplemented and deferred.
 
 ## Context and Orientation
 

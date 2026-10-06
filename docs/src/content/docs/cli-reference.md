@@ -91,7 +91,8 @@ See [profiles and harnesses](/profiles/) for home directories, credential handli
 mj import <harness> (--session <uuid> | --latest) [options]
 ```
 
-`<harness>` is one of `claude`, `codex`, `kimi`, `grok`, or `muse`.
+`<harness>` is one of `claude`, `codex`, `kimi`, `grok`, or `muse`. OpenCode
+keeps its sessions in a SQLite database, so it cannot be imported yet.
 
 | Option | Meaning |
 | --- | --- |

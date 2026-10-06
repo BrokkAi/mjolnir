@@ -13,16 +13,17 @@ isolation always
 selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
-`bypassPermissions`, Kimi Code `auto`, or Grok Build's `--always-approve`
-launch flag. Muse uses `allowAll`, `--disable-sandbox`, and the staged
+`bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
+flag, or OpenCode's `"permission": "allow"` config setting. Muse uses
+`allowAll`, `--disable-sandbox`, and the staged
 `:unrestricted` profile. Every one of those approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
 Bare localhost sessions preserve configured approvals for supported harnesses.
-Codex, Claude Code, and Grok Build expose guardian modes; Kimi Code and Muse
-Code do not, and Muse always runs unconstrained. Mjolnir warns against running an
-unsupported harness on a raw, unsandboxed target.
+Codex, Claude Code, Grok Build, and OpenCode expose guardian modes; Kimi Code
+and Muse Code do not, and Muse always runs unconstrained. Mjolnir warns against
+running an unsupported harness on a raw, unsandboxed target.
 
 A container session's repository content always comes from a network clone. A
 local session that runs the agent in a directory on this machine can still move
@@ -84,8 +85,8 @@ a native `mj-worker` for local bare sessions.
 
 Mjolnir ships a reference container image with everything a session needs
 pre-installed: Rust, cargo-nextest, Node 24, OpenJDK 25, Git, GitHub CLI, the
-Codex and Claude ACP bridges, and Muse Code with `muse-acp`. Kimi and Grok
-install on demand. It also carries Playwright's Chromium system
+Codex and Claude ACP bridges, and Muse Code with `muse-acp`. Kimi, Grok, and
+OpenCode install on demand. It also carries Playwright's Chromium system
 libraries and the pre-installed Chromium headless shell in
 `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`, so headless browser tests need no
 privileged install and no run-time browser download, and the profiling tools
