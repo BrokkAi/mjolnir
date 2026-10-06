@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use mj_core::state::{State, TargetLocator};
 use mj_core::worker_launch::installed_harness_home;
 
-use crate::targets::{CommandExecutor, CommandSpec};
+use crate::targets::CommandExecutor;
 
 /// A session whose staged home was linked to the profile home its worker runs
 /// from.
@@ -139,8 +139,9 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
 /// The argument lists of every process running on this machine, or `None`
 /// when they cannot be listed. The same `ps` options work on Linux and macOS,
 /// and `-ww` keeps long arguments whole.
+#[cfg(unix)]
 pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<String>> {
-    let command = CommandSpec::new("ps", ["-A", "-ww", "-o", "args="])
+    let command = crate::targets::CommandSpec::new("ps", ["-A", "-ww", "-o", "args="])
         .purpose("list running processes before removing files they may be using");
     match executor.execute(&command) {
         Ok(output) if output.status == 0 => Some(
@@ -161,6 +162,52 @@ pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<
             tracing::warn!("could not list running processes: {error:#}");
             None
         }
+    }
+}
+
+/// [`running_process_arguments`] where there is no `ps`: each process's
+/// command line as Windows reports it, its arguments joined with spaces the
+/// way `ps` prints them. A process whose command line cannot be read lists
+/// as empty. An empty listing cannot be right, since it would not even hold
+/// this process, so it counts as one that failed.
+#[cfg(not(unix))]
+pub fn running_process_arguments(_executor: &impl CommandExecutor) -> Option<Vec<String>> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::new().with_cmd(sysinfo::UpdateKind::Always),
+    );
+    let arguments = system
+        .processes()
+        .values()
+        .map(|process| {
+            process
+                .cmd()
+                .iter()
+                .map(|argument| argument.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    if arguments.iter().all(String::is_empty) {
+        tracing::warn!("could not list running processes: no command line was readable");
+        return None;
+    }
+    Some(arguments)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    // sysinfo fills command lines only when the refresh asks for them, and
+    // reads them from each process's memory. The sweep's guard depends on
+    // this process's own command line showing up whole.
+    #[test]
+    fn running_process_arguments_include_this_process() {
+        let own = std::env::args().collect::<Vec<_>>().join(" ");
+        let running = super::running_process_arguments(&crate::targets::ProcessExecutor)
+            .expect("list running processes");
+        assert!(running.contains(&own), "{own:?} not in {} processes", running.len());
     }
 }
 
