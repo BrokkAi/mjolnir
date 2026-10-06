@@ -595,6 +595,7 @@ mod tests {
         assert!(!super::WorkerRestartLeftNoWorker::marks(&slow), "{slow:#}");
     }
 
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

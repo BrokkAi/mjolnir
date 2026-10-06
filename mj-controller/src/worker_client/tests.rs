@@ -868,6 +868,7 @@ fn catch_up_page_stops_at_the_frontier_captured_before_stream_growth() {
     assert_eq!(clipped.events.last().unwrap().ordinal, 2);
 }
 
+#[cfg(unix)]
 fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
     CredentialSyncTarget {
         session_id: SESSION_ID.into(),

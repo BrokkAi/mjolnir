@@ -1048,6 +1048,7 @@ pub(super) fn install_worker_over_ssh(
 mod mbx_shim_tests {
     use super::*;
 
+    #[cfg(unix)]
     fn execute_script(
         script: &str,
         arguments: impl IntoIterator<Item = String>,
@@ -1073,6 +1074,7 @@ mod mbx_shim_tests {
         targets::ProcessExecutor.execute(&command).unwrap()
     }
 
+    #[cfg(unix)]
     fn run_script(script: &str, arguments: impl IntoIterator<Item = String>) {
         let output = execute_script(script, arguments, None, None);
         assert_eq!(

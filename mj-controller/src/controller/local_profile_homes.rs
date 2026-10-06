@@ -164,11 +164,10 @@ pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     fn session(
         id: &str,
         harness: HarnessKind,
@@ -182,7 +181,6 @@ mod tests {
         session
     }
 
-    #[cfg(unix)]
     fn install_launch(worker_root: &Path, launch: serde_json::Value) {
         std::fs::create_dir_all(worker_root).unwrap();
         std::fs::write(
@@ -195,7 +193,6 @@ mod tests {
     /// A Codex session an earlier release started from `~/.codex` keeps
     /// running from it: its staged home links there, so a relaunch and a
     /// checkpoint find its login and its native transcript.
-    #[cfg(unix)]
     #[test]
     fn an_earlier_session_s_staged_home_links_to_the_home_its_worker_uses() {
         let directory = tempfile::tempdir().unwrap();

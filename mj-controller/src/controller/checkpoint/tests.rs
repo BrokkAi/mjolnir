@@ -1221,7 +1221,6 @@ fn latch_relay_child_serves_stdio() {
     }
 }
 
-#[cfg(unix)]
 fn record_test_subagent_admission(relay_root: &Path, open: bool) {
     let queue_path = relay_root
         .parent()
