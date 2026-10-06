@@ -147,6 +147,8 @@ Creates and verifies a recovery copy for an active session. It waits for a safe 
 mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--queue discard|start] [--clear-resources] [--yes] [--json]
         [--prepare] [--allow-large-transfer] [--exclude <repository>:<path>]...
+        [--subagents native|single-model|none]
+        [--subagent-model <model>] [--subagent-effort <effort>]
 mj move-sources --session <id> [--cleanup <operation-id> --yes]
 ```
 
@@ -161,6 +163,13 @@ Move inherits the source resource sizing and attached directories by default.
 `--clear-resources` explicitly removes inherited sizing so the destination
 uses its configured defaults; attached directories remain part of the fixed
 workspace selection.
+
+`--subagents native` switches to the harness's native sub-agents;
+`--subagents none` disables delegation. For a fixed Mjolnir child model, pass
+`--subagents single-model --subagent-model <model>` and optionally
+`--subagent-effort <effort>`. Omitting these options retains the session's
+policy. A retry of a sealed Move retains its recorded policy; an explicit
+different policy is refused.
 
 A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
