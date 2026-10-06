@@ -647,6 +647,7 @@ fn read_private_key_file(path: &std::path::Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("read GitHub App private key {}", path.display()))
 }
 
+#[cfg(unix)]
 fn validate_private_key_metadata(
     path: &std::path::Path,
     file_uid: u32,
@@ -1113,6 +1114,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn private_key_permissions_require_daemon_ownership_and_private_mode() {
         let path = std::path::Path::new("/var/lib/mj/github-app.pem");
