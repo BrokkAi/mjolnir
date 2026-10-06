@@ -246,7 +246,8 @@ pub enum SymbolSet {
 ///
 /// `Terminal` rings the terminal bell and works over SSH and inside a
 /// multiplexer, which is why it is the default. `System` also posts a desktop
-/// notification through `osascript` on macOS or `notify-send` on Linux.
+/// notification through `osascript` on macOS, `notify-send` on Linux, or a
+/// PowerShell toast on Windows.
 /// `Off` reports nothing. Independently of the mode, `title` keeps the
 /// terminal window title showing how many sessions are waiting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
