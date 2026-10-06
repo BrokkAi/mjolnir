@@ -76,6 +76,8 @@ pub(crate) enum DialogControl {
     NoticeLogClose,
     SessionCpuReportTabs,
     SessionCpuReportRows,
+    SessionCpuReportHourly,
+    SessionCpuReportRecent,
     SessionCpuReportClose,
 }
 
@@ -127,6 +129,8 @@ pub(crate) struct SessionCpuReportDialog {
     pub(crate) selected_session_id: RefCell<Option<String>>,
     /// Used to choose the nearest row if the selected session leaves the report.
     pub(crate) selected_row: std::cell::Cell<usize>,
+    /// The figure the report shows, sorts by and totals.
+    pub(crate) metric: std::cell::Cell<crate::session_cpu_report::CpuMetric>,
     pub(crate) form: RefCell<Dialog<DialogControl>>,
 }
 
@@ -1302,7 +1306,7 @@ impl DashboardState {
         event: Event,
         mut dialog: SessionCpuReportDialog,
     ) -> DashboardAction {
-        let groups = crate::session_cpu_report::report_groups(self);
+        let groups = crate::session_cpu_report::report_groups(self, dialog.metric.get());
         let group_index = reconcile_session_cpu_report(self, &dialog, &groups);
         if let Event::Key(key) = &event
             && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
@@ -1349,7 +1353,11 @@ impl DashboardState {
                         self.mode = Mode::SessionCpuReport(dialog);
                         return DashboardAction::None;
                     }
-                    Some(DialogControl::SessionCpuReportClose) => {}
+                    Some(
+                        DialogControl::SessionCpuReportClose
+                        | DialogControl::SessionCpuReportHourly
+                        | DialogControl::SessionCpuReportRecent,
+                    ) => {}
                     Some(DialogControl::SessionCpuReportRows) | None => {
                         if let Some(session_id) = dialog.selected_session_id.borrow().clone() {
                             self.record_event_handled();
@@ -1369,6 +1377,18 @@ impl DashboardState {
             }
             Some(Interaction::Select(DialogControl::SessionCpuReportTabs, index)) => {
                 switch_session_cpu_report_tab(&dialog, &groups, index);
+                self.mode = Mode::SessionCpuReport(dialog);
+            }
+            Some(Interaction::Activate(DialogControl::SessionCpuReportHourly)) => {
+                dialog
+                    .metric
+                    .set(crate::session_cpu_report::CpuMetric::Hourly);
+                self.mode = Mode::SessionCpuReport(dialog);
+            }
+            Some(Interaction::Activate(DialogControl::SessionCpuReportRecent)) => {
+                dialog
+                    .metric
+                    .set(crate::session_cpu_report::CpuMetric::Recent);
                 self.mode = Mode::SessionCpuReport(dialog);
             }
             Some(Interaction::Activate(DialogControl::SessionCpuReportTabs)) => {
