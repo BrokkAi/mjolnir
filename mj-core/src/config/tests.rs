@@ -471,20 +471,29 @@ fn retired_stopped_session_filters_load_and_are_dropped_on_save() {
 }
 
 #[test]
-fn muse_home_mapping_keeps_config_credentials_and_session_data_together() {
-    let home = Path::new("/private/session/muse");
-    let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
-    HarnessKind::Muse.configure_home_environment(home, &mut environment);
-    assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
-    assert_eq!(environment["XDG_DATA_HOME"], "/private/session/muse/.data");
-    assert_eq!(
-        HarnessKind::Muse.home_from_environment(&environment["XDG_CONFIG_HOME"]),
-        home
-    );
-    assert_eq!(
-        harness_authentication_marker(HarnessKind::Muse, home),
-        home.join("auth.json")
-    );
+fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
+    for (kind, credential) in [
+        (HarnessKind::Muse, "auth.json"),
+        (HarnessKind::OpenCode, ".data/opencode/auth.json"),
+    ] {
+        let home = Path::new("/private/session").join(kind.id());
+        let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
+        kind.configure_home_environment(&home, &mut environment);
+        assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
+        assert_eq!(
+            environment["XDG_DATA_HOME"],
+            home.join(".data").to_string_lossy()
+        );
+        assert_eq!(
+            kind.home_from_environment(&environment["XDG_CONFIG_HOME"]),
+            home
+        );
+        assert_eq!(
+            harness_authentication_marker(kind, &home),
+            home.join(credential),
+            "{kind:?}"
+        );
+    }
 }
 
 fn sample_config() -> Config {
@@ -554,8 +563,8 @@ fn sample_config() -> Config {
 fn every_harness_is_pointed_at_its_staged_home() {
     for kind in HarnessKind::ALL {
         let mut environment = BTreeMap::new();
-        let home = Path::new("/private/session/muse");
-        kind.configure_home_environment(home, &mut environment);
+        let home = Path::new("/private/session").join(kind.id());
+        kind.configure_home_environment(&home, &mut environment);
         assert!(environment.contains_key(kind.home_env()), "{kind:?}");
         assert_eq!(
             kind.home_from_environment(&environment[kind.home_env()]),

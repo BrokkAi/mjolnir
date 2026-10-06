@@ -80,6 +80,18 @@ fn grok_credentials(expiries: &[&str]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::Value::Object(grants)).unwrap()
 }
 
+fn opencode_credentials(expires: i64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "anthropic": {
+            "type": "oauth",
+            "refresh": "refresh",
+            "access": "access",
+            "expires": expires,
+        }
+    }))
+    .unwrap()
+}
+
 fn snapshot(fingerprint: &str, freshness: Option<i64>) -> CredentialSnapshot {
     CredentialSnapshot {
         present: true,
@@ -144,6 +156,12 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             HarnessKind::Grok,
             grok_credentials(&["2026-08-17T02:19:01.724226598Z"]),
             Some(1_786_933_141_724),
+            None,
+        ),
+        (
+            HarnessKind::OpenCode,
+            opencode_credentials(1_756_000_000_000),
+            Some(1_756_000_000_000),
             None,
         ),
         (HarnessKind::Muse, b"{}".to_vec(), None, None),
