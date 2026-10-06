@@ -35,6 +35,11 @@ pub const INSTANCE_TAG: &str = "dev.mj.instance";
 /// `container_workspace_root`.
 pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
+/// Whether this machine runs Mjolnir workers itself. Windows is a controller
+/// only: its sessions run on Linux, in a container or on an SSH host, so it
+/// has no local bare target and no local worker to probe a profile with.
+pub const HOST_RUNS_WORKERS: bool = cfg!(unix);
+
 /// The launch phase a command belongs to, reported as launch progress.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProvisionStage {
