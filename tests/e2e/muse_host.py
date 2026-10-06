@@ -5,7 +5,10 @@ import os
 from pathlib import Path
 import sys
 
-SESSION = "01991be0-0000-7000-8000-000000000001"
+# muse-acp's auto-review starts its reviewer as another `muse serve` with
+# --no-session-log; that host answers each review with MJ_MUSE_TEST_REVIEW.
+REVIEWER = "--no-session-log" in sys.argv
+SESSION = "01991be0-0000-7000-8000-00000000000" + ("2" if REVIEWER else "1")
 turn = 0
 workspace = os.getcwd()
 mode = "promptUnmatched"
@@ -56,7 +59,9 @@ for line in sys.stdin:
         result = {"commandId": params.get("commandId"), "status": "accepted", "turnId": f"turn-{turn}",
                   "disposition": "started", "startedNewTurn": True}
         scenario = os.environ.get("MJ_MUSE_TEST_SCENARIO", "chat")
-        if scenario == "chat":
+        if REVIEWER:
+            after = "review"
+        elif scenario == "chat":
             after = "chat"
         elif scenario == "permission":
             after = "permission"
@@ -68,7 +73,13 @@ for line in sys.stdin:
         after = "cancel"
     send({"jsonrpc": "2.0", "id": request["id"], "result": result})
     base = {"sessionId": SESSION, "turnId": f"turn-{turn}"}
-    if after == "chat":
+    if after == "review":
+        verdict = {"allow": {"risk_level": "low", "user_authorization": "high", "outcome": "allow"},
+                   "deny": {"risk_level": "critical", "user_authorization": "unknown", "outcome": "deny"}}
+        verdict = {**verdict[os.environ["MJ_MUSE_TEST_REVIEW"]], "rationale": "test review"}
+        notify("item/completed", {**base, "item": {"itemId": f"review-{turn}", "kind": "agentMessage", "status": "completed", "text": json.dumps(verdict)}})
+        finish()
+    elif after == "chat":
         notify("item/completed", {**base, "item": {"itemId": f"message-{turn}", "kind": "agentMessage", "status": "completed", "text": "Muse test reply"}})
         finish()
     elif after == "permission":

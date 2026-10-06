@@ -98,30 +98,7 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
         let target = session.target_runtime_settings(&self.config)?;
-        let execution_policy = profile
-            .kind
-            .effective_execution_policy(target.execution_policy);
-        // A reviewer reads a change another agent wrote, so it must not run
-        // with more authority than the session it reviews. Muse has no
-        // guardian mode and always runs unconstrained.
-        if execution_policy.is_unconstrained() && !target.execution_policy.is_unconstrained() {
-            let session_unconstrained = self
-                .config
-                .profiles
-                .get(&session.last_profile)
-                .is_some_and(|session_profile| {
-                    session_profile
-                        .kind
-                        .effective_execution_policy(target.execution_policy)
-                        .is_unconstrained()
-                });
-            ensure!(
-                session_unconstrained,
-                "{} cannot review this session: it has no guardian approval mode, so it would run unconstrained while the session runs with approvals on target {:?}. Choose another reviewer, or run the session on a container target",
-                profile.kind.display_name(),
-                session.target_template_id
-            );
-        }
+        let execution_policy = target.execution_policy;
         let (backend, worker_root) = self.worker_placement(session_id)?;
 
         let staging = tempfile::tempdir().context("create reviewer staging directory")?;
@@ -777,42 +754,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unconstrained_reviewer_is_refused_for_a_session_that_runs_with_approvals() {
-        let directory = tempfile::tempdir().unwrap();
-        let (mut controller, session_id) = fixture(
-            directory.path(),
-            mj_core::state::TargetLocator::LocalBare {
-                worker_root: directory.path().join(SESSION_ID),
-            },
-        );
-        controller.config.profiles.insert(
-            "muse".into(),
-            HarnessProfile {
-                enabled: true,
-                kind: HarnessKind::Muse,
-                home: directory.path().join("muse"),
-                environment: BTreeMap::new().into(),
-                context_window_bytes: None,
-                subagents: Default::default(),
-                guardian_review_model: None,
-            },
-        );
-        let executor = RecordingExecutor::new();
-
-        // The fixture's Codex session runs with guardian approvals on a bare
-        // target; Muse would review it with none.
-        let error = controller
-            .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &executor)
-            .unwrap_err();
-
-        assert!(
-            format!("{error:#}").contains("cannot review this session"),
-            "{error:#}"
-        );
-        assert!(executor.commands.borrow().is_empty());
-    }
-
-    #[test]
     fn a_muse_reviewer_is_staged_with_the_permission_profile_its_policy_enforces() {
         let directory = tempfile::tempdir().unwrap();
         let worker_root = directory.path().join(SESSION_ID);
@@ -843,15 +784,6 @@ mod tests {
                 guardian_review_model: None,
             },
         );
-        // A Muse session already runs unconstrained, so a Muse reviewer gains
-        // nothing over it.
-        controller
-            .state
-            .sessions
-            .get_mut(&session_id)
-            .unwrap()
-            .last_profile = "muse".into();
-
         controller
             .stage_reviewer_profile_controlled(&session_id, "muse", 0, &[], &ProcessExecutor)
             .unwrap();
@@ -860,7 +792,8 @@ mod tests {
             &std::fs::read(worker_root.join("reviewer/profile/settings.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(staged["permissions"]["default_profile"], ":unrestricted");
+        // The fixture's bare target keeps configured approvals.
+        assert_eq!(staged["permissions"]["default_profile"], ":ask-me");
     }
 
     #[test]

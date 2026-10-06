@@ -841,4 +841,4 @@ const ACP_BRIDGE_RESTART_WARNING: &str = "ACP bridge restarting; reloading the n
 #[cfg(all(test, unix))]
 pub(crate) mod muse_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

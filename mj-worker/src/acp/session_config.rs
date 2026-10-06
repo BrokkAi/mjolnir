@@ -473,41 +473,53 @@ fn announced_mode_substitute(harness: HarnessKind, desired: &str) -> Option<&'st
     }
 }
 
+/// The config option that offers `desired`: `selector` when the bridge lists
+/// it there, otherwise the bridge's Mode selector.
+fn execution_mode_option<'a>(
+    config_options: &'a [SessionConfigOption],
+    selector: Option<&str>,
+    desired: &str,
+) -> Option<&'a SessionConfigOption> {
+    let offers = |option: &&SessionConfigOption| select_contains(&option.kind, desired);
+    selector
+        .and_then(|id| {
+            config_options
+                .iter()
+                .filter(|option| option.id.to_string() == id)
+                .find(offers)
+        })
+        .or_else(|| {
+            config_options
+                .iter()
+                .filter(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+                .find(offers)
+        })
+}
+
 pub(super) async fn enforce_execution_mode(
     connection: &ConnectionTo<Agent>,
     session_id: &SessionId,
     harness: HarnessKind,
+    selector: Option<&str>,
     desired: &str,
     config_options: &mut Vec<SessionConfigOption>,
     legacy_modes: &mut Option<agent_client_protocol::schema::v1::SessionModeState>,
 ) -> Result<String> {
-    if let Some(option) = config_options.iter().find(|option| {
-        option.category == Some(SessionConfigOptionCategory::Mode)
-            && select_contains(&option.kind, desired)
-    }) {
-        let option_id = option.id.to_string();
-        let response = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                option.id.clone(),
-                SessionConfigValueId::new(desired.to_string()),
-            ))
-            .block_task()
-            .await
-            .with_context(|| format!("select required ACP execution mode {desired}"))?;
-        *config_options = response.config_options;
-        // A harness can answer the request and still report another mode, so
-        // the session is only safe to use once it confirms the effective one.
-        let effective = surface::config_current_value(config_options, &option_id);
-        let substitute = announced_mode_substitute(harness, desired);
-        let applied = match effective.as_deref() {
-            Some(mode) if mode == desired || Some(mode) == substitute => mode.to_owned(),
-            _ => bail!(
-                "the harness acknowledged execution mode {desired} but reports {}",
-                effective.map_or_else(|| "no mode".to_owned(), |mode| format!("{mode:?}"))
-            ),
-        };
-        if let Some(modes) = legacy_modes.as_mut() {
+    if let Some(option) = execution_mode_option(config_options, selector, desired) {
+        let option_id = option.id.clone();
+        // Legacy session modes mirror only the Mode selector.
+        let mirrors_legacy_modes = option.category == Some(SessionConfigOptionCategory::Mode);
+        let applied = select_confirmed(
+            connection,
+            session_id,
+            harness,
+            option_id,
+            "execution mode",
+            desired,
+            config_options,
+        )
+        .await?;
+        if mirrors_legacy_modes && let Some(modes) = legacy_modes.as_mut() {
             modes.current_mode_id = applied.clone().into();
         }
         return Ok(applied);
@@ -538,6 +550,67 @@ pub(super) async fn enforce_execution_mode(
     bail!("ACP bridge does not expose required execution mode {desired}")
 }
 
+/// Select a config option an execution policy requires besides its mode,
+/// such as Muse's auto-review. A bridge without it cannot realize the policy.
+pub(super) async fn enforce_policy_setting(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    (key, value): (&str, &str),
+    config_options: &mut Vec<SessionConfigOption>,
+) -> Result<()> {
+    let option_id = config_options
+        .iter()
+        .find(|option| option.id.to_string() == key && select_contains(&option.kind, value))
+        .map(|option| option.id.clone())
+        .with_context(|| format!("ACP bridge does not expose required {key} {value}"))?;
+    select_confirmed(
+        connection,
+        session_id,
+        harness,
+        option_id,
+        key,
+        value,
+        config_options,
+    )
+    .await
+    .map(drop)
+}
+
+/// Select `desired` on `option_id` and return the value the harness then
+/// reports, refusing any other.
+async fn select_confirmed(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    option_id: agent_client_protocol::schema::v1::SessionConfigId,
+    label: &str,
+    desired: &str,
+    config_options: &mut Vec<SessionConfigOption>,
+) -> Result<String> {
+    let response = connection
+        .send_request(SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            option_id.clone(),
+            SessionConfigValueId::new(desired.to_string()),
+        ))
+        .block_task()
+        .await
+        .with_context(|| format!("select required ACP {label} {desired}"))?;
+    *config_options = response.config_options;
+    // A harness can answer the request and still report another value, so
+    // the session is only safe to use once it confirms the effective one.
+    let effective = surface::config_current_value(config_options, &option_id.to_string());
+    let substitute = announced_mode_substitute(harness, desired);
+    match effective.as_deref() {
+        Some(value) if value == desired || Some(value) == substitute => Ok(value.to_owned()),
+        _ => bail!(
+            "the harness acknowledged {label} {desired} but reports {}",
+            effective.map_or_else(|| "no value".to_owned(), |value| format!("{value:?}"))
+        ),
+    }
+}
+
 /// The harness's own words when it answered a mode request with an error,
 /// or `None` when the failure was not an answer from the harness: a mode it
 /// does not list, or an acknowledged request that left another mode.
@@ -562,16 +635,23 @@ pub(super) fn mode_refusal(error: &anyhow::Error) -> Option<String> {
 /// for a new session, naming the mode the session is left in.
 pub(super) fn refused_mode_warning(
     harness: HarnessKind,
+    selector: Option<&str>,
     desired: &str,
     refusal: &str,
     modes: Option<&agent_client_protocol::schema::v1::SessionModeState>,
     config_options: &[SessionConfigOption],
 ) -> String {
     let harness_name = harness.display_name();
-    let current = config_options
-        .iter()
-        .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
-        .and_then(|option| surface::config_current_value(config_options, &option.id.to_string()))
+    let current = selector
+        .and_then(|id| surface::config_current_value(config_options, id))
+        .or_else(|| {
+            config_options
+                .iter()
+                .find(|option| option.category == Some(SessionConfigOptionCategory::Mode))
+                .and_then(|option| {
+                    surface::config_current_value(config_options, &option.id.to_string())
+                })
+        })
         .or_else(|| modes.map(|modes| modes.current_mode_id.to_string()));
     let kept = match current {
         Some(id) => {

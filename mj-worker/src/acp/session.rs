@@ -460,10 +460,12 @@ pub(super) async fn serve_session(
         }
     }
     if let Some(desired_mode) = enforcement.and_then(ExecutionEnforcement::acp_mode) {
+        let selector = enforcement.and_then(ExecutionEnforcement::acp_mode_selector);
         let enforced = enforce_execution_mode(
             connection,
             &session_id,
             spec.harness,
+            selector,
             desired_mode,
             &mut config_options,
             &mut modes,
@@ -488,6 +490,7 @@ pub(super) async fn serve_session(
                 RuntimeEvent::Warning {
                     message: refused_mode_warning(
                         spec.harness,
+                        selector,
                         desired_mode,
                         &refusal,
                         modes.as_ref(),
@@ -497,6 +500,18 @@ pub(super) async fn serve_session(
             )
             .await?;
         }
+    }
+    // Muse's auto-review is off in every session muse-acp opens, so it is
+    // selected on every open, resumed or not.
+    if let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting) {
+        enforce_policy_setting(
+            connection,
+            &session_id,
+            spec.harness,
+            setting,
+            &mut config_options,
+        )
+        .await?;
     }
     if let Some(mode) = spec
         .clear_context_request
@@ -508,6 +523,7 @@ pub(super) async fn serve_session(
             connection,
             &session_id,
             spec.harness,
+            None,
             mode,
             &mut config_options,
             &mut modes,
@@ -1448,6 +1464,7 @@ pub(super) async fn serve_session(
                             connection,
                             &session_id,
                             spec.harness,
+                            None,
                             &desired,
                             &mut config_options,
                             &mut modes,

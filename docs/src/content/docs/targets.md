@@ -69,11 +69,12 @@ always-approve with its sandbox disabled, and OpenCode
 `"permission": "allow"` in `opencode.json`. These all approve every action;
 Kimi's mode happens to be named `auto` but is not a risk-selective guardian.
 Muse uses the staged `:unrestricted` permission profile, `allowAll`, and
-`--disable-sandbox` on every target, overriding the policy in the table.
+`--disable-sandbox`. Muse's guardian is muse-acp's auto-review with the staged
+`:ask-me` profile and `promptUnmatched` approvals.
 
-Codex, Claude Code, Grok Build, and OpenCode can preserve guardian approvals on
-raw targets. Kimi Code and Muse Code cannot, so Mjolnir displays a prominent warning when either is
-selected without an isolation boundary. Read [Security boundaries](/security/)
+Codex, Claude Code, Grok Build, OpenCode, and Muse Code can preserve guardian
+approvals on raw targets. Kimi Code cannot, so Mjolnir displays a prominent
+warning when it is selected without an isolation boundary. Read [Security boundaries](/security/)
 before choosing a raw or `yolo` target.
 
 ## Bare runtimes
