@@ -1905,10 +1905,6 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             memory.root,
             "{kind:?} retains its memory replica in the dedicated launch field"
         );
-        if kind == HarnessKind::Muse {
-            assert_eq!(launch.execution_policy, ExecutionPolicy::Unconstrained);
-            assert_eq!(launch.environment["MUSE_SERVE_ARGS"], "--disable-sandbox");
-        }
     }
 }
 

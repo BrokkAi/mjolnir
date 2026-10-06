@@ -1276,6 +1276,16 @@ async fn a_muse_reviewer_reads_its_login_from_its_own_muse_home() {
     let earlier = fixture.worker_root.join("reviewer/runtime-profile");
     std::fs::create_dir_all(&earlier).unwrap();
     std::fs::write(earlier.join("config.toml"), b"earlier\n").unwrap();
+    // The bridge answers each guardian selection with the options it leaves.
+    let mut options = crate::acp::muse_tests::muse_policy_options();
+    let directory = fixture.script_directory();
+    std::fs::write(directory.join("options.json"), options.to_string()).unwrap();
+    for (key, value) in [("approval_mode", "promptUnmatched"), ("auto_review", "on")] {
+        let params = serde_json::json!({"configId": key, "value": value});
+        crate::acp::muse_tests::select_option(&mut options, &params);
+        let name = format!("options-{value}.json");
+        std::fs::write(directory.join(name), options.to_string()).unwrap();
+    }
     let mut muse = config(0);
     muse.harness = HarnessKind::Muse;
     let body = fixture.start(muse).await;

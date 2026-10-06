@@ -2783,6 +2783,7 @@ async fn silent_after_prompt_bridge_with_late_reply(
     let mut prior_prompt = None;
     let mut traffic = tokio::time::interval(Duration::from_millis(100));
     let mut child_started = false;
+    let mut options = super::muse_tests::muse_policy_options();
     loop {
         let line = tokio::select! {
             line = lines.next_line() => match line.expect("read bridge input") {
@@ -2825,8 +2826,12 @@ async fn silent_after_prompt_bridge_with_late_reply(
             "session/new" | "session/load" => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": {"sessionId": "scripted"},
+                "result": {"sessionId": "scripted", "configOptions": options},
             }),
+            "session/set_config_option" => {
+                super::muse_tests::select_option(&mut options, &request["params"]);
+                serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"configOptions":options}})
+            }
             "session/prompt" => {
                 if child_traffic && !child_started {
                     let spawn = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":"scripted", "update":{"sessionUpdate":"subagent_spawned", "subagentSessionId":"heap", "name":"heap", "task":"Independent heap analysis", "capabilities":{}}}});
@@ -6918,6 +6923,7 @@ async fn a_form_the_harness_withdraws_still_resolves() {
         let (read, mut write) = tokio::io::split(bridge_stream);
         let mut lines = BufReader::new(read).lines();
         let mut prompt_id = None;
+        let mut options = super::muse_tests::muse_policy_options();
         while let Some(line) = lines.next_line().await.expect("read bridge input") {
             let message: serde_json::Value = serde_json::from_str(&line).expect("valid JSON-RPC");
             let id = message
@@ -6940,8 +6946,13 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                 Some("initialize") => {
                     serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"protocolVersion":1}})
                 }
-                Some("session/new") => {
-                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"sessionId":"scripted"}})
+                Some("session/new") => serde_json::json!({
+                    "jsonrpc":"2.0", "id":id,
+                    "result":{"sessionId":"scripted", "configOptions":options},
+                }),
+                Some("session/set_config_option") => {
+                    super::muse_tests::select_option(&mut options, &message["params"]);
+                    serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{"configOptions":options}})
                 }
                 Some("session/prompt") => {
                     prompt_id = Some(id);

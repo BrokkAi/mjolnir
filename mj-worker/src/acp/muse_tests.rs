@@ -132,6 +132,33 @@ async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
         .expect("Muse runtime stopped unexpectedly")
 }
 
+/// muse-acp 0.10's policy selectors as a fake bridge reports them: approvals
+/// on `approval_mode`, apart from Mode, and auto-review off in every session
+/// it opens. A guardian Muse session selects `promptUnmatched` and `on`.
+pub(crate) fn muse_policy_options() -> serde_json::Value {
+    serde_json::json!([
+        {"id": "approval_mode", "name": "Approvals", "type": "select",
+         "currentValue": "allowAll", "options": [
+            {"value": "allowAll", "name": "Allow all"},
+            {"value": "promptUnmatched", "name": "Prompt unmatched"}
+        ]},
+        {"id": "auto_review", "name": "Auto-review", "type": "select",
+         "currentValue": "off", "options": [
+            {"value": "off", "name": "Off"},
+            {"value": "on", "name": "On"}
+        ]}
+    ])
+}
+
+/// Apply a `session/set_config_option` request's params to `options`.
+pub(crate) fn select_option(options: &mut serde_json::Value, params: &serde_json::Value) {
+    for option in options.as_array_mut().expect("config options are a list") {
+        if option["id"] == params["configId"] {
+            option["currentValue"] = params["value"].clone();
+        }
+    }
+}
+
 /// What opening a session through the fake muse-acp produced.
 struct Opened {
     outcome: Result<()>,
@@ -152,6 +179,7 @@ async fn open_muse(host: &str) -> Opened {
         r#"
 import json, os, sys
 host, log = os.environ['MJ_FAKE_MUSE_HOST'], os.environ['MJ_FAKE_MUSE_LOG']
+options = json.loads(os.environ['MJ_FAKE_MUSE_OPTIONS'])
 for line in sys.stdin:
     request = json.loads(line)
     method, ident = request.get('method'), request.get('id')
@@ -167,7 +195,12 @@ for line in sys.stdin:
         if host == 'failed':
             reply = {'error': {'code': -32000, 'message': 'Muse Code is not logged in'}}
         else:
-            reply = {'result': {'sessionId': 'native'}}
+            reply = {'result': {'sessionId': 'native', 'configOptions': options}}
+    elif method == 'session/set_config_option':
+        for option in options:
+            if option['id'] == params['configId']:
+                option['currentValue'] = params['value']
+        reply = {'result': {'configOptions': options}}
     else:
         reply = {'result': {}}
     print(json.dumps({'jsonrpc': '2.0', 'id': ident, **reply}), flush=True)
@@ -185,6 +218,10 @@ for line in sys.stdin:
         args: vec![script.to_string_lossy().into_owned()],
         environment: BTreeMap::from([
             ("MJ_FAKE_MUSE_HOST".into(), host.into()),
+            (
+                "MJ_FAKE_MUSE_OPTIONS".into(),
+                muse_policy_options().to_string(),
+            ),
             (
                 "MJ_FAKE_MUSE_LOG".into(),
                 log.to_string_lossy().into_owned(),
