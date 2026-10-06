@@ -870,21 +870,30 @@ pub(crate) async fn workspaces_create(args: WorkspaceCreateArgs) -> Result<()> {
 }
 
 fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
+    subagent_policy(
+        args.subagents.as_deref(),
+        args.subagent_model.as_deref(),
+        args.subagent_effort.as_deref(),
+    )
+}
+
+pub(crate) fn subagent_policy(
+    mode: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
-    if args.subagents.as_deref() != Some("single-model")
-        && (args.subagent_model.is_some() || args.subagent_effort.is_some())
-    {
+    if mode != Some("single-model") && (model.is_some() || effort.is_some()) {
         bail!("--subagent-model and --subagent-effort require --subagents single-model");
     }
-    Ok(match args.subagents.as_deref() {
+    Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
         Some("none") => Some(SubagentPolicy::None),
         Some("single-model") => Some(SubagentPolicy::SingleModel {
-            model: args
-                .subagent_model
-                .clone()
-                .context("--subagents single-model requires --subagent-model")?,
-            effort: args.subagent_effort.clone(),
+            model: model
+                .context("--subagents single-model requires --subagent-model")?
+                .to_owned(),
+            effort: effort.map(str::to_owned),
         }),
         _ => None,
     })

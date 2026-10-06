@@ -48,7 +48,7 @@ impl ProviderAuthCache {
                     }
                     match mj_core::codex_provider::parse_config(text, &path) {
                         Ok(provider) => {
-                            Some(provider.is_some_and(|provider| provider.env_key.is_some()))
+                            Some(provider.is_some_and(|provider| provider.skips_login_file_sync()))
                         }
                         Err(error) => {
                             tracing::warn!(%error, path = %path.display(), "invalid credential provider configuration");
@@ -86,7 +86,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_homes_parse_once_and_external_edits_change_authentication() {
+    fn shared_homes_parse_once_and_provider_edits_change_login_file_sync() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("config.toml");
         let mut config = Config::default();
@@ -133,6 +133,17 @@ env_key = "FIXTURE_KEY"
         std::fs::remove_file(&path).unwrap();
         assert!(cache.refresh(&config));
         assert!(cache.schemes.values().all(|api| !*api));
+        std::fs::write(
+            &path,
+            "model = \"global.openai.gpt-6-luna\"\n\
+             model_provider = \"amazon-bedrock-runtime\"\n\
+             [model_providers.amazon-bedrock-runtime.aws]\n\
+             region = \"us-east-1\"\n",
+        )
+        .unwrap();
+        assert!(cache.refresh(&config));
+        assert!(cache.schemes.values().all(|skip_sync| *skip_sync));
+        assert_eq!(cache.parses, 4);
         config.profiles.clear();
         assert!(cache.refresh(&config));
         assert!(cache.files.is_empty());

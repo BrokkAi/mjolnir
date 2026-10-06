@@ -591,10 +591,9 @@ pub(super) async fn reconcile_connected(
     github_token: Option<&str>,
 ) -> Result<Vec<CredentialSyncAction>> {
     let mut actions = Vec::new();
-    // An API-key profile keeps its key in the profile environment, which the
-    // worker already receives in the launch environment. There is no
-    // credential file on either side to compare or copy.
-    if !target.authenticates_with_api_key {
+    // Profiles without a harness login file already receive credentials
+    // through their environment or target credential chain.
+    if !target.skips_login_file_sync {
         reconcile_credentials(
             client,
             target,

@@ -75,7 +75,7 @@ pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTar
         .config
         .profiles
         .iter()
-        .map(|(id, profile)| (id.clone(), profile.auth_scheme().is_api_key()))
+        .map(|(id, profile)| (id.clone(), !profile.auth_scheme().uses_native_login_file()))
         .collect();
     credential_sync_targets_with_auth(controller, &schemes)
 }
@@ -131,7 +131,7 @@ pub(crate) fn credential_sync_targets_from_sources(
                 profile_id: session.last_profile.clone(),
                 harness: profile.kind,
                 profile_home: profile.home.clone(),
-                authenticates_with_api_key: *schemes.get(&session.last_profile)?,
+                skips_login_file_sync: *schemes.get(&session.last_profile)?,
                 sync_github_token,
                 github_app_configured: controller.config.github.app.is_some(),
                 skills_scope: session.target.as_ref()?.skills_scope(),

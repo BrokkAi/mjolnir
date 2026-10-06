@@ -759,7 +759,7 @@ fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> Strin
 }
 
 /// Where a profile's quota report comes from, in the terms the quota refresh
-/// uses: a Codex profile is read through its custom provider only when that
+/// uses: a Codex profile is read through a custom provider only when that
 /// provider's API key is in the profile's environment.
 fn profile_quota_source(profile: &HarnessProfile) -> String {
     match profile.kind {
@@ -774,10 +774,19 @@ fn profile_quota_source(profile: &HarnessProfile) -> String {
             ),
             None => match profile.codex_provider() {
                 Ok(None) => "ChatGPT subscription quota".to_owned(),
-                Ok(Some(provider)) => format!(
+                Ok(Some(provider))
+                    if provider.built_in()
+                        == Some(mj_core::codex_provider::BuiltInCodexProvider::OpenAi) =>
+                {
+                    "ChatGPT subscription quota".to_owned()
+                }
+                Ok(Some(provider)) if provider.custom().is_some() => format!(
                     "no quota report, because custom provider {:?} has no API key in this profile's environment",
-                    provider.id
+                    provider.id()
                 ),
+                Ok(Some(provider)) => {
+                    format!("no quota report for built-in provider {:?}", provider.id())
+                }
                 Err(error) => format!("its Codex config.toml could not be read ({error:#})"),
             },
         },

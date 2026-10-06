@@ -13,6 +13,7 @@ use tracing::Instrument;
 use crate::claude_usage;
 use crate::codex_usage::{self, CodexUsageClient, CodexUsageStatus};
 use crate::grok_usage;
+use mj_core::codex_provider::BuiltInCodexProvider;
 use mj_core::config::{HarnessKind, HarnessProfile, harness_authentication_marker};
 use mj_core::credentials::{
     MAX_CREDENTIAL_BYTES, credential_expiry, credential_fingerprint, credential_freshness,
@@ -80,7 +81,11 @@ impl QuotaRefreshRequest {
         let configured_provider = profile.codex_provider();
         Self {
             native_openai: profile.kind == HarnessKind::Codex
-                && matches!(configured_provider, Ok(None)),
+                && match &configured_provider {
+                    Ok(None) => true,
+                    Ok(Some(provider)) => provider.built_in() == Some(BuiltInCodexProvider::OpenAi),
+                    Err(_) => false,
+                },
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
             source_home: profile.home.clone(),
@@ -106,10 +111,11 @@ fn provider_credential_from(
     provider: Option<&mj_core::codex_provider::CodexProvider>,
 ) -> Option<ProviderCredential> {
     let provider = provider?;
-    let env_key = provider.env_key.as_deref()?;
+    let custom = provider.custom()?;
+    let env_key = custom.env_key.as_deref()?;
     let api_key = profile.environment.get(env_key)?;
     Some(ProviderCredential {
-        id: provider.id.clone(),
+        id: provider.id().to_owned(),
         host: provider.host()?,
         api_key: api_key.clone(),
     })

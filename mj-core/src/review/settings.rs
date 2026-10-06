@@ -1,6 +1,6 @@
 //! Shared review policy, independent of the UI and of profile names.
 
-use crate::codex_provider::CodexProviderKind;
+use crate::codex_provider::{BuiltInCodexProvider, CodexProviderDefinition, CodexProviderKind};
 use crate::config::{HarnessKind, HarnessProfile};
 use serde::{Deserialize, Serialize};
 
@@ -16,9 +16,13 @@ pub enum ReviewProvider {
 impl ReviewProvider {
     pub fn for_profile(profile: &HarnessProfile) -> anyhow::Result<Self> {
         if let Some(provider) = profile.codex_provider()? {
-            return Ok(match provider.kind() {
-                CodexProviderKind::DeepSeek => Self::DeepSeek,
-                _ => Self::Other,
+            return Ok(match &provider.definition {
+                CodexProviderDefinition::BuiltIn(BuiltInCodexProvider::OpenAi) => Self::Codex,
+                CodexProviderDefinition::BuiltIn(_) => Self::Other,
+                CodexProviderDefinition::Custom(_) => match provider.kind() {
+                    CodexProviderKind::DeepSeek => Self::DeepSeek,
+                    CodexProviderKind::Zai | CodexProviderKind::Other => Self::Other,
+                },
             });
         }
         Ok(match profile.kind {

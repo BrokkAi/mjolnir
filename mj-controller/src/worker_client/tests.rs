@@ -740,7 +740,7 @@ for line in sys.stdin:
         profile_id: "codex".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: std::path::PathBuf::new(),
-        authenticates_with_api_key: true,
+        skips_login_file_sync: true,
         sync_github_token: true,
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Isolated,
@@ -781,7 +781,7 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
-        authenticates_with_api_key: false,
+        skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
@@ -805,7 +805,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         profile_id: profile_id.into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
-        authenticates_with_api_key: false,
+        skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
@@ -939,7 +939,7 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Claude,
         profile_home: profile_home.to_path_buf(),
-        authenticates_with_api_key: false,
+        skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
@@ -998,7 +998,7 @@ async fn mixed_localhost_and_isolated_sessions_sync_different_skills_from_one_pr
             let mut target = skills_sync_target(home.path());
             target.session_id = format!("{index:032x}");
             target.skills_scope = scope;
-            target.authenticates_with_api_key = true;
+            target.skips_login_file_sync = true;
             target.spec = CommandSpec::new(
                 "python3",
                 [
@@ -1090,7 +1090,7 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
         let scratch = tempfile::tempdir().unwrap();
         let received = scratch.path().join("received");
         let mut target = skills_sync_target(home.path());
-        target.authenticates_with_api_key = true;
+        target.skips_login_file_sync = true;
         target.spec = CommandSpec::new(
             "python3",
             [
@@ -1254,7 +1254,7 @@ fn codex_sync_target(
         profile_id: "codex4".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: home.to_path_buf(),
-        authenticates_with_api_key: false,
+        skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
@@ -1376,7 +1376,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         profile_id: "work".into(),
         harness: mj_core::config::HarnessKind::Codex,
         profile_home: profile.path().to_path_buf(),
-        authenticates_with_api_key: false,
+        skips_login_file_sync: false,
         sync_github_token: false,
         github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,

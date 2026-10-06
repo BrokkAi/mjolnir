@@ -604,10 +604,17 @@ pub fn events_report_auth_failure(_kind: HarnessKind, events: &[RelayEvent]) -> 
 /// `grok login`, and `muse login`.
 ///
 pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> {
-    if let AuthScheme::ApiKey { env_key } = profile.auth_scheme() {
-        bail!(
+    match profile.auth_scheme() {
+        AuthScheme::ApiKey { env_key } => bail!(
             "this profile authenticates with the {env_key} API key, from its `environment` entry or the environment Mjolnir started with, so it has no interactive login"
-        );
+        ),
+        AuthScheme::AwsCredentialChain => bail!(
+            "this profile authenticates with the AWS credential chain, so it has no interactive login"
+        ),
+        AuthScheme::NoAuthentication => {
+            bail!("this profile's built-in provider does not require an interactive login")
+        }
+        AuthScheme::NativeLogin => {}
     }
     Ok(native_login_command(profile))
 }
@@ -630,10 +637,10 @@ pub struct CredentialSyncTarget {
     pub harness: HarnessKind,
     /// Controller-side canonical home for the profile.
     pub profile_home: PathBuf,
-    /// True when the profile authenticates with an API key from its own
-    /// `environment`. Such a profile has no credential file to exchange with
-    /// the session, so only skills and the GitHub token are reconciled.
-    pub authenticates_with_api_key: bool,
+    /// True when the profile has no harness login file to synchronize. Such a
+    /// profile has no credential file to exchange with the session, so only
+    /// skills and the GitHub token are reconciled.
+    pub skips_login_file_sync: bool,
     /// GitHub CLI credentials are pushed to every target except raw localhost.
     pub sync_github_token: bool,
     /// The controller has GitHub App configuration and should resolve a
@@ -773,7 +780,7 @@ impl RejectedLogins {
         // compares its key.
         if cause.reason != CredentialSyncReason::AuthenticationFailure
             || result.failure.is_some()
-            || profile.auth_scheme().is_api_key()
+            || !profile.auth_scheme().uses_native_login_file()
         {
             return;
         }

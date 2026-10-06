@@ -1,25 +1,86 @@
-//! Reads the custom model provider out of a Codex profile home.
+//! Reads the selected model provider out of a Codex profile home.
 //!
-//! Codex keeps its own configuration in `config.toml` inside the directory
-//! named by `CODEX_HOME`. That file decides which service Codex talks to:
-//! `model_provider = "<id>"` selects an entry from the `[model_providers.<id>]`
-//! table, and that entry carries the base URL, the wire protocol, and how the
-//! API key is supplied. Mjolnir copies the file verbatim into the staged
-//! profile home, so the file stays the single source of truth; this module only
-//! reads the few keys Mjolnir needs to know how a profile authenticates and
-//! where its model catalog and quota live.
+//! Codex keeps its configuration in `config.toml` inside `CODEX_HOME`. A
+//! `model_provider` can select one of Codex's built-in providers, or a custom
+//! provider described by `[model_providers.<id>]`. Mjolnir copies the file
+//! verbatim into the staged profile home; it reads only the provider identity
+//! and the custom-provider fields it needs for authentication and catalog
+//! discovery.
 //!
-//! A profile with no `config.toml`, or one that names no `model_provider`, uses
-//! Codex's built-in OpenAI provider and therefore reports `None` here.
+//! A profile with no `config.toml`, or one that names no `model_provider`,
+//! uses Codex's default OpenAI provider and reports `None` here.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-/// A custom model provider named in a Codex `config.toml`.
+/// The selected Codex provider, represented according to who defines it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexProvider {
+    pub definition: CodexProviderDefinition,
+    /// The top-level `model_catalog_json` path, when the profile's Codex
+    /// `config.toml` names one. A relative path resolves against `CODEX_HOME`.
+    pub model_catalog_json: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexProviderDefinition {
+    /// A provider Codex ships and configures itself. Its optional provider
+    /// table is left to Codex, which owns the built-in provider schema.
+    BuiltIn(BuiltInCodexProvider),
+    /// A provider described by the profile's `[model_providers.<id>]` table.
+    Custom(CustomCodexProvider),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltInCodexProvider {
+    OpenAi,
+    AmazonBedrock,
+    AmazonBedrockRuntime,
+    Ollama,
+    LmStudio,
+}
+
+impl BuiltInCodexProvider {
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "openai" => Self::OpenAi,
+            "amazon-bedrock" => Self::AmazonBedrock,
+            "amazon-bedrock-runtime" => Self::AmazonBedrockRuntime,
+            "ollama" => Self::Ollama,
+            "lmstudio" => Self::LmStudio,
+            _ => return None,
+        })
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::AmazonBedrock => "amazon-bedrock",
+            Self::AmazonBedrockRuntime => "amazon-bedrock-runtime",
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+        }
+    }
+
+    pub const fn uses_aws_credentials(self) -> bool {
+        matches!(self, Self::AmazonBedrock | Self::AmazonBedrockRuntime)
+    }
+
+    /// Only the built-in OpenAI provider uses Codex's own login file.
+    pub const fn uses_codex_login(self) -> bool {
+        matches!(self, Self::OpenAi)
+    }
+
+    /// These local providers do not need a login file or an API key.
+    pub const fn needs_no_authentication(self) -> bool {
+        matches!(self, Self::Ollama | Self::LmStudio)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomCodexProvider {
     pub id: String,
     pub base_url: String,
     /// Environment variable that carries the API key, when the provider uses
@@ -27,11 +88,76 @@ pub struct CodexProvider {
     pub env_key: Option<String>,
     /// True when the key is inline as `experimental_bearer_token`.
     pub inline_bearer_token: bool,
-    /// The top-level `model_catalog_json` path, when the profile's Codex
-    /// `config.toml` names one. Mjolnir stages its own catalog and points the
-    /// staged configuration at that, replacing this key, so the file the path
-    /// names is ignored.
-    pub model_catalog_json: Option<PathBuf>,
+}
+
+impl CodexProvider {
+    pub fn id(&self) -> &str {
+        match &self.definition {
+            CodexProviderDefinition::BuiltIn(provider) => provider.id(),
+            CodexProviderDefinition::Custom(provider) => &provider.id,
+        }
+    }
+
+    pub fn built_in(&self) -> Option<BuiltInCodexProvider> {
+        match &self.definition {
+            CodexProviderDefinition::BuiltIn(provider) => Some(*provider),
+            CodexProviderDefinition::Custom(_) => None,
+        }
+    }
+
+    pub fn custom(&self) -> Option<&CustomCodexProvider> {
+        match &self.definition {
+            CodexProviderDefinition::BuiltIn(_) => None,
+            CodexProviderDefinition::Custom(provider) => Some(provider),
+        }
+    }
+
+    pub fn uses_aws_credentials(&self) -> bool {
+        self.built_in()
+            .is_some_and(BuiltInCodexProvider::uses_aws_credentials)
+    }
+
+    /// Whether this provider uses Codex's native OpenAI login file. The
+    /// built-in `openai` provider is equivalent to leaving `model_provider`
+    /// unset; every other explicit provider has its own authentication path.
+    pub fn uses_codex_login(&self) -> bool {
+        self.built_in()
+            .is_some_and(BuiltInCodexProvider::uses_codex_login)
+    }
+
+    /// Whether this provider does not require credentials at all.
+    pub fn needs_no_authentication(&self) -> bool {
+        self.built_in()
+            .is_some_and(BuiltInCodexProvider::needs_no_authentication)
+    }
+
+    /// Whether the provider has no harness login file to synchronize. This
+    /// includes providers that use an external credential chain, local
+    /// providers without authentication, and custom API-key providers.
+    pub fn skips_login_file_sync(&self) -> bool {
+        match &self.definition {
+            CodexProviderDefinition::BuiltIn(provider) => !provider.uses_codex_login(),
+            CodexProviderDefinition::Custom(provider) => provider.env_key.is_some(),
+        }
+    }
+
+    /// Host component of a custom provider's `base_url`, lowercased, when the
+    /// URL parses. Built-in providers do not expose a custom base URL here.
+    pub fn host(&self) -> Option<String> {
+        self.custom().and_then(|provider| {
+            url::Url::parse(&provider.base_url)
+                .ok()
+                .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        })
+    }
+
+    /// Which custom service this provider points at. Built-ins and unrecognized
+    /// hosts are `Other` for Mjolnir's provider-specific quota and utility work.
+    pub fn kind(&self) -> CodexProviderKind {
+        self.host()
+            .as_deref()
+            .map_or(CodexProviderKind::Other, CodexProviderKind::from_host)
+    }
 }
 
 /// Which service a custom provider points at, as far as Mjolnir needs to
@@ -56,28 +182,10 @@ impl CodexProviderKind {
     }
 }
 
-impl CodexProvider {
-    /// Host component of `base_url`, lowercased, when the URL parses.
-    pub fn host(&self) -> Option<String> {
-        url::Url::parse(&self.base_url)
-            .ok()
-            .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
-    }
-
-    /// Which service this provider points at. A base URL that does not parse
-    /// as a URL with a host is `Other`.
-    pub fn kind(&self) -> CodexProviderKind {
-        self.host()
-            .as_deref()
-            .map_or(CodexProviderKind::Other, CodexProviderKind::from_host)
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct CodexConfigFile {
     model_provider: Option<String>,
-    /// Top-level key naming the JSON file Codex advertises models from. A
-    /// relative path resolves against `CODEX_HOME`.
+    /// Top-level key naming the JSON file Codex advertises models from.
     model_catalog_json: Option<PathBuf>,
     #[serde(default)]
     model_providers: std::collections::BTreeMap<String, ProviderTable>,
@@ -111,9 +219,16 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Option<CodexProvider>> {
     let Some(id) = file.model_provider else {
         return Ok(None);
     };
+    let model_catalog_json = file.model_catalog_json.clone();
+    if let Some(provider) = BuiltInCodexProvider::from_id(&id) {
+        return Ok(Some(CodexProvider {
+            definition: CodexProviderDefinition::BuiltIn(provider),
+            model_catalog_json,
+        }));
+    }
     let Some(table) = file.model_providers.get(&id) else {
         bail!(
-            "{} names model_provider {id:?} but has no [model_providers.{id}] table",
+            "{} names model_provider {id:?}, which is not a Codex built-in provider, and has no [model_providers.{id}] custom-provider table",
             path.display()
         );
     };
@@ -151,11 +266,13 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Option<CodexProvider>> {
         );
     }
     Ok(Some(CodexProvider {
-        id,
-        base_url,
-        env_key,
-        inline_bearer_token,
-        model_catalog_json: file.model_catalog_json.clone(),
+        definition: CodexProviderDefinition::Custom(CustomCodexProvider {
+            id,
+            base_url,
+            env_key,
+            inline_bearer_token,
+        }),
+        model_catalog_json,
     }))
 }
 
@@ -168,10 +285,28 @@ mod tests {
     }
 
     #[test]
-    fn config_without_model_provider_reports_no_custom_provider() {
+    fn config_without_model_provider_reports_no_selected_provider() {
         let home = tempfile::tempdir().expect("temporary home");
         std::fs::write(home.path().join("config.toml"), "model = \"gpt-5.5\"\n").expect("write");
         assert_eq!(codex_provider(home.path()).expect("read"), None);
+    }
+
+    #[test]
+    fn built_in_bedrock_runtime_accepts_aws_overrides_without_a_custom_provider_definition() {
+        let provider = parse(
+            "model = \"global.openai.gpt-6-luna\"\n\
+             model_provider = \"amazon-bedrock-runtime\"\n\
+             [model_providers.amazon-bedrock-runtime.aws]\n\
+             region = \"us-east-1\"\n",
+        )
+        .expect("parse")
+        .expect("built-in provider");
+        assert_eq!(
+            provider.definition,
+            CodexProviderDefinition::BuiltIn(BuiltInCodexProvider::AmazonBedrockRuntime)
+        );
+        assert!(provider.uses_aws_credentials());
+        assert_eq!(provider.id(), "amazon-bedrock-runtime");
     }
 
     #[test]
@@ -186,10 +321,11 @@ mod tests {
         )
         .expect("parse")
         .expect("provider");
-        assert_eq!(provider.id, "zai");
-        assert_eq!(provider.base_url, "https://api.z.ai/api/v1");
-        assert_eq!(provider.env_key.as_deref(), Some("ZAI_API_KEY"));
-        assert!(!provider.inline_bearer_token);
+        let custom = provider.custom().expect("custom provider");
+        assert_eq!(custom.id, "zai");
+        assert_eq!(custom.base_url, "https://api.z.ai/api/v1");
+        assert_eq!(custom.env_key.as_deref(), Some("ZAI_API_KEY"));
+        assert!(!custom.inline_bearer_token);
         assert_eq!(provider.host().as_deref(), Some("api.z.ai"));
     }
 
@@ -204,8 +340,9 @@ mod tests {
         )
         .expect("parse")
         .expect("provider");
-        assert_eq!(provider.env_key, None);
-        assert!(provider.inline_bearer_token);
+        let custom = provider.custom().expect("custom provider");
+        assert_eq!(custom.env_key, None);
+        assert!(custom.inline_bearer_token);
     }
 
     #[test]
@@ -223,11 +360,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_provider_table_is_rejected_by_name() {
-        let error = parse("model_provider = \"zai\"\n")
-            .expect_err("missing table")
+    fn unknown_provider_without_a_table_names_the_missing_custom_provider_table() {
+        let error = parse("model_provider = \"unknown-service\"\n")
+            .expect_err("unknown provider without a table")
             .to_string();
-        assert!(error.contains("model_providers.zai"), "{error}");
+        assert!(error.contains("not a Codex built-in provider"), "{error}");
+        assert!(error.contains("model_providers.unknown-service"), "{error}");
     }
 
     #[test]
