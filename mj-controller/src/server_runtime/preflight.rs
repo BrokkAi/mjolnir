@@ -159,7 +159,7 @@ pub(super) fn run_resume_preflight(
         Ok(_) => {
             let executor =
                 CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            match crate::controller::raw_conversion_preview_for(&session, &config, &executor) {
+            match crate::controller::raw_conversion_preview_for(&session, &executor) {
                 Err(error) => crate::server::PreflightResume::Unavailable {
                     detail: format!("{error:#}"),
                 },

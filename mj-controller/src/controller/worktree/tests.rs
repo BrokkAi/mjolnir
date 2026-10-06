@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Barrier};
 
 use anyhow::Result;
 
@@ -13,7 +14,7 @@ use crate::controller::test_support::{
     test_git, test_name,
 };
 use mj_checkpoint::archive::RepositoryMetadata;
-use mj_core::config::{Config, ProjectRepository, TargetTemplate};
+use mj_core::config::{Config, ProjectBundle, ProjectRepository, TargetTemplate};
 use mj_core::state::{ManagedWorktree, ManagedWorktreeTarget, SessionState, State};
 
 use crate::targets::{
@@ -846,10 +847,9 @@ fn fixture_network_source() -> mj_core::remote_git::NetworkGitSource {
 #[test]
 fn a_checkout_without_a_network_remote_cannot_be_planned_for_a_target() {
     let repository = committed_repository();
-    let config = resume_compatibility_config();
     let session = raw_session_on("local-bare", &repository.path().to_string_lossy());
 
-    let error = plan_raw_to_workspace(&session, &config, &ProcessExecutor).unwrap_err();
+    let error = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap_err();
 
     let detail = format!("{error:#}");
     assert!(detail.contains("has no network Git remote"), "{detail}");
@@ -860,10 +860,9 @@ fn a_checkout_without_a_network_remote_cannot_be_planned_for_a_target() {
 #[test]
 fn planning_a_conversion_records_the_checkouts_network_remote() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
-    let config = resume_compatibility_config();
     let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
 
-    let conversion = plan_raw_to_workspace(&session, &config, &ProcessExecutor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
     assert_eq!(conversion.source.fetch_url, FIXTURE_FETCH_URL);
     assert_eq!(conversion.source.push_urls, [FIXTURE_FETCH_URL]);
@@ -966,10 +965,9 @@ fn a_conversion_preview_counts_unpushed_commits_and_dirty_files() {
     std::fs::write(checkout.path().join("nested/file.txt"), "unstaged\n").unwrap();
     let untracked = "u".repeat(100 * 1024);
     std::fs::write(checkout.path().join("untracked.txt"), &untracked).unwrap();
-    let config = resume_compatibility_config();
     let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
     let executor = FixtureRemoteExecutor { remote };
-    let conversion = plan_raw_to_workspace(&session, &config, &executor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &executor).unwrap();
 
     let preview = raw_conversion_preview(&session, &conversion, &executor).unwrap();
 
@@ -998,9 +996,8 @@ fn a_conversion_preview_reports_a_managed_worktree_as_not_retained() {
     let (checkout, _remote_parent, remote) = checkout_with_network_remote();
     let session_id = "0123456789abcdef0123456789abcdef";
     let session = managed_worktree_session(checkout.path(), session_id);
-    let config = resume_compatibility_config();
     let executor = FixtureRemoteExecutor { remote };
-    let conversion = plan_raw_to_workspace(&session, &config, &executor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &executor).unwrap();
 
     let preview = raw_conversion_preview(&session, &conversion, &executor).unwrap();
 
@@ -1050,9 +1047,8 @@ fn a_conversion_preview_refuses_a_dirty_submodule_but_not_an_unregistered_gitlin
     );
     test_git(checkout.path(), &["commit", "-m", "add submodule"]);
     std::fs::write(checkout.path().join("sub/nested/file.txt"), "dirty\n").unwrap();
-    let config = resume_compatibility_config();
     let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
-    let conversion = plan_raw_to_workspace(&session, &config, &ProcessExecutor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
     let error = raw_conversion_preview(&session, &conversion, &ProcessExecutor).unwrap_err();
 
@@ -1352,26 +1348,172 @@ fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() 
     let session = managed_worktree_session(repository.path(), session_id);
     let worktree = session.managed_worktree.clone().unwrap();
 
-    let conversion = plan_raw_to_workspace(&session, &Config::default(), &ProcessExecutor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
     assert_eq!(conversion.checkout, worktree.worktree_root);
     assert_eq!(conversion.repository, repository.path());
     assert_eq!(conversion.retire, Some(worktree));
-    let bundle = conversion.new_bundle.expect("a bundle is synthesized");
-    assert_eq!(bundle.repositories.len(), 1);
-    assert_eq!(bundle.primary_repo, bundle.repositories[0].id);
-    assert_eq!(
-        bundle.repositories[0].local.as_deref(),
-        Some(repository.path())
-    );
-    assert_eq!(bundle.repositories[0].github, None);
+    assert_eq!(conversion.bundle_id, None);
+    assert_eq!(conversion.planned_bundle.repository, repository.path());
     // The archive names the session directory as the repository, and the
     // restored harness session points inside the target at that name.
     assert_eq!(
-        bundle.repositories[0].destination,
+        conversion.planned_bundle.destination,
         PathBuf::from(session_id)
     );
 }
+
+#[test]
+fn planned_raw_conversions_resolve_ids_inside_the_config_update() {
+    const CHILD: &str = "MJ_RAW_CONVERSION_BUNDLE_RACE_TEST_CHILD";
+    let name = test_name(
+        module_path!(),
+        "planned_raw_conversions_resolve_ids_inside_the_config_update",
+    );
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env(CHILD, "1")
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+
+    let _writer = crate::database::install_isolated_test_writer();
+    let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+    let raw_session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+    let identical_a = plan_raw_to_workspace(&raw_session, &ProcessExecutor).unwrap();
+    let identical_b = plan_raw_to_workspace(&raw_session, &ProcessExecutor).unwrap();
+    let managed_session =
+        managed_worktree_session(checkout.path(), "20000000000000000000000000000001");
+    let different = plan_raw_to_workspace(&managed_session, &ProcessExecutor).unwrap();
+
+    // The plans exist before either config transaction begins. The old
+    // planner would have embedded the same speculative id in all three.
+    let base_id = identical_a.planned_bundle.base_id.clone();
+    assert_eq!(identical_a.planned_bundle, identical_b.planned_bundle);
+    assert_eq!(
+        identical_a.planned_bundle.base_id,
+        different.planned_bundle.base_id
+    );
+    assert_ne!(identical_a.planned_bundle, different.planned_bundle);
+    let conflicting_bundle = ProjectBundle {
+        primary_repo: "other".into(),
+        repositories: vec![ProjectRepository {
+            id: "other".into(),
+            github: None,
+            local: Some(PathBuf::from("/other/repository")),
+            destination: PathBuf::from("other"),
+            git_ref: None,
+        }],
+    };
+    let mut initial_config = Config::default();
+    initial_config
+        .bundles
+        .insert(base_id.clone(), conflicting_bundle);
+    initial_config.save().unwrap();
+
+    let planned = identical_a.planned_bundle.clone();
+    let (_, identical_id_a) = Config::update(|config| Ok(planned.save_to(config))).unwrap();
+    let planned = identical_b.planned_bundle.clone();
+    let (_, identical_id_b) = Config::update(|config| Ok(planned.save_to(config))).unwrap();
+    assert_eq!(identical_id_a, identical_id_b);
+    let planned = different.planned_bundle.clone();
+    let (_, sequential_different_id) =
+        Config::update(|config| Ok(planned.save_to(config))).unwrap();
+    assert_ne!(identical_id_a, sequential_different_id);
+    let after_sequential_saves = Config::load().unwrap();
+    assert_eq!(
+        after_sequential_saves.bundles[&identical_id_a].repositories[0]
+            .local
+            .as_deref(),
+        Some(checkout.path())
+    );
+    assert_eq!(
+        after_sequential_saves.bundles[&sequential_different_id].repositories[0].destination,
+        different.planned_bundle.destination
+    );
+
+    // Reset to the same starting snapshot and race two different layouts
+    // through Config::update. Each update must choose from the config protected
+    // by the lock, so both definitions get a distinct saved id.
+    initial_config.save().unwrap();
+    let gate = Arc::new(Barrier::new(3));
+    let handles = [
+        identical_a.planned_bundle.clone(),
+        different.planned_bundle.clone(),
+    ]
+    .into_iter()
+    .map(|planned| {
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            gate.wait();
+            Config::update(|config| Ok(planned.save_to(config))).map(|(_, id)| id)
+        })
+    })
+    .collect::<Vec<_>>();
+    gate.wait();
+    let concurrent_id_a = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    assert_ne!(concurrent_id_a[0], concurrent_id_a[1]);
+    let after_concurrent_saves = Config::load().unwrap();
+    assert_eq!(
+        after_concurrent_saves.bundles[&concurrent_id_a[0]].repositories[0].destination,
+        identical_a.planned_bundle.destination
+    );
+    assert_eq!(
+        after_concurrent_saves.bundles[&concurrent_id_a[1]].repositories[0].destination,
+        different.planned_bundle.destination
+    );
+
+    fn save_resumed_reference(
+        source: &SessionRecord,
+        mut conversion: RawToWorkspaceConversion,
+        bundle_id: &str,
+        session_id: &str,
+    ) {
+        conversion.bundle_id = Some(bundle_id.to_owned());
+        let mut record = source.clone();
+        record.id = session_id.to_owned();
+        apply_raw_to_workspace(&mut record, &conversion).unwrap();
+        crate::database::save_session(&record).unwrap();
+        assert_eq!(
+            crate::database::load_session_record(session_id)
+                .unwrap()
+                .unwrap()
+                .bundle_id,
+            bundle_id
+        );
+    }
+
+    save_resumed_reference(
+        &raw_session,
+        identical_a.clone(),
+        &identical_id_a,
+        "30000000000000000000000000000001",
+    );
+    save_resumed_reference(
+        &raw_session,
+        identical_b,
+        &identical_id_b,
+        "30000000000000000000000000000002",
+    );
+    save_resumed_reference(
+        &raw_session,
+        identical_a,
+        &concurrent_id_a[0],
+        "30000000000000000000000000000003",
+    );
+    save_resumed_reference(
+        &managed_session,
+        different,
+        &concurrent_id_a[1],
+        "30000000000000000000000000000004",
+    );
+}
+
 #[test]
 fn an_unmanaged_conversion_serves_the_main_repository_behind_a_linked_worktree() {
     let repository = committed_repository();
@@ -1384,7 +1526,7 @@ fn an_unmanaged_conversion_serves_the_main_repository_behind_a_linked_worktree()
     session.target_template_id = "local-bare".into();
     session.project_directory = Some(checkout.clone());
 
-    let conversion = plan_raw_to_workspace(&session, &Config::default(), &ProcessExecutor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
     assert_eq!(conversion.checkout, checkout.canonicalize().unwrap());
     assert_eq!(
@@ -1413,7 +1555,7 @@ fn an_unmanaged_conversion_accepts_a_checkout_reached_through_a_symlink() {
     session.target_template_id = "local-bare".into();
     session.project_directory = Some(symlink);
 
-    let conversion = plan_raw_to_workspace(&session, &Config::default(), &ProcessExecutor).unwrap();
+    let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
     assert_eq!(conversion.checkout, checkout.canonicalize().unwrap());
     assert_eq!(
@@ -1652,11 +1794,15 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
             checkout: previous.project_directory.clone().unwrap(),
             repository: PathBuf::from("/home/dev/project"),
             source: fixture_network_source(),
-            bundle_id: "project".into(),
-            new_bundle: None,
+            bundle_id: Some("project".into()),
+            planned_bundle: PlannedRawWorkspaceBundle::new(
+                Path::new("/home/dev/project"),
+                Path::new("project"),
+            ),
             retire: previous.managed_worktree.clone(),
         },
-    );
+    )
+    .unwrap();
 
     let mut cleaned = converted.clone();
     apply_failed_resume_rollback(&mut cleaned, &previous, "podman is unavailable", None);
