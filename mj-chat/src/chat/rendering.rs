@@ -671,7 +671,18 @@ pub fn wrap_styled_line(
     width: usize,
     continuation_indent: usize,
 ) -> Vec<Line<'static>> {
-    wrap_line(line, width, continuation_indent, None)
+    wrap_line(line, width, continuation_indent, None, None)
+}
+
+/// How copying one rendered row gives back the text it was drawn from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RowCopy {
+    /// Leading cells that only decorate the row, such as a role gutter or a
+    /// wrap indent.
+    pub(crate) lead: usize,
+    /// On a row that wrapping split from the row above, the text the break
+    /// removed between them: a space, or nothing where a word was cut.
+    pub(crate) joins: Option<&'static str>,
 }
 
 /// For each wrapped row, the index of the source span drawn in each cell, or
@@ -686,8 +697,27 @@ pub(super) fn wrap_styled_line_with_sources(
     continuation_indent: usize,
 ) -> (Vec<Line<'static>>, CellSources) {
     let mut sources = Vec::new();
-    let rows = wrap_line(line, width, continuation_indent, Some(&mut sources));
+    let rows = wrap_line(line, width, continuation_indent, Some(&mut sources), None);
     (rows, sources)
+}
+
+/// Wrap `line` exactly as [`wrap_styled_line`] does, and also report its cell
+/// sources and how copying each row gives back the line's text.
+pub(super) fn wrap_styled_line_for_copy(
+    line: Line<'static>,
+    width: usize,
+    continuation_indent: usize,
+) -> (Vec<Line<'static>>, CellSources, Vec<RowCopy>) {
+    let mut sources = Vec::new();
+    let mut copies = Vec::new();
+    let rows = wrap_line(
+        line,
+        width,
+        continuation_indent,
+        Some(&mut sources),
+        Some(&mut copies),
+    );
+    (rows, sources, copies)
 }
 
 fn wrap_line(
@@ -695,10 +725,14 @@ fn wrap_line(
     width: usize,
     continuation_indent: usize,
     mut sources: Option<&mut CellSources>,
+    mut copies: Option<&mut Vec<RowCopy>>,
 ) -> Vec<Line<'static>> {
     let span_count = line.spans.len();
     let mut rows = Vec::new();
-    wrap_graphemes(&line, width, continuation_indent, |buffer, row| {
+    wrap_graphemes(&line, width, continuation_indent, |buffer, row, copy| {
+        if let Some(copies) = copies.as_mut() {
+            copies.push(copy);
+        }
         if let Some(sources) = sources.as_mut() {
             // Style indexes past the line's spans belong to the indent.
             sources.push(
@@ -726,7 +760,7 @@ pub(crate) fn wrap_styled_line_until(
     continuation_indent: usize,
     mut emit: impl FnMut(Line<'static>) -> ControlFlow<()>,
 ) {
-    wrap_graphemes(&line, width, continuation_indent, |buffer, row| {
+    wrap_graphemes(&line, width, continuation_indent, |buffer, row, _| {
         emit(buffer.line(row))
     });
 }
@@ -845,6 +879,8 @@ struct RowFill {
     current: Vec<Grapheme>,
     current_width: usize,
     emitted: usize,
+    /// Whether the latest break dropped whitespace, rather than cutting a word.
+    broke_at_space: bool,
 }
 
 impl RowFill {
@@ -852,10 +888,19 @@ impl RowFill {
     fn finish_row(
         &mut self,
         buffer: &StyledBuffer,
-        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme], RowCopy) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
+        // Every row after a line's first is one that wrapping split off.
+        let copy = if self.emitted == 0 {
+            RowCopy::default()
+        } else {
+            RowCopy {
+                lead: self.continuation_indent,
+                joins: Some(if self.broke_at_space { " " } else { "" }),
+            }
+        };
         self.emitted += 1;
-        let flow = emit(buffer, &self.current);
+        let flow = emit(buffer, &self.current, copy);
         self.current.clear();
         flow
     }
@@ -873,7 +918,7 @@ impl RowFill {
         &mut self,
         token: &[Grapheme],
         buffer: &StyledBuffer,
-        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+        emit: &mut impl FnMut(&StyledBuffer, &[Grapheme], RowCopy) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         let token_width: usize = token
             .iter()
@@ -888,11 +933,13 @@ impl RowFill {
             if !self.current.is_empty() {
                 self.finish_row(buffer, emit)?;
             }
+            self.broke_at_space = true;
             self.start_continuation();
         } else if token_width + self.continuation_indent <= self.width {
             if self.current.len() > self.continuation_indent {
-                trim_trailing_whitespace(&mut self.current);
+                let trimmed = trim_trailing_whitespace(&mut self.current);
                 self.finish_row(buffer, emit)?;
+                self.broke_at_space = trimmed;
             }
             self.start_continuation();
             self.current.extend_from_slice(token);
@@ -901,8 +948,9 @@ impl RowFill {
             for grapheme in token {
                 let grapheme_width = usize::from(grapheme.width);
                 if self.current_width + grapheme_width > self.width && !self.current.is_empty() {
-                    trim_trailing_whitespace(&mut self.current);
+                    let trimmed = trim_trailing_whitespace(&mut self.current);
                     self.finish_row(buffer, emit)?;
+                    self.broke_at_space = trimmed;
                     self.start_continuation();
                 }
                 self.current.push(*grapheme);
@@ -918,7 +966,7 @@ fn wrap_graphemes(
     line: &Line<'static>,
     width: usize,
     continuation_indent: usize,
-    mut emit: impl FnMut(&StyledBuffer, &[Grapheme]) -> ControlFlow<()>,
+    mut emit: impl FnMut(&StyledBuffer, &[Grapheme], RowCopy) -> ControlFlow<()>,
 ) {
     let width = width.max(1);
     let continuation_indent = continuation_indent.min(width.saturating_sub(1));
@@ -930,6 +978,7 @@ fn wrap_graphemes(
         current: Vec::new(),
         current_width: 0,
         emitted: 0,
+        broke_at_space: false,
     };
     // Rows are filled a run of whitespace or non-whitespace graphemes at a
     // time, each run as soon as the next one begins.
@@ -956,10 +1005,13 @@ fn wrap_graphemes(
     }
 }
 
-fn trim_trailing_whitespace(graphemes: &mut Vec<Grapheme>) {
+/// Drops trailing whitespace, reporting whether there was any.
+fn trim_trailing_whitespace(graphemes: &mut Vec<Grapheme>) -> bool {
+    let len = graphemes.len();
     while graphemes.last().is_some_and(|grapheme| grapheme.whitespace) {
         graphemes.pop();
     }
+    graphemes.len() < len
 }
 
 pub(super) fn display_width(text: &str) -> usize {
@@ -1098,6 +1150,33 @@ mod tests {
         // sequence, and nesting cannot recurse without bound.
         assert_eq!(sanitize_terminal_text("\x1b]0;title\x1b[31mred"), "red");
         assert_eq!(sanitize_terminal_text(&"\x1b]".repeat(50_000)), "");
+    }
+
+    /// Each row after a line's first says what its break removed, so copying
+    /// can join the rows back: a space between words, nothing inside a word.
+    #[test]
+    fn wrapped_rows_record_what_each_break_removed() {
+        let (rows, _, copies) =
+            wrap_styled_line_for_copy(Line::from("alpha beta abcdefghijkl"), 8, 2);
+        assert_eq!(text(&rows), ["alpha", "  beta a", "  bcdefg", "  hijkl"]);
+        assert_eq!(
+            copies,
+            [
+                RowCopy::default(),
+                RowCopy {
+                    lead: 2,
+                    joins: Some(" ")
+                },
+                RowCopy {
+                    lead: 2,
+                    joins: Some("")
+                },
+                RowCopy {
+                    lead: 2,
+                    joins: Some("")
+                },
+            ]
+        );
     }
 
     #[test]

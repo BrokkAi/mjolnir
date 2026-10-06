@@ -13,14 +13,13 @@ use std::sync::Arc;
 
 use crate::theme;
 use crossterm::event::{Event, KeyEvent, MouseEvent};
-use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::Paragraph;
 
 use crate::components::{ButtonRow, ControlKind, Form, Interaction};
-use crate::selection::{SelectionRange, SurfaceFrame, SurfaceId};
+use crate::selection::SelectionRange;
 use mj_core::elicitation::ElicitationRequest;
 use mj_core::relay::RelayEvent;
 use mj_core::second_opinion::{ReviewStage, ReviewWorkflow, WorkflowRequest};
@@ -28,8 +27,8 @@ use mj_core::state::MaterializedSession;
 use mj_core::transcript::ChatEntry;
 use mj_transcript::projection::{apply_committed_projection_event, project_relay_event};
 
-use super::rendering::TranscriptRenderMode;
-use super::transcript::{materialized_chat_entries_reusing, render_entry_rows};
+use super::rendering::{RowCopy, TranscriptRenderMode};
+use super::transcript::{copied_rows_text, materialized_chat_entries_reusing, render_entry_rows};
 use super::viewport::RowViewport;
 
 /// The plan a review is about, captured when the user asked for one.
@@ -249,6 +248,8 @@ pub(super) struct ReviewerPane {
     /// Wrapped rows for `width`. This is the pane's own row cache: a
     /// selection in it is resolved here and never against the primary's.
     rows: Vec<Line<'static>>,
+    /// How copying each of `rows` gives back its text.
+    copies: Vec<RowCopy>,
     theme: theme::UiTheme,
     width: u16,
     /// Where this pane is scrolled to.
@@ -365,13 +366,14 @@ impl ReviewerPane {
         }
         self.width = width;
         self.theme = theme::current();
-        self.rows = self
-            .entries
-            .iter()
-            .flat_map(|entry| {
-                render_entry_rows(entry, usize::from(width), TranscriptRenderMode::Rich)
-            })
-            .collect();
+        self.rows.clear();
+        self.copies.clear();
+        for entry in &self.entries {
+            let (rows, copies) =
+                render_entry_rows(entry, usize::from(width), TranscriptRenderMode::Rich);
+            self.rows.extend(rows);
+            self.copies.extend(copies);
+        }
     }
 
     /// Scrolls by `delta` rows, leaving follow mode on only at the end.
@@ -386,18 +388,14 @@ impl ReviewerPane {
             return None;
         }
         let end = range.end.row.min(self.rows.len().saturating_sub(1));
-        let text = (range.start.row..=end)
+        let rows = (range.start.row..=end)
             .filter_map(|row| {
                 let line = self.rows.get(row)?;
-                Some(match range.columns_on(row, self.width) {
-                    Some((first, last)) if first > 0 || last + 1 < self.width => {
-                        sliced_row(line, self.width, first, last)
-                    }
-                    _ => row_text(line),
-                })
+                let copy = self.copies.get(row).copied().unwrap_or_default();
+                Some((line, copy, range.columns_on(row, self.width)))
             })
             .collect::<Vec<_>>();
-        (!text.is_empty()).then(|| text.join("\n"))
+        (!rows.is_empty()).then(|| copied_rows_text(rows, self.width))
     }
 }
 
@@ -427,29 +425,6 @@ fn split_form() -> Form<SplitControl> {
     form.declare(SplitControl::Cancel, ControlKind::Button);
     form.end_frame(SplitControl::Transfer);
     form
-}
-
-fn row_text(line: &Line<'_>) -> String {
-    line.spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>()
-        .trim_end()
-        .to_owned()
-}
-
-fn sliced_row(line: &Line<'static>, width: u16, first: u16, last: u16) -> String {
-    let area = Rect::new(0, 0, width, 1);
-    let mut buffer = Buffer::empty(area);
-    Paragraph::new(line.clone()).render(area, &mut buffer);
-    crate::selection::extract_rows(
-        &buffer,
-        &SurfaceFrame::fixed(SurfaceId::ReviewerTranscript, area),
-        &SelectionRange {
-            start: crate::selection::ContentPos::new(0, first),
-            end: crate::selection::ContentPos::new(0, last),
-        },
-    )
 }
 
 impl super::ChatState {
