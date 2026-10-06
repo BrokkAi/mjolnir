@@ -102,8 +102,8 @@ same harness is selected again. A cross-harness resume instead restores the
 workspace and supplies a size-bounded handoff derived from the canonical
 transcript. See [Durability and recovery](/durability/).
 
-Kimi Code and Muse Code do not provide a guardian approval mode. They should
-not be used on a bare, unsandboxed runtime. Muse Code currently accepts one
+Kimi Code does not provide a guardian approval mode. It should not be used on
+a bare, unsandboxed runtime. Muse Code currently accepts one
 workspace root, so use either a one-repository bundle or one bare project
 directory, without attached directories.
 
@@ -114,11 +114,11 @@ A machine is a host: `local` (this computer), `ssh` (a named host), or
 
 | What you get | Runtime | Machine | Execution policy | Session boundary |
 | --- | --- | --- | --- | --- |
-| Local checkout or isolated clone | `bare` | `local`, on a Linux or macOS controller host | Configured approvals, except Muse | Existing directory or independent clone under `.mj/clones/` |
+| Local checkout or isolated clone | `bare` | `local`, on a Linux or macOS controller host | Configured approvals | Existing directory or independent clone under `.mj/clones/` |
 | Podman container | `podman` | `local`, on Linux or WSL2 | Unconstrained | Disposable container |
 | Docker container | `docker` | `local`, with a reachable Linux Docker daemon, including a VM on macOS | Unconstrained | Disposable container |
 | Apple container | `apple-container` | `local`, on macOS 26+ with Apple silicon | Unconstrained | Disposable container |
-| Remote checkout or isolated clone | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained, except Muse | Existing directory or independent clone on that host |
+| Remote checkout or isolated clone | `bare` | an `ssh` machine, a named Linux host | Guardian or unconstrained | Existing directory or independent clone on that host |
 | Podman over SSH | `podman` | an `ssh` machine | Unconstrained | Disposable remote container |
 | Docker over SSH | `docker` | an `ssh` machine | Unconstrained | Disposable remote container |
 | AWS EC2 | `bare` | an `aws-ec2` machine, in your AWS account | Unconstrained | Disposable instance |
@@ -128,9 +128,6 @@ approval behavior. “Unconstrained” means Mjolnir deliberately selects the
 harness's full-access mode and relies on the runtime boundary to contain the
 blast radius. The exact controls and data boundaries are documented in
 [Security boundaries](/security/).
-
-Muse always runs unconstrained, including on a bare runtime; use an isolated
-target for it. See [Muse limitations](/profiles/#harness-limitations).
 
 Use a bare local target when you specifically want the agent to operate on
 your machine under its normal approvals. Use a container for a disposable

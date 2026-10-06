@@ -86,6 +86,8 @@ pub struct ExecutionEnforcement {
     /// The config option that carries `acp_mode` when the harness keeps it
     /// apart from its Mode selector.
     acp_mode_selector: Option<&'static str>,
+    /// A further ACP config option and value the policy requires.
+    acp_setting: Option<(&'static str, &'static str)>,
     launch_flag: Option<&'static str>,
     launch_environment: Option<(&'static str, &'static str)>,
     /// A word appended once to a whitespace-separated argv held in an env var.
@@ -156,6 +158,12 @@ impl ExecutionEnforcement {
     /// Without it, the mode goes to the bridge's Mode selector.
     pub const fn acp_mode_selector(self) -> Option<&'static str> {
         self.acp_mode_selector
+    }
+
+    /// A further config option and value to select after the mode, when the
+    /// policy needs one.
+    pub const fn acp_setting(self) -> Option<(&'static str, &'static str)> {
+        self.acp_setting
     }
 
     /// The launch flag to add to the bridge command line, when there is one.
@@ -417,6 +425,7 @@ impl HarnessKind {
                 // and the approval policy on `approval_mode`. Container images
                 // built before it keep the approval policy on `mode`.
                 acp_mode_selector: Some("approval_mode"),
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
                 launch_argument: Some(("MUSE_SERVE_ARGS", "--disable-sandbox")),
@@ -428,10 +437,31 @@ impl HarnessKind {
                     object_version: Some(("schema_version", 1)),
                 }),
             }),
+            // Muse's guardian is muse-acp's auto-review: a read-only Muse
+            // reviewer answers each approval, and a failed review denies.
+            // `muse serve` refuses Muse's own `:auto-review` profile, so the
+            // staged profile asks and the adapter's reviewer answers.
+            (Self::Muse, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
+                label: "promptUnmatched / auto-review / :ask-me",
+                acp_mode: Some("promptUnmatched"),
+                acp_mode_selector: Some("approval_mode"),
+                acp_setting: Some(("auto_review", "on")),
+                launch_flag: None,
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: Some(StagedSetting {
+                    file: "settings.json",
+                    path: &["permissions", "default_profile"],
+                    value: ":ask-me",
+                    object_version: Some(("schema_version", 1)),
+                }),
+            }),
             (Self::Codex, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "agent / guardian",
                 acp_mode: Some("agent"),
                 acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent")),
                 launch_argument: None,
@@ -442,6 +472,7 @@ impl HarnessKind {
                 label: "agent-full-access",
                 acp_mode: Some("agent-full-access"),
                 acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: Some(("INITIAL_AGENT_MODE", "agent-full-access")),
                 launch_argument: None,
@@ -455,6 +486,7 @@ impl HarnessKind {
                 label: "auto / guardian",
                 acp_mode: Some("auto"),
                 acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -462,13 +494,12 @@ impl HarnessKind {
                 staged_setting: None,
             }),
             // Every remaining harness keeps the configuration its user wrote.
-            // Muse never reaches this arm: `effective_execution_policy` has
-            // already forced it unconstrained.
             (_, ExecutionPolicy::ConfiguredApprovals) => None,
             (Self::Claude, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 label: "bypassPermissions / sandbox-off",
                 acp_mode: Some("bypassPermissions"),
                 acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -479,6 +510,7 @@ impl HarnessKind {
                 label: "auto",
                 acp_mode: Some("auto"),
                 acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: None,
                 launch_environment: None,
                 launch_argument: None,
@@ -489,6 +521,7 @@ impl HarnessKind {
                 label: "always-approve / sandbox-off",
                 acp_mode: None,
                 acp_mode_selector: None,
+                acp_setting: None,
                 launch_flag: Some("--always-approve"),
                 launch_environment: Some(("GROK_SANDBOX", "off")),
                 launch_argument: None,
@@ -526,19 +559,7 @@ impl HarnessKind {
     }
 
     pub const fn supports_guardian_approvals(self) -> bool {
-        matches!(self, Self::Codex | Self::Claude | Self::Grok)
-    }
-
-    /// The policy a session actually runs under. Muse cannot honor configured
-    /// approvals: its permission profile is a host-lifetime setting that
-    /// `muse serve` refuses when it names the automated reviewer, and the wire
-    /// cannot select another. Muse therefore runs unconstrained on every
-    /// target and the target wizard warns on raw ones.
-    pub const fn effective_execution_policy(self, target: ExecutionPolicy) -> ExecutionPolicy {
-        match self {
-            Self::Muse => ExecutionPolicy::Unconstrained,
-            _ => target,
-        }
+        matches!(self, Self::Codex | Self::Claude | Self::Grok | Self::Muse)
     }
 
     /// Shared warning for selecting a harness without guardian approvals on a

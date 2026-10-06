@@ -1627,7 +1627,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             .collect::<String>()
     };
 
-    for kind in [HarnessKind::Kimi, HarnessKind::Muse] {
+    for kind in [HarnessKind::Kimi] {
         let marked = profile_step(kind);
         assert!(marked.contains('⚠'), "{kind:?}: {marked}");
         assert!(
@@ -1640,7 +1640,12 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
         );
     }
 
-    for kind in [HarnessKind::Codex, HarnessKind::Claude, HarnessKind::Grok] {
+    for kind in [
+        HarnessKind::Codex,
+        HarnessKind::Claude,
+        HarnessKind::Grok,
+        HarnessKind::Muse,
+    ] {
         let quiet = profile_step(kind);
         assert!(!quiet.contains('⚠'), "{kind:?}: {quiet}");
         assert!(

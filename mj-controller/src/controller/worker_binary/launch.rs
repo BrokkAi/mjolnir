@@ -660,9 +660,7 @@ pub(super) fn worker_launch_config(
     target: &mj_core::state::TargetRuntimeSettings,
 ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
     let session_id = session.id.as_str();
-    let execution_policy = profile
-        .kind
-        .effective_execution_policy(target.execution_policy);
+    let execution_policy = target.execution_policy;
     let target_profile_home = target_profile_home(backend, session_id, profile);
     let workspace = if let Some(project_directory) = &session.project_directory {
         (project_directory.to_string_lossy().into_owned(), Vec::new())

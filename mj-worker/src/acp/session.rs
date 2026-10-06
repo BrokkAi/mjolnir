@@ -501,6 +501,18 @@ pub(super) async fn serve_session(
             .await?;
         }
     }
+    // Muse's auto-review is off in every session muse-acp opens, so it is
+    // selected on every open, resumed or not.
+    if let Some(setting) = enforcement.and_then(ExecutionEnforcement::acp_setting) {
+        enforce_policy_setting(
+            connection,
+            &session_id,
+            spec.harness,
+            setting,
+            &mut config_options,
+        )
+        .await?;
+    }
     if let Some(mode) = spec
         .clear_context_request
         .as_ref()

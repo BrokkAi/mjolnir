@@ -827,8 +827,8 @@ permissions = "guardian"
 
 The new-session wizard asks for an existing absolute Git project directory on
 the runtime's machine. On `local` supported harnesses retain configured
-approvals because there is no container or instance boundary. Muse always runs
-unconstrained; see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
+approvals because there is no container or instance boundary; Muse's guardian
+is muse-acp's auto-review, see [Harness limitations](/profiles/#harness-limitations). On an SSH machine
 the wizard separately asks for an existing absolute remote Git directory; when
 **Create isolated checkout** is checked on the final review, the new checkout is
 created below the repository's own `.mj/clones/` tree. A bare runtime on an

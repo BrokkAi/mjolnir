@@ -20,8 +20,8 @@ mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 
 Bare localhost sessions preserve configured approvals for supported harnesses.
-Codex, Claude Code, and Grok Build expose guardian modes; Kimi Code and Muse
-Code do not, and Muse always runs unconstrained. Mjolnir warns against running an
+Codex, Claude Code, Grok Build, and Muse Code expose guardian modes; Kimi Code
+does not. Mjolnir warns against running an
 unsupported harness on a raw, unsandboxed target.
 
 A container session's repository content always comes from a network clone. A

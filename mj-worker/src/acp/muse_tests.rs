@@ -319,6 +319,11 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                 log.to_string_lossy().into_owned(),
             ),
             ("MJ_MUSE_TEST_SCENARIO".into(), scenario.into()),
+            // The verdict the fake auto-review host returns.
+            (
+                "MJ_MUSE_TEST_REVIEW".into(),
+                if choice == "deny" { "deny" } else { "allow" }.into(),
+            ),
         ]);
         let spec = LaunchSpec {
             bridge_spec_path: None,
@@ -418,26 +423,18 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
                     replied |= update.to_string().contains("Muse test reply");
                 }
                 RuntimeEvent::ElicitationRequested { request } => {
+                    // Guardian answers Muse permissions with auto-review.
+                    assert_eq!(scenario, "question", "{request:?}");
                     let field = &request.fields[0];
-                    let response = if scenario == "permission" {
+                    let response = if choice == "accept" {
                         ElicitationResponse::Accept {
                             content: BTreeMap::from([(
-                                "choice".into(),
-                                ElicitationValue::String(choice.into()),
+                                field.id.clone(),
+                                ElicitationValue::String("First".into()),
                             )]),
                         }
                     } else {
-                        assert_eq!(scenario, "question");
-                        if choice == "accept" {
-                            ElicitationResponse::Accept {
-                                content: BTreeMap::from([(
-                                    field.id.clone(),
-                                    ElicitationValue::String("First".into()),
-                                )]),
-                            }
-                        } else {
-                            ElicitationResponse::Cancel
-                        }
+                        ElicitationResponse::Cancel
                     };
                     let (resolved, result) = oneshot::channel();
                     commands
@@ -464,7 +461,7 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         if scenario == "chat" {
             assert!(replied);
         }
-        if matches!(scenario, "permission" | "question") {
+        if scenario == "question" {
             assert!(answered, "scenario {scenario} did not request user input");
         }
         commands
@@ -489,9 +486,11 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
             .filter(|message| message["method"] == "session/setApprovalMode")
             .map(|message| message["params"]["mode"].clone())
             .collect();
-        if policy == Unconstrained {
-            assert_eq!(approval_modes, [serde_json::json!("allowAll")]);
-        }
+        let approval_mode = match policy {
+            Unconstrained => "allowAll",
+            ConfiguredApprovals => "promptUnmatched",
+        };
+        assert_eq!(approval_modes, [serde_json::json!(approval_mode)]);
         assert!(trace.contains("reasoningEffort"));
         if scenario == "question" {
             let method = if choice == "accept" {

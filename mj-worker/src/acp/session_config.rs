@@ -550,6 +550,33 @@ pub(super) async fn enforce_execution_mode(
     bail!("ACP bridge does not expose required execution mode {desired}")
 }
 
+/// Select a config option an execution policy requires besides its mode,
+/// such as Muse's auto-review. A bridge without it cannot realize the policy.
+pub(super) async fn enforce_policy_setting(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    harness: HarnessKind,
+    (key, value): (&str, &str),
+    config_options: &mut Vec<SessionConfigOption>,
+) -> Result<()> {
+    let option_id = config_options
+        .iter()
+        .find(|option| option.id.to_string() == key && select_contains(&option.kind, value))
+        .map(|option| option.id.clone())
+        .with_context(|| format!("ACP bridge does not expose required {key} {value}"))?;
+    select_confirmed(
+        connection,
+        session_id,
+        harness,
+        option_id,
+        key,
+        value,
+        config_options,
+    )
+    .await
+    .map(drop)
+}
+
 /// Select `desired` on `option_id` and return the value the harness then
 /// reports, refusing any other.
 async fn select_confirmed(
