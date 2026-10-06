@@ -29,7 +29,7 @@ action: None
 project request: Github { query: "" }
 action: None
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -60,7 +60,7 @@ action: None
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -91,7 +91,7 @@ action: None
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -153,7 +153,7 @@ action: None
 ╰────                                                                                                             ─────╯
 / sea
 === saved_projects_show_every_source_of_the_selection_and_stack_add_and_remove (120x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
@@ -187,7 +187,7 @@ action: None
 action: CreateBundle { sources: ["owner/only"] }
 action: None
 === project_picker_url_enter_creates_one_repository_and_advances_to_review (100x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
@@ -1764,7 +1764,7 @@ action: None
 /                                                         ys
 action: None
 === directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
@@ -1795,7 +1795,7 @@ action: None
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
 === directory_completion_lists_every_candidate_and_selects_with_keys (100x30) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
@@ -1827,7 +1827,7 @@ action: None
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · : palette · ? keys
 action: None
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1868,7 +1868,7 @@ action: None
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -1909,7 +1909,7 @@ action: None
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === clicking_a_recent_project_fills_the_field_and_enter_validates_it (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │

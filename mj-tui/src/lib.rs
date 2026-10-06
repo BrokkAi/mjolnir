@@ -212,6 +212,10 @@ pub(crate) const DASHBOARD_PANE_COUNT: usize = 3;
 /// Maximum gap between two left clicks on the same session row for the pair
 /// to count as a double click.
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+/// Stands in for the build on the workspace pane in tests and the committed
+/// documentation screenshots, so goldens and captures do not change with
+/// every release and nobody reads them as a claim about the running version.
+const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -898,11 +902,8 @@ pub struct DashboardState {
     /// The daemon storage owner's verdict per target host. The daemon is the
     /// only judge of a full disk; this surface shows what it says.
     pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
-    /// The build stamped on the workspace pane, as `v2.11.0`. It is a field
-    /// rather than the compiled constant so the documentation capture can pin
-    /// a placeholder: those screenshots are committed, and a version read from
-    /// the binary would make every one of them wrong the moment the next
-    /// release goes out.
+    /// The build stamped on the workspace pane, as `v2.11.0`. Tests render
+    /// [`TEST_VERSION_LABEL`] instead.
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
@@ -1196,7 +1197,12 @@ impl DashboardState {
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             target_storage: Vec::new(),
-            version_label: concat!("v", env!("CARGO_PKG_VERSION")).to_owned(),
+            version_label: if cfg!(test) {
+                TEST_VERSION_LABEL
+            } else {
+                concat!("v", env!("CARGO_PKG_VERSION"))
+            }
+            .to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
             project_directory_checks: BTreeMap::new(),

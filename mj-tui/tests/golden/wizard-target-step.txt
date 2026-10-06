@@ -1,5 +1,5 @@
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -40,7 +40,7 @@
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -82,7 +82,7 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 action: ValidateProjectDirectory { target_template_id: "localhost", directory: "/work/project" }
 === new_session_skips_the_target_step_when_only_one_target_is_offered (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -123,7 +123,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -164,7 +164,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -205,7 +205,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -246,7 +246,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === new_session_shows_the_target_step_when_a_second_target_may_be_chosen (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -287,7 +287,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === a_lone_container_target_keeps_its_step_for_sizing (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -329,7 +329,7 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 action: None
 === resume_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -370,7 +370,7 @@ action: None
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === resume_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -413,7 +413,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 action: PreflightResumeRepositories { launch: ResumeSession { workspace_id: "default", session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, discard_queue: false } }
 action: None
 === resume_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -454,7 +454,7 @@ action: None
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === resume_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -496,7 +496,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 action: None
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -538,7 +538,7 @@ action: None
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 action: MoveSession { subagents: None, workspace_selection: WorkspaceSelection { exclusions: [], acknowledge_large_transfer: false }, session_id: "session-1", profile_id: "codex-1", target_template_id: "machine", additional_mounts: [], resource_allocation: None, clear_resource_allocation: true, preparation_request_id: Some(1), queue: Some(Discard) }
 === move_skips_the_target_step_when_only_one_target_suits_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -580,7 +580,7 @@ action: MoveSession { subagents: None, workspace_selection: WorkspaceSelection {
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 action: None
 === move_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -621,7 +621,7 @@ action: None
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === move_shows_the_target_step_when_two_targets_suit_the_session (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -662,7 +662,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 === selecting_a_row_skips_the_hidden_target (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰───────────────────────────────────────────────────╯│                                                                                                         │
 ╭ Sessions ────────────────────────────── ▁   ▪   □ ╮│                                                                                                         │
@@ -704,7 +704,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 selection: podman (the next visible row; docker is hidden)
 === selecting_a_row_skips_the_hidden_target (160x40) ===
-╭ Workspaces ──────────────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                         ☰ ││                                                                                                         │
 ╰───────────────────────────────────────────────────╯│                                                                                                         │
 ╭ Sessions ────────────────────────────── ▁   ▪   □ ╮│                                                                                                         │
@@ -745,7 +745,7 @@ selection: podman (the next visible row; docker is hidden)
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 === target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets (140x32) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -778,7 +778,7 @@ selection: podman (the next visible row; docker is hidden)
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === target_step_draws_a_table_and_offers_resize_keys_only_for_sized_targets (140x32) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -812,7 +812,7 @@ selection: podman (the next visible row; docker is hidden)
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 action: None
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -854,7 +854,7 @@ action: None
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 cell style: CPU and MEM (GiB) inputs are underlined before focus
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (140x40) ===
-╭ Workspaces ───────────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
@@ -895,7 +895,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (80x24) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│           ✦  M J O L N I R           │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -921,7 +921,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys
 cell style: CPU and MEM (GiB) inputs are underlined before focus
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (80x24) ===
-╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation ────── ◇   ⋯───╮
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
 │ default                            ☰ ││                                      │
 ╰──────────────────────────────────────╯│           ✦  M J O L N I R           │
 ╭ Sessions ───────────────────── ▁   ▪ ╮│                                      │
@@ -946,7 +946,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 ╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then : palette · ? keys
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (60x20) ===
-╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                ☰ │
 
 
@@ -968,7 +968,7 @@ cell style: CPU and MEM (GiB) inputs are underlined before focus
 / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 cell style: CPU and MEM (GiB) inputs are underlined before focus
 === container_fields_are_underlined_before_focus_and_clickable_on_small_terminals (60x20) ===
-╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+╭ Workspaces ──────────────────────────── ✦ MJOLNIR vX.Y.Z ╮
 │ default                                                ☰ │
 
 

@@ -49,9 +49,10 @@ tag, and publishing remotely through the normal release workflows, including
 required package-channel updates. Treat this as an explicit push request;
 do not ask for separate push or publication confirmation.
 
-Follow `RELEASING.md` for every release. Tag the selected known-good commit;
-it need not be current master or merged into master. Reuse passing validation
-for that exact commit instead of rerunning it for the release. The committed
+Follow `RELEASING.md` for every release. Tag the prepared commit; it need not
+be current master or merged into master, and it need not wait for branch CI.
+The release workflow runs the full CI suite on the tag and publishes only if
+it passes, so do not rerun validation locally for the release. The committed
 workspace version, internal dependency constraints, and `Cargo.lock` must match
 the tag; the release workflow checks version consistency and generates license
 reports from that tagged commit instead of committing them.
