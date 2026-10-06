@@ -41,7 +41,9 @@ COPY --from=node /usr/local/ /usr/local/
 # voice-worker) needs to compile; without it any build that includes
 # `brokk-mj-voice-worker` fails in the `alsa-sys` build script. This matches
 # the `libasound2-dev` install in the voice-worker CI job and the Linux
-# release builds.
+# release builds. `eatmydata` lets sessions run build and test commands with
+# fsync turned into a no-op (LD_PRELOAD=libeatmydata.so), the way CI jobs that
+# commit many small SQLite transactions do.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
@@ -50,6 +52,7 @@ RUN apt-get update \
         clang \
         cmake \
         curl \
+        eatmydata \
         fd-find \
         file \
         git \
