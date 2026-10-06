@@ -350,7 +350,12 @@ pub struct DeploymentCapacityTarget {
     pub kind: DeploymentCapacityKind,
     pub local: bool,
     /// Alternative commands for a host, or one command per live AWS instance.
+    /// The local host has none: sysinfo reads its CPU and memory, and its
+    /// storage is measured over `local_storage_paths`.
     pub probes: Vec<CommandSpec>,
+    /// The paths on this machine whose filesystems local targets write to.
+    /// Empty for every other host, whose probes carry their own paths.
+    pub local_storage_paths: Vec<String>,
     /// Prevents a partial AWS fleet sample when one live instance cannot be probed yet.
     pub probe_error: Option<String>,
 }

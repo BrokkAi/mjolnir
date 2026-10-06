@@ -1653,6 +1653,7 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
         kind: mj_core::targets::DeploymentCapacityKind::Host,
         local: false,
         probes: Vec::new(),
+        local_storage_paths: Vec::new(),
         probe_error: None,
     }]);
     let draw = |dashboard: &mut DashboardState| {
@@ -2069,6 +2070,7 @@ fn session_cpu_report_groups_sorts_and_refreshes_while_open() {
                 kind: DeploymentCapacityKind::Host,
                 local: true,
                 probes: Vec::new(),
+                local_storage_paths: Vec::new(),
                 probe_error: None,
             })
             .collect(),
@@ -2193,6 +2195,7 @@ fn session_cpu_report_opens_on_the_selected_sessions_machine() {
                 kind: DeploymentCapacityKind::Host,
                 local: true,
                 probes: Vec::new(),
+                local_storage_paths: Vec::new(),
                 probe_error: None,
             })
             .collect(),

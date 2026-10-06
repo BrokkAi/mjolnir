@@ -646,14 +646,9 @@ pub fn parse_storage_lines(output: &[u8]) -> (Option<String>, Vec<FilesystemSpac
         ) else {
             continue;
         };
-        let path = normalize_target_path(path, home.as_deref());
-        match filesystems.iter_mut().find(|known| known.mount == *mount) {
-            Some(known) => {
-                if !known.paths.contains(&path) {
-                    known.paths.push(path);
-                }
-            }
-            None => filesystems.push(FilesystemSpace {
+        place_measured_path(
+            &mut filesystems,
+            FilesystemSpace {
                 mount: (*mount).to_owned(),
                 available_bytes: available.saturating_mul(1024),
                 total_bytes: total.saturating_mul(1024),
@@ -661,11 +656,83 @@ pub fn parse_storage_lines(output: &[u8]) -> (Option<String>, Vec<FilesystemSpac
                     .saturating_sub(used)
                     .saturating_sub(available)
                     .saturating_mul(1024),
-                paths: vec![path],
-            }),
-        }
+                paths: vec![normalize_target_path(path, home.as_deref())],
+            },
+        );
     }
     (home, filesystems)
+}
+
+/// Add one measurement, a filesystem holding one path, keeping one entry per
+/// filesystem and the first reading of each.
+fn place_measured_path(filesystems: &mut Vec<FilesystemSpace>, measured: FilesystemSpace) {
+    match filesystems
+        .iter_mut()
+        .find(|known| known.mount == measured.mount)
+    {
+        Some(known) => {
+            for path in measured.paths {
+                if !known.paths.contains(&path) {
+                    known.paths.push(path);
+                }
+            }
+        }
+        None => filesystems.push(measured),
+    }
+}
+
+/// What [`STORAGE_PROBE_SCRIPT`] reports, measured on Windows through the
+/// volume APIs, since Windows has no POSIX `df`. Each path is measured at its
+/// nearest existing ancestor, on the volume it is mounted from. A path that
+/// is not absolute here, such as a Linux container engine's
+/// `/var/lib/docker`, lives inside a VM that Windows cannot measure, and is
+/// left out like a path `df` cannot read.
+#[cfg(windows)]
+pub fn measure_windows_filesystems(paths: &[String]) -> Vec<FilesystemSpace> {
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumePathNameW};
+
+    let wide = |text: &std::ffi::OsStr| text.encode_wide().chain([0]).collect::<Vec<u16>>();
+    let measure = |path: &std::path::Path| -> Option<FilesystemSpace> {
+        let existing = path.ancestors().find(|ancestor| ancestor.exists())?;
+        let mut volume = vec![0u16; 1024];
+        // SAFETY: the name is NUL-terminated and the buffer length is passed.
+        let found = unsafe {
+            GetVolumePathNameW(
+                wide(existing.as_os_str()).as_ptr(),
+                volume.as_mut_ptr(),
+                volume.len() as u32,
+            )
+        };
+        if found == 0 {
+            return None;
+        }
+        volume.truncate(volume.iter().position(|&unit| unit == 0)?);
+        let (mut available, mut total, mut free) = (0u64, 0u64, 0u64);
+        volume.push(0);
+        // SAFETY: the volume name is NUL-terminated and each out-pointer is a
+        // live u64.
+        let measured =
+            unsafe { GetDiskFreeSpaceExW(volume.as_ptr(), &mut available, &mut total, &mut free) };
+        volume.pop();
+        (measured != 0).then(|| FilesystemSpace {
+            mount: std::ffi::OsString::from_wide(&volume)
+                .to_string_lossy()
+                .into_owned(),
+            available_bytes: available,
+            total_bytes: total,
+            // Free space beyond the caller's quota, which it cannot write.
+            reserved_bytes: free.saturating_sub(available),
+            paths: vec![path.to_string_lossy().into_owned()],
+        })
+    };
+    let mut filesystems = Vec::new();
+    for path in paths.iter().map(std::path::Path::new) {
+        if let Some(measured) = path.is_absolute().then(|| measure(path)).flatten() {
+            place_measured_path(&mut filesystems, measured);
+        }
+    }
+    filesystems
 }
 
 #[cfg(test)]
@@ -817,5 +884,23 @@ garbage\n";
         assert_eq!(filesystems.len(), 1, "{output:?}");
         assert!(filesystems[0].total_bytes > 0);
         assert_eq!(filesystems[0].paths.len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_measures_missing_paths_at_an_existing_ancestor() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("not/yet/created");
+        let paths = [
+            missing.to_string_lossy().into_owned(),
+            directory.path().to_string_lossy().into_owned(),
+            // Inside Docker Desktop's VM, which Windows cannot measure.
+            "/var/lib/docker".to_owned(),
+        ];
+        let filesystems = measure_windows_filesystems(&paths);
+        assert_eq!(filesystems.len(), 1, "{filesystems:?}");
+        assert!(missing.starts_with(&filesystems[0].mount), "{filesystems:?}");
+        assert!(filesystems[0].available_bytes <= filesystems[0].total_bytes);
+        assert_eq!(filesystems[0].paths, paths[..2]);
     }
 }

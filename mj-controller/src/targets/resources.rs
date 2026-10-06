@@ -148,6 +148,51 @@ pub fn storage_samples(
     }]
 }
 
+/// The home and the filesystems under `paths` on this machine: what the
+/// daemon's capacity service and doctor both report for local targets.
+/// Unix runs [`mj_core::targets::storage::STORAGE_PROBE_SCRIPT`] through
+/// `executor`; Windows has no POSIX shell, so it asks its volume APIs.
+pub fn measure_local_storage(
+    paths: &[String],
+    executor: &impl CommandExecutor,
+) -> Result<(
+    Option<String>,
+    Vec<mj_core::targets::storage::FilesystemSpace>,
+)> {
+    #[cfg(unix)]
+    {
+        let mut probe = CommandSpec::new(
+            "sh",
+            [
+                "-c",
+                mj_core::targets::storage::STORAGE_PROBE_SCRIPT,
+                "mj-storage",
+            ],
+        )
+        .purpose("measure local free space");
+        probe.args.extend(paths.iter().cloned());
+        let output = executor.execute(&probe)?;
+        ensure!(
+            output.status == 0,
+            "{} failed with status {}: {}",
+            probe.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(mj_core::targets::storage::parse_storage_lines(
+            &output.stdout,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let _ = executor;
+        Ok((
+            None,
+            mj_core::targets::storage::measure_windows_filesystems(paths),
+        ))
+    }
+}
+
 pub fn parse_host_capacity(output: &[u8], host: &str) -> Result<DeploymentCapacityUsage> {
     let values = parse_key_values(output);
     let total = parse_required_u64(&values, "memory.max")?;
