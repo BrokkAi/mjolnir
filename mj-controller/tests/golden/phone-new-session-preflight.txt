@@ -3,7 +3,7 @@
   "project_directory": "<project>",
   "managed_worktree": {
     "available": true,
-    "default_create": false
+    "default_create": true
   },
   "remote_repairs": [],
   "dirty_repositories": [],
