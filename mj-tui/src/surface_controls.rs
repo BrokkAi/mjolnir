@@ -300,8 +300,9 @@ pub(crate) fn render_session_buttons(frame: &mut Frame, area: Rect, dashboard: &
             && !dashboard.modal_open();
         let style = if enabled && (focused || form.is_armed(control)) {
             theme::focus_control()
-        } else if enabled && id == CommandId::NewSessionWizard && !theme::is_mono() {
-            // Monochrome reserves bold reverse video for actual keyboard focus.
+        } else if enabled && id == CommandId::NewSessionWizard && !theme::reverse_video() {
+            // Without painted surfaces, bold reverse video is reserved for
+            // actual keyboard focus.
             theme::active_control()
         } else if enabled {
             theme::actionable().patch(theme::raised())
@@ -744,7 +745,7 @@ mod tests {
         let reversed = (x..x + FILTER_LABEL.len() as u16 + FILTER_FIELD_MAX)
             .filter(|&column| {
                 let cell = &buffer[(column, y)];
-                if theme::is_mono() {
+                if theme::reverse_video() {
                     cell.modifier.contains(ratatui::style::Modifier::REVERSED)
                 } else {
                     Some(cell.bg) == caret.bg

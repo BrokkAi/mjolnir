@@ -34,15 +34,9 @@ pub(super) fn voice_button_area(prompt_area: Rect) -> Option<Rect> {
 /// Renders the microphone chip that belongs to the prompt's top border.
 pub(super) fn voice_button_line(voice_available: bool, voice_active: bool) -> Line<'static> {
     let style = if voice_active {
-        Style::default()
-            .fg(theme::palette().background)
-            .bg(theme::palette().error)
-            .add_modifier(Modifier::BOLD)
+        theme::filled(theme::palette().error).add_modifier(Modifier::BOLD)
     } else if voice_available {
-        Style::default()
-            .fg(theme::palette().background)
-            .bg(theme::palette().accent)
-            .add_modifier(Modifier::BOLD)
+        theme::filled(theme::palette().accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(theme::palette().muted)

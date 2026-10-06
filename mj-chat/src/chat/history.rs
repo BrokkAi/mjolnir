@@ -3,7 +3,7 @@
 
 use crate::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::text_input::TextInput;
@@ -381,10 +381,7 @@ pub(super) fn highlighted_input_lines(input: &str, query: &str) -> Vec<Line<'sta
             }
             spans.push(Span::styled(
                 input[start..end].to_owned(),
-                Style::default()
-                    .fg(theme::palette().background)
-                    .bg(theme::palette().warning)
-                    .add_modifier(Modifier::BOLD),
+                theme::filled(theme::palette().warning).add_modifier(Modifier::BOLD),
             ));
             cursor = end;
         }

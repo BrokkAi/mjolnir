@@ -30,7 +30,35 @@ pub struct Palette {
     pub session_attention: Color,
     pub session_idle: Color,
     pub activity_dim: Color,
+    /// The colors pinned sessions cycle through.
+    pub pins: [Color; 8],
+    /// The palette leaves every background to the terminal, so selection,
+    /// focus, and filled chips are drawn with reverse video, bold, and
+    /// underline instead of painted surfaces.
+    pub reverse_video: bool,
 }
+
+const DARK_PINS: [Color; 8] = [
+    rgb(100, 215, 235),
+    rgb(190, 160, 250),
+    rgb(130, 210, 180),
+    rgb(235, 160, 205),
+    rgb(145, 175, 250),
+    rgb(205, 195, 135),
+    rgb(125, 215, 215),
+    rgb(215, 175, 175),
+];
+
+const LIGHT_PINS: [Color; 8] = [
+    rgb(0, 105, 135),
+    rgb(112, 65, 165),
+    rgb(40, 110, 95),
+    rgb(155, 65, 115),
+    rgb(65, 85, 165),
+    rgb(115, 95, 40),
+    rgb(0, 110, 115),
+    rgb(125, 75, 80),
+];
 
 const MIDNIGHT: Palette = Palette {
     // Neutral graphite leaves color to actions, authorship, and session state.
@@ -51,6 +79,8 @@ const MIDNIGHT: Palette = Palette {
     session_attention: rgb(240, 205, 145),
     session_idle: rgb(158, 194, 238),
     activity_dim: rgb(67, 44, 48),
+    pins: DARK_PINS,
+    reverse_video: false,
 };
 
 const LIGHT: Palette = Palette {
@@ -71,6 +101,8 @@ const LIGHT: Palette = Palette {
     session_attention: rgb(133, 83, 19),
     session_idle: rgb(54, 95, 146),
     activity_dim: rgb(220, 183, 187),
+    pins: LIGHT_PINS,
+    reverse_video: false,
 };
 
 const DARCULA: Palette = Palette {
@@ -93,6 +125,8 @@ const DARCULA: Palette = Palette {
     session_attention: rgb(255, 220, 96),
     session_idle: rgb(145, 220, 255),
     activity_dim: rgb(104, 56, 76),
+    pins: DARK_PINS,
+    reverse_video: false,
 };
 
 const HIGH_CONTRAST: Palette = Palette {
@@ -114,6 +148,8 @@ const HIGH_CONTRAST: Palette = Palette {
     session_attention: rgb(255, 220, 96),
     session_idle: rgb(140, 220, 255),
     activity_dim: rgb(64, 0, 32),
+    pins: DARK_PINS,
+    reverse_video: false,
 };
 
 /// No colors: every slot is the terminal's own default, and the style
@@ -136,6 +172,8 @@ const MONO: Palette = Palette {
     session_attention: Color::Reset,
     session_idle: Color::Reset,
     activity_dim: Color::Reset,
+    pins: [Color::Reset; 8],
+    reverse_video: true,
 };
 
 thread_local! {
@@ -147,10 +185,10 @@ pub fn current() -> UiTheme {
     CURRENT.get()
 }
 
-/// Whether the palette in force paints no colors, so styles have to say
-/// everything with modifiers.
-pub fn is_mono() -> bool {
-    current() == UiTheme::Mono
+/// Whether the palette in force leaves backgrounds to the terminal, so
+/// styles carry selection and focus with reverse video, bold, and underline.
+pub fn reverse_video() -> bool {
+    palette().reverse_video
 }
 
 /// Whether `NO_COLOR` (https://no-color.org) is set to a non-empty value.
@@ -506,9 +544,13 @@ pub fn muted() -> Style {
 
 pub fn border(focused: bool) -> Style {
     match (focused, current()) {
-        (true, UiTheme::Mono) => Style::default().add_modifier(Modifier::BOLD),
         (true, UiTheme::HighContrast) => Style::default()
             .fg(palette().accent)
+            .add_modifier(Modifier::BOLD),
+        // The terminal's own colors have no edge quieter than the border, so
+        // focus is the foreground in bold.
+        (true, _) if reverse_video() => Style::default()
+            .fg(palette().text)
             .add_modifier(Modifier::BOLD),
         // Titles carry the accent. A neutral edge keeps large panes quiet.
         (true, _) => Style::default().fg(palette().muted),
@@ -527,8 +569,8 @@ pub fn title(focused: bool) -> Style {
 }
 
 pub fn selection(focused: bool) -> Style {
-    if is_mono() {
-        // With no colors, reverse video is the selection.
+    if reverse_video() {
+        // Without a painted surface, reverse video is the selection.
         let style = Style::default().add_modifier(Modifier::REVERSED);
         return if focused {
             style.add_modifier(Modifier::BOLD)
@@ -547,9 +589,9 @@ pub fn selection(focused: bool) -> Style {
 }
 
 /// The background of a raised surface: a selected row, an armed control, a
-/// modal's title bar. Reverse video without colors.
+/// modal's title bar. Reverse video without painted surfaces.
 pub fn raised() -> Style {
-    if is_mono() {
+    if reverse_video() {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default().bg(palette().surface_raised)
@@ -557,9 +599,9 @@ pub fn raised() -> Style {
 }
 
 /// The style of a control that is switched on, such as the active pane size
-/// chip: a selection surface in a colored theme, reverse video without colors.
+/// chip: a selection surface in a painted theme, reverse video otherwise.
 pub fn active_control() -> Style {
-    if is_mono() {
+    if reverse_video() {
         Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
     } else {
         Style::default()
@@ -572,20 +614,24 @@ pub fn active_control() -> Style {
 /// A focused or armed action. Filled color is reserved for a direct action;
 /// selected content uses the quieter [`selection`] surface.
 pub fn focus_control() -> Style {
-    if is_mono() {
-        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    filled(palette().accent).add_modifier(Modifier::BOLD)
+}
+
+/// A chip filled with `color` and lettered in the canvas color. Without a
+/// painted canvas, reverse video swaps the terminal's own background in as
+/// the lettering, which keeps the chip readable on any scheme.
+pub fn filled(color: Color) -> Style {
+    if reverse_video() {
+        Style::default().fg(color).add_modifier(Modifier::REVERSED)
     } else {
-        Style::default()
-            .fg(palette().background)
-            .bg(palette().accent)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(palette().background).bg(color)
     }
 }
 
 /// An inset text field, with an uninterrupted focus surface for legibility.
-/// Monochrome terminals use an underline so editable text remains distinct.
+/// Without painted surfaces an underline keeps editable text distinct.
 pub fn field(focused: bool) -> Style {
-    if is_mono() {
+    if reverse_video() {
         return if focused {
             Style::default().add_modifier(Modifier::UNDERLINED)
         } else {
@@ -928,7 +974,7 @@ mod tests {
         ));
 
         for theme in UiTheme::ALL {
-            if theme == UiTheme::Mono {
+            if palette_for(theme).reverse_video {
                 continue;
             }
             let palette = palette_for(theme);
@@ -1040,33 +1086,7 @@ pub fn pin_label(mut id: u32) -> String {
 }
 
 pub fn pin_color(id: u32) -> Color {
-    if is_mono() {
-        return palette().text;
-    }
-    let colors = if current() == UiTheme::Light {
-        [
-            rgb(0, 105, 135),
-            rgb(112, 65, 165),
-            rgb(40, 110, 95),
-            rgb(155, 65, 115),
-            rgb(65, 85, 165),
-            rgb(115, 95, 40),
-            rgb(0, 110, 115),
-            rgb(125, 75, 80),
-        ]
-    } else {
-        [
-            rgb(100, 215, 235),
-            rgb(190, 160, 250),
-            rgb(130, 210, 180),
-            rgb(235, 160, 205),
-            rgb(145, 175, 250),
-            rgb(205, 195, 135),
-            rgb(125, 215, 215),
-            rgb(215, 175, 175),
-        ]
-    };
-    colors[(id % 8) as usize]
+    palette().pins[(id % 8) as usize]
 }
 
 #[cfg(test)]
