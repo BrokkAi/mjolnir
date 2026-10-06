@@ -141,20 +141,17 @@ impl AcpSessionSurface {
             .any(|command| command.name == name)
     }
 
-    /// Muse's /plan is a host skill, not its approval-mode selector.
+    /// Whether `/plan` goes to Muse as prompt text, for its `plan` skill.
     ///
-    /// Muse's bundled `plan` skill (`muse-core/skills/plan/SKILL.md`) says it is
-    /// "planning guidance, not a host-enforced mode", and muse-acp advertises no
-    /// `plan` session mode or `mode` config pair. So the whole command is sent to
-    /// Muse as prompt text and none of mj's plan-mode state engages: no `PLAN MODE`
-    /// indicator, no `/implement`. The same skill also forbids `request_user_input`
-    /// for final approval and asks in prose ("Reply Approve, Request changes, or
-    /// Cancel"), so the plan-review elicitation (`normalized_plan_review`) never
-    /// triggers either; the user answers by typing `Approve` as the next prompt.
-    /// Both gaps need muse-acp to advertise a plan mode and emit a `plan_review`
-    /// permission before mj can do better.
+    /// muse-acp 0.10 offers Plan on its `mode` selector, and `/plan` then
+    /// controls that mode like any other harness's. Container images built
+    /// before it carry an adapter without Plan; there `/plan` stays Muse's
+    /// own skill, which is "planning guidance, not a host-enforced mode", so
+    /// none of mj's plan-mode state engages.
     pub fn forwards_plan_command(&self) -> bool {
-        self.harness_kind == Some(HarnessKind::Muse) && self.advertises_command("plan")
+        self.harness_kind == Some(HarnessKind::Muse)
+            && self.advertises_command("plan")
+            && !self.supports_plan_mode()
     }
 
     pub fn current_model(&self) -> Option<&str> {
@@ -213,8 +210,15 @@ impl AcpSessionSurface {
         }
         let value = if active { "plan" } else { "default" };
         match self.harness_kind {
-            // Muse has no plan mode over ACP; see `forwards_plan_command`.
-            Some(HarnessKind::Muse) => Err(PlanControlError::Incompatible),
+            // muse-acp 0.10 runs Plan read-only, and leaving it keeps the
+            // separate `approval_mode`; see `forwards_plan_command`.
+            Some(HarnessKind::Muse) => self
+                .exact_config_has_plan_pair("mode")
+                .then(|| PlanControl::SetConfig {
+                    key: "mode".into(),
+                    value: value.into(),
+                })
+                .ok_or(PlanControlError::Incompatible),
             Some(HarnessKind::Codex) => self
                 .exact_config_has_plan_pair("collaboration_mode")
                 .then(|| PlanControl::SetConfig {

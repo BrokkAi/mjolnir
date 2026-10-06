@@ -899,6 +899,11 @@ impl ReviewerRole {
     /// read-only, and its prompt says not to implement for the same reason. A
     /// harness with no plan mode simply keeps the one it has.
     async fn request_plan_mode(&mut self, config: &ReviewerLaunchConfig) {
+        // Muse's Plan mode disables the shell, and the reviewer reads the
+        // change with `git diff`.
+        if config.harness == mj_core::config::HarnessKind::Muse {
+            return;
+        }
         let Ok(state) = self.state() else {
             return;
         };
