@@ -329,13 +329,13 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ The agent does not advertise model values; usage: /model <value>                                 │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+The agent does not advertise model values; usage: /model <value>
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
-│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 

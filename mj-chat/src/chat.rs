@@ -952,16 +952,9 @@ impl ChatState {
         self.encoded_draft()
     }
 
-    /// Rows the composer wants at `width`: the notice box when there is
-    /// something to say, the wrapped input, up to three queued-prompt
-    /// previews with a separating row, and the block's borders.
+    /// Rows the composer wants at `width`: the wrapped input, up to three
+    /// queued-prompt previews with a separating row, and the block's borders.
     pub fn desired_prompt_height(&self, width: u16) -> u16 {
-        self.desired_standby_height(width, None)
-    }
-
-    /// [`Self::desired_prompt_height`] for a band drawn by
-    /// [`Self::draw_prompt_band`] with the same `note`.
-    pub fn desired_standby_height(&self, width: u16, note: Option<&str>) -> u16 {
         let content_width = active::prompt_content_width(width);
         let input_rows =
             u16::try_from(input::input_visual_rows(&self.input, content_width)).unwrap_or(u16::MAX);
@@ -971,20 +964,18 @@ impl ChatState {
             .saturating_add(u16::from(queued > 0))
             .saturating_add(2)
             .max(4)
-            .saturating_add(active::notice_box_height(self, note, width))
     }
 
     /// Draws only the composer band into `area`, for hosts that show the real
     /// prompt while the session is not attached. Clears and re-registers this
     /// band's chat surfaces; the host merges them into its own frame
-    /// surfaces. `note` adds a message to the notice box above the composer;
-    /// size the band with [`Self::desired_standby_height`] and the same note.
+    /// surfaces. `note` adds a left-aligned line to the bottom border.
     pub fn draw_prompt_band(
         &mut self,
         frame: &mut Frame,
         area: Rect,
         prompt_focused: bool,
-        note: Option<&str>,
+        note: Option<Line<'static>>,
     ) {
         self.frame_surfaces.clear();
         self.footer_command_areas.borrow_mut().clear();
