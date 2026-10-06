@@ -780,9 +780,8 @@ impl HarnessProfile {
         self.kind.execution_enforcement(policy)
     }
 
-    /// The custom model provider named in this profile's Codex `config.toml`,
-    /// if any. Always `None` for a harness other than Codex, and for a Codex
-    /// profile whose home does not exist yet or uses Codex's own provider.
+    /// The provider named in this profile's Codex `config.toml`, if any.
+    /// Always `None` for another harness, or when Codex uses its default.
     pub fn codex_provider(&self) -> Result<Option<CodexProvider>> {
         if self.kind != HarnessKind::Codex {
             return Ok(None);
@@ -794,15 +793,18 @@ impl HarnessProfile {
     ///
     /// `ApiKey` means the key is supplied through the named environment
     /// variable from the profile's `environment` map, so there is no
-    /// interactive login and no credential file to sync or expire. Every other
-    /// profile, including a Codex provider that inlines its key as
-    /// `experimental_bearer_token`, reports `NativeLogin`: for the inline form
-    /// the key already sits inside the staged configuration file, which is the
-    /// same file the authentication gate checks. Prefer `env_key` so the key
-    /// never lands in a staged file.
+    /// interactive login and no credential file to sync or expire. Bedrock
+    /// uses the AWS credential chain; local built-in providers need no login.
+    /// A custom provider that inlines its key as `experimental_bearer_token`
+    /// retains the existing `NativeLogin` behavior.
     pub fn auth_scheme(&self) -> AuthScheme {
         match self.codex_provider() {
-            Ok(Some(provider)) => match provider.env_key {
+            Ok(Some(provider)) if provider.uses_aws_credentials() => AuthScheme::AwsCredentialChain,
+            Ok(Some(provider)) if provider.needs_no_authentication() => {
+                AuthScheme::NoAuthentication
+            }
+            Ok(Some(provider)) => match provider.custom().and_then(|custom| custom.env_key.clone())
+            {
                 Some(env_key) => AuthScheme::ApiKey { env_key },
                 None => AuthScheme::NativeLogin,
             },
@@ -817,7 +819,9 @@ impl HarnessProfile {
     /// itself lives in the profile environment rather than in a file.
     pub fn authentication_marker(&self) -> PathBuf {
         match self.auth_scheme() {
-            AuthScheme::ApiKey { .. } => self.home.join("config.toml"),
+            AuthScheme::ApiKey { .. }
+            | AuthScheme::AwsCredentialChain
+            | AuthScheme::NoAuthentication => self.home.join("config.toml"),
             AuthScheme::NativeLogin => harness_authentication_marker(self.kind, &self.home),
         }
     }
@@ -826,7 +830,9 @@ impl HarnessProfile {
     /// expire or refresh, so it orders no copies.
     pub fn credential_freshness(&self, bytes: &[u8]) -> Option<i64> {
         match self.auth_scheme() {
-            AuthScheme::ApiKey { .. } => None,
+            AuthScheme::ApiKey { .. }
+            | AuthScheme::AwsCredentialChain
+            | AuthScheme::NoAuthentication => None,
             AuthScheme::NativeLogin => crate::credentials::credential_freshness(self.kind, bytes),
         }
     }
@@ -834,7 +840,9 @@ impl HarnessProfile {
     /// See [`crate::credentials::credential_expiry`]. An API key has no expiry.
     pub fn credential_expiry(&self, bytes: &[u8]) -> Option<i64> {
         match self.auth_scheme() {
-            AuthScheme::ApiKey { .. } => None,
+            AuthScheme::ApiKey { .. }
+            | AuthScheme::AwsCredentialChain
+            | AuthScheme::NoAuthentication => None,
             AuthScheme::NativeLogin => crate::credentials::credential_expiry(self.kind, bytes),
         }
     }
@@ -918,9 +926,11 @@ impl HarnessProfile {
             return;
         }
         if let Ok(Some(provider)) = self.codex_provider()
-            && let Some(env_key) = provider.env_key
+            && let Some(env_key) = provider
+                .custom()
+                .and_then(|custom| custom.env_key.as_deref())
         {
-            self.environment.inherit(&env_key);
+            self.environment.inherit(env_key);
         }
     }
 
@@ -941,7 +951,9 @@ impl HarnessProfile {
             self.environment.ensure_resolved()?;
             let provider = self.codex_provider()?;
             if let Some(provider) = provider.as_ref()
-                && let Some(env_key) = provider.env_key.as_deref()
+                && let Some(env_key) = provider
+                    .custom()
+                    .and_then(|custom| custom.env_key.as_deref())
                 && self
                     .environment
                     .get(env_key)
@@ -952,7 +964,11 @@ impl HarnessProfile {
                     self.home.join("config.toml").display()
                 );
             }
-            if self.guardian_review_model.is_some() && provider.is_none() {
+            if self.guardian_review_model.is_some()
+                && provider
+                    .as_ref()
+                    .is_none_or(|provider| provider.custom().is_none())
+            {
                 bail!(
                     "`guardian_review_model` applies only to a Codex profile whose {} names a custom model provider, because Mjolnir generates the model catalog only for those",
                     self.home.join("config.toml").display()
@@ -973,11 +989,20 @@ pub enum AuthScheme {
     NativeLogin,
     /// A long-lived API key supplied through this environment variable.
     ApiKey { env_key: String },
+    /// Codex obtains AWS credentials from its configured AWS provider chain.
+    AwsCredentialChain,
+    /// A built-in local provider does not require credentials.
+    NoAuthentication,
 }
 
 impl AuthScheme {
     pub const fn is_api_key(&self) -> bool {
         matches!(self, Self::ApiKey { .. })
+    }
+
+    /// Whether this profile uses the harness's own login file.
+    pub const fn uses_native_login_file(&self) -> bool {
+        matches!(self, Self::NativeLogin)
     }
 }
 
@@ -1007,9 +1032,8 @@ pub enum CodexLogin {
 }
 
 impl HarnessProfile {
-    /// How this profile signs in to OpenAI. `None` for another harness, and
-    /// for a Codex profile whose `config.toml` names a custom model provider:
-    /// that profile authenticates however its provider says.
+    /// How this profile signs in to OpenAI. `None` for another harness and for
+    /// providers that do not use Codex's own OpenAI login.
     ///
     /// Codex records the choice as `auth_mode` in `auth.json`: `"apikey"`
     /// after `codex login --with-api-key` and `"chatgpt"` after a ChatGPT
@@ -1017,7 +1041,13 @@ impl HarnessProfile {
     /// ChatGPT login, because such a profile has no API key of its own: a key
     /// could only reach it from somewhere else.
     pub fn codex_login(&self) -> Option<CodexLogin> {
-        if self.kind != HarnessKind::Codex || matches!(self.codex_provider(), Ok(Some(_))) {
+        if self.kind != HarnessKind::Codex
+            || self
+                .codex_provider()
+                .ok()
+                .flatten()
+                .is_some_and(|provider| !provider.uses_codex_login())
+        {
             return None;
         }
         let auth_mode = std::fs::read(harness_authentication_marker(self.kind, &self.home))
@@ -1033,17 +1063,22 @@ impl HarnessProfile {
     /// Remove from `environment` every variable this profile's harness must
     /// never see, and return the names of all such variables, present or not.
     ///
-    /// A Codex profile that signs in with ChatGPT uses that login and nothing
-    /// else. In #1160 such a profile's Codex sent an API key it found in its
-    /// environment to the ChatGPT backend, which rejected it, and the turn
-    /// died. The names travel in the launch description as well, because the
-    /// worker adds the target's own login environment later and has to remove
-    /// them from that too.
+    /// A Codex profile that signs in with ChatGPT, or selects a built-in
+    /// provider that does not use OpenAI credentials, must not inherit an API
+    /// key from its environment. The names travel in the launch description
+    /// as well, because the worker adds the target's own login environment
+    /// later and has to remove them from that too.
     pub fn exclude_harness_environment(
         &self,
         environment: &mut BTreeMap<String, String>,
     ) -> Vec<String> {
-        if self.codex_login() != Some(CodexLogin::ChatGpt) {
+        let built_in_without_openai_auth = self
+            .codex_provider()
+            .ok()
+            .flatten()
+            .and_then(|provider| provider.built_in())
+            .is_some_and(|provider| !provider.uses_codex_login());
+        if self.codex_login() != Some(CodexLogin::ChatGpt) && !built_in_without_openai_auth {
             return Vec::new();
         }
         CODEX_CREDENTIAL_ENVIRONMENT

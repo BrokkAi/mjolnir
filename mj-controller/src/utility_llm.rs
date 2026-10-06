@@ -23,7 +23,7 @@ use crate::compaction::{
     CompactionBackend, CompactionFailure, DEFAULT_CONTEXT_BYTES, MIN_CONTEXT_BYTES,
 };
 use crate::quota::{ProfileQuota, QuotaManager, QuotaRefreshRequest};
-use mj_core::codex_provider::CodexProviderKind;
+use mj_core::codex_provider::{BuiltInCodexProvider, CodexProviderDefinition, CodexProviderKind};
 use mj_core::config::{Config, HarnessKind, HarnessProfile};
 
 const QUOTA_FRESH_SECONDS: u64 = 20 * 60;
@@ -585,10 +585,19 @@ impl UtilityFamily {
 /// so both stay excluded. Those profiles still run sessions; they just never
 /// serve Mjolnir's own inference.
 fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
-    if profile.auth_scheme().is_api_key() {
-        return match profile.codex_provider().ok().flatten()?.kind() {
-            CodexProviderKind::DeepSeek => Some(UtilityFamily::DeepSeek),
-            CodexProviderKind::Zai | CodexProviderKind::Other => None,
+    if let Some(provider) = profile.codex_provider().ok().flatten() {
+        return match &provider.definition {
+            CodexProviderDefinition::BuiltIn(BuiltInCodexProvider::OpenAi) => {
+                Some(UtilityFamily::Codex)
+            }
+            CodexProviderDefinition::BuiltIn(_) => None,
+            CodexProviderDefinition::Custom(custom) if custom.env_key.is_some() => {
+                match provider.kind() {
+                    CodexProviderKind::DeepSeek => Some(UtilityFamily::DeepSeek),
+                    CodexProviderKind::Zai | CodexProviderKind::Other => None,
+                }
+            }
+            CodexProviderDefinition::Custom(_) => None,
         };
     }
     match profile.kind {
@@ -644,8 +653,9 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
     // environment variable the provider names.
     if let Some(provider) = profile.codex_provider().ok().flatten()
         && provider.kind() == CodexProviderKind::DeepSeek
+        && let Some(custom) = provider.custom()
     {
-        let key = provider
+        let key = custom
             .env_key
             .as_deref()
             .and_then(|env_key| profile.environment.get(env_key))
@@ -653,7 +663,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
             .filter(|key| !key.is_empty());
         return Ok(key.map(|key| {
             Arc::new(OpenAiClient::with_deepseek_reasoning_support(
-                provider.base_url.clone(),
+                custom.base_url.clone(),
                 Some(key),
                 reqwest::header::HeaderMap::new(),
             )) as Arc<dyn LlmBackend>

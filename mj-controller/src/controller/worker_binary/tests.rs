@@ -3114,6 +3114,63 @@ fn an_api_key_codex_launch_keeps_its_key_on_every_target() {
     }
 }
 
+#[test]
+fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model = \"global.openai.gpt-6-luna\"\n\
+         model_provider = \"amazon-bedrock-runtime\"\n\
+         [model_providers.amazon-bedrock-runtime.aws]\n\
+         region = \"us-east-1\"\n",
+    )
+    .unwrap();
+    let aws_environment = BTreeMap::from([
+        ("AWS_REGION".to_owned(), "us-east-1".to_owned()),
+        ("AWS_DEFAULT_REGION".to_owned(), "us-east-1".to_owned()),
+        ("AWS_PROFILE".to_owned(), "bedrock".to_owned()),
+        (
+            "AWS_CONFIG_FILE".to_owned(),
+            "/home/hel/.aws/config".to_owned(),
+        ),
+        (
+            "AWS_SHARED_CREDENTIALS_FILE".to_owned(),
+            "/home/hel/.aws/credentials".to_owned(),
+        ),
+        ("AWS_EC2_METADATA_DISABLED".to_owned(), "false".to_owned()),
+    ]);
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: aws_environment.clone().into(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+
+    for (target, launch) in launches_on_every_target(&profile) {
+        for (name, value) in &aws_environment {
+            assert_eq!(
+                launch.environment.get(name),
+                Some(value),
+                "{target}: {name}"
+            );
+        }
+        for name in mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT {
+            assert!(
+                !launch.environment.contains_key(name),
+                "{target}: inherited OpenAI key {name}"
+            );
+        }
+        assert_eq!(
+            launch.excluded_environment,
+            mj_core::config::CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned),
+            "{target}"
+        );
+    }
+}
+
 /// #1160: a sub-agent child in its parent's container on a remote machine
 /// runs from a staged home of its own, named after the child, and the
 /// launch tells its worker which file there holds the login. That file is

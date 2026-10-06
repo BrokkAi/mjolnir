@@ -1129,8 +1129,8 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
         assert_eq!(on_this_machine[0].profile_home, home, "{kind:?}");
         assert_eq!(on_this_machine[0].harness, kind);
         assert_eq!(
-            on_this_machine[0].authenticates_with_api_key,
-            in_container[0].authenticates_with_api_key
+            on_this_machine[0].skips_login_file_sync,
+            in_container[0].skips_login_file_sync
         );
         assert!(!on_this_machine[0].sync_github_token, "{kind:?}");
         assert_eq!(
@@ -1238,7 +1238,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
     );
     for target in &targets {
         assert_eq!(target.profile_home, home.path());
-        assert!(!target.authenticates_with_api_key);
+        assert!(!target.skips_login_file_sync);
     }
     let child_command = std::iter::once(targets[0].spec.program.clone())
         .chain(targets[0].spec.args.iter().cloned())

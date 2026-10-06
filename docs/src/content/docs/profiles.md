@@ -1,6 +1,6 @@
 ---
 title: Profiles and harnesses
-description: Configure Codex (including custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, and OpenCode accounts, credentials, skills, runtimes, and quota reporting.
+description: Configure Codex (including Amazon Bedrock and custom model providers), Claude Code, Kimi Code, Grok Build, Muse Code, and OpenCode accounts, credentials, skills, runtimes, and quota reporting.
 ---
 
 A profile connects Mjolnir to one installed coding-agent harness and one account.
@@ -31,8 +31,9 @@ All models is unavailable for new selections.
 | Muse Code | `muse` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/muse` | `auth.json` | no |
 | OpenCode | `opencode` | `XDG_CONFIG_HOME` (parent of home) | `~/.config/opencode` | `.data/opencode/auth.json` | yes |
 
-There are six harness kinds. A Codex profile can also authenticate with an API
-key against a model provider other than OpenAI; see
+There are six harness kinds. Codex can use its built-in Amazon Bedrock
+providers; see [Codex on Amazon Bedrock](#codex-on-amazon-bedrock). It can also
+authenticate with an API key against a custom provider; see
 [Codex with a custom provider](#codex-with-a-custom-provider).
 
 A session never runs from the profile home itself. Every session, on every
@@ -51,6 +52,56 @@ Container runtimes and EC2
 machines instead run every harness unconstrained inside the isolation
 boundary. See
 [Targets](/targets/) and [Security boundaries](/security/).
+
+## Codex on Amazon Bedrock
+
+Codex 0.159.1 includes the built-in providers `amazon-bedrock` and
+`amazon-bedrock-runtime`. Select one directly in the profile home's
+`config.toml`; it does not need a `[model_providers.<id>]` table, `base_url`,
+`wire_api`, or an API key. Codex signs requests with AWS SigV4 using its AWS
+credential chain, which can use environment credentials, an AWS profile, or an
+EC2 instance role.
+
+For GPT-6 Luna through a Bedrock Runtime inference profile, put this in
+`/home/ubuntu/.codex-bedrock/config.toml`:
+
+```toml
+model = "global.openai.gpt-6-luna"
+model_provider = "amazon-bedrock-runtime"
+model_reasoning_effort = "high"
+
+[model_providers.amazon-bedrock-runtime.aws]
+region = "us-east-1"
+```
+
+`aws.region` is an optional Codex override. Codex can also read
+`AWS_REGION` or `AWS_DEFAULT_REGION`. Configure the Mjolnir profile like this:
+
+```toml
+[profiles.bedrock-luna]
+kind = "codex"
+home = "/home/ubuntu/.codex-bedrock"
+
+[profiles.bedrock-luna.environment]
+AWS_REGION = "us-east-1"
+AWS_DEFAULT_REGION = "us-east-1"
+```
+
+Mjolnir passes profile environment entries to the harness on local, container,
+and remote targets. Use `{ from_env = "AWS_PROFILE" }` for an AWS profile name
+from the environment Mjolnir started with, or `{ from_secret = "NAME" }` for
+AWS access keys or session tokens. The AWS config and credentials files named
+by `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` must exist on the target
+where Codex runs. An EC2 instance role needs no key variables or credential
+files. For Podman sessions on EC2, set the host's instance-metadata response
+hop limit to `2` so the container can reach IMDS, and leave
+`AWS_EC2_METADATA_DISABLED` unset or false.
+
+The AWS account must have access enabled for the requested Bedrock model and
+inference profile. `mj models --profile bedrock-luna` asks Codex for its
+built-in Bedrock catalog; Mjolnir does not try to fetch `/models` with an API
+key. If Codex reports no models, the command says so and the `model` configured
+in `config.toml` remains the profile's default.
 
 ## Codex with a custom provider
 

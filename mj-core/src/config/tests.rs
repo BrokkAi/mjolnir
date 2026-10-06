@@ -234,6 +234,44 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
     assert_eq!(with_key.credential_expiry(b"{}"), None);
 }
 
+#[test]
+fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file() {
+    let home = tempfile::tempdir().expect("temporary home");
+    fs::write(
+        home.path().join("config.toml"),
+        "model = \"global.openai.gpt-6-luna\"\n\
+         model_provider = \"amazon-bedrock-runtime\"\n\
+         [model_providers.amazon-bedrock-runtime.aws]\n\
+         region = \"us-east-1\"\n",
+    )
+    .expect("write Codex configuration");
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: BTreeMap::new().into(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+
+    profile
+        .ensure_ready("bedrock")
+        .expect("the AWS chain does not need a profile API key");
+    assert_eq!(profile.auth_scheme(), AuthScheme::AwsCredentialChain);
+    assert!(!profile.auth_scheme().uses_native_login_file());
+    assert_eq!(
+        profile.authentication_marker(),
+        home.path().join("config.toml")
+    );
+    assert_eq!(profile.credential_freshness(b"{}"), None);
+    assert_eq!(profile.credential_expiry(b"{}"), None);
+    assert!(
+        crate::credentials::login_command(&profile).is_err(),
+        "an AWS role profile has no interactive Codex login"
+    );
+}
+
 /// A Codex home that names its key variable works the way standalone Codex
 /// does: an exported key reaches the profile without an `environment` entry,
 /// and is never written to config.toml.
