@@ -12,8 +12,8 @@
 │          │                                                                                                                   │           │
 │          │ ╭ Mjolnir sessions · newest first ──────────────────────────────────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │codex-1         localhost/bifrost-fird    Aug 8, 2026     ACP pretty name                                      │ │           │
-│          │ │codex-1         precision-3260/bifrost    Aug 8, 2026     ACP pretty name                                      │ │           │
+│          │ │codex-1         localhost/bifrost-fird    Aug 9, 2026     ACP pretty name                                      │ │           │
+│          │ │codex-1         precision-3260/bifrost    Aug 9, 2026     ACP pretty name                                      │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
@@ -82,7 +82,7 @@
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         retired-target            Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         retired-target            Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -118,8 +118,8 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │          │                                                                                                                   │           │
 │          │ ╭ Mjolnir sessions · newest first ──────────────────────────────────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            │ │           │
-│          │ │codex-1         podman                    May 31, 2026    ? Newest record                                      │ │           │
-│          │ │codex-1         podman                    Dec 31, 2025    ? ACP pretty name                                    │ │           │
+│          │ │codex-1         podman                    Jun 1, 2026     ? Newest record                                      │ │           │
+│          │ │codex-1         podman                    Jan 1, 2026     ? ACP pretty name                                    │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
 │          │ │                                                                                                               │ │           │
@@ -153,8 +153,8 @@ ordered resume titles: ["Native July", "Newest record", "Native March", "ACP pre
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? Archived record                   │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? Current record                    │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? Archived record                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? Current record                    │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -189,7 +189,7 @@ native archive metadata: true
 │         │                                                                                                  │         │
 │         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         local/hel                 Dec 31, 1969    Archived in Codex                   │ │         │
+│         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -225,7 +225,7 @@ archive shortcut action: None
 │         │                                                                                                  │         │
 │         │ ╭ Importable sessions · newest first ──────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         local/hel                 Dec 31, 1969    Archived in Codex                   │ │         │
+│         │ │codex-1         local/hel                 Jan 1, 1970     Archived in Codex                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -261,7 +261,7 @@ d key action: None
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -341,8 +341,8 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │          │                                                                                                                   │           │
 │          │ ╭ Archived sessions · newest first ─────────────────────────────────────────────────────────────────────────────╮ │           │
 │          │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                                            ▐ │           │
-│          │ │codex-2         localhost/project         Aug 31, 2026    archived bare                                        │ │           │
-│          │ │codex-2         podman                    Aug 31, 2026    archived container                                   │ │           │
+│          │ │codex-2         localhost/project         Sep 1, 2026     archived bare                                        │ │           │
+│          │ │codex-2         podman                    Sep 1, 2026     archived container                                   │ │           │
 │          │ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │           │
 │          │                                                                                                                   │           │
 │          │ ╭ Archived transcript ──────────────────────────────────────────────────────────────────────────────────────────╮ │           │
@@ -379,7 +379,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -449,7 +449,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -484,7 +484,7 @@ archived row archived worktree profile/origin: ("codex-2", "localhost/project")
 │         │                                                                                                  │         │
 │         │ ╭ Mjolnir sessions · newest first ─────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -630,9 +630,9 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │  │ No   │                                                                                                  │         │
 │  │      │ ╭ Running sessions · every workspace · newest first ───────────────────────────────────────────╮ │         │
 │         │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
-│         │ │Default                   Aug 8, 2026     ? Sweep the hearth                                  │ │         │
-│         │ │Default                   Aug 8, 2026     ? Count the coins                                   │ │         │
-│         │ │Other                     Aug 8, 2026     ? Raise the mast                                    │ │         │
+│         │ │Default                   Aug 9, 2026     ? Sweep the hearth                                  │ │         │
+│         │ │Default                   Aug 9, 2026     ? Count the coins                                   │ │         │
+│         │ │Other                     Aug 9, 2026     ? Raise the mast                                    │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
@@ -717,7 +717,7 @@ search key t action: SearchArchivedSessions { request_id: 5, query: "mast" }
 │  │ No   │                                                                                                  │         │
 │  │      │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  WORKSPACE                 LAST ACTIVE     SESSION                                           │ │         │
-│         │ │Other                     Aug 8, 2026     ? Raise the mast                                    │ │         │
+│         │ │Other                     Aug 9, 2026     ? Raise the mast                                    │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │
 │         │ │                                                                                              │ │         │

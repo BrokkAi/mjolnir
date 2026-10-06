@@ -15,7 +15,7 @@
 │         │                                                                                                  │         │
 │         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │codex-1         podman                    Aug 8, 2026     ? ACP pretty name                   │ │         │
+│         │ │codex-1         podman                    Aug 9, 2026     ? ACP pretty name                   │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
@@ -100,8 +100,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 1/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -141,8 +141,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 2/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -182,8 +182,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 1/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -223,8 +223,8 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ 3 matches ───────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-1                  ▐ │         │
-│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-2                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 2, 2026     archived archive-1                  ▐ │         │
+│         │ │mjolnir         local/project             Sep 3, 2026     archived archive-2                  ▐ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
 │         │ ╭ Transcript · hit 2/2 ─────────────────────────────────────────────────────────────────[↑]─[↓]╮ │         │
@@ -264,7 +264,7 @@ empty tab message: "No matches here · 1 on Import"
 │         │                                                                                                  │         │
 │         │ ╭ Archived sessions · newest first ────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Aug 31, 2026    archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
@@ -306,7 +306,7 @@ briefing request action: None
 │         │                                                                                                  │         │
 │         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Aug 31, 2026    archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
@@ -351,7 +351,7 @@ new query request action: LoadArchivedHits { wiki_id: "archive-0", query: "other
 │         │                                                                                                  │         │
 │         │ ╭ 1 match ─────────────────────────────────────────────────────────────────────────────────────╮ │         │
 │         │ │  PROFILE         TARGET                    LAST ACTIVE     SESSION                           │ │         │
-│         │ │mjolnir         local/project             Aug 31, 2026    archived archive-0                  │ │         │
+│         │ │mjolnir         local/project             Sep 1, 2026     archived archive-0                  │ │         │
 │         │ │                                                                                              │ │         │
 │         │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │         │
 │         │                                                                                                  │         │
