@@ -163,9 +163,8 @@ A `bare` runtime on the machine also takes:
 | --- | --- | --- |
 | `permissions` | no | `guardian` (the default) preserves configured harness approvals; `yolo` runs unconstrained. |
 
-Guardian approvals are supported by Codex, Claude Code, and Grok Build. Kimi
-and Muse do not provide them; Muse always runs unconstrained, regardless of
-this setting.
+Guardian approvals are supported by Codex, Claude Code, Grok Build, OpenCode,
+and Muse Code. Kimi does not provide them.
 
 ```toml
 [machines.builder]

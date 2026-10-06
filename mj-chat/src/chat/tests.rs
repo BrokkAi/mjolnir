@@ -2757,6 +2757,30 @@ mod golden_cases {
             |_| Vec::new(),
         );
 
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        chat.set_harness_kind(HarnessKind::Muse);
+        advertise(&mut chat, 1, &["plan"]);
+        chat.set_config_options(&[
+            select_config_option("mode", "default", &["default", "readOnly", "plan"])
+                .category(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Mode),
+            select_config_option(
+                "approval_mode",
+                "allowAll",
+                &["allowAll", "promptUnmatched", "onRequest", "denyUnmatched"],
+            ),
+        ]);
+        chat.set_input("/plan the migration".into());
+        let action = chat.handle_key(key(KeyCode::Enter));
+        state(
+            &mut output,
+            "Muse plan mode selector",
+            &mut chat,
+            WIDTH,
+            HEIGHT,
+            Some(action),
+            |_| Vec::new(),
+        );
+
         let mut chat = grok_chat();
         advertise(&mut chat, 1, &["plan"]);
         chat.set_input("/plan the migration".into());
