@@ -1358,7 +1358,8 @@ fn detecting_profiles_on_a_machine_without_an_agent_says_so_plainly() {
     assert_eq!(
         notice,
         "No coding agent installation was found on this machine. Install Codex, Claude Code, \
-         Kimi Code, Grok Build, or Muse Code, sign in to it once, and choose Detect profiles again."
+         Kimi Code, Grok Build, Muse Code, or OpenCode, sign in to it once, and choose Detect \
+         profiles again."
     );
 }
 
