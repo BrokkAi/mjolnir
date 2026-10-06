@@ -116,7 +116,7 @@ fn voice_form() -> Form<VoiceControl> {
 pub use active::{ActiveChat, ChatDaemonRequest, ChatInstance, PreparedChat};
 pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
 pub use transcript::{
-    TAIL_SEED_ITEMS, TranscriptSnapshot, format_event_time, render_agent_message_head,
+    TAIL_SEED_ITEMS, ToolDisplay, TranscriptSnapshot, format_event_time, render_agent_message_head,
     render_agent_message_tail,
 };
 pub use turn_review::TurnReviewIntent as TurnReviewRequest;
@@ -644,6 +644,7 @@ pub struct ChatState {
     revealed_anchor: Option<(u64, u64)>,
     last_viewport_height: usize,
     render_mode: TranscriptRenderMode,
+    tool_display: ToolDisplay,
     render_cache: TranscriptRenderCache,
     transcript_scrollbar: TranscriptScrollbarState,
     /// Completed tool calls the user has opened in the Rich transcript.
@@ -830,6 +831,7 @@ impl ChatState {
             revealed_anchor: None,
             last_viewport_height: 0,
             render_mode: TranscriptRenderMode::Rich,
+            tool_display: ToolDisplay::default(),
             render_cache: TranscriptRenderCache::default(),
             transcript_scrollbar: TranscriptScrollbarState::default(),
             expanded_tool_calls: BTreeSet::new(),
@@ -938,6 +940,7 @@ impl ChatState {
         state.set_review_config(config.review.clone());
         state.set_spinner_style(config.spinner);
         state.set_detailed_activity_clocks(config.advanced.detailed_activity_clocks);
+        state.set_tool_display(ToolDisplay::from_config(&config.advanced));
         state
     }
 

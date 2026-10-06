@@ -145,7 +145,7 @@ impl SessionsSide {
 ///
 /// The section is optional on disk so configurations written before it was
 /// introduced retain their existing representation and behavior.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
     #[serde(skip_serializing_if = "is_false")]
@@ -157,6 +157,50 @@ pub struct AdvancedConfig {
     /// Unicode otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbols: Option<SymbolSet>,
+    #[serde(skip_serializing_if = "ToolOutput::is_default")]
+    pub tool_output: ToolOutput,
+    /// How many output rows an inline tool call shows, the omission marker
+    /// included. Zero shows none.
+    #[serde(skip_serializing_if = "is_default_tool_output_lines")]
+    pub tool_output_lines: usize,
+}
+
+impl Default for AdvancedConfig {
+    fn default() -> Self {
+        Self {
+            detailed_activity_clocks: false,
+            session_order: SessionOrder::default(),
+            symbols: None,
+            tool_output: ToolOutput::default(),
+            tool_output_lines: DEFAULT_TOOL_OUTPUT_LINES,
+        }
+    }
+}
+
+pub const DEFAULT_TOOL_OUTPUT_LINES: usize = 5;
+
+fn is_default_tool_output_lines(lines: &usize) -> bool {
+    *lines == DEFAULT_TOOL_OUTPUT_LINES
+}
+
+/// How the conversation draws tool calls.
+///
+/// `Grouped` folds a run of finished calls into one row of short names and
+/// keeps only the newest thought of the run. `Inline` gives every call its
+/// own row with its full command and a few lines of its output, and keeps
+/// every thought, the way Codex draws a turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolOutput {
+    #[default]
+    Grouped,
+    Inline,
+}
+
+impl ToolOutput {
+    pub(super) fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The character set the dashboard draws status symbols, borders, and
