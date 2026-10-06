@@ -735,6 +735,7 @@ impl ActiveChat {
                 state.set_spinner_style(context.config.spinner);
                 state
                     .set_detailed_activity_clocks(context.config.advanced.detailed_activity_clocks);
+                state.set_tool_display(super::ToolDisplay::from_config(&context.config.advanced));
             }
             state.set_session_modes(
                 snapshot
@@ -1040,6 +1041,8 @@ impl ActiveChat {
         self.state.set_spinner_style(config.spinner);
         self.state
             .set_detailed_activity_clocks(config.advanced.detailed_activity_clocks);
+        self.state
+            .set_tool_display(super::ToolDisplay::from_config(&config.advanced));
         self.refresh_voice_availability();
     }
 

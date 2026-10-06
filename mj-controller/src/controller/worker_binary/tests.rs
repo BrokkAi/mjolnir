@@ -3628,6 +3628,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     assert!(rendered.contains("worker' 'prepare-harness' '--config'"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     struct CacheLinkExecutor {

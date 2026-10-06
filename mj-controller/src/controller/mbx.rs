@@ -2104,7 +2104,7 @@ mod tests {
         assert_eq!(available_bytes("Filesystem 1K-blocks\n"), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn native_probe_prefers_path_then_user_bins_and_canonicalizes_symlinks() {
         use std::os::unix::fs::{PermissionsExt, symlink};
@@ -2171,7 +2171,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn cache_copy_refresh_is_atomic_and_skips_unchanged_binaries() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};

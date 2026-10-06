@@ -31,7 +31,7 @@ use crate::components::{
     ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, render_scrollbar, scrollbar_geometry,
 };
 use crate::theme;
-use agent_client_protocol::schema::v1::{ToolCall, ToolCallContent};
+use agent_client_protocol::schema::v1::{ToolCall, ToolCallContent, ToolKind};
 pub use mj_client::transcript::TAIL_SEED_ITEMS;
 pub(super) use mj_client::transcript::*;
 use ratatui::Frame;
@@ -108,6 +108,39 @@ impl TranscriptScrollbarState {
     }
 }
 
+/// How the Rich transcript draws tool calls, from Settings › Advanced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolDisplay {
+    pub layout: mj_core::config::ToolOutput,
+    /// Output rows each inline call shows.
+    pub output_lines: usize,
+}
+
+impl ToolDisplay {
+    pub fn from_config(advanced: &mj_core::config::AdvancedConfig) -> Self {
+        Self {
+            layout: advanced.tool_output,
+            output_lines: advanced.tool_output_lines,
+        }
+    }
+
+    /// How an entry this layout leaves on its own draws its call.
+    fn view(self) -> ToolView {
+        match self.layout {
+            mj_core::config::ToolOutput::Grouped => ToolView::Summary,
+            mj_core::config::ToolOutput::Inline => ToolView::Inline {
+                output_lines: self.output_lines,
+            },
+        }
+    }
+}
+
+impl Default for ToolDisplay {
+    fn default() -> Self {
+        Self::from_config(&mj_core::config::AdvancedConfig::default())
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct TranscriptRenderCache {
     theme: theme::UiTheme,
@@ -116,6 +149,7 @@ pub(super) struct TranscriptRenderCache {
     ascii: bool,
     width: u16,
     mode: TranscriptRenderMode,
+    tools: ToolDisplay,
     entries: Vec<Option<CachedEntry>>,
     collapse: Vec<EntryCollapse>,
     collapse_input_fingerprint: u64,
@@ -230,7 +264,8 @@ impl TranscriptSnapshot {
 
     #[cfg(test)]
     fn rich_tail(&mut self, width: u16, maximum_lines: usize) -> Vec<Line<'static>> {
-        self.rich_tail_scrolled(width, maximum_lines, 0).0
+        self.rich_tail_scrolled(width, maximum_lines, 0, ToolDisplay::default())
+            .0
     }
 
     /// The last `maximum_lines` non-empty rows, skipping `scroll` rows above the
@@ -241,12 +276,14 @@ impl TranscriptSnapshot {
         width: u16,
         maximum_lines: usize,
         scroll: usize,
+        tools: ToolDisplay,
     ) -> (Vec<Line<'static>>, usize) {
         prepare_render_cache(
             &self.entries,
             &mut self.render_cache,
             width,
             TranscriptRenderMode::Rich,
+            tools,
             &BTreeSet::new(),
         );
         let wanted = maximum_lines.saturating_add(scroll);
@@ -383,16 +420,17 @@ fn selection_row(offset: i64) -> usize {
     usize::try_from(SELECTION_BASE_ROW.saturating_add(offset)).unwrap_or(0)
 }
 
-/// Drop rows invalidated by width, rendering mode, or palette changes, and
-/// size the cache to the current entry count.
+/// Drop rows invalidated by width, rendering mode, tool display, or palette
+/// changes, and size the cache to the current entry count.
 fn prepare_render_cache(
     entries: &[ChatEntry],
     cache: &mut TranscriptRenderCache,
     width: u16,
     mode: TranscriptRenderMode,
+    tools: ToolDisplay,
     expanded_tool_calls: &BTreeSet<u64>,
 ) {
-    let mode_changed = cache.mode != mode;
+    let mode_changed = cache.mode != mode || cache.tools != tools;
     let collapse_input_fingerprint = collapse_revision_fingerprint(entries);
     if cache.width != width
         || mode_changed
@@ -403,6 +441,7 @@ fn prepare_render_cache(
         cache.ascii = theme::ascii();
         cache.width = width;
         cache.mode = mode;
+        cache.tools = tools;
         cache.entries.clear();
     }
     cache.entries.resize(entries.len(), None);
@@ -412,7 +451,7 @@ fn prepare_render_cache(
     {
         return;
     }
-    let collapse = entry_collapse_states(entries, mode, expanded_tool_calls);
+    let collapse = entry_collapse_states(entries, mode, tools.layout, expanded_tool_calls);
     for (index, state) in collapse.iter().enumerate() {
         if cache.collapse.get(index) != Some(state) {
             cache.entries[index] = None;
@@ -457,7 +496,9 @@ fn cached_entry_lines<'cache>(
     if stale {
         let width = usize::from(cache.width);
         let lines = match collapse {
-            EntryCollapse::None => render_transcript_entry(entry, width, cache.mode),
+            EntryCollapse::None => {
+                render_transcript_entry_with_options(entry, width, cache.mode, cache.tools.view())
+            }
             EntryCollapse::Hidden | EntryCollapse::Omitted => Vec::new(),
             EntryCollapse::Expanded => render_transcript_entry_expanded(entry, width),
             EntryCollapse::Summary { end, .. } => {
@@ -488,6 +529,7 @@ impl Default for TranscriptRenderCache {
             ascii: theme::ascii(),
             width: 0,
             mode: TranscriptRenderMode::Rich,
+            tools: ToolDisplay::default(),
             entries: Vec::new(),
             collapse: Vec::new(),
             collapse_input_fingerprint: 0,
@@ -764,6 +806,7 @@ impl ChatState {
             &mut self.render_cache,
             width,
             self.render_mode,
+            self.tool_display,
             &self.expanded_tool_calls,
         );
         let top = AnchorRow { entry: 0, row: 0 };
@@ -973,6 +1016,7 @@ impl ChatState {
             &mut self.render_cache,
             width,
             self.render_mode,
+            self.tool_display,
             &self.expanded_tool_calls,
         );
     }
@@ -1254,22 +1298,18 @@ impl ChatState {
             let visible = rows.saturating_sub(skip);
             if target < screen_offset + visible {
                 let entry_row = skip + (target - screen_offset);
-                let expanded_tool = match collapse {
-                    EntryCollapse::None => false,
-                    EntryCollapse::Expanded => true,
+                // The view `cached_entry_lines` drew the entry with.
+                let (mode, tool) = match collapse {
+                    EntryCollapse::None => (self.render_cache.mode, self.render_cache.tools.view()),
+                    EntryCollapse::Expanded => (TranscriptRenderMode::Rich, ToolView::Expanded),
                     // A collapsed streak draws a summary, not entry text.
                     _ => return None,
                 };
                 return transcript_entry_links(
                     &self.entries[index],
                     usize::from(self.render_cache.width),
-                    // `Expanded` rows always render as Rich; see `cached_entry_lines`.
-                    if expanded_tool {
-                        TranscriptRenderMode::Rich
-                    } else {
-                        self.render_cache.mode
-                    },
-                    expanded_tool,
+                    mode,
+                    tool,
                 )
                 .into_iter()
                 .find(|link| link.row == entry_row && (link.start..link.end).contains(&column))

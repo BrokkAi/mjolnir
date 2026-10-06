@@ -671,7 +671,7 @@ image = "ubuntu:24.04"
     if first_run {
         fs::write(
             config_root.join("hel/config.toml"),
-            "version = 14\n[phone]\nenabled = false\n\n[targets.podman]\nkind = \"podman\"\nmachine = \"local\"\nimage = \"ubuntu:24.04\"\n",
+            "version = 14\n[phone]\nenabled = false\n\n[targets.docker]\nkind = \"docker\"\nmachine = \"local\"\nimage = \"ubuntu:24.04\"\n",
         )
         .unwrap();
         let setup_state = storage.path().join("data/hel/setup-state");
@@ -685,11 +685,12 @@ image = "ubuntu:24.04"
         mj_core::test_hooks::install_fake_command(&tools, "claude", "#!/bin/sh\nexit 1\n");
         // Hold the doctor image check after setup completes, so the welcome
         // remains interactive while the first-run checks are in progress.
+        // Docker, unlike local Podman, is checked on Linux and macOS hosts.
         mj_core::test_hooks::install_fake_command(
             &tools,
-            "podman",
+            "docker",
             &format!(
-                "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'podman version 5.4.2' ;;\n  unshare) printf '         0       1000          1\\n         1     100000      65536\\n' ;;\n  image) : > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.05; done; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n  version) echo '27.0.0 linux' ;;\n  image) : > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.05; done; exit 1 ;;\n  *) exit 1 ;;\nesac\n",
                 storage.path().join(FIRST_RUN_CHECK_STARTED).display(),
                 storage.path().join(FIRST_RUN_CHECK_RELEASE).display()
             ),
@@ -1397,7 +1398,7 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_background_chec
     wait_for_screen(
         &mut fixture.master,
         &mut output,
-        b"Podman image for target podman",
+        b"Docker image for target docker",
         Instant::now() + STARTUP_TIMEOUT,
     );
     let path = fixture._storage.path();

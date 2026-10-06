@@ -241,6 +241,8 @@ pub struct Glyphs {
     pub role_thought: &'static str,
     pub role_plan: &'static str,
     pub role_plan_proposal: &'static str,
+    /// Leads the first output row under an inline tool call.
+    pub tool_output: &'static str,
 }
 
 pub const UNICODE_GLYPHS: Glyphs = Glyphs {
@@ -295,6 +297,7 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     role_thought: "○",
     role_plan: "◇",
     role_plan_proposal: "◈",
+    tool_output: "└ ",
 };
 
 pub const ASCII_GLYPHS: Glyphs = Glyphs {
@@ -347,6 +350,7 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     role_thought: "o",
     role_plan: "-",
     role_plan_proposal: "+",
+    tool_output: "`- ",
 };
 
 /// The glyphs in force on this thread.
