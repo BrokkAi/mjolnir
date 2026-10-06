@@ -230,10 +230,8 @@ def main():
         wait_prompt(child, "Return a short fixture report.")
         # Handback travels through the child's durable queue while its turn runs.
         tool(child, "handback", {"message": "first report without a dashboard"})
-        first = tool(
-            parent, "wait_agents", {"child_session_ids": [child], "timeout_seconds": 30}
-        )
-        assert first["status"] == "complete", first
+        first = tool(parent, "wait_agents")
+        assert first["status"] == "reported", first
         assert first["agents"][0]["output"] == "first report without a dashboard", first
 
         def wait_parked(session):
@@ -254,18 +252,17 @@ def main():
         # A wait on a parked child whose report is already delivered answers
         # at once, not after its timeout.
         asked = time.monotonic()
-        parked = tool(
-            parent, "wait_agents", {"child_session_ids": [child], "timeout_seconds": 30}
-        )
+        parked = tool(parent, "wait_agents")
         parked_seconds = time.monotonic() - asked
-        assert parked["status"] == "complete", parked
-        assert parked["agents"][0]["output"] == "first report without a dashboard", parked
+        assert parked["status"] == "nothing_to_wait_for", parked
+        assert parked["agents"][0]["output"] is None, parked
         assert parked_seconds < 5, f"wait on a parked child took {parked_seconds}"
-        # A wait that names no children finds nothing running and answers at
-        # once, listing the finished child.
-        idless = tool(parent, "wait_agents", {"timeout_seconds": 30})
-        assert idless["status"] == "complete", idless
+        # Wait always watches the parent's children and answers immediately
+        # when no new report or unfinished child remains.
+        idless = tool(parent, "wait_agents")
+        assert idless["status"] == "nothing_to_wait_for", idless
         assert [agent["child_session_id"] for agent in idless["agents"]] == [child], idless
+        assert idless["agents"][0]["output"] is None, idless
         # Submit the next wait while send_input is still starting the parked
         # child. It must not answer with the old report or return early, and
         # the daemon must not re-park the child under the input. Then replace
@@ -281,7 +278,6 @@ def main():
                 tool,
                 parent,
                 "wait_agents",
-                {"child_session_ids": [child], "timeout_seconds": 60},
             )
             wait_prompt(child, "second turn")
             assert not waiting.done(), "wait answered before the second report"
@@ -302,7 +298,7 @@ def main():
                 "the child turn must survive daemon replacement"
             )
             second = waiting.result(timeout=40)
-            assert second["status"] == "complete", second
+            assert second["status"] == "reported", second
             assert second["agents"][0]["output"] == (
                 "second report across daemon replacement"
             ), second
@@ -332,7 +328,7 @@ def main():
         wait_prompt(legacy, "legacy source evidence")
         wait_prompt(legacy, "retained parent context")
         tool(legacy, "handback", {"message": "legacy content retained"})
-        tool(parent, "wait_agents", {"child_session_ids": [legacy], "timeout_seconds": 30})
+        tool(parent, "wait_agents")
         wait_parked(legacy)
 
         # Simulate a daemon exiting after it records failed startup but before

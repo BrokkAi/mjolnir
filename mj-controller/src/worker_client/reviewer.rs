@@ -327,12 +327,9 @@ impl RelayClient {
     pub async fn complete_subagent_request(
         &mut self,
         result: mj_core::subagent::SubagentToolResult,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let request = RelayRequest::CompleteSubagentRequest { result };
-        match self.call(request).await? {
-            RelayResponsePayload::SubagentRequestCompleted => Ok(()),
-            _ => bail!("relay returned an unexpected sub-agent completion response"),
-        }
+        subagent_completion_delivery(self.call(request).await?)
     }
 
     pub async fn detach(mut self) -> Result<()> {
@@ -368,5 +365,37 @@ impl RelayClient {
             }
         }
         Ok(())
+    }
+}
+
+fn subagent_completion_delivery(payload: RelayResponsePayload) -> Result<bool> {
+    match payload {
+        // Old workers return the original unit response. Treat it as
+        // delivered: they cannot tell us that their local wait timed out.
+        RelayResponsePayload::SubagentRequestCompleted => Ok(true),
+        RelayResponsePayload::SubagentRequestCompletedWithDelivery {
+            delivered_to_waiter,
+        } => Ok(delivered_to_waiter),
+        _ => bail!("relay returned an unexpected sub-agent completion response"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_worker_completion_without_delivery_status_counts_as_delivered() {
+        assert!(
+            subagent_completion_delivery(RelayResponsePayload::SubagentRequestCompleted).unwrap()
+        );
+        assert!(
+            !subagent_completion_delivery(
+                RelayResponsePayload::SubagentRequestCompletedWithDelivery {
+                    delivered_to_waiter: false,
+                }
+            )
+            .unwrap()
+        );
     }
 }

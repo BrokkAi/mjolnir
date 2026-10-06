@@ -376,6 +376,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );
@@ -419,6 +420,7 @@ fn managed_and_native_children_are_sub_agents_and_their_owner_is_not() {
             request_key: "request-1".into(),
             created_at: child.created_at.clone(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );
@@ -1273,6 +1275,7 @@ fn a_stored_subagent_may_launch_outside_the_parent_workspace() {
             request_key: "request-1".into(),
             created_at: "2026-09-16T00:00:00Z".into(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );

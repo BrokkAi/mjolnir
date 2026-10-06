@@ -762,6 +762,7 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
         request_key: "request-1".into(),
         created_at: "2026-09-29T00:00:00Z".into(),
         noticed_turn: None,
+        reported_finish: None,
         handback_tool: true,
     };
     let mut config = Config::default();

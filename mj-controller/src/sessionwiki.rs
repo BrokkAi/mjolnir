@@ -3041,6 +3041,7 @@ mod tests {
             request_key: "key".into(),
             created_at: "2026-09-01T00:00:00Z".into(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         }
     }

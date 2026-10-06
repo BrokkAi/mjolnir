@@ -5054,6 +5054,7 @@ fn subagent_pair(path: &Path) -> (SessionRecord, SessionRecord) {
             request_key: "probe-1".into(),
             created_at: "2026-09-18T00:00:00Z".into(),
             noticed_turn: None,
+            reported_finish: None,
             handback_tool: false,
         },
     );

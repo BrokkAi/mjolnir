@@ -1,10 +1,11 @@
 //! The daemon owns delegation; control surfaces only observe its effects.
 use crate::daemon::RuntimeState;
+use crate::database::StoredDelegationResult;
 use crate::server_runtime::api::ApiBackend;
 use crate::session_manager::{DelegationObservation, DelegationUpdates, SessionManagerControl};
 use anyhow::{Context, Result};
-use mj_core::subagent::{SubagentToolAction, SubagentToolResult};
-use std::collections::BTreeMap;
+use mj_core::subagent::SubagentToolAction;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -19,7 +20,7 @@ enum ChildCompletion {
 }
 
 enum Completed {
-    Executed(SubagentToolResult, bool),
+    Executed(StoredDelegationResult, bool),
     Delivered,
     Unaccepted,
 }
@@ -49,6 +50,8 @@ async fn run(
     {
         tracing::warn!(%error, "could not prune acknowledged delegation records");
     }
+    let initial_wait_prompt_parents =
+        tokio::task::spawn_blocking(crate::database::list_subagent_parent_ids).await??;
     let mut revisions = state.revisions();
     let mut dispatch = SubagentDispatch::default();
     let mut jobs = tokio::task::JoinSet::new();
@@ -58,10 +61,29 @@ async fn run(
     let mut completion_ids = BTreeMap::<tokio::task::Id, (String, u64)>::new();
     let mut noticed = BTreeMap::<String, u64>::new();
     let mut retry = BTreeMap::<String, Instant>::new();
+    let mut wait_prompt_queue = VecDeque::from(initial_wait_prompt_parents);
+    let mut wait_prompt_pending = BTreeSet::new();
+    let mut wait_prompt_tasks = tokio::task::JoinSet::new();
+    let mut wait_prompt_task_ids = BTreeMap::<tokio::task::Id, String>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut quota_open = true;
     loop {
+        while wait_prompt_tasks.len() < 32 {
+            let Some(parent) = wait_prompt_queue.pop_front() else {
+                break;
+            };
+            if !wait_prompt_pending.insert(parent.clone()) {
+                continue;
+            }
+            let runtime = state.clone();
+            let task_parent = parent.clone();
+            let task = wait_prompt_tasks.spawn(async move {
+                let result = runtime.ensure_parent_wait_prompt(&task_parent).await;
+                (task_parent, result)
+            });
+            wait_prompt_task_ids.insert(task.id(), parent);
+        }
         if !crate::upgrade::is_draining() {
             for (id, job) in dispatch.ready(Instant::now()) {
                 let backend = backend.clone();
@@ -73,7 +95,7 @@ async fn run(
                         Job::Execute(request) => {
                             let _admission = if matches!(
                                 request.action,
-                                SubagentToolAction::WaitAgents { .. }
+                                SubagentToolAction::WaitAgents
                                     | SubagentToolAction::SendInput { .. }
                                     | SubagentToolAction::Spawn { .. }
                             ) {
@@ -91,7 +113,7 @@ async fn run(
                             drop(_admission);
                             let delivered = deliver(&runtime, &parent, result.clone()).await;
                             if let Err(error) = &delivered {
-                                tracing::warn!(parent_session_id = %parent, request_id = %result.request_id, %error, "delegation delivery failed; retaining result for retry");
+                                tracing::warn!(parent_session_id = %parent, request_id = %result.result.request_id, %error, "delegation delivery failed; retaining result for retry");
                             }
                             Ok(Completed::Executed(result, delivered.is_ok()))
                         }
@@ -165,7 +187,7 @@ async fn run(
                     match result {
                         Ok(Completed::Executed(result, delivered)) => {
                             tracing::debug!(parent_session_id = %id.0, request_id = %id.1, delivered,
-                                is_error = result.is_error, "delegation execution completed");
+                                is_error = result.result.is_error, "delegation execution completed");
                             dispatch.executed(&id, result);
                             dispatch.delivered(&id, delivered);
                         },
@@ -198,19 +220,47 @@ async fn run(
                     }
                 }
             }
+            completed = wait_prompt_tasks.join_next_with_id(), if !wait_prompt_tasks.is_empty() => {
+                let Some(completed) = completed else { continue };
+                let (task_id, result) = match completed {
+                    Ok((id, result)) => (id, Ok(result)),
+                    Err(error) => (error.id(), Err(anyhow::Error::from(error))),
+                };
+                let Some(parent) = wait_prompt_task_ids.remove(&task_id) else { continue };
+                wait_prompt_pending.remove(&parent);
+                match result {
+                    Ok((_, Ok(()))) => {}
+                    Ok((_, Err(error))) => tracing::warn!(parent_session_id = %parent, %error,
+                        "wait-prompt reconciliation failed; it will be retried"),
+                    Err(error) => {
+                        state.schedule_wait_prompt_retry(&parent);
+                        tracing::error!(parent_session_id = %parent, %error,
+                            "wait-prompt reconciliation task failed; it will be retried");
+                    }
+                }
+            }
             changed = revisions.changed() => { changed.context("daemon revision feed stopped")?; policy.sync(false); }
             _ = policy.refresh_rx.recv() => policy.sync(true),
             update = policy.quota_rx.recv(), if quota_open => match update {
                 Some(update) => policy.quota(update),
                 None => { quota_open = false; tracing::error!("delegation quota service stopped"); }
             },
-            _ = tick.tick() => policy.tick(),
+            _ = tick.tick() => {
+                policy.tick();
+                let available = 32usize.saturating_sub(wait_prompt_tasks.len());
+                for parent in state.take_due_wait_prompt_retries(Instant::now(), available) {
+                    if !wait_prompt_pending.contains(&parent) {
+                        wait_prompt_queue.push_back(parent);
+                    }
+                }
+            },
         }
         // Coalesced receives can be immediately ready without Tokio's channel budget.
         tokio::task::yield_now().await;
     }
     jobs.abort_all();
     completions.abort_all();
+    wait_prompt_tasks.abort_all();
     while let Some(result) = jobs.join_next().await {
         if let Err(error) = result
             && !error.is_cancelled()
@@ -223,6 +273,13 @@ async fn run(
             && !error.is_cancelled()
         {
             tracing::error!(%error, "delegation completion failed during shutdown");
+        }
+    }
+    while let Some(result) = wait_prompt_tasks.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "wait-prompt task failed during shutdown");
         }
     }
     Ok(())
@@ -265,7 +322,7 @@ async fn complete_child(
         if !reminded {
             backend
                 .record_subagent_completion_notice(
-                    relation.parent_session_id,
+                    relation.parent_session_id.clone(),
                     &child_id,
                     &title,
                     &outcome,
@@ -281,6 +338,17 @@ async fn complete_child(
             return Ok(ChildCompletion::Settled);
         }
     }
+    if let Err(error) = state
+        .ensure_parent_wait_prompt(&relation.parent_session_id)
+        .await
+    {
+        tracing::warn!(
+            parent_session_id = relation.parent_session_id,
+            child_session_id = child_id,
+            %error,
+            "could not reconcile the parent's sub-agent wait prompt; continuing to park the child"
+        );
+    }
     // A persisted notice and a successful park are different facts. Only the
     // worker's reservation decides whether its processes can be stopped.
     if !observation.in_flight.is_empty() {
@@ -294,7 +362,11 @@ async fn complete_child(
     }
 }
 
-async fn deliver(runtime: &RuntimeState, parent: &str, result: SubagentToolResult) -> Result<()> {
+async fn deliver(
+    runtime: &RuntimeState,
+    parent: &str,
+    result: StoredDelegationResult,
+) -> Result<()> {
     let _work = crate::upgrade::activity_unless_draining("delegation result delivery")?;
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -307,20 +379,36 @@ async fn deliver(runtime: &RuntimeState, parent: &str, result: SubagentToolResul
 async fn deliver_result(
     runtime: &RuntimeState,
     parent: &str,
-    result: SubagentToolResult,
+    stored_result: StoredDelegationResult,
 ) -> Result<()> {
     let handle = runtime.workspace_session_handle(parent).await?;
     let mut lease = handle.lease_connection().await?;
-    let request_id = result.request_id.clone();
+    let request_id = stored_result.result.request_id.clone();
     let delivered = lease
         .connection_mut()
-        .complete_subagent_request(result)
+        .complete_subagent_request(stored_result.result.clone())
         .await;
     lease.release();
-    delivered?;
+    let delivered_to_waiter = delivered?;
+    if !delivered_to_waiter && !stored_result.reported_finishes.is_empty() {
+        let parent = parent.to_owned();
+        let reported_finishes = stored_result.reported_finishes.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::database::unreport_delegation_finishes(parent, reported_finishes)
+        })
+        .await??;
+    }
+    if let Err(error) = runtime.ensure_parent_wait_prompt(parent).await {
+        tracing::warn!(
+            parent_session_id = parent,
+            error = format!("{error:#}"),
+            "could not reconcile the parent's sub-agent wait prompt after result delivery"
+        );
+    }
     let parent = parent.to_owned();
+    let acknowledged_parent = parent.clone();
     tokio::task::spawn_blocking(move || {
-        crate::database::acknowledge_delegation(parent, request_id)
+        crate::database::acknowledge_delegation(acknowledged_parent, request_id)
     })
     .await??;
     Ok(())
@@ -337,8 +425,14 @@ mod tests {
 
     struct BusyThenParked(AtomicUsize);
     impl ExportRuntime for BusyThenParked {
-        fn session_record(&self, _: &str) -> Option<mj_core::state::SessionRecord> {
-            None
+        fn session_record(&self, session_id: &str) -> Option<mj_core::state::SessionRecord> {
+            (session_id == "parent").then(|| {
+                crate::daemon::tests::runtime_test_session(
+                    "parent",
+                    "workspace",
+                    mj_core::state::SessionState::Running,
+                )
+            })
         }
         fn checkpoint_now(
             &self,
@@ -390,12 +484,14 @@ mod tests {
         crate::database::save_subagent_session(&child, &relation).unwrap();
         let state = crate::daemon::tests::test_runtime_state();
         let parks = Arc::new(BusyThenParked(AtomicUsize::new(0)));
-        // No parent handle exists: attempting to send its notice again fails.
+        // The parent record is active but has no actor. Prompt reconciliation
+        // fails and schedules a retry; it must not prevent either park attempt.
         let backend = Arc::new(ApiBackend::new(
             state.session_manager.client(),
             Arc::new(|_| None),
             parks.clone(),
         ));
+        state.install_wait_prompt_backend(&backend);
         let observation = DelegationObservation {
             requests: Vec::new(),
             completed: Vec::new(),
@@ -427,12 +523,16 @@ mod tests {
             ChildCompletion::RetryPark
         ));
         assert!(matches!(
-            complete_child(state, backend, "child".into(), observation)
+            complete_child(state.clone(), backend, "child".into(), observation)
                 .await
                 .unwrap(),
             ChildCompletion::Settled
         ));
         assert_eq!(parks.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            state.take_due_wait_prompt_retries(Instant::now() + Duration::from_secs(2), 10),
+            ["parent"]
+        );
         assert_eq!(
             crate::database::load_subagent("child")
                 .unwrap()

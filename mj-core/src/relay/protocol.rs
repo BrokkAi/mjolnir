@@ -493,6 +493,11 @@ pub enum RelayResponsePayload {
         results: Vec<crate::subagent::SubagentToolResult>,
     },
     SubagentRequestCompleted,
+    /// Newer peers report whether the result reached a live tool caller. The
+    /// original unit response remains valid and is treated as delivered.
+    SubagentRequestCompletedWithDelivery {
+        delivered_to_waiter: bool,
+    },
     HistoryRequests {
         requests: Vec<crate::history::HistoryRequest>,
     },

@@ -3,7 +3,11 @@ use super::*;
 use tokio::sync::watch;
 
 type Durable = watch::Receiver<Result<Arc<crate::database::CommittedState>, Arc<str>>>;
-type Inputs = Vec<(Option<u64>, bool)>;
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Inputs {
+    children: Vec<String>,
+    revisions: Vec<(Option<u64>, bool)>,
+}
 
 pub(super) struct ChildWaitFeed {
     durable: Option<Durable>,
@@ -33,9 +37,26 @@ impl ChildWaitFeed {
         })
     }
 
-    pub(super) fn inputs(&self, backend: &ApiBackend, ids: &[String]) -> Result<Inputs> {
+    pub(super) fn inputs(
+        &self,
+        backend: &ApiBackend,
+        parent_id: &str,
+        ids: &[String],
+    ) -> Result<Inputs> {
         let committed = self.committed()?;
-        Ok(ids
+        let children = committed.as_ref().map_or_else(
+            || ids.to_vec(),
+            |state| {
+                state
+                    .state
+                    .subagents
+                    .values()
+                    .filter(|child| child.parent_session_id == parent_id)
+                    .map(|child| child.child_session_id.clone())
+                    .collect()
+            },
+        );
+        let revisions = children
             .iter()
             .map(|id| {
                 (
@@ -45,7 +66,11 @@ impl ChildWaitFeed {
                     backend.exports.close_is_requested(id),
                 )
             })
-            .collect())
+            .collect();
+        Ok(Inputs {
+            children,
+            revisions,
+        })
     }
 
     pub(super) async fn wait(
@@ -84,7 +109,7 @@ impl ChildWaitFeed {
             .unwrap_or(deadline)
             .min(deadline);
         loop {
-            if self.inputs(backend, ids)? != *observed {
+            if self.inputs(backend, parent_id, ids)? != *observed {
                 return Ok(());
             }
             // Offline test backends have no publication owner. Their durable
@@ -163,9 +188,28 @@ mod tests {
             Arc::new(|_| None),
             Arc::new(NoExports),
         );
+        let mut state: mj_core::state::State = Default::default();
+        state.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentRecord {
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: "task".into(),
+                profile_id: "profile".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: "task".into(),
+                request_key: "request".into(),
+                created_at: "now".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            },
+        );
         let committed = crate::database::CommittedState {
             sequence: 0,
-            state: Default::default(),
+            state,
             moves: Default::default(),
             native_agents: Default::default(),
             startup_groups: Default::default(),
@@ -181,7 +225,7 @@ mod tests {
         };
         let ids = vec!["child".into()];
         {
-            let observed = feed.inputs(&backend, &ids).unwrap();
+            let observed = feed.inputs(&backend, "parent", &ids).unwrap();
             let waiter = feed.wait(
                 &backend,
                 "parent",
@@ -212,7 +256,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let observed = feed.inputs(&backend, &ids).unwrap();
+        let observed = feed.inputs(&backend, "parent", &ids).unwrap();
         feed.wait(
             &backend,
             "parent",

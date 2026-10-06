@@ -64,13 +64,15 @@ You own the final synthesis and any requested commit or delivery.
 
 ## Collect results and continue
 
-When progress depends on children, call `wait` for the outstanding children you
-need using its default maximum timeout. Use `return_when: "any"` when one result
-will let you advance. A timeout means work is still running; wait again when
-you need the results. Avoid short polling and repeated status checks: every
-parent request carries your accumulated context. Use `list_agents` to reconcile
-uncertain child state. Results are collected through `wait`, not pushed into
-your conversation.
+When progress depends on children, call `wait` without arguments. It uses this
+harness's wait window, watches every child that is not stopped, and returns as
+soon as one has a new report. Each finish is reported once; a child resumed with
+`send_input` can report again after its next turn. If a wait times out, call it
+again when you need to collect a report. A wait may end before work is done,
+and another wait is normal. Avoid repeated status checks: every parent request
+carries your accumulated context. A prompt may
+remind you to call `wait`, but contains no child output. Use `list_agents` to
+reconcile uncertain child state.
 
 Completed children are parked and consume no process slots. Use `send_input`
 when a follow-up benefits from the child's existing context. A fresh child with

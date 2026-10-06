@@ -52,9 +52,9 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// controller side. Protocol 0 is the retired pre-relay worker protocol.
 ///
 /// 30 removed the reviewer's change-analysis request and added per-file line
-/// counts to a review capture. An older controller's requests are refused
-/// whole by a newer worker, rather than half-decoded.
-pub const RELAY_PROTOCOL_VERSION: u32 = 30;
+/// counts to a review capture. 31 adds delivery status to sub-agent results;
+/// the old completion response remains readable and means delivered.
+pub const RELAY_PROTOCOL_VERSION: u32 = 31;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

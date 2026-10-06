@@ -310,6 +310,7 @@ impl Controller {
             request_key: request.request_key,
             created_at,
             noticed_turn: None,
+            reported_finish: None,
             handback_tool,
         };
         crate::database::save_subagent_session(&session, &relation)?;
@@ -809,6 +810,7 @@ mod tests {
                     request_key: format!("request-{id}"),
                     created_at: "2026-09-25T00:00:00Z".into(),
                     noticed_turn: None,
+                    reported_finish: None,
                     handback_tool: true,
                 },
             )

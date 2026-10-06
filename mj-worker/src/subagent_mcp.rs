@@ -15,10 +15,11 @@ use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest
 /// Delegation policy is delivered through initialization, never a tool description.
 const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before collecting that context yourself. Keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice yourself only when it needs your whole context, briefing a child would exceed doing it yourself, or a child has already failed it once; state the reason in one sentence. Re-task a wrong or incomplete handback once with the correction and failing evidence; take over a second failed handback and note it in your report. Children running suites report test names, reasons and log paths; run a suite yourself only to reproduce a reported failure, and do not repeat green suites. You own design, integrated review, the commit and final acceptance. Children can profile and measure, but performance design is usually beyond their abilities: have them collect profiles and timings, then decide the design yourself. Do not duplicate assignments while children work on them. Give a focused outcome, constraints, ownership boundaries and required evidence in instructions; point to relevant files, symbols, line ranges and earlier reports. Children share your target and filesystem but do not receive your full conversation automatically. Starting files are pointers, not a whitelist. Before spawning, give follow-up work through send_input to an idle child that already has useful context; spawn for independent work or when the old context would mislead it.";
 
-/// Results reach the model through wait, never as a push notification.
+/// Reports reach the model through `wait`; a prompt can tell the parent one is
+/// ready without including the child's output.
 static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{DELEGATION_ROUTING} Collect results through wait or list_agents; no result is pushed into your conversation. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Finished children are parked and hold no processes. send_input resumes one with its conversation intact. Close children you no longer need, including failed children after reading their error. The user can see children in the Sub-agents workspace."
+        "{DELEGATION_ROUTING} Collect reports through wait or list_agents. A prompt may tell you that one or more children finished; call wait to collect their reports. That prompt contains no child output. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Finished children are parked and hold no processes. send_input resumes one with its conversation intact. Close children you no longer need, including failed children after reading their error. The user can see children in the Sub-agents workspace."
     )
 });
 
@@ -172,23 +173,22 @@ fn still_closing_reply(request_id: &str, child_session_id: &str, reason: &str) -
         "closed":false,
         "status":"still_closing",
         "note":reason,
-        "next_action":"Call wait with this child_session_id. The close is finished when that wait answers status complete with this child's state \"stopped\"; a child that is still being torn down reports state \"stopping\". Do not spawn a replacement child before then."
+        "next_action":"Call wait to observe all of your children. This child remains in the wait set while its state is \"stopping\" and leaves it once teardown reaches \"stopped\". Do not spawn a replacement child before then."
     })
 }
 
-/// Slack added to a `wait` call's own timeout. The worker answers a `wait` at
-/// the caller's deadline itself, so this only covers the hop back from the
-/// worker; it is not the timer the answer depends on.
+/// Slack added to the harness's `wait` window. The worker answers a `wait` at
+/// the deadline itself, so this covers only the hop back from the worker.
 const WAIT_REPLY_GRACE: Duration = Duration::from_secs(30);
 
-/// How long the shim waits for the worker to answer `action`. A `wait` blocks
-/// for as long as the caller asked plus grace; everything else is bounded by
+/// How long the shim waits for the worker to answer `action`. A `wait` uses
+/// the harness's default window plus grace; everything else is bounded by
 /// [`REPLY_TIMEOUT`].
-fn reply_timeout(action: &SubagentToolAction) -> Duration {
+fn reply_timeout(action: &SubagentToolAction, harness: Option<HarnessKind>) -> Duration {
     match action {
-        SubagentToolAction::WaitAgents {
-            timeout_seconds, ..
-        } => mj_core::subagent::subagent_wait_timeout(*timeout_seconds) + WAIT_REPLY_GRACE,
+        SubagentToolAction::WaitAgents => {
+            mj_core::subagent::subagent_wait_timeout_for(harness) + WAIT_REPLY_GRACE
+        }
         _ => REPLY_TIMEOUT,
     }
 }
@@ -216,16 +216,12 @@ fn unanswered_reply(
             false,
         );
     }
-    if let SubagentToolAction::WaitAgents {
-        child_session_ids, ..
-    } = action
-    {
+    if let SubagentToolAction::WaitAgents = action {
         let mut payload = mj_core::subagent::still_running_payload(
-            child_session_ids,
             waited.as_secs(),
             Some(
-                "Mjolnir did not answer this wait in time, so these children's state is unknown \
-                 rather than observed. They are still running; call wait again to collect them.",
+                "Mjolnir did not answer this wait in time, so the current child states are unknown. \
+                 Call wait again later to collect any reports that are ready.",
             ),
         );
         if let Some(object) = payload.as_object_mut() {
@@ -268,22 +264,11 @@ fn model_facing(request_id: &str, result: &Value) -> Value {
 /// What a progress notification says while a `wait` is open. A client that
 /// shows it to a person, or to a model, should learn something from it.
 fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Option<String> {
-    let SubagentToolAction::WaitAgents {
-        child_session_ids, ..
-    } = action
-    else {
+    let SubagentToolAction::WaitAgents = action else {
         return None;
     };
-    if child_session_ids.is_empty() {
-        return Some(format!(
-            "waiting for every child session that is still running; {}s elapsed",
-            elapsed.as_secs()
-        ));
-    }
     Some(format!(
-        "waiting for {} child session(s) to finish their turn: {}; {}s elapsed",
-        child_session_ids.len(),
-        child_session_ids.join(", "),
+        "waiting for a new report from any child that is still running; {}s elapsed",
         elapsed.as_secs()
     ))
 }
@@ -372,14 +357,8 @@ struct HandbackArgs {
 }
 
 #[derive(Deserialize)]
-struct WaitArgs {
-    #[serde(default)]
-    child_session_ids: Vec<String>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    return_when: mj_core::subagent::ReturnWhen,
-}
+#[serde(deny_unknown_fields)]
+struct WaitArgs {}
 
 fn call(
     socket: &Path,
@@ -388,14 +367,16 @@ fn call(
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
 ) -> Result<(Value, bool)> {
-    call_with_budget(socket, harness, role, params, progress, reply_timeout)
+    call_with_budget(socket, harness, role, params, progress, |action| {
+        reply_timeout(action, harness)
+    })
 }
 
 /// Answer one tool call, waiting for the worker as long as `budget` allows
 /// for the call's action.
 fn call_with_budget(
     socket: &Path,
-    harness: Option<HarnessKind>,
+    _harness: Option<HarnessKind>,
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
@@ -453,17 +434,8 @@ fn call_with_budget(
             }
         }
         "wait" => {
-            let args: WaitArgs = serde_json::from_value(params.arguments)?;
-            // Apply the harness's own ceiling once, here, so the worker and the
-            // daemon work to the same deadline the caller will be answered at.
-            SubagentToolAction::WaitAgents {
-                child_session_ids: args.child_session_ids,
-                timeout_seconds: Some(
-                    mj_core::subagent::subagent_wait_timeout_for(harness, args.timeout_seconds)
-                        .as_secs(),
-                ),
-                return_when: args.return_when,
-            }
+            let _args: WaitArgs = serde_json::from_value(params.arguments)?;
+            SubagentToolAction::WaitAgents
         }
         "interrupt" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
@@ -550,9 +522,7 @@ fn send(
         })
     };
     let total = match &request.action {
-        SubagentToolAction::WaitAgents {
-            timeout_seconds, ..
-        } => Some(mj_core::subagent::subagent_wait_timeout(*timeout_seconds).as_secs()),
+        SubagentToolAction::WaitAgents => Some(timeout.saturating_sub(WAIT_REPLY_GRACE).as_secs()),
         _ => None,
     };
     let answer = loop {
@@ -574,9 +544,7 @@ fn send(
     answer
 }
 
-fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
-    let ceiling = mj_core::subagent::max_wait_seconds_for(harness);
-    let default_wait = mj_core::subagent::subagent_wait_timeout_for(harness, None).as_secs();
+fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     let current = mj_core::subagent::CURRENT_MODEL;
     let model = format!(
@@ -614,10 +582,10 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         tool(
             "wait",
             &format!(
-                "Wait for child turns or timeout. Omit child_session_ids to wait for every child of yours that is still running; with none running, it returns immediately with finished children. Call once for every child you need, using the default maximum timeout; do not poll with short timeouts because every call carries your whole context. Use return_when any to advance on the first finished child. Status complete means all named children finished; still_running means some remain or return_when any returned early: wait again when needed. Each entry carries finished and output, a short handback or last message; report_source identifies which. Details are in report_dir; output over {max_output} characters is truncated. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Delivery failures report state failed and their cause, not an old report. A reminder to hand back keeps a child running. A finished child has parked true when its processes were released; send_input resumes it. A closed child reports state \"stopping\" until teardown finishes, then \"stopped\". A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`; repair that login or make another eligible profile available before spawning again. timeout_seconds defaults to {default_wait}, the most this harness allows; work may take longer, so another wait is normal.",
+                "Wait for every child of yours that is not stopped. A child that you closed is not covered, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. A report is returned only once for each finish; a child resumed with send_input can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Entries without a new report have no output. A wait may end before work is done, and another wait is normal. A finished child has parked true when its processes were released; send_input resumes it. A child being closed stays in the wait set while state is \"stopping\" and leaves it when stopped. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
-            json!({"type":"object","properties":{"child_session_ids":{"type":"array","items":{"type":"string"},"description":"The children to wait for. Omit, or pass an empty list, to wait for every child of yours that is still running."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":ceiling},"return_when":{"type":"string","enum":["all","any"],"description":"all (the default) answers once every named child finished; any answers once one of them did."}},"additionalProperties":false}),
+            json!({"type":"object","properties":{},"additionalProperties":false}),
         ),
         tool(
             "interrupt",
@@ -626,7 +594,7 @@ fn tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "close",
-            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait with the closed child's id first and spawn its replacement only once that wait reports the child finished with state \"stopped\" - a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait after close and wait until the closing child is no longer listed before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
     ]
@@ -874,15 +842,13 @@ mod tests {
     }
 
     #[test]
-    fn wait_advertises_the_shared_runtime_timeout_limit() {
+    fn wait_advertises_no_arguments() {
         let wait = tool_definitions(None)
             .into_iter()
             .find(|tool| tool["name"] == "wait")
             .expect("wait definition");
-        assert_eq!(
-            wait["inputSchema"]["properties"]["timeout_seconds"]["maximum"],
-            mj_core::subagent::MAX_WAIT_SECONDS
-        );
+        assert_eq!(wait["inputSchema"]["properties"], json!({}));
+        assert_eq!(wait["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]
@@ -893,7 +859,7 @@ mod tests {
             "instructions must not promise pushed results: {SERVER_INSTRUCTIONS:?}"
         );
         // Each wait call resends the parent's whole context, so the parent is
-        // told to wait long and once, and to read details from files.
+        // told to read details from files.
         for needed in ["report_dir", "instead of duplicating work"] {
             assert!(
                 SERVER_INSTRUCTIONS.contains(needed),
@@ -906,29 +872,42 @@ mod tests {
             .expect("wait definition");
         let description = wait["description"].as_str().unwrap_or_default();
         assert!(
-            description.contains("do not poll") && description.contains("return_when any"),
+            description.contains("new report") && description.contains("reported"),
             "{description}"
         );
-        assert_eq!(
-            wait["inputSchema"]["properties"]["return_when"]["enum"],
-            json!(["all", "any"])
+        assert!(
+            wait["inputSchema"]["properties"]
+                .get("child_session_ids")
+                .is_none()
+        );
+        assert!(
+            wait["inputSchema"]["properties"]
+                .get("return_when")
+                .is_none()
+        );
+        assert!(
+            wait["inputSchema"]["properties"]
+                .get("timeout_seconds")
+                .is_none()
         );
     }
 
     #[test]
-    fn a_wait_without_a_timeout_advertises_the_harness_ceiling_as_its_default() {
-        for harness in [None, Some(HarnessKind::Codex)] {
-            let ceiling = mj_core::subagent::max_wait_seconds_for(harness);
-            let wait = tool_definitions(harness)
-                .into_iter()
-                .find(|tool| tool["name"] == "wait")
-                .expect("wait definition");
-            let description = wait["description"].as_str().unwrap_or_default();
-            assert!(
-                description.contains(&format!("defaults to {ceiling},")),
-                "{description}"
-            );
-        }
+    fn wait_description_explains_that_another_wait_is_normal() {
+        let wait = tool_definitions(None)
+            .into_iter()
+            .find(|tool| tool["name"] == "wait")
+            .expect("wait definition");
+        let description = wait["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("A wait may end before work is done, and another wait is normal."),
+            "{description}"
+        );
+        assert!(!description.contains("timeout_seconds"), "{description}");
+        assert!(
+            !description.contains("poll with short timeouts"),
+            "{description}"
+        );
     }
 
     #[test]
@@ -1108,26 +1087,18 @@ mod tests {
     }
 
     #[test]
-    fn wait_calls_get_their_own_timeout_plus_grace() {
-        let wait = |timeout_seconds| SubagentToolAction::WaitAgents {
-            child_session_ids: vec!["c1".into()],
-            timeout_seconds,
-            return_when: Default::default(),
-        };
+    fn wait_calls_use_the_harness_default_plus_grace() {
+        let wait = SubagentToolAction::WaitAgents;
         assert_eq!(
-            reply_timeout(&wait(Some(7))),
-            Duration::from_secs(7) + WAIT_REPLY_GRACE
-        );
-        assert_eq!(
-            reply_timeout(&wait(None)),
+            reply_timeout(&wait, None),
             Duration::from_secs(mj_core::subagent::DEFAULT_WAIT_SECONDS) + WAIT_REPLY_GRACE
         );
         assert_eq!(
-            reply_timeout(&wait(Some(mj_core::subagent::MAX_WAIT_SECONDS * 2))),
-            Duration::from_secs(mj_core::subagent::MAX_WAIT_SECONDS) + WAIT_REPLY_GRACE
+            reply_timeout(&wait, Some(HarnessKind::Codex)),
+            Duration::from_secs(mj_core::subagent::MAX_CODEX_WAIT_SECONDS) + WAIT_REPLY_GRACE
         );
         assert_eq!(
-            reply_timeout(&SubagentToolAction::ListAgents),
+            reply_timeout(&SubagentToolAction::ListAgents, Some(HarnessKind::Codex)),
             REPLY_TIMEOUT
         );
     }
@@ -1206,7 +1177,7 @@ mod tests {
             SubagentMcpRole::Parent,
             Some(&json!({
                 "name": "wait",
-                "arguments": {"child_session_ids": ["c1", "c2"], "timeout_seconds": 5}
+                "arguments": {}
             })),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_millis(200),
@@ -1221,8 +1192,11 @@ mod tests {
             value["status"],
             mj_core::subagent::WAIT_STATUS_STILL_RUNNING
         );
-        assert_eq!(value["agents"][1]["child_session_id"], "c2");
-        assert_eq!(value["agents"][1]["finished"], false);
+        assert_eq!(
+            value["agents"],
+            json!([]),
+            "the worker does not know child state"
+        );
         assert!(
             !value["request_id"].as_str().unwrap_or_default().is_empty(),
             "{value}"
@@ -1237,10 +1211,10 @@ mod tests {
             "request_id": "r-1",
             "completed_at_ms": 7,
             "is_error": false,
-            "message": "{\"status\":\"complete\",\"agents\":[]}"
+            "message": "{\"status\":\"reported\",\"agents\":[]}"
         });
         let value = model_facing("r-1", &envelope);
-        assert_eq!(value["status"], "complete");
+        assert_eq!(value["status"], "reported");
         assert_eq!(value["request_id"], "r-1");
         assert!(
             value.get("message").is_none(),
@@ -1376,7 +1350,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_wait_for_any_child_carries_return_when_and_the_harness_default() {
+    fn a_wait_request_has_no_params() {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
 
@@ -1407,80 +1381,61 @@ mod tests {
             &socket,
             Some(HarnessKind::Codex),
             SubagentMcpRole::Parent,
-            Some(&json!({"name": "wait", "arguments": {
-                "child_session_ids": ["c1", "c2"], "return_when": "any"
-            }})),
+            Some(&json!({"name": "wait", "arguments": {}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_secs(5),
         )
         .unwrap();
         assert!(!is_error, "{value}");
         let request = received.recv().unwrap();
-        assert_eq!(
-            request["action"],
-            json!({"action": "wait_agents", "params": {
-                "child_session_ids": ["c1", "c2"],
-                "timeout_seconds": mj_core::subagent::MAX_CODEX_WAIT_SECONDS,
-                "return_when": "any"
-            }})
-        );
+        assert_eq!(request["action"], json!({"action": "wait_agents"}));
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_wait_without_child_ids_or_with_an_empty_list_names_no_children() {
+    fn a_wait_accepts_no_arguments_and_omits_retired_fields() {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
 
-        for arguments in [
-            json!({"return_when": "any"}),
-            json!({"child_session_ids": []}),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let socket = dir.path().join("subagents.sock");
-            let listener = UnixListener::bind(&socket).unwrap();
-            let (sent, received) = std::sync::mpsc::channel::<Value>();
-            std::thread::spawn(move || {
-                let (stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let request: Value = serde_json::from_str(line.trim()).unwrap();
-                let request_id = request["request_id"].clone();
-                sent.send(request).unwrap();
-                let reply = json!({"accepted": true, "result": {
-                    "request_id": request_id, "completed_at_ms": 1, "is_error": false,
-                    "message": "{\"status\":\"complete\",\"agents\":[]}"
-                }});
-                let mut body = serde_json::to_vec(&reply).unwrap();
-                body.push(b'\n');
-                let mut stream = reader.into_inner();
-                stream.write_all(&body).unwrap();
-                stream.flush().unwrap();
-                let _ = stream.read(&mut [0u8; 1]);
-            });
-            let (value, is_error) = call_with_budget(
-                &socket,
-                Some(HarnessKind::Codex),
-                SubagentMcpRole::Parent,
-                Some(&json!({"name": "wait", "arguments": arguments})),
-                &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-                |_| Duration::from_secs(5),
-            )
-            .unwrap();
-            assert!(!is_error, "{value}");
-            let request = received.recv().unwrap();
-            assert_eq!(
-                request["action"]["params"].get("child_session_ids"),
-                None,
-                "{request}"
-            );
-            assert_eq!(request["action"]["action"], "wait_agents", "{request}");
-        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (sent, received) = std::sync::mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            let request_id = request["request_id"].clone();
+            sent.send(request).unwrap();
+            let reply = json!({"accepted": true, "result": {
+                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
+                "message": "{\"status\":\"nothing_to_wait_for\",\"agents\":[]}"
+            }});
+            let mut body = serde_json::to_vec(&reply).unwrap();
+            body.push(b'\n');
+            let mut stream = reader.into_inner();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+            let _ = stream.read(&mut [0u8; 1]);
+        });
+        let (value, is_error) = call_with_budget(
+            &socket,
+            Some(HarnessKind::Codex),
+            SubagentMcpRole::Parent,
+            Some(&json!({"name": "wait", "arguments": {}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!is_error, "{value}");
+        let request = received.recv().unwrap();
+        assert_eq!(request["action"], json!({"action":"wait_agents"}));
     }
 
     #[test]
-    fn the_wait_schema_makes_child_session_ids_optional_and_says_so() {
+    fn the_wait_schema_is_empty_and_rejects_extra_properties() {
         let tools = tool_definitions(Some(HarnessKind::Codex));
         let wait = tools
             .iter()
@@ -1488,19 +1443,41 @@ mod tests {
             .expect("wait tool");
         let schema = &wait["inputSchema"];
         assert!(schema.get("required").is_none(), "{schema}");
+        assert_eq!(schema["properties"], json!({}), "{schema}");
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
         assert!(
-            schema["properties"]["child_session_ids"]
-                .get("minItems")
-                .is_none(),
+            schema["properties"].get("child_session_ids").is_none(),
+            "{schema}"
+        );
+        assert!(
+            schema["properties"].get("return_when").is_none(),
             "{schema}"
         );
         let description = wait["description"].as_str().unwrap();
         assert!(
-            description.contains(
-                "Omit child_session_ids to wait for every child of yours that is still running"
-            ),
+            description.contains("every child of yours that is not stopped"),
             "{description}"
         );
+        assert!(
+            description.contains("closed is not covered"),
+            "{description}"
+        );
+        assert!(
+            description.contains("A wait may end before work is done, and another wait is normal."),
+            "{description}"
+        );
+        assert!(!description.contains("timeout_seconds"), "{description}");
+    }
+
+    #[test]
+    fn the_wait_arguments_reject_retired_selectors() {
+        for field in ["child_session_ids", "return_when", "timeout_seconds"] {
+            let arguments = json!({field: true});
+            assert!(
+                serde_json::from_value::<WaitArgs>(arguments).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
@@ -1655,7 +1632,7 @@ mod tests {
         // responses would come back the other way round.
         let input = format!(
             "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{"child_session_ids":["c1"],"timeout_seconds":1}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents"}}),
         );
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -1798,9 +1775,8 @@ mod tests {
         assert_eq!(value["closed"], true, "{value}");
     }
 
-    /// The parent model has to learn the rule from the tools themselves: the
-    /// close is finished only when a wait reports the child stopped, and a
-    /// replacement child waits for that.
+    /// The parent model has to learn from the tools that a closing child stays
+    /// visible to wait until teardown finishes, and a replacement must wait.
     #[test]
     fn close_directs_the_model_to_wait_for_a_stopped_child_before_replacing_it() {
         let definitions = tool_definitions(None);
@@ -1815,7 +1791,7 @@ mod tests {
 
         let close = description("close");
         assert!(close.contains("wait"), "{close}");
-        assert!(close.contains("\"stopped\""), "{close}");
+        assert!(close.contains("no longer listed"), "{close}");
         assert!(
             close.contains("replacement"),
             "the close must say what to do before spawning the next child: {close}"
@@ -1826,7 +1802,7 @@ mod tests {
         let wait = description("wait");
         assert!(wait.contains("closed"), "{wait}");
         assert!(
-            wait.contains("\"stopping\"") && wait.contains("\"stopped\""),
+            wait.contains("\"stopping\"") && wait.contains("leaves it when stopped"),
             "{wait}"
         );
     }

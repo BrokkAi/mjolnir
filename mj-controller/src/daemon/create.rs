@@ -52,7 +52,8 @@ impl RuntimeState {
             return Ok(relation);
         }
         let session_id = relation.child_session_id.clone();
-        self.start_or_join_lifecycle_controlled(
+        let parent_session_id = relation.parent_session_id.clone();
+        let started = self.start_or_join_lifecycle_controlled(
             session_id.clone(),
             LifecycleKind::Create,
             None,
@@ -75,15 +76,46 @@ impl RuntimeState {
                 }
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
-                    state,
+                    state.clone(),
                     session_id.clone(),
                 );
-                controller
+                if let Err(error) = controller
                     .provision_subagent_session_controlled(&session_id, &executor)
-                    .await?;
+                    .await
+                {
+                    drop(controller);
+                    state.reload_controller().await?;
+                    if let Err(prompt_error) = state
+                        .ensure_parent_wait_prompt(&parent_session_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            child_session_id = %session_id,
+                            parent_session_id,
+                            error = format!("{prompt_error:#}"),
+                            "could not reconcile the parent's sub-agent wait prompt after provisioning failure"
+                        );
+                    }
+                    return Err(error);
+                }
                 Ok(DaemonLifecycleResult::Done)
             },
-        )?;
+        );
+        if let Err(error) = started {
+            self.reload_controller().await?;
+            if let Err(prompt_error) = self
+                .ensure_parent_wait_prompt(&relation.parent_session_id)
+                .await
+            {
+                tracing::warn!(
+                    child_session_id = %relation.child_session_id,
+                    parent_session_id = %relation.parent_session_id,
+                    error = format!("{prompt_error:#}"),
+                    "could not reconcile the parent's sub-agent wait prompt after provisioning failure"
+                );
+            }
+            return Err(error);
+        }
         self.reload_controller().await?;
         Ok(relation)
     }

@@ -17,7 +17,7 @@ use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use mj_core::state::{MaterializedExecutionState, SessionState};
-use mj_core::subagent::{DEFAULT_WAIT_SECONDS, ReportState, bounded_report};
+use mj_core::subagent::{ReportState, bounded_report};
 
 use crate::quota::ProfileQuota;
 
@@ -369,6 +369,8 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a restarted sub-agent's session actor has to connect to the
 /// worker the restart already proved ready.
 const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const PARENT_WAIT_PROMPT_TEXT: &str =
+    "One or more sub-agents finished. Call wait to collect their reports.";
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
@@ -386,10 +388,26 @@ pub struct ApiBackend {
     /// Profiles whose login the credential sync found refused; session and
     /// sub-agent selection refuse them until their login file changes.
     rejected_logins: Arc<Mutex<mj_core::credentials::RejectedLogins>>,
+    /// Serialize waits per parent through durable result and marker commit, so
+    /// parallel requests cannot return the same finish twice.
+    wait_execution_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Serialize prompt reconciliation and withdrawal for each parent.
+    wait_prompt_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The capabilities user-facing selection and sub-agent operations use.
     /// The catalogue discovers them in the background, so a call waits for a
     /// profile the pass has not published instead of starting another probe.
     profile_catalog: Arc<super::profile_catalog::ProfileCatalog>,
+}
+
+struct WaitChildSnapshot {
+    relation: mj_core::subagent::SubagentRecord,
+    summary: Option<mj_core::state::MaterializedSessionSummary>,
+    progress: ChildProgress,
+    record: Option<mj_core::state::SessionRecord>,
+    state: String,
+    output: Option<String>,
+    finished: bool,
+    identity: Option<mj_core::subagent::SubagentFinishIdentity>,
 }
 
 impl ApiBackend {
@@ -489,6 +507,8 @@ impl ApiBackend {
             exports,
             quota_reports: Arc::new(Mutex::new(BTreeMap::new())),
             rejected_logins: Arc::default(),
+            wait_execution_locks: Mutex::new(BTreeMap::new()),
+            wait_prompt_locks: Mutex::new(BTreeMap::new()),
             // Nothing is adopted until the daemon hands its configuration
             // over, so a backend built without one — every test that does not
             // care about profiles — reports that `list_profiles` has nothing
@@ -505,6 +525,28 @@ impl ApiBackend {
     ) -> Self {
         self.quota_reports = quota_reports;
         self
+    }
+
+    fn parent_lock(
+        locks: &Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+        parent: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            locks
+                .entry(parent.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    fn wait_execution_lock(&self, parent: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Self::parent_lock(&self.wait_execution_locks, parent)
+    }
+
+    fn wait_prompt_lock(&self, parent: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Self::parent_lock(&self.wait_prompt_locks, parent)
     }
 
     pub fn with_rejected_logins(
@@ -528,7 +570,24 @@ impl ApiBackend {
         self: &Arc<Self>,
         parent: String,
         request: mj_core::subagent::SubagentToolRequest,
-    ) -> Result<mj_core::subagent::SubagentToolResult> {
+    ) -> Result<crate::database::StoredDelegationResult> {
+        let wait_lock = matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::WaitAgents
+        )
+        .then(|| self.wait_execution_lock(&parent));
+        let _wait_guard = match &wait_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        if matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::WaitAgents
+        ) {
+            // Do this before replay lookup too: a retried durable wait is
+            // still the parent taking responsibility for collecting reports.
+            self.withdraw_parent_wait_prompt(&parent).await?;
+        }
         let stored = blocking("load delegation effect", {
             let parent = parent.clone();
             let id = request.request_id.clone();
@@ -583,19 +642,23 @@ impl ApiBackend {
             move || crate::database::delegation_delivering(parent, id)
         })
         .await?;
-        let result = self
-            .execute_subagent_tool_prepared(
+        let (result, reported_finishes) = self
+            .execute_subagent_tool_prepared_with_reports(
                 parent.clone(),
                 prepared.request.clone(),
                 Some(&prepared),
             )
             .await;
+        let stored_result = crate::database::StoredDelegationResult {
+            result,
+            reported_finishes,
+        };
         blocking("persist delegation result", {
-            let result = result.clone();
-            move || crate::database::record_delegation_result(parent, result)
+            let result = stored_result.clone();
+            move || crate::database::record_delegation_result_with_reports(parent, result)
         })
         .await?;
-        Ok(result)
+        Ok(stored_result)
     }
 
     #[cfg(test)]
@@ -608,14 +671,35 @@ impl ApiBackend {
             .await
     }
 
+    #[cfg(test)]
     async fn execute_subagent_tool_prepared(
         self: &Arc<Self>,
         parent_session_id: String,
         request: mj_core::subagent::SubagentToolRequest,
         prepared: Option<&crate::database::PreparedDelegation>,
     ) -> mj_core::subagent::SubagentToolResult {
+        self.execute_subagent_tool_prepared_with_reports(parent_session_id, request, prepared)
+            .await
+            .0
+    }
+
+    async fn execute_subagent_tool_prepared_with_reports(
+        self: &Arc<Self>,
+        parent_session_id: String,
+        request: mj_core::subagent::SubagentToolRequest,
+        prepared: Option<&crate::database::PreparedDelegation>,
+    ) -> (
+        mj_core::subagent::SubagentToolResult,
+        Vec<(String, mj_core::subagent::SubagentFinishIdentity)>,
+    ) {
+        let mut reported_finishes = Vec::new();
         let outcome = self
-            .execute_subagent_tool_inner(&parent_session_id, &request, prepared)
+            .execute_subagent_tool_inner(
+                &parent_session_id,
+                &request,
+                prepared,
+                &mut reported_finishes,
+            )
             .await;
         if let mj_core::subagent::SubagentToolAction::SendInput {
             child_session_id, ..
@@ -631,12 +715,15 @@ impl ApiBackend {
             value["child_session_id"] = child_session_id.clone().into();
             value["request_id"] = request.request_id.clone().into();
             value["created_at_ms"] = request.created_at_ms.into();
-            return mj_core::subagent::SubagentToolResult {
-                request_id: request.request_id,
-                completed_at_ms: mj_core::clock::epoch_millis(),
-                is_error,
-                message: value.to_string(),
-            };
+            return (
+                mj_core::subagent::SubagentToolResult {
+                    request_id: request.request_id,
+                    completed_at_ms: mj_core::clock::epoch_millis(),
+                    is_error,
+                    message: value.to_string(),
+                },
+                reported_finishes,
+            );
         }
         let (is_error, message) = match outcome {
             Ok(value) => (
@@ -645,12 +732,15 @@ impl ApiBackend {
             ),
             Err(error) => (true, format!("{error:#}")),
         };
-        mj_core::subagent::SubagentToolResult {
-            request_id: request.request_id,
-            completed_at_ms: mj_core::clock::epoch_millis(),
-            is_error,
-            message,
-        }
+        (
+            mj_core::subagent::SubagentToolResult {
+                request_id: request.request_id,
+                completed_at_ms: mj_core::clock::epoch_millis(),
+                is_error,
+                message,
+            },
+            reported_finishes,
+        )
     }
 
     async fn execute_subagent_tool_inner(
@@ -658,6 +748,7 @@ impl ApiBackend {
         parent_session_id: &str,
         request: &mj_core::subagent::SubagentToolRequest,
         prepared: Option<&crate::database::PreparedDelegation>,
+        reported_finishes: &mut Vec<(String, mj_core::subagent::SubagentFinishIdentity)>,
     ) -> Result<serde_json::Value> {
         use mj_core::subagent::SubagentToolAction;
         let request_created_at_ms = request.created_at_ms;
@@ -834,6 +925,7 @@ impl ApiBackend {
                         // collected through wait.
                         let unknown = ChildProgress {
                             finished_span: None,
+                            last_completed_ordinal: None,
                             report: ReportState::Fallback,
                             awaited_ordinal: None,
                             answered_ordinal: None,
@@ -888,154 +980,151 @@ impl ApiBackend {
                     serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id,"status":"submitted"}),
                 )
             }
-            SubagentToolAction::WaitAgents {
-                child_session_ids,
-                timeout_seconds,
-                return_when,
-            } => {
-                // Naming no children means every child of this parent that is
-                // not finished. This daemon owns the parent-to-children list,
-                // so it resolves the set once, when the wait starts.
-                let resolved;
-                let child_session_ids = if child_session_ids.is_empty() {
-                    resolved = self.unfinished_children(parent_session_id).await?;
-                    &resolved
-                } else {
-                    for child_id in child_session_ids {
-                        self.require_owned_child(parent_session_id, child_id)
-                            .await?;
-                    }
-                    child_session_ids
-                };
+            SubagentToolAction::WaitAgents => {
                 // The budget runs from when the caller made the request, not
                 // from when this daemon picked it up. A request that is
                 // executed again — after a daemon restart, or after a result
                 // could not be handed back — then still answers at the
-                // caller's original deadline instead of starting over.
+                // caller's original harness deadline instead of starting over.
+                let harness = self
+                    .exports
+                    .session_record(parent_session_id)
+                    .map(|record| record.harness_kind);
+                let wait_budget = mj_core::subagent::subagent_wait_timeout_for(harness);
                 let started = tokio::time::Instant::now();
                 let remaining = mj_core::subagent::remaining_subagent_wait(
                     request_created_at_ms,
-                    *timeout_seconds,
+                    harness,
                     mj_core::clock::epoch_millis(),
                 );
                 tracing::info!(
                     parent_session_id,
-                    children = child_session_ids.len(),
-                    requested_seconds = timeout_seconds.unwrap_or(DEFAULT_WAIT_SECONDS),
+                    wait_budget_seconds = wait_budget.as_secs(),
                     remaining_seconds = remaining.as_secs(),
                     "starting a sub-agent wait"
                 );
                 let deadline = started + remaining;
                 let mut changes = ChildWaitFeed::new(self, parent_session_id).await?;
                 loop {
-                    let observed = changes.inputs(self, child_session_ids)?;
-                    let inputs = self.subagent_input_progress(parent_session_id).await?;
-                    let (summaries, starts) =
-                        self.child_snapshots(child_session_ids.clone()).await?;
-                    let finished = summaries
-                        .iter()
-                        .map(|(id, summary, progress)| {
-                            let record = self.exports.session_record(id);
-                            inputs
-                                .status(
-                                    id,
-                                    subagent_status(
-                                        record.as_ref(),
-                                        summary.as_ref(),
-                                        starts.get(id),
-                                        None,
-                                        self.exports.close_is_requested(id),
-                                        progress,
-                                    ),
-                                )
-                                .2
-                        })
+                    // Capture the publication baseline before loading child
+                    // snapshots. Otherwise a finish between the snapshot
+                    // read and this baseline could look already observed and
+                    // leave the wait asleep until its deadline.
+                    let observed_child_ids = self
+                        .list_subagents(parent_session_id.to_owned())
+                        .await?
+                        .into_iter()
+                        .map(|child| child.child_session_id)
                         .collect::<Vec<_>>();
-                    let complete = finished.iter().all(|done| *done);
-                    if return_when.satisfied(&finished) || tokio::time::Instant::now() >= deadline {
-                        // Only read now, and only here: this is the one answer
-                        // that has to be the child's own report.
-                        let ids = summaries
-                            .iter()
-                            .map(|(id, _, progress)| (id.clone(), progress.finished_span))
-                            .collect::<Vec<_>>();
-                        let reports = tokio::task::spawn_blocking(move || {
-                            crate::database::load_child_answer_messages(&ids)
+                    let observed = changes.inputs(self, parent_session_id, &observed_child_ids)?;
+                    let (inputs, children) = self.wait_children(parent_session_id).await?;
+                    let all_child_ids = children
+                        .iter()
+                        .map(|child| child.relation.child_session_id.clone())
+                        .collect::<Vec<_>>();
+                    let children = children
+                        .into_iter()
+                        .filter(|child| child.state != "stopped")
+                        .collect::<Vec<_>>();
+                    let new_reports = children
+                        .iter()
+                        .filter(|child| {
+                            child.identity.as_ref().is_some_and(|identity| {
+                                child.relation.reported_finish.as_ref() != Some(identity)
+                            })
                         })
-                        .await??;
-                        let agents = summaries
-                            .into_iter()
-                            .map(|(id, mut summary, progress)| {
-                                if let Some(summary) = summary.as_mut() {
-                                    summary.last_agent_message =
-                                        reports.get(&id).and_then(|message| message.latest.clone());
-                                }
-                                let record = self.exports.session_record(&id);
-                                let (state, output, finished) = inputs.status(
-                                    &id,
-                                    subagent_status(
-                                        record.as_ref(),
-                                        summary.as_ref(),
-                                        starts.get(&id),
-                                        reports
-                                            .get(&id)
-                                            .and_then(|message| message.finished.as_deref()),
-                                        self.exports.close_is_requested(&id),
-                                        &progress,
-                                    ),
-                                );
-                                let mut entry =
-                                    wait_agent_entry(&id, &state, output, finished, &progress);
-                                inputs.annotate(&id, &mut entry);
-                                mark_parked(&mut entry, record.as_ref());
-                                entry
+                        .count();
+                    let unfinished = children.iter().filter(|child| !child.finished).count();
+                    let timed_out = tokio::time::Instant::now() >= deadline;
+                    if new_reports > 0 || unfinished == 0 || timed_out {
+                        // Only read transcript output when answering. The
+                        // stored span bounds each child's report to that turn.
+                        let spans = children
+                            .iter()
+                            .map(|child| {
+                                (
+                                    child.relation.child_session_id.clone(),
+                                    child.progress.finished_span,
+                                )
                             })
                             .collect::<Vec<_>>();
-                        let unfinished = agents
-                            .iter()
-                            .filter(|agent| agent["finished"] != serde_json::Value::Bool(true))
-                            .filter_map(|agent| agent["child_session_id"].as_str())
-                            .map(str::to_owned)
-                            .collect::<Vec<_>>();
-                        // What the caller has waited, not what this execution
-                        // has: a request picked up late, or executed again
-                        // after a restart, already spent part of its budget.
+                        let reports = tokio::task::spawn_blocking(move || {
+                            crate::database::load_child_answer_messages(&spans)
+                        })
+                        .await??;
+                        let mut agents = Vec::with_capacity(children.len());
+                        for mut child in children {
+                            let id = child.relation.child_session_id.clone();
+                            if let Some(summary) = child.summary.as_mut() {
+                                summary.last_agent_message =
+                                    reports.get(&id).and_then(|message| message.latest.clone());
+                            }
+                            let output = if child.state == "completed" {
+                                match &child.progress.report {
+                                    ReportState::Delivered(message) => Some(message.clone()),
+                                    _ => reports
+                                        .get(&id)
+                                        .and_then(|message| message.finished.clone())
+                                        .or(child.output.clone()),
+                                }
+                            } else {
+                                child.output.clone()
+                            };
+                            let mut entry = wait_agent_entry(
+                                &id,
+                                &child.state,
+                                output,
+                                child.finished,
+                                &child.progress,
+                            );
+                            let is_new_report = child.identity.as_ref().is_some_and(|identity| {
+                                child.relation.reported_finish.as_ref() != Some(identity)
+                            });
+                            if is_new_report {
+                                reported_finishes.push((
+                                    id.clone(),
+                                    child
+                                        .identity
+                                        .clone()
+                                        .expect("new report has a finish identity"),
+                                ));
+                            } else {
+                                entry["output"] = serde_json::Value::Null;
+                                entry["report_source"] = serde_json::Value::Null;
+                            }
+                            inputs.annotate(&id, &mut entry);
+                            mark_parked(&mut entry, child.record.as_ref());
+                            agents.push(entry);
+                        }
+                        let status = if new_reports > 0 {
+                            mj_core::subagent::WAIT_STATUS_REPORTED
+                        } else if unfinished == 0 {
+                            mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR
+                        } else {
+                            mj_core::subagent::WAIT_STATUS_STILL_RUNNING
+                        };
                         let waited_seconds =
-                            (mj_core::subagent::subagent_wait_timeout(*timeout_seconds)
-                                - remaining
-                                + started.elapsed())
-                            .as_secs();
+                            (wait_budget.saturating_sub(remaining) + started.elapsed()).as_secs();
                         tracing::info!(
                             parent_session_id,
-                            complete,
+                            new_reports,
+                            unfinished,
                             waited_seconds,
                             "answering a sub-agent wait"
                         );
-                        // A deadline reached is an answer, not a failure: the
-                        // shape says which children are still running and what
-                        // the caller should do next.
                         return Ok(serde_json::json!({
-                            "status": if complete {
-                                mj_core::subagent::WAIT_STATUS_COMPLETE
-                            } else {
-                                mj_core::subagent::WAIT_STATUS_STILL_RUNNING
-                            },
+                            "status": status,
                             "waited_seconds": waited_seconds,
                             "agents": agents,
                             "next_action": mj_core::subagent::next_action(
-                                child_session_ids,
-                                &unfinished,
+                                status,
+                                new_reports,
+                                unfinished,
                             ),
                         }));
                     }
                     changes
-                        .wait(
-                            self,
-                            parent_session_id,
-                            child_session_ids,
-                            &observed,
-                            deadline,
-                        )
+                        .wait(self, parent_session_id, &all_child_ids, &observed, deadline)
                         .await?;
                 }
             }
@@ -1305,37 +1394,158 @@ impl ApiBackend {
         Ok((summaries, starts))
     }
 
-    /// The children an id-less `wait` covers: those of `parent_id` that are not
-    /// finished. When none is, the finished ones that still exist, so the
-    /// caller learns their state from an immediate answer.
-    async fn unfinished_children(&self, parent_id: &str) -> Result<Vec<String>> {
+    /// Resolve every child and the existing finished predicate from one
+    /// current observation. The caller re-runs this on each wait iteration so
+    /// children added while it is blocked join the wait set.
+    async fn wait_children(
+        &self,
+        parent_id: &str,
+    ) -> Result<(subagent_input::InputProgress, Vec<WaitChildSnapshot>)> {
         let inputs = self.subagent_input_progress(parent_id).await?;
-        let ids = self
-            .list_subagents(parent_id.to_owned())
-            .await?
-            .into_iter()
-            .map(|child| child.child_session_id)
-            .collect::<Vec<_>>();
-        let (summaries, starts) = self.child_snapshots(ids).await?;
-        let children = summaries
+        let relations = self.list_subagents(parent_id.to_owned()).await?;
+        let ids = relations
             .iter()
-            .map(|(id, summary, progress)| {
-                let record = self.exports.session_record(id);
-                let (state, _, finished) = inputs.status(
-                    id,
+            .map(|relation| relation.child_session_id.clone())
+            .collect::<Vec<_>>();
+        let (observed, starts) = self.child_snapshots(ids).await?;
+        let mut observed = observed
+            .into_iter()
+            .map(|(id, summary, progress)| (id, (summary, progress)))
+            .collect::<BTreeMap<_, _>>();
+        let children = relations
+            .into_iter()
+            .map(|relation| {
+                let id = relation.child_session_id.clone();
+                let (summary, progress) = observed
+                    .remove(&id)
+                    .expect("child snapshots include every registered child");
+                let record = self.exports.session_record(&id);
+                let (state, output, finished) = inputs.status(
+                    &id,
                     subagent_status(
                         record.as_ref(),
                         summary.as_ref(),
-                        starts.get(id),
+                        starts.get(&id),
                         None,
-                        self.exports.close_is_requested(id),
-                        progress,
+                        self.exports.close_is_requested(&id),
+                        &progress,
                     ),
                 );
-                (id.clone(), state, finished)
+                let identity =
+                    finished.then(|| finish_identity(&state, output.as_deref(), &progress));
+                WaitChildSnapshot {
+                    relation,
+                    summary,
+                    progress,
+                    record,
+                    state,
+                    output,
+                    finished,
+                    identity,
+                }
             })
-            .collect::<Vec<_>>();
-        Ok(implicit_wait_set(&children))
+            .collect();
+        Ok((inputs, children))
+    }
+
+    /// Level-triggered reconciliation for one parent: if an unreported child
+    /// finish exists and the parent is not already waiting,
+    /// submit one normal prompt for the next turn boundary.
+    pub(crate) async fn ensure_parent_wait_prompt(&self, parent_id: &str) -> Result<()> {
+        let lock = self.wait_prompt_lock(parent_id);
+        let _guard = lock.lock().await;
+        if self.exports.close_is_requested(parent_id)
+            || self
+                .exports
+                .session_record(parent_id)
+                .is_none_or(|record| !record.state.is_active())
+        {
+            return Ok(());
+        }
+        let handle = self
+            .sessions
+            .session(parent_id.to_owned())
+            .await
+            .with_context(|| format!("load parent {parent_id} for wait-prompt reconciliation"))?;
+        let snapshot = handle
+            .view()
+            .snapshot
+            .context("parent has no current view for wait-prompt reconciliation")?;
+        if snapshot.subagent_requests.iter().any(|request| {
+            matches!(
+                request.action,
+                mj_core::subagent::SubagentToolAction::WaitAgents
+            )
+        }) || queued_wait_prompt(&snapshot.materialized.queued_prompts)
+        {
+            return Ok(());
+        }
+        let (_, children) = self.wait_children(parent_id).await?;
+        let has_new_report = children.iter().any(|child| {
+            !self
+                .exports
+                .close_is_requested(&child.relation.child_session_id)
+                && !matches!(child.state.as_str(), "stopping" | "stopped")
+                && child.identity.as_ref().is_some_and(|identity| {
+                    child.relation.reported_finish.as_ref() != Some(identity)
+                })
+        });
+        if !has_new_report {
+            return Ok(());
+        }
+        submit_prompt(&handle, PARENT_WAIT_PROMPT_TEXT.to_owned()).await?;
+        Ok(())
+    }
+
+    /// Remove any wait reminder still waiting in the parent's relay queue.
+    /// A reminder already promoted to the active turn has left that queue and
+    /// is intentionally left alone.
+    async fn withdraw_parent_wait_prompt(&self, parent_id: &str) -> Result<()> {
+        let lock = self.wait_prompt_lock(parent_id);
+        let _guard = lock.lock().await;
+        let Ok(handle) = self.sessions.session(parent_id.to_owned()).await else {
+            return Ok(());
+        };
+        let queue_ids = handle
+            .view()
+            .snapshot
+            .map(|snapshot| {
+                snapshot
+                    .materialized
+                    .queued_prompts
+                    .iter()
+                    .filter(|prompt| queued_wait_prompt(std::slice::from_ref(*prompt)))
+                    .map(|prompt| prompt.command_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for queue_id in queue_ids {
+            let result = handle
+                .submit(
+                    new_command_id("subagent-wait-remove")?,
+                    RelayCommand::RemoveQueuedPrompt {
+                        queued_command_id: queue_id.clone(),
+                    },
+                )
+                .await;
+            if let Err(error) = result {
+                // The relay may have promoted the reminder between the view
+                // and removal. That is the one case where removal is no
+                // longer possible; retain other errors while the item stays
+                // queued.
+                handle.sync_now().await?;
+                let still_queued = handle.view().snapshot.is_some_and(|snapshot| {
+                    snapshot.materialized.queued_prompts.iter().any(|prompt| {
+                        prompt.command_id == queue_id
+                            && queued_wait_prompt(std::slice::from_ref(prompt))
+                    })
+                });
+                if still_queued {
+                    return Err(error).context("withdraw queued sub-agent wait prompt");
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn require_owned_child(&self, parent_id: &str, child_id: &str) -> Result<()> {
@@ -1349,12 +1559,10 @@ impl ApiBackend {
         Ok(())
     }
 
-    /// Record that a child finished a turn as a one-line user-visible notice
-    /// in the parent's conversation. This is the one unsolicited sub-agent
-    /// event, so it is a notice, not a prompt: it must not forge a user turn
-    /// or start one. The child's output is not included — it is collected
-    /// with `wait` and read in the child transcript; the notice only says
-    /// what happened.
+    /// Record that a child finished a turn as a one-line notice in the
+    /// parent's conversation. The notice contains no child output; a separate
+    /// level-triggered wait prompt is a normal prompt that queues or starts a
+    /// parent turn to call `wait`, which returns the report.
     ///
     /// `child_title` is the child's listed title. The turn is named by the
     /// number the child's own `mj wait` and `mj prompt` print (its accepted
@@ -1566,24 +1774,31 @@ fn profile_remaining_percent(report: Option<&ProfileQuota>) -> Option<u8> {
 /// that closed a child and spawned its replacement stacked the two process
 /// trees inside one container (#1087). This is the projection the daemon's own
 /// viewer applies, down to leaving a record that already says `Stopped` alone.
-/// The children an id-less `wait` covers, from each child's id, state and
-/// whether it finished: the unfinished ones (running, starting, stopping). With
-/// none unfinished, every child that has not been stopped, all finished, so the
-/// wait answers at once with their state.
-fn implicit_wait_set(children: &[(String, String, bool)]) -> Vec<String> {
-    let unfinished = children
-        .iter()
-        .filter(|(_, _, finished)| !finished)
-        .map(|(id, _, _)| id.clone())
-        .collect::<Vec<_>>();
-    if !unfinished.is_empty() {
-        return unfinished;
+fn finish_identity(
+    state: &str,
+    output: Option<&str>,
+    progress: &ChildProgress,
+) -> mj_core::subagent::SubagentFinishIdentity {
+    if let Some((start_position, completed_ordinal)) = progress.finished_span {
+        return mj_core::subagent::SubagentFinishIdentity::Turn {
+            start_position,
+            completed_ordinal,
+            state: state.to_owned(),
+        };
     }
-    children
-        .iter()
-        .filter(|(_, state, _)| state != "stopped")
-        .map(|(id, _, _)| id.clone())
-        .collect()
+    mj_core::subagent::SubagentFinishIdentity::Terminal {
+        state: state.to_owned(),
+        detail: output.map(str::to_owned),
+        last_completed_ordinal: progress.last_completed_ordinal,
+    }
+}
+
+fn queued_wait_prompt(prompts: &[mj_core::state::MaterializedQueuedPrompt]) -> bool {
+    prompts.iter().any(|prompt| {
+        prompt.content.iter().any(|content| {
+            content.get("text").and_then(serde_json::Value::as_str) == Some(PARENT_WAIT_PROMPT_TEXT)
+        })
+    })
 }
 
 fn subagent_status(
@@ -1705,6 +1920,8 @@ fn subagent_status(
 pub(crate) struct ChildProgress {
     /// The completed turn observed here owns only this transcript span.
     pub finished_span: Option<(u64, u64)>,
+    /// Stable terminal-failure generation even when the turn has no span.
+    pub last_completed_ordinal: Option<u64>,
     /// Where the child's report stands after its last finished turn.
     pub report: ReportState,
     /// The newest prompt the parent gave the child, by acceptance ordinal.
@@ -1729,6 +1946,7 @@ impl ChildProgress {
     pub(crate) fn settled(report: ReportState) -> Self {
         Self {
             finished_span: None,
+            last_completed_ordinal: None,
             report,
             awaited_ordinal: None,
             answered_ordinal: None,
@@ -1765,6 +1983,7 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
         }),
+        last_completed_ordinal: last.map(|turn| turn.completed_ordinal),
         report: mj_core::subagent::report_state(
             subagent.is_some_and(|record| record.handback_tool),
             recorded,
@@ -1828,6 +2047,7 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
             turn.turn_start_position
                 .map(|start| (start, turn.completed_ordinal))
         }),
+        last_completed_ordinal: last.as_ref().map(|turn| turn.completed_ordinal),
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answered_ordinal: last.as_ref().and_then(mj_core::subagent::answered_ordinal),

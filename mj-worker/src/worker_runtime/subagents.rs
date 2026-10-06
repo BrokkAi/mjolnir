@@ -169,10 +169,18 @@ struct QueueState {
     requests: BTreeMap<String, SubagentToolRequest>,
     #[serde(default)]
     results: BTreeMap<String, SubagentToolResult>,
+    /// Whether each persisted result reached a live waiter when it arrived.
+    /// Older queue files lack this fact and are treated as already delivered.
+    #[serde(default)]
+    delivered_to_waiter: BTreeMap<String, bool>,
     /// The daemon's reads of this queue since this worker started. It lives
     /// under the queue's lock so a request is either in a read or after it.
     #[serde(skip)]
     collections: Collections,
+    /// Waiters currently registered in this worker process. Registration and
+    /// completion share the queue lock to decide the fallback race once.
+    #[serde(skip)]
+    live_waiters: BTreeMap<String, usize>,
 }
 
 /// How often and how recently the daemon has read the queue.
@@ -187,6 +195,7 @@ pub struct SubagentEndpoint {
     path: PathBuf,
     admission: Arc<SocketAdmission>,
     relay: Option<Arc<Mutex<crate::relay::DurableRelay>>>,
+    harness: Option<mj_core::config::HarnessKind>,
     state: Arc<Mutex<QueueState>>,
     /// Woken whenever a result lands, so a socket call awaiting its own request
     /// returns the moment the daemon completes it.
@@ -209,6 +218,7 @@ impl SubagentEndpoint {
             path,
             admission: Arc::default(),
             relay: None,
+            harness: None,
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
         })
@@ -226,21 +236,44 @@ impl SubagentEndpoint {
     /// Wait for the daemon to complete `request_id`, up to `deadline`. Returns
     /// the result, or `None` at the deadline. Interest is registered before
     /// each read of the queue, so a completion racing the check is never lost.
+    #[cfg(test)]
     pub async fn await_result(
         &self,
         request_id: &str,
         deadline: Instant,
+    ) -> Option<SubagentToolResult> {
+        let mut waiter = self.register_waiter(request_id);
+        self.await_result_registered(request_id, deadline, &mut waiter)
+            .await
+    }
+
+    fn register_waiter(&self, request_id: &str) -> LiveWaiter {
+        let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
+        *state.live_waiters.entry(request_id.to_owned()).or_default() += 1;
+        LiveWaiter {
+            state: self.state.clone(),
+            request_id: request_id.to_owned(),
+            active: true,
+        }
+    }
+
+    async fn await_result_registered(
+        &self,
+        request_id: &str,
+        deadline: Instant,
+        waiter: &mut LiveWaiter,
     ) -> Option<SubagentToolResult> {
         loop {
             let notified = self.completed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(result) = self.cached_result(request_id) {
+                waiter.finish();
                 return Some(result);
             }
             tokio::select! {
                 _ = &mut notified => {}
-                _ = sleep_until(deadline) => return self.cached_result(request_id),
+                _ = sleep_until(deadline) => return waiter.finish_and_take_result(),
             }
         }
     }
@@ -315,12 +348,24 @@ impl SubagentEndpoint {
         Ok((None, mark))
     }
 
-    pub fn complete(&self, result: SubagentToolResult) -> Result<()> {
+    pub fn complete(&self, result: SubagentToolResult) -> Result<bool> {
         let request_id = result.request_id.clone();
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
+        if let Some(delivered) = state.delivered_to_waiter.get(&request_id).copied() {
+            return Ok(delivered);
+        }
+        // A result retained by an older worker has no delivery bit. Preserve
+        // legacy behavior: a duplicate completion is assumed to have reached
+        // its caller rather than reopening a report that may already be read.
+        if state.results.contains_key(&request_id) {
+            return Ok(true);
+        }
+        let delivered = state.live_waiters.get(&request_id).copied().unwrap_or(0) > 0;
         let mut next = state.clone();
         next.requests.remove(&request_id);
-        next.results.insert(request_id, result);
+        next.results.insert(request_id.clone(), result);
+        next.delivered_to_waiter
+            .insert(request_id.clone(), delivered);
         // Results are small but bound retained history so a long-lived parent does not
         // grow this control file forever.
         while next.results.len() > 256 {
@@ -333,18 +378,63 @@ impl SubagentEndpoint {
                 break;
             };
             next.results.remove(&oldest);
+            next.delivered_to_waiter.remove(&oldest);
         }
         self.persist(&next)?;
         *state = next;
         drop(state);
         self.completed.notify_waiters();
-        Ok(())
+        Ok(delivered)
     }
 
     fn persist(&self, state: &QueueState) -> Result<()> {
         let body = serde_json::to_vec_pretty(state)?;
         mj_core::config::atomic_write(&self.path, &body)
             .with_context(|| format!("write sub-agent queue {}", self.path.display()))
+    }
+}
+
+struct LiveWaiter {
+    state: Arc<Mutex<QueueState>>,
+    request_id: String,
+    active: bool,
+}
+
+impl LiveWaiter {
+    /// End the waiter and inspect its result under the same lock used by
+    /// `complete`, so timeout and completion have one serialized winner.
+    fn finish_and_take_result(&mut self) -> Option<SubagentToolResult> {
+        let state_ref = self.state.clone();
+        let request_id = self.request_id.clone();
+        let mut state = state_ref.lock().expect("sub-agent queue lock poisoned");
+        Self::remove_from(&mut self.active, &request_id, &mut state);
+        state.results.get(&request_id).cloned()
+    }
+
+    fn finish(&mut self) {
+        let state_ref = self.state.clone();
+        let request_id = self.request_id.clone();
+        let mut state = state_ref.lock().expect("sub-agent queue lock poisoned");
+        Self::remove_from(&mut self.active, &request_id, &mut state);
+    }
+
+    fn remove_from(active: &mut bool, request_id: &str, state: &mut QueueState) {
+        if !*active {
+            return;
+        }
+        if let Some(waiters) = state.live_waiters.get_mut(request_id) {
+            *waiters -= 1;
+            if *waiters == 0 {
+                state.live_waiters.remove(request_id);
+            }
+        }
+        *active = false;
+    }
+}
+
+impl Drop for LiveWaiter {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -628,6 +718,29 @@ enabled = false
     }
 
     #[test]
+    fn wait_budget_uses_the_harness_default_from_request_creation() {
+        let action = SubagentToolAction::WaitAgents;
+        assert_eq!(
+            wait_budget(&action, None, 1_000_000, 1_010_000),
+            Duration::from_secs(mj_core::subagent::DEFAULT_WAIT_SECONDS - 10) + WORKER_WAIT_GRACE
+        );
+        assert_eq!(
+            wait_budget(
+                &action,
+                Some(mj_core::config::HarnessKind::Codex),
+                1_000_000,
+                1_010_000,
+            ),
+            Duration::from_secs(mj_core::subagent::MAX_CODEX_WAIT_SECONDS - 10) + WORKER_WAIT_GRACE
+        );
+        assert_eq!(
+            wait_budget(&action, None, 1_000_000, 5_000_000),
+            WORKER_WAIT_GRACE,
+            "an expired durable wait only gets the fallback delivery grace"
+        );
+    }
+
+    #[test]
     fn admission_stamps_worker_turn_and_replay_cannot_retarget_it() {
         use crate::relay::test_support::{prompt, submit_relay};
         let root = tempfile::tempdir().unwrap();
@@ -704,11 +817,7 @@ enabled = false
             let service = endpoint.clone();
             tasks.spawn(async move { serve_one(server, service).await });
             let mut wait = request(&format!("wait-{n}"));
-            wait.action = SubagentToolAction::WaitAgents {
-                child_session_ids: vec!["child".into()],
-                timeout_seconds: Some(60),
-                return_when: Default::default(),
-            };
+            wait.action = SubagentToolAction::WaitAgents;
             let mut body = serde_json::to_vec(&wait).unwrap();
             body.push(b'\n');
             client.write_all(&body).await.unwrap();
@@ -726,11 +835,7 @@ enabled = false
         let service = endpoint.clone();
         tasks.spawn(async move { serve_one(server, service).await });
         let mut excess = request("excess-wait");
-        excess.action = SubagentToolAction::WaitAgents {
-            child_session_ids: vec!["child".into()],
-            timeout_seconds: Some(60),
-            return_when: Default::default(),
-        };
+        excess.action = SubagentToolAction::WaitAgents;
         let mut body = serde_json::to_vec(&excess).unwrap();
         body.push(b'\n');
         client.write_all(&body).await.unwrap();
@@ -876,26 +981,70 @@ enabled = false
     }
 
     #[tokio::test]
-    async fn a_waiting_socket_call_returns_the_daemon_result_when_it_lands() {
+    async fn a_socket_waiter_is_registered_before_the_request_becomes_visible() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
         let directory = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
-        assert_eq!(endpoint.enqueue(request("r1")).unwrap(), None);
-        let waiter = tokio::spawn({
-            let endpoint = endpoint.clone();
-            async move {
-                endpoint
-                    .await_result("r1", Instant::now() + Duration::from_secs(5))
-                    .await
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let served = tokio::spawn(serve_one(server, endpoint.clone()));
+        let mut body = serde_json::to_vec(&request("r1")).unwrap();
+        body.push(b'\n');
+        client.write_all(&body).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !endpoint
+                .snapshot()
+                .0
+                .iter()
+                .any(|request| request.request_id == "r1")
+            {
+                tokio::task::yield_now().await;
             }
-        });
-        // Let the waiter register its interest before the result lands.
-        tokio::task::yield_now().await;
-        endpoint.complete(done("r1")).unwrap();
-        assert_eq!(waiter.await.unwrap(), Some(done("r1")));
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            endpoint.state.lock().unwrap().live_waiters.get("r1"),
+            Some(&1),
+            "a daemon may complete immediately once it sees the queued request"
+        );
+        assert!(endpoint.complete(done("r1")).unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            BufReader::new(&mut client).read_line(&mut line),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        served.await.unwrap().unwrap();
+        let reply: SocketReply = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply.result, Some(done("r1")));
+    }
+
+    #[tokio::test]
+    async fn completion_records_when_a_waiter_timed_out_and_replays_that_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
+        endpoint.enqueue(request("late-result")).unwrap();
+
+        assert_eq!(
+            endpoint.await_result("late-result", Instant::now()).await,
+            None,
+            "the local fallback wins before the daemon completion"
+        );
+        assert!(!endpoint.complete(done("late-result")).unwrap());
+        assert!(
+            !endpoint.complete(done("late-result")).unwrap(),
+            "a retried completion must keep the original delivery decision"
+        );
+
+        let reopened = SubagentEndpoint::open(directory.path()).unwrap();
+        assert!(!reopened.complete(done("late-result")).unwrap());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_wait_the_daemon_never_answers_is_answered_here_at_the_callers_deadline() {
+    async fn a_wait_the_daemon_never_answers_without_guessing_child_state() {
         #[cfg(test)]
         use tokio::io::AsyncBufReadExt;
         use tokio::io::{AsyncWriteExt, BufReader};
@@ -916,12 +1065,9 @@ enabled = false
         let request = SubagentToolRequest {
             originating_command_id: None,
             request_id: "r-late".into(),
-            created_at_ms: 1,
-            action: SubagentToolAction::WaitAgents {
-                child_session_ids: vec!["child-1".into(), "child-2".into()],
-                timeout_seconds: Some(45),
-                return_when: Default::default(),
-            },
+            created_at_ms: mj_core::clock::epoch_millis()
+                .saturating_sub(((mj_core::subagent::DEFAULT_WAIT_SECONDS - 45) * 1_000) as i64),
+            action: SubagentToolAction::WaitAgents,
         };
         let mut body = serde_json::to_vec(&request).unwrap();
         body.push(b'\n');
@@ -953,7 +1099,7 @@ enabled = false
             mj_core::subagent::WAIT_STATUS_STILL_RUNNING,
             "{payload}"
         );
-        assert_eq!(payload["agents"][0]["child_session_id"], "child-1");
+        assert_eq!(payload["agents"], serde_json::json!([]));
         assert!(
             payload["next_action"]
                 .as_str()
@@ -1044,9 +1190,11 @@ struct SocketReply {
 pub(super) fn serve(
     root: &Path,
     relay: Arc<Mutex<crate::relay::DurableRelay>>,
+    harness: mj_core::config::HarnessKind,
 ) -> Result<(SubagentEndpoint, super::unix::SocketGuard)> {
     let mut endpoint = SubagentEndpoint::open(root)?;
     endpoint.relay = Some(relay);
+    endpoint.harness = Some(harness);
     let path = root.join(SUBAGENT_SOCKET);
     let _ = std::fs::remove_file(&path);
     let listener = mj_core::local_sockets::bind_unix_listener(&path)
@@ -1092,14 +1240,20 @@ pub(super) fn serve(
     Ok((endpoint, super::unix::SocketGuard(path)))
 }
 
-/// How long this worker waits for the daemon before answering by itself. Only
-/// a `wait` has a deadline of the caller's own choosing; every other action is
-/// answered just before the MCP server would stop listening.
-fn wait_budget(action: &mj_core::subagent::SubagentToolAction) -> Duration {
+/// How long this worker waits for the daemon before answering by itself. A
+/// `wait` uses the harness's default window measured from request creation;
+/// every other action is answered just before the MCP server stops listening.
+fn wait_budget(
+    action: &mj_core::subagent::SubagentToolAction,
+    harness: Option<mj_core::config::HarnessKind>,
+    created_at_ms: i64,
+    now_ms: i64,
+) -> Duration {
     match action {
-        mj_core::subagent::SubagentToolAction::WaitAgents {
-            timeout_seconds, ..
-        } => mj_core::subagent::subagent_wait_timeout(*timeout_seconds) + WORKER_WAIT_GRACE,
+        mj_core::subagent::SubagentToolAction::WaitAgents => {
+            mj_core::subagent::remaining_subagent_wait(created_at_ms, harness, now_ms)
+                + WORKER_WAIT_GRACE
+        }
         _ => crate::subagent_mcp::REPLY_TIMEOUT - WORKER_REPLY_MARGIN,
     }
 }
@@ -1107,30 +1261,15 @@ fn wait_budget(action: &mj_core::subagent::SubagentToolAction) -> Duration {
 /// The children a `wait` is about, or `None` for any other action. Only a
 /// `wait` can be answered by this worker alone; the rest have no answer that
 /// does not come from the daemon.
-fn waiting_children(action: &mj_core::subagent::SubagentToolAction) -> Option<Vec<String>> {
-    match action {
-        mj_core::subagent::SubagentToolAction::WaitAgents {
-            child_session_ids, ..
-        } => Some(child_session_ids.clone()),
-        _ => None,
-    }
-}
-
 /// This worker's own answer to a `wait` the daemon did not finish in time. It
-/// carries the same shape as the daemon's answer, so a model reads one rule:
-/// `status` says whether the children are finished, and `next_action` says what
-/// to do. It is not an error; the children are still working.
-fn late_daemon_reply(
-    request_id: &str,
-    child_session_ids: &[String],
-    waited_seconds: u64,
-) -> SubagentToolResult {
+/// has no child list or current status, so it reports that the timed-out check
+/// is unknown and tells the parent to call `wait` later.
+fn late_daemon_reply(request_id: &str, waited_seconds: u64) -> SubagentToolResult {
     let payload = mj_core::subagent::still_running_payload(
-        child_session_ids,
         waited_seconds,
         Some(
-            "Mjolnir did not finish checking these children within this call's timeout. \
-             Their state here is unknown rather than observed; call wait again to collect it.",
+            "Mjolnir did not finish checking child reports within this call's timeout. \
+             Their state here is unknown rather than observed; call wait again later.",
         ),
     );
     SubagentToolResult {
@@ -1155,7 +1294,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         serde_json::from_str(&line).context("parse sub-agent request")?;
     let lane = if matches!(
         request.action,
-        mj_core::subagent::SubagentToolAction::WaitAgents { .. }
+        mj_core::subagent::SubagentToolAction::WaitAgents
             | mj_core::subagent::SubagentToolAction::Spawn { .. }
     ) {
         &endpoint.admission.long
@@ -1173,14 +1312,22 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     // for the daemon; wait/list_agents expose its eventual delivery result.
     // Other tools still return their completed result.
     //
-    // A `wait` gets the caller's own deadline here, on this host's monotonic
+    // A `wait` gets the caller harness's deadline here, on this host's monotonic
     // clock. This is the timer the model depends on: it is unaffected by a
     // daemon restart, by a result that could not be handed back, and by clock
     // skew between the two hosts. When it expires this worker answers the call
     // itself rather than leaving the harness in silence.
     let request_id = request.request_id.clone();
-    let deadline_budget = wait_budget(&request.action);
-    let waiting_for = waiting_children(&request.action);
+    let deadline_budget = wait_budget(
+        &request.action,
+        endpoint.harness,
+        request.created_at_ms,
+        mj_core::clock::epoch_millis(),
+    );
+    let is_wait = matches!(
+        request.action,
+        mj_core::subagent::SubagentToolAction::WaitAgents
+    );
     let queued_input = match &request.action {
         mj_core::subagent::SubagentToolAction::SendInput { child_session_id, .. } => {
             Some(SubagentToolResult {
@@ -1198,25 +1345,34 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         _ => None,
     };
     let started = Instant::now();
+    // Register before durable enqueue: the daemon can collect and complete a
+    // request as soon as the queue write becomes visible.
+    let mut waiter = queued_input
+        .is_none()
+        .then(|| endpoint.register_waiter(&request_id));
     let (queued, mark) = endpoint.enqueue_marked(request)?;
     let result = match queued {
         Some(cached) => Some(cached),
         None if queued_input.is_some() => queued_input,
         None => {
             endpoint
-                .await_result(&request_id, started + deadline_budget)
+                .await_result_registered(
+                    &request_id,
+                    started + deadline_budget,
+                    waiter.as_mut().expect("a waiting request has a waiter"),
+                )
                 .await
         }
     };
     let result = result.or_else(|| {
-        waiting_for.map(|children| {
+        is_wait.then(|| {
             tracing::warn!(
                 request_id = %request_id,
                 waited_seconds = started.elapsed().as_secs(),
                 "the daemon did not answer a sub-agent wait by its deadline; \
                  answering that the children are still running"
             );
-            late_daemon_reply(&request_id, &children, started.elapsed().as_secs())
+            late_daemon_reply(&request_id, started.elapsed().as_secs())
         })
     });
     // Without a result, say whether the daemon has picked the request up: a
