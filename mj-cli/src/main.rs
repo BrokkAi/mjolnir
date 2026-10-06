@@ -2062,7 +2062,8 @@ fn doctor_failure(json: bool) -> anyhow::Error {
 pub(crate) use mj_core::state::short_id;
 
 pub(crate) struct TerminalGuard {
-    pub(crate) terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    /// Private so every frame goes through [`TerminalGuard::draw`].
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
     keyboard_enhancement: bool,
     /// The window title last written, so it is only rewritten when it
     /// changes and cleared on exit only if it was ever set.
@@ -2104,6 +2105,31 @@ impl TerminalGuard {
             keyboard_enhancement,
             title: None,
         })
+    }
+
+    /// Draws one frame as a synchronized update (DEC mode 2026).
+    ///
+    /// ratatui writes a frame as many small writes, and only the cells that
+    /// changed. Under Windows Terminal with WSL, a frame applied piecemeal
+    /// left rows of the composer drawn at column 0 over the Sessions pane, and
+    /// since those cells never changed again they stayed there. Inside a
+    /// synchronized update the terminal applies the frame as a whole.
+    /// Terminals without the mode ignore it.
+    pub(crate) fn draw(&mut self, render: impl FnOnce(&mut ratatui::Frame<'_>)) -> Result<()> {
+        crossterm::queue!(
+            self.terminal.backend_mut(),
+            crossterm::terminal::BeginSynchronizedUpdate
+        )
+        .context("begin a synchronized terminal update")?;
+        let drawn = self.terminal.draw(render).map(drop);
+        // End the update even when the frame failed, or a supporting terminal
+        // keeps showing the old screen until it times the update out.
+        let ended = execute!(
+            self.terminal.backend_mut(),
+            crossterm::terminal::EndSynchronizedUpdate
+        );
+        drawn.context("draw the terminal frame")?;
+        ended.context("end the synchronized terminal update")
     }
 
     /// Rings the terminal bell. Terminals, multiplexers, and SSH clients
