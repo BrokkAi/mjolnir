@@ -214,6 +214,33 @@ action: PlanCommand { original: "/plan", control: SetSessionMode { mode_id: "pla
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: Prompt("/plan the migration")
 
+=== Muse plan mode selector (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ No messages yet — send a prompt to begin.                                                       ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎  PLAN MODE ────────────────────────────────────────────────────────────────────────────────────╮
+│> What would you like to build?                                                                   │
+│                                                                                                  │
+╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+action: PlanCommand { original: "/plan the migration", control: SetConfig { key: "mode", value: "plan" }, requested_active: true, prompt: Some("the migration") }
+
 === unified plan command wins over skill (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
 │ No messages yet — send a prompt to begin.                                                       ▐│
