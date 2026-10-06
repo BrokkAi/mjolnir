@@ -22,7 +22,9 @@ const RECENT_LOG_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(1);
 const RECENT_LOG_LIMIT: usize = 1000;
 /// The timestamp format in log filenames. It sorts as text in time order.
 const LOG_TIMESTAMP: &str = "%Y%m%dT%H%M%S%.3fZ";
-const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+/// Give a queued burst time to drain under contention without allowing a stuck
+/// writer to hold process shutdown indefinitely.
+const LOG_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The kind of process writing a Mjolnir log, recorded in the log filename so
 /// retention can keep the newest logs of each kind separately. A short-lived

@@ -6746,6 +6746,7 @@ fn checkpoint_only_restart_releases_an_abandoned_barrier_and_preserves_an_accept
     assert_eq!(relay.operational_state().acp_ready, Some(false));
 }
 
+// Hard-won: #1257: a test-spawned child can retain the released worker flock until exec.
 #[tokio::test]
 async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting_a_harness() {
     let temp = tempfile::tempdir().unwrap();
@@ -6759,7 +6760,13 @@ async fn checkpoint_only_start_refuses_missing_or_corrupt_state_without_starting
     assert!(format!("{error:#}").contains("existing relay state"));
     let state = root.join(mj_core::relay::RELAY_STATE_FILE);
     std::fs::write(&state, b"corrupt state").unwrap();
-    let error = unix::run_daemon(root.clone(), config).await.unwrap_err();
+    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let child = super::root_owner::ForkedPreExecChild::start();
+    drop(owner);
+    let release = child.release_after(std::time::Duration::from_millis(30));
+    let owner = super::root_owner::acquire_after_fork_exec_window(&root).unwrap();
+    let error = unix::run_daemon_owned(&owner, config).await.unwrap_err();
+    release.join().unwrap();
     assert!(format!("{error:#}").contains("parse"), "{error:#}");
     assert_eq!(std::fs::read(state).unwrap(), b"corrupt state");
     assert!(!root.join("control.sock").exists());
