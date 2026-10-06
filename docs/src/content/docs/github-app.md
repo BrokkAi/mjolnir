@@ -41,6 +41,40 @@ GitHub for the repository or account installation and caches the result. The
 key path must be readable on the controller host. Restart the daemon after
 changing the App configuration.
 
+Permission subsets are optional. Each table is a complete grant for its token
+type: list every permission the token should receive. Permission names use
+GitHub's permission keys and values are `"read"` or `"write"`. For example,
+sessions can use the listed permissions with read-only statuses, while tokens
+from `mj github-token` receive write access to statuses:
+
+```toml
+[github.app.session_permissions]
+contents = "write"
+pull_requests = "write"
+issues = "write"
+workflows = "write"
+actions = "write"
+checks = "write"
+statuses = "read"
+metadata = "read"
+
+[github.app.token_permissions]
+contents = "write"
+pull_requests = "write"
+issues = "write"
+workflows = "write"
+actions = "write"
+checks = "write"
+statuses = "write"
+metadata = "read"
+```
+
+Add any other permission keys required by your GitHub App to both tables. When
+a table is omitted, Mjolnir does not send a `permissions` field and GitHub
+applies the installation's full grant. Mjolnir checks configured levels
+against the installation and refuses to mint a token if the grant is too
+narrow. Repository scoping and permission subsets apply together.
+
 Without `[github.app]`, Mjolnir continues to use `GH_TOKEN`, `GITHUB_TOKEN`, or
 `gh auth token`. The private key and installation tokens are not stored in the
 database or session checkpoints.

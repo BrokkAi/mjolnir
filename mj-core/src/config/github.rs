@@ -33,6 +33,34 @@ pub struct GithubAppConfig {
     /// Optional GitHub owner login to installation ID overrides.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub installations: BTreeMap<String, u64>,
+    /// Complete permission grant requested for session tokens. `None` keeps
+    /// the installation's full permission grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_permissions: Option<GithubPermissionSet>,
+    /// Complete permission grant requested by `mj github-token`. `None`
+    /// keeps the installation's full permission grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_permissions: Option<GithubPermissionSet>,
+}
+
+/// A subset of GitHub App permissions requested for an installation token.
+pub type GithubPermissionSet = BTreeMap<String, GithubPermissionLevel>;
+
+/// Permission levels GitHub allows an installation access token to request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubPermissionLevel {
+    Read,
+    Write,
+}
+
+impl GithubPermissionLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
 }
 
 impl GithubAppConfig {
@@ -42,6 +70,20 @@ impl GithubAppConfig {
         }
         if self.private_key_path.as_os_str().is_empty() {
             bail!("[github.app] private_key_path must not be empty");
+        }
+        for (section, permissions) in [
+            ("session_permissions", self.session_permissions.as_ref()),
+            ("token_permissions", self.token_permissions.as_ref()),
+        ] {
+            if let Some(permissions) = permissions {
+                for permission in permissions.keys() {
+                    if !valid_github_permission_name(permission) {
+                        bail!(
+                            "[github.app.{section}] key {permission:?} is not a valid GitHub permission name"
+                        );
+                    }
+                }
+            }
         }
         let mut owners = BTreeSet::new();
         for (owner, installation_id) in &self.installations {
@@ -61,6 +103,12 @@ impl GithubAppConfig {
         }
         Ok(())
     }
+}
+
+fn valid_github_permission_name(permission: &str) -> bool {
+    let mut bytes = permission.bytes();
+    matches!(bytes.next(), Some(byte) if byte.is_ascii_lowercase())
+        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 pub fn valid_github_owner_login(owner: &str) -> bool {
@@ -91,6 +139,8 @@ mod tests {
             app_id: 42,
             private_key_path: PathBuf::from("app.pem"),
             installations: BTreeMap::new(),
+            session_permissions: None,
+            token_permissions: None,
         };
         assert!(valid.validate().is_ok());
 
@@ -106,7 +156,46 @@ mod tests {
             app_id: 42,
             private_key_path: PathBuf::from("app.pem"),
             installations: BTreeMap::from([("Acme".into(), 1), ("acme".into(), 2)]),
+            session_permissions: None,
+            token_permissions: None,
         };
         assert!(ambiguous.validate().is_err());
+    }
+
+    #[test]
+    fn permission_tables_distinguish_absent_from_present_empty_and_validate_names() {
+        let absent: GithubAppConfig =
+            toml::from_str("app_id = 42\nprivate_key_path = 'app.pem'\n").unwrap();
+        assert_eq!(absent.session_permissions, None);
+        assert_eq!(absent.token_permissions, None);
+
+        let empty: GithubAppConfig =
+            toml::from_str("app_id = 42\nprivate_key_path = 'app.pem'\n[session_permissions]\n")
+                .unwrap();
+        assert_eq!(empty.session_permissions, Some(BTreeMap::new()));
+
+        let configured: GithubAppConfig = toml::from_str(
+            "app_id = 42\nprivate_key_path = 'app.pem'\n[session_permissions]\ncontents = 'write'\nstatuses = 'read'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            configured.session_permissions,
+            Some(BTreeMap::from([
+                ("contents".into(), GithubPermissionLevel::Write),
+                ("statuses".into(), GithubPermissionLevel::Read),
+            ]))
+        );
+        assert!(configured.validate().is_ok());
+
+        let invalid_name: GithubAppConfig = toml::from_str(
+            "app_id = 42\nprivate_key_path = 'app.pem'\n[session_permissions]\n'Contents' = 'read'\n",
+        )
+        .unwrap();
+        assert!(invalid_name.validate().is_err());
+
+        let invalid_level = toml::from_str::<GithubAppConfig>(
+            "app_id = 42\nprivate_key_path = 'app.pem'\n[session_permissions]\ncontents = 'admin'\n",
+        );
+        assert!(invalid_level.is_err());
     }
 }

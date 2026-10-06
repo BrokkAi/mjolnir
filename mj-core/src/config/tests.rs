@@ -1152,11 +1152,21 @@ fn github_app_configuration_is_optional_and_round_trips() {
         app_id: 1234,
         private_key_path: PathBuf::from("/controller/keys/app.pem"),
         installations: BTreeMap::from([("Acme".into(), 5678)]),
+        session_permissions: Some(BTreeMap::from([(
+            "contents".into(),
+            GithubPermissionLevel::Write,
+        )])),
+        token_permissions: Some(BTreeMap::from([(
+            "statuses".into(),
+            GithubPermissionLevel::Read,
+        )])),
     });
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
     assert!(body.contains("[github.app.installations]"), "{body}");
+    assert!(body.contains("[github.app.session_permissions]"), "{body}");
+    assert!(body.contains("[github.app.token_permissions]"), "{body}");
     assert_eq!(Config::load_from(&path).unwrap(), configured);
 
     fs::write(

@@ -26,6 +26,15 @@ The visible proof is a successful token command against an App installation, an 
 - [x] (2026-10-05) Let legacy credential sync branch before loading controller/session state when the published target has no GitHub App configuration.
 - [x] (2026-10-05) Re-run all touched crate tests, workspace clippy, and format validation after the review fixes.
 
+### Permission subset follow-up
+
+- [x] (2026-10-05) Add optional complete `[github.app.session_permissions]` and `[github.app.token_permissions]` tables with generic GitHub permission keys and read/write levels; preserve omitted-table behavior.
+- [x] (2026-10-05) Check requested grants against installation permissions before minting and against the returned token, scope mint requests with both repositories and permissions, and include permissions in the cache key.
+- [x] (2026-10-05) Document permission-table completeness and a session/read-only-status versus CLI/write-status example; add config, mint body, grant refusal, absent-table, and cache-separation tests.
+- [x] (2026-10-05) Run touched crate tests, workspace clippy, and format validation, then commit the follow-up without pushing.
+
+Validation: `mbx test -p brokk-mj-core -p brokk-mj-controller -- --test-threads=8` passed (665 core tests and 2,259 controller tests); `mbx clippy --all-targets -- -D warnings`, `mbx fmt --all -- --check`, and `npm run check` in `docs/` passed.
+
 ## Surprises & Discoveries
 
 - Observation: relay messages already support installing and removing a worker's GitHub token, and the worker reads the atomically replaced token file on each new `gh` or Git credential invocation.
@@ -43,6 +52,9 @@ The visible proof is a successful token command against an App installation, an 
 - Decision: scope session and `--repo` tokens with GitHub's `repositories` parameter, leave permissions unspecified so installation permissions apply, and key tokens by installation plus a normalized sorted repository set. `--owner` intentionally remains installation-wide.
   Date/Author: 2026-10-05, Codex sub-agent.
 - Decision: publish whether App auth is configured on each credential-sync target so legacy sync can call its existing token lookup without loading controller configuration or session state.
+  Date/Author: 2026-10-05, Codex sub-agent.
+- Decision: permission tables are optional and complete. When absent, the mint request omits `permissions`; when present, the configured map is sent as-is. Cache entries include the exact optional permission map, and requested levels are checked against the current installation grant and token response.
+  Rationale: this gives operators a generic least-privilege control without baking repository workflow concepts into Mjolnir.
   Date/Author: 2026-10-05, Codex sub-agent.
 - Decision: retain the existing environment/`gh auth token` lookup exactly when `[github.app]` is absent; App selection is based on the configured session bundle's GitHub owners and resolves all repository installations before accepting a multi-repository session.
   Rationale: this preserves existing setups while enforcing the decided one-installation-per-session v1 boundary.

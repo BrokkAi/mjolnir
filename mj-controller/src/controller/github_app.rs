@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use mj_core::config::{
-    GithubAppConfig, ProjectBundle, ProjectRepository, valid_github_owner_login,
+    GithubAppConfig, GithubPermissionLevel, GithubPermissionSet, ProjectBundle, ProjectRepository,
+    valid_github_owner_login,
 };
 use mj_core::remote_git::{github_owner_repo, resolve_repository};
 
@@ -44,6 +45,7 @@ pub(crate) struct GithubAppTokenProvider {
 struct TokenCacheKey {
     installation_id: u64,
     repositories: Vec<String>,
+    permissions: Option<GithubPermissionSet>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,12 +76,14 @@ struct JwtClaims {
 #[derive(Deserialize)]
 struct InstallationResponse {
     id: u64,
+    permissions: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
 struct AccessTokenResponse {
     token: String,
     expires_at: String,
+    permissions: Option<BTreeMap<String, String>>,
 }
 
 impl GithubAppTokenProvider {
@@ -138,7 +142,8 @@ impl GithubAppTokenProvider {
 
     pub(crate) async fn token_for_owner(&self, owner: &str) -> Result<String> {
         let installation_id = self.installation_for_owner(owner, None).await?;
-        self.token_for_installation(installation_id, &[]).await
+        self.token_for_installation(installation_id, &[], self.config.token_permissions.as_ref())
+            .await
     }
 
     pub(crate) async fn token_for_repositories(
@@ -150,8 +155,12 @@ impl GithubAppTokenProvider {
             .await
             .map_err(GithubBundleSelectionError::into_anyhow)?
             .ok_or_else(|| anyhow!("at least one repository is required"))?;
-        self.token_for_installation(scope.installation_id, &scope.repositories)
-            .await
+        self.token_for_installation(
+            scope.installation_id,
+            &scope.repositories,
+            self.config.token_permissions.as_ref(),
+        )
+        .await
     }
 
     pub(crate) async fn installation_for_repo(&self, owner: &str, repository: &str) -> Result<u64> {
@@ -322,6 +331,7 @@ impl GithubAppTokenProvider {
         &self,
         installation_id: u64,
         repositories: &[String],
+        permissions: Option<&GithubPermissionSet>,
     ) -> Result<String> {
         ensure!(installation_id != 0, "installation ID must be positive");
         let mut repositories = repositories
@@ -333,6 +343,7 @@ impl GithubAppTokenProvider {
         let key = TokenCacheKey {
             installation_id,
             repositories: repositories.clone(),
+            permissions: permissions.cloned(),
         };
         let cache = {
             let mut tokens = self
@@ -357,7 +368,7 @@ impl GithubAppTokenProvider {
         }
 
         match self
-            .mint_installation_token(installation_id, &repositories)
+            .mint_installation_token(installation_id, &repositories, permissions)
             .await
         {
             Ok(entry) => {
@@ -366,6 +377,9 @@ impl GithubAppTokenProvider {
                 Ok(token)
             }
             Err(error) => {
+                if error.downcast_ref::<PermissionGrantError>().is_some() {
+                    return Err(error);
+                }
                 if let Some(entry) = cached.as_ref()
                     && entry.expires_at > now
                 {
@@ -385,13 +399,25 @@ impl GithubAppTokenProvider {
         &self,
         installation_id: u64,
         repositories: &[String],
+        permissions: Option<&GithubPermissionSet>,
     ) -> Result<TokenEntry> {
         let jwt = self.app_jwt().await?;
-        let body = if repositories.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::json!({ "repositories": repositories })
-        };
+        if let Some(permissions) = permissions {
+            let installation = self.installation_details(installation_id, &jwt).await?;
+            let installed_permissions = installation.permissions.as_ref().ok_or_else(|| {
+                permission_grant_error(format!(
+                    "GitHub installation {installation_id} response omitted permissions"
+                ))
+            })?;
+            validate_requested_permissions(installation_id, permissions, installed_permissions)?;
+        }
+        let mut body = serde_json::Map::new();
+        if !repositories.is_empty() {
+            body.insert("repositories".to_owned(), serde_json::json!(repositories));
+        }
+        if let Some(permissions) = permissions {
+            body.insert("permissions".to_owned(), serde_json::to_value(permissions)?);
+        }
         let response = self
             .http
             .post(self.api_url(&[
@@ -417,6 +443,14 @@ impl GithubAppTokenProvider {
             .json::<AccessTokenResponse>()
             .await
             .context("decode GitHub App access-token response")?;
+        if let Some(permissions) = permissions {
+            let granted_permissions = response.permissions.as_ref().ok_or_else(|| {
+                permission_grant_error(
+                    "GitHub installation token response omitted permissions".to_owned(),
+                )
+            })?;
+            validate_minted_permissions(installation_id, permissions, granted_permissions)?;
+        }
         ensure!(
             !response.token.is_empty(),
             "GitHub returned an empty installation token"
@@ -442,6 +476,38 @@ impl GithubAppTokenProvider {
         })
     }
 
+    async fn installation_details(
+        &self,
+        installation_id: u64,
+        jwt: &str,
+    ) -> Result<InstallationResponse> {
+        let response = self
+            .http
+            .get(self.api_url(&["app", "installations", &installation_id.to_string()])?)
+            .bearer_auth(jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .send()
+            .await
+            .context("reach the GitHub App installation details API")?;
+        if !response.status().is_success() {
+            bail!(
+                "GitHub App installation details lookup failed with HTTP {}",
+                response.status().as_u16()
+            );
+        }
+        let installation = response
+            .json::<InstallationResponse>()
+            .await
+            .context("decode GitHub App installation details")?;
+        ensure!(
+            installation.id == installation_id,
+            "GitHub returned installation {} while checking installation {installation_id}",
+            installation.id
+        );
+        Ok(installation)
+    }
+
     async fn app_jwt(&self) -> Result<String> {
         let config = self.config.clone();
         let key = self
@@ -465,6 +531,92 @@ impl GithubAppTokenProvider {
             .extend(segments.iter().copied());
         Ok(url)
     }
+}
+
+fn validate_requested_permissions(
+    installation_id: u64,
+    requested: &GithubPermissionSet,
+    installed: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (permission, requested_level) in requested {
+        let actual_level = installed.get(permission).map(String::as_str);
+        let actual_rank = match actual_level {
+            None | Some("none") => 0,
+            Some("read") => 1,
+            Some("write") => 2,
+            Some("admin") => 3,
+            Some(other) => {
+                return Err(permission_grant_error(format!(
+                    "GitHub installation {installation_id} returned unsupported level {other:?} for permission {permission:?}"
+                )));
+            }
+        };
+        let requested_rank = match requested_level {
+            GithubPermissionLevel::Read => 1,
+            GithubPermissionLevel::Write => 2,
+        };
+        if actual_rank < requested_rank {
+            return Err(permission_grant_error(format!(
+                "GitHub installation {installation_id} grants {} for permission {permission:?}, but {} was requested",
+                actual_level.unwrap_or("none"),
+                requested_level.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_minted_permissions(
+    installation_id: u64,
+    requested: &GithubPermissionSet,
+    granted: &BTreeMap<String, String>,
+) -> Result<()> {
+    validate_requested_permissions(installation_id, requested, granted)?;
+    for (permission, actual_level) in granted {
+        let Some(requested_level) = requested.get(permission) else {
+            return Err(permission_grant_error(format!(
+                "GitHub installation token for installation {installation_id} includes unrequested permission {permission:?}"
+            )));
+        };
+        let requested_rank = match requested_level {
+            GithubPermissionLevel::Read => 1,
+            GithubPermissionLevel::Write => 2,
+        };
+        let actual_rank = match actual_level.as_str() {
+            "none" => 0,
+            "read" => 1,
+            "write" => 2,
+            "admin" => 3,
+            other => {
+                return Err(permission_grant_error(format!(
+                    "GitHub installation token for installation {installation_id} returned unsupported level {other:?} for permission {permission:?}"
+                )));
+            }
+        };
+        if actual_rank > requested_rank {
+            return Err(permission_grant_error(format!(
+                "GitHub installation token for installation {installation_id} has {} for permission {permission:?}, but {} was requested",
+                actual_level,
+                requested_level.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PermissionGrantError(String);
+
+impl std::fmt::Display for PermissionGrantError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PermissionGrantError {}
+
+fn permission_grant_error(message: String) -> anyhow::Error {
+    anyhow::Error::new(PermissionGrantError(message))
 }
 
 #[cfg(unix)]
@@ -643,7 +795,11 @@ impl Controller {
             return Ok(None);
         };
         provider
-            .token_for_installation(scope.installation_id, &scope.repositories)
+            .token_for_installation(
+                scope.installation_id,
+                &scope.repositories,
+                app.session_permissions.as_ref(),
+            )
             .await
             .map(Some)
     }
@@ -814,6 +970,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use axum::extract::Path;
     use axum::extract::State;
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -831,6 +988,8 @@ mod tests {
         lookups: Arc<AtomicU64>,
         exchanges: Arc<AtomicU64>,
         scopes: Arc<Mutex<Vec<Vec<String>>>>,
+        bodies: Arc<Mutex<Vec<Value>>>,
+        installation_permissions: Arc<Mutex<BTreeMap<String, String>>>,
     }
 
     async fn installation(State(fake): State<FakeGithub>) -> Json<Value> {
@@ -838,8 +997,19 @@ mod tests {
         Json(serde_json::json!({ "id": 77331 }))
     }
 
+    async fn installation_details(
+        State(fake): State<FakeGithub>,
+        Path(installation_id): Path<u64>,
+    ) -> Json<Value> {
+        Json(serde_json::json!({
+            "id": installation_id,
+            "permissions": fake.installation_permissions.lock().unwrap().clone(),
+        }))
+    }
+
     async fn access_token(State(fake): State<FakeGithub>, Json(body): Json<Value>) -> Json<Value> {
         let exchange = fake.exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+        fake.bodies.lock().unwrap().push(body.clone());
         let repositories = body
             .get("repositories")
             .and_then(Value::as_array)
@@ -851,8 +1021,12 @@ mod tests {
             })
             .unwrap_or_default();
         fake.scopes.lock().unwrap().push(repositories);
+        let permissions = body.get("permissions").cloned().unwrap_or_else(|| {
+            serde_json::to_value(fake.installation_permissions.lock().unwrap().clone()).unwrap()
+        });
         Json(serde_json::json!({
             "token": format!("test-installation-token-{exchange}"),
+            "permissions": permissions,
             "expires_at": chrono::DateTime::from_timestamp(
                 fake.now.load(Ordering::SeqCst) as i64 + 3600,
                 0,
@@ -869,6 +1043,7 @@ mod tests {
             .route("/repos/{owner}/{repo}/installation", get(installation))
             .route("/orgs/{owner}/installation", get(installation))
             .route("/users/{owner}/installation", get(missing_installation))
+            .route("/app/installations/{id}", get(installation_details))
             .route("/app/installations/{id}/access_tokens", post(access_token))
             .with_state(fake);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -884,6 +1059,23 @@ mod tests {
             app_id: 12_345,
             private_key_path: PathBuf::from("test.pem"),
             installations: BTreeMap::new(),
+            session_permissions: None,
+            token_permissions: None,
+        }
+    }
+
+    fn fake_github(now: u64) -> FakeGithub {
+        FakeGithub {
+            now: Arc::new(AtomicU64::new(now)),
+            lookups: Arc::new(AtomicU64::new(0)),
+            exchanges: Arc::new(AtomicU64::new(0)),
+            scopes: Arc::new(Mutex::new(Vec::new())),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+            installation_permissions: Arc::new(Mutex::new(BTreeMap::from([
+                ("contents".into(), "write".into()),
+                ("metadata".into(), "read".into()),
+                ("statuses".into(), "read".into()),
+            ]))),
         }
     }
 
@@ -953,15 +1145,9 @@ mod tests {
 
     #[tokio::test]
     async fn installation_lookup_and_token_cache_refresh_below_ten_minutes() {
-        let now = Arc::new(AtomicU64::new(1_800_000_000));
-        let fake = FakeGithub {
-            now: Arc::clone(&now),
-            lookups: Arc::new(AtomicU64::new(0)),
-            exchanges: Arc::new(AtomicU64::new(0)),
-            scopes: Arc::new(Mutex::new(Vec::new())),
-        };
+        let fake = fake_github(1_800_000_000);
         let (api_base, server) = test_server(fake.clone()).await;
-        let now_for_clock = Arc::clone(&now);
+        let now_for_clock = Arc::clone(&fake.now);
         let config = test_config();
         let provider = GithubAppTokenProvider::with_test_transport(
             config,
@@ -995,8 +1181,9 @@ mod tests {
         assert_eq!(fake.lookups.load(Ordering::SeqCst), 1);
         assert_eq!(fake.exchanges.load(Ordering::SeqCst), 1);
         assert_eq!(*fake.scopes.lock().unwrap(), [vec!["widget".to_owned()]]);
+        assert!(fake.bodies.lock().unwrap()[0].get("permissions").is_none());
 
-        now.store(1_800_000_000 + 3600 - 601, Ordering::SeqCst);
+        fake.now.store(1_800_000_000 + 3600 - 601, Ordering::SeqCst);
         assert_eq!(
             provider
                 .token_for_repositories(&[("acme".into(), "widget".into())])
@@ -1006,7 +1193,7 @@ mod tests {
         );
         assert_eq!(fake.exchanges.load(Ordering::SeqCst), 1);
 
-        now.store(1_800_000_000 + 3600 - 599, Ordering::SeqCst);
+        fake.now.store(1_800_000_000 + 3600 - 599, Ordering::SeqCst);
         assert_eq!(
             provider
                 .token_for_repositories(&[("acme".into(), "widget".into())])
@@ -1020,12 +1207,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_cache_separates_installation_wide_and_sorted_repository_scopes() {
-        let fake = FakeGithub {
-            now: Arc::new(AtomicU64::new(1_800_000_000)),
-            lookups: Arc::new(AtomicU64::new(0)),
-            exchanges: Arc::new(AtomicU64::new(0)),
-            scopes: Arc::new(Mutex::new(Vec::new())),
-        };
+        let fake = fake_github(1_800_000_000);
         let (api_base, server) = test_server(fake.clone()).await;
         let mut config = test_config();
         config.installations.insert("acme".into(), 77331);
@@ -1042,43 +1224,203 @@ mod tests {
 
         let first_scope = vec!["Zebra".to_owned(), "Alpha".to_owned()];
         let reordered_scope = vec!["alpha".to_owned(), "zebra".to_owned()];
+        let write_contents = BTreeMap::from([("contents".into(), GithubPermissionLevel::Write)]);
+        let read_contents = BTreeMap::from([("contents".into(), GithubPermissionLevel::Read)]);
         let first = provider
-            .token_for_installation(77331, &first_scope)
+            .token_for_installation(77331, &first_scope, Some(&write_contents))
             .await
             .unwrap();
         let cached = provider
-            .token_for_installation(77331, &reordered_scope)
+            .token_for_installation(77331, &reordered_scope, Some(&write_contents))
+            .await
+            .unwrap();
+        let different_permissions = provider
+            .token_for_installation(77331, &first_scope, Some(&read_contents))
             .await
             .unwrap();
         let narrower = provider
-            .token_for_installation(77331, &["alpha".to_owned()])
+            .token_for_installation(77331, &["alpha".to_owned()], None)
             .await
             .unwrap();
-        let installation_wide = provider.token_for_installation(77331, &[]).await.unwrap();
+        let installation_wide = provider
+            .token_for_installation(77331, &[], None)
+            .await
+            .unwrap();
 
         assert_eq!(first, cached);
         assert_ne!(first, narrower);
+        assert_ne!(first, different_permissions);
         assert_ne!(narrower, installation_wide);
-        assert_eq!(fake.exchanges.load(Ordering::SeqCst), 3);
+        assert_eq!(fake.exchanges.load(Ordering::SeqCst), 4);
         assert_eq!(
             *fake.scopes.lock().unwrap(),
             [
                 vec!["alpha".to_owned(), "zebra".to_owned()],
+                vec!["alpha".to_owned(), "zebra".to_owned()],
                 vec!["alpha".to_owned()],
                 vec![]
             ]
+        );
+        assert_eq!(
+            fake.bodies.lock().unwrap()[0]["permissions"]["contents"],
+            "write"
+        );
+        assert_eq!(
+            fake.bodies.lock().unwrap()[1]["permissions"]["contents"],
+            "read"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn permission_subset_is_minted_with_repository_scope() {
+        let fake = fake_github(1_800_000_000);
+        let (api_base, server) = test_server(fake.clone()).await;
+        let mut config = test_config();
+        config.installations.insert("acme".into(), 77331);
+        config.session_permissions = Some(BTreeMap::from([
+            ("contents".into(), GithubPermissionLevel::Write),
+            ("statuses".into(), GithubPermissionLevel::Read),
+        ]));
+        let provider = GithubAppTokenProvider::with_test_transport(
+            config.clone(),
+            reqwest::Client::new(),
+            api_base,
+            Arc::new(|| UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+        );
+        let seeded = provider
+            .signing_key
+            .set(Arc::new(parse_private_key(TEST_KEY).unwrap()));
+        assert!(seeded.is_ok());
+
+        provider
+            .token_for_installation(
+                77331,
+                &["widget".to_owned()],
+                config.session_permissions.as_ref(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fake.bodies.lock().unwrap()[0],
+            serde_json::json!({
+                "repositories": ["widget"],
+                "permissions": {"contents": "write", "statuses": "read"}
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn permission_request_above_installation_grant_is_refused_before_minting() {
+        let fake = fake_github(1_800_000_000);
+        let (api_base, server) = test_server(fake.clone()).await;
+        let mut config = test_config();
+        config.installations.insert("acme".into(), 77331);
+        config.token_permissions = Some(BTreeMap::from([(
+            "statuses".into(),
+            GithubPermissionLevel::Write,
+        )]));
+        let provider = GithubAppTokenProvider::with_test_transport(
+            config,
+            reqwest::Client::new(),
+            api_base,
+            Arc::new(|| UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+        );
+        let seeded = provider
+            .signing_key
+            .set(Arc::new(parse_private_key(TEST_KEY).unwrap()));
+        assert!(seeded.is_ok());
+
+        let error = provider.token_for_owner("acme").await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("statuses"), "{message}");
+        assert!(
+            message.contains("read") && message.contains("write"),
+            "{message}"
+        );
+        assert_eq!(fake.exchanges.load(Ordering::SeqCst), 0);
+        assert!(fake.bodies.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cached_token_does_not_hide_a_newly_insufficient_permission_grant() {
+        let fake = fake_github(1_800_000_000);
+        let (api_base, server) = test_server(fake.clone()).await;
+        let mut config = test_config();
+        config.installations.insert("acme".into(), 77331);
+        config.token_permissions = Some(BTreeMap::from([(
+            "contents".into(),
+            GithubPermissionLevel::Write,
+        )]));
+        let now = Arc::clone(&fake.now);
+        let provider = GithubAppTokenProvider::with_test_transport(
+            config,
+            reqwest::Client::new(),
+            api_base,
+            Arc::new(move || UNIX_EPOCH + Duration::from_secs(now.load(Ordering::SeqCst))),
+        );
+        let seeded = provider
+            .signing_key
+            .set(Arc::new(parse_private_key(TEST_KEY).unwrap()));
+        assert!(seeded.is_ok());
+        provider.token_for_owner("acme").await.unwrap();
+
+        fake.installation_permissions
+            .lock()
+            .unwrap()
+            .insert("contents".into(), "read".into());
+        fake.now.store(1_800_000_000 + 3600 - 599, Ordering::SeqCst);
+        let error = provider.token_for_owner("acme").await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("contents"), "{message}");
+        assert!(
+            message.contains("read") && message.contains("write"),
+            "{message}"
+        );
+        assert_eq!(fake.exchanges.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_command_uses_its_configured_permission_table() {
+        let fake = fake_github(1_800_000_000);
+        let (api_base, server) = test_server(fake.clone()).await;
+        let mut config = test_config();
+        config.installations.insert("acme".into(), 77331);
+        config.session_permissions = Some(BTreeMap::from([(
+            "contents".into(),
+            GithubPermissionLevel::Read,
+        )]));
+        config.token_permissions = Some(BTreeMap::from([(
+            "statuses".into(),
+            GithubPermissionLevel::Read,
+        )]));
+        let provider = GithubAppTokenProvider::with_test_transport(
+            config,
+            reqwest::Client::new(),
+            api_base,
+            Arc::new(|| UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+        );
+        let seeded = provider
+            .signing_key
+            .set(Arc::new(parse_private_key(TEST_KEY).unwrap()));
+        assert!(seeded.is_ok());
+
+        provider.token_for_owner("acme").await.unwrap();
+
+        assert_eq!(
+            fake.bodies.lock().unwrap()[0]["permissions"],
+            serde_json::json!({"statuses": "read"})
         );
         server.abort();
     }
 
     #[tokio::test]
     async fn configured_installation_avoids_network_discovery() {
-        let fake = FakeGithub {
-            now: Arc::new(AtomicU64::new(1_800_000_000)),
-            lookups: Arc::new(AtomicU64::new(0)),
-            exchanges: Arc::new(AtomicU64::new(0)),
-            scopes: Arc::new(Mutex::new(Vec::new())),
-        };
+        let fake = fake_github(1_800_000_000);
         let (api_base, server) = test_server(fake.clone()).await;
         let now = Arc::clone(&fake.now);
         let mut config = test_config();

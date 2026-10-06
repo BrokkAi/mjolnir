@@ -449,7 +449,11 @@ impl Controller {
                 match scope {
                     Some(scope) => Some(
                         provider
-                            .token_for_installation(scope.installation_id, &scope.repositories)
+                            .token_for_installation(
+                                scope.installation_id,
+                                &scope.repositories,
+                                app.session_permissions.as_ref(),
+                            )
                             .await?,
                     ),
                     None => None,
