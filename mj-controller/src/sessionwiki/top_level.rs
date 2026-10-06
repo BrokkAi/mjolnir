@@ -8,6 +8,7 @@ use sessionwiki::adapters::{Adapter, Discovered};
 use sessionwiki::model::Session;
 
 use mj_core::config::HarnessKind;
+use mj_core::state::State;
 
 use crate::import::NativeScanCache;
 
@@ -16,6 +17,110 @@ use super::harness_adapters::harness_for_tool;
 struct PreparedFiles {
     adapter: Box<dyn Adapter>,
     discovered: Discovered,
+}
+
+/// One ownership view shared by index discovery, cleanup, and every Mjolnir
+/// read of the shared SessionWiki index.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Snapshot {
+    child_session_ids: BTreeSet<String>,
+    child_native_ids: BTreeSet<String>,
+}
+
+impl Snapshot {
+    pub(super) fn from_state(state: &State) -> Self {
+        let child_session_ids: BTreeSet<String> = state
+            .subagents
+            .keys()
+            .chain(
+                state
+                    .sessions
+                    .keys()
+                    .filter(|id| state.is_subagent_session(id)),
+            )
+            .cloned()
+            .collect();
+        let child_native_ids = child_session_ids
+            .iter()
+            .filter_map(|id| state.sessions.get(id)?.native_session_id.as_deref())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        Self {
+            child_session_ids,
+            child_native_ids,
+        }
+    }
+
+    /// SessionWiki derives its key from the full path, while Mjolnir tracks
+    /// native IDs. Match the native ID so standalone sync cannot expose a
+    /// child transcript under another tool's partition.
+    pub(super) fn owns_indexed_child(
+        &self,
+        session_id: &str,
+        path: &str,
+        tool: &str,
+        kind: &str,
+    ) -> bool {
+        kind != "main"
+            || (tool == super::TOOL && self.child_session_ids.contains(session_id))
+            || self
+                .child_native_ids
+                .contains(&session_id.to_ascii_lowercase())
+            || sessionwiki::index::native_id_of(path)
+                .is_some_and(|native_id| self.child_native_ids.contains(&native_id))
+    }
+
+    pub(super) fn owns_session(&self, session_id: &str) -> bool {
+        self.child_session_ids.contains(session_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(child_session_ids: BTreeSet<String>) -> Self {
+        Self {
+            child_session_ids,
+            child_native_ids: BTreeSet::new(),
+        }
+    }
+}
+
+/// Load the ownership snapshot used to classify rows a standalone SessionWiki
+/// sync may have discovered independently.
+pub(super) fn current_snapshot() -> Result<Snapshot> {
+    let state = crate::database::load_state().context("load session ownership for SessionWiki")?;
+    Ok(Snapshot::from_state(&state))
+}
+
+/// Whether a native Claude or Codex transcript is a child, using the same
+/// bounded summary parser and cache as sync-side discovery.
+fn native_is_child(kind: HarnessKind, path: &Path, cache: &NativeScanCache) -> Result<bool> {
+    Ok(!cache.index_eligible(kind, path)?)
+}
+
+/// Classify one row as a child. SessionWiki's `kind` remains one signal, while
+/// Mjolnir native-id ownership and the shared native summary classifier cover
+/// rows a standalone sync may have mislabeled as `main`.
+pub(super) fn is_child(
+    row: &sessionwiki::index::SessionRow,
+    snapshot: &Snapshot,
+    cache: &NativeScanCache,
+) -> Result<bool> {
+    if snapshot.owns_indexed_child(&row.session_id, &row.path, &row.tool, &row.kind) {
+        return Ok(true);
+    }
+    if let Some(kind @ (HarnessKind::Codex | HarnessKind::Claude)) = harness_for_tool(&row.tool) {
+        let path = Path::new(&row.path);
+        let needs_native_classification = kind == HarnessKind::Claude
+            && path
+                .components()
+                .any(|component| component.as_os_str() == "subagents")
+            || sessionwiki::index::native_id_of(&row.path).is_some();
+        if !needs_native_classification {
+            return Ok(false);
+        }
+        return native_is_child(kind, Path::new(&row.path), cache)
+            .with_context(|| format!("classify indexed {} session {}", row.tool, row.session_id));
+    }
+    Ok(false)
 }
 
 impl Adapter for PreparedFiles {
@@ -66,9 +171,9 @@ pub(super) fn prepare(
         } = adapter.discover();
         let mut selected = Vec::with_capacity(files.len());
         for path in files {
-            match cache.index_eligible(kind, &path) {
-                Ok(true) => selected.push(path),
-                Ok(false) => {
+            match native_is_child(kind, &path, cache) {
+                Ok(false) => selected.push(path),
+                Ok(true) => {
                     excluded.insert(path.to_string_lossy().into_owned());
                 }
                 Err(error) => {
@@ -95,7 +200,7 @@ pub(super) fn prepare(
 pub(super) fn prune(
     connection: &mut rusqlite::Connection,
     excluded: &BTreeSet<String>,
-    owned_children: &BTreeSet<String>,
+    ownership: &Snapshot,
 ) -> Result<usize> {
     // Classification of existing rows and deletion share one SQLite snapshot.
     let transaction = connection.transaction()?;
@@ -115,9 +220,7 @@ pub(super) fn prune(
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .filter(|(id, path, kind, tool)| {
-            kind == "sub"
-                || excluded.contains(path)
-                || (tool == super::TOOL && owned_children.contains(id))
+            excluded.contains(path) || ownership.owns_indexed_child(id, path, tool, kind)
         })
         .map(|(id, _, _, _)| id)
         .collect();
@@ -246,7 +349,7 @@ mod tests {
         );
         sessionwiki::index::sync_with(&mut connection, &adapters, None).unwrap();
         assert_eq!(
-            prune(&mut connection, &excluded, &BTreeSet::new()).unwrap(),
+            prune(&mut connection, &excluded, &Snapshot::default()).unwrap(),
             0
         );
         let indexed: BTreeSet<PathBuf> = connection
@@ -328,8 +431,12 @@ mod tests {
             .unwrap();
         let excluded = BTreeSet::from(["/checkpoints/native-child".to_owned()]);
         let children = BTreeSet::from(["owned-child".to_owned()]);
-        assert_eq!(prune(&mut connection, &excluded, &children).unwrap(), 4);
-        assert_eq!(prune(&mut connection, &excluded, &children).unwrap(), 0);
+        let ownership = Snapshot {
+            child_session_ids: children,
+            child_native_ids: BTreeSet::new(),
+        };
+        assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 4);
+        assert_eq!(prune(&mut connection, &excluded, &ownership).unwrap(), 0);
         for table in [
             "files",
             "messages",

@@ -40,6 +40,12 @@ impl NativeScanCache {
         Self::default()
     }
 
+    /// The cache shared by index discovery and Mjolnir's SessionWiki reads.
+    pub(crate) fn shared() -> Self {
+        static CACHE: std::sync::OnceLock<NativeScanCache> = std::sync::OnceLock::new();
+        CACHE.get_or_init(Self::new).clone()
+    }
+
     /// How many files this cache has actually parsed, for tests and diagnostics.
     pub fn parsed_files(&self) -> u64 {
         self.lock().parsed_files
