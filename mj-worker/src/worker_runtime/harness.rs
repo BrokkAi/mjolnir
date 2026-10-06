@@ -188,6 +188,11 @@ async fn resolve_at_async(
                 .into_owned(),
         );
     }
+    // The pinned installation is not the release channel, so its downloader
+    // must never fetch a replacement under a running session.
+    if harness == HarnessKind::OpenCode {
+        launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
+    }
     Ok(ManagedHarness {
         command: install.join(selected.entrypoint),
         args: harness
@@ -281,6 +286,7 @@ async fn install_into(
         HarnessKind::Kimi => install_kimi(staging.path(), environment).await?,
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse(staging.path(), environment).await?,
+        HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
     }
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
@@ -417,6 +423,55 @@ async fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) ->
     download_verified_async(&url, &muse, field("muse_sha256")?, environment).await?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&muse, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// Install the pinned OpenCode release from its own published archive.
+///
+/// The Linux archive is a gzipped tarball and the macOS archive is a zip;
+/// macOS `tar` is bsdtar, which reads both, and GNU tar reads the tarball.
+async fn install_opencode(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    use mj_core::harness_runtime::OPENCODE_VERSION;
+    let metadata: serde_json::Value =
+        serde_json::from_str(include_str!("../../assets/opencode/runtime.json"))?;
+    anyhow::ensure!(
+        metadata["version"] == OPENCODE_VERSION,
+        "OpenCode download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("OpenCode does not have a managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing OpenCode artifact field {name}"))
+    };
+    let file = field("file")?;
+    let url = format!(
+        "https://github.com/anomalyco/opencode/releases/download/v{OPENCODE_VERSION}/{file}"
+    );
+    let archive = staging.join(file);
+    download_verified_async(&url, &archive, field("sha256")?, environment).await?;
+    let mut tar = tokio::process::Command::new("tar");
+    tar.arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(staging)
+        .env_clear()
+        .envs(environment);
+    run_bounded_checked(
+        &mut tar,
+        "extract verified OpenCode archive",
+        HARNESS_COMMAND_TIMEOUT,
+    )
+    .await?;
+    std::fs::remove_file(&archive)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        staging.join("opencode"),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
     Ok(())
 }
 

@@ -87,12 +87,13 @@ fn close_plan_scoped(
             // write would recreate the directory this command removes. The
             // session's staged profile home, and with it the project-memory
             // replica and native history inside, goes with the worker root;
-            // a Muse session's lies under the data directory instead.
+            // a harness with a nested home keeps its root under the data
+            // directory instead.
             let script = format!(
                 "{}\nrm -rf -- {} {}\n",
                 stop_worker_daemon_script(&session_worker_root),
                 posix_quote(&session_worker_root),
-                posix_quote(&local_muse_profile_root(session_id).to_string_lossy()),
+                posix_quote(&local_nested_profile_root(session_id).to_string_lossy()),
             );
             CommandSpec::new("sh", ["-c", script.as_str()]).purpose(
                 "stop the local Mjolnir worker and remove exact local Mjolnir worker state",
@@ -218,10 +219,11 @@ exit "$status""#;
     })
 }
 
-/// Where a Muse session on this machine keeps its per-session profile root,
-/// which lies under the data directory rather than the worker root, so closing
-/// the session names it separately.
-pub fn local_muse_profile_root(session_id: &str) -> PathBuf {
+/// Where a session of a harness with an XDG-nested home (Muse, OpenCode) on
+/// this machine keeps its per-session profile root, which lies under the data
+/// directory rather than the worker root, so closing the session names it
+/// separately.
+pub fn local_nested_profile_root(session_id: &str) -> PathBuf {
     mj_core::config::data_dir()
         .join("profiles")
         .join(session_id)
@@ -240,7 +242,7 @@ pub fn borrowed_worker_cleanup_plan(
     if matches!(locator, TargetLocator::LocalBare { .. }) {
         script.push_str(&format!(
             "rm -rf -- {}\n",
-            posix_quote(&local_muse_profile_root(child_session_id).to_string_lossy()),
+            posix_quote(&local_nested_profile_root(child_session_id).to_string_lossy()),
         ));
     } else {
         script.push_str(&format!(

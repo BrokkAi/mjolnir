@@ -481,7 +481,7 @@ pub fn error_reports_missing_native_session(
         HarnessKind::Claude => error.contains(&format!(
             "{CLAUDE_MISSING_SESSION_MESSAGE}{native_session_id}"
         )),
-        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => false,
+        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => false,
     }
 }
 
@@ -973,7 +973,12 @@ mod missing_thread_tests {
 
     #[test]
     fn harnesses_that_always_materialize_a_session_never_report_one_missing() {
-        for harness in [HarnessKind::Kimi, HarnessKind::Grok, HarnessKind::Muse] {
+        for harness in [
+            HarnessKind::Kimi,
+            HarnessKind::Grok,
+            HarnessKind::Muse,
+            HarnessKind::OpenCode,
+        ] {
             assert!(!error_reports_missing_native_session(
                 harness,
                 "native",

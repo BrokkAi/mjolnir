@@ -11,7 +11,9 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
         }
         "advanced" => {
-            json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null})
+            json!({"detailed_activity_clocks":false,"session_order":"project","symbols":null,
+                   "tool_output":"grouped",
+                   "tool_output_lines":mj_core::config::DEFAULT_TOOL_OUTPUT_LINES})
         }
         "notify" => {
             json!({"mode":"terminal","bell":true,"delay_seconds":2,"title":true})
@@ -162,6 +164,7 @@ pub(super) fn whole_number(path: &[String]) -> Option<WholeNumber> {
     let (min, max, message, defaulted) = match parts.as_slice() {
         ["notify", "delay_seconds"] => (0, u64::MAX, "Enter a whole number of seconds.", true),
         ["subagents", "max_concurrent"] => (1, 64, "Enter a whole number from 1 to 64.", true),
+        ["advanced", "tool_output_lines"] => (0, 50, "Enter a whole number from 0 to 50.", true),
         ["sessionwiki", "archive_after_days"] => (
             1,
             u64::from(u32::MAX),
@@ -221,6 +224,8 @@ pub(super) fn label(key: &str) -> String {
         "detailed_activity_clocks" => "Detailed activity clocks",
         "session_order" => "Session order",
         "symbols" => "Symbols",
+        "tool_output" => "Tool calls",
+        "tool_output_lines" => "Tool output lines",
         "notify" => "Notifications",
         "mode" => "Notify through",
         "bell" => "Ring the terminal bell",
@@ -326,6 +331,9 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::SubagentConfig::default().max_concurrent
         ),
+        ["advanced", "tool_output_lines"] => {
+            format!("{} (default)", mj_core::config::DEFAULT_TOOL_OUTPUT_LINES)
+        }
         // Unset symbols follow the terminal: ASCII on the Linux console or
         // without a UTF-8 locale, Unicode otherwise.
         ["advanced", "symbols"] => "Follows the terminal".to_owned(),
@@ -406,9 +414,14 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
             } else {
                 ""
             };
+            let tools = if section["tool_output"] == Value::String("inline".to_owned()) {
+                " · inline tools"
+            } else {
+                ""
+            };
             match on {
-                0 => format!("All off{order}"),
-                count => format!("{count} on{order}"),
+                0 => format!("All off{order}{tools}"),
+                count => format!("{count} on{order}{tools}"),
             }
         }
         "notify" => match section["mode"].as_str() {
@@ -550,6 +563,8 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
         "yolo" => "Allow all actions",
         "left" => "Left",
         "right" => "Right",
+        "grouped" => "Grouped",
+        "inline" => "Inline with output",
         "podman-volume" => "Managed volume",
         "container-layer" => "Inside the container",
         "host-helper" => "Custom storage helper",
@@ -571,6 +586,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
+        "tool_output" => &["grouped", "inline"],
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "permissions" => &["guardian", "yolo"],
@@ -580,7 +596,7 @@ pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
             &["podman-volume", "host-helper", "container-layer"]
         }
         "kind" if path.first().is_some_and(|key| key == "profiles") => {
-            &["codex", "claude", "kimi", "grok", "muse"]
+            &["codex", "claude", "kimi", "grok", "muse", "opencode"]
         }
         "kind" if path.first().is_some_and(|key| key == "machines") => &["local", "ssh", "aws-ec2"],
         "kind" => &["bare", "podman", "docker", "apple-container"],
@@ -703,7 +719,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "phone" => {
             "Web access changes take effect when the background server next starts. Remote access requires a certificate and key."
         }
-        "advanced" => "Optional diagnostics and display details for the activity surface.",
+        "advanced" => {
+            "Display options: activity clocks, session order, symbols, and how tool calls show."
+        }
         "notify" => {
             "How to be told when a session you are not looking at asks a question, fails, or finishes."
         }
@@ -723,6 +741,12 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "symbols" => {
             "Draw marks and borders in Unicode or ASCII. Unset: ASCII on the Linux console or without UTF-8."
+        }
+        "tool_output" => {
+            "Grouped folds finished calls into one row of names. Inline shows each call with its command and output, like Codex."
+        }
+        "tool_output_lines" => {
+            "Output rows under each inline tool call: the first and last lines, with a count of the rest. 0 hides output."
         }
         "bundles" => {
             "Projects can contain one or more repositories. Choose the main repository where the agent starts."

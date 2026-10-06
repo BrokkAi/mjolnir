@@ -1627,24 +1627,20 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             .collect::<String>()
     };
 
-    for kind in [HarnessKind::Kimi] {
-        let marked = profile_step(kind);
-        assert!(marked.contains('⚠'), "{kind:?}: {marked}");
-        assert!(
-            marked.contains("No guardian approval mode"),
-            "{kind:?}: {marked}"
-        );
-        assert!(
-            marked.contains("do not run on a raw, unsandboxed target"),
-            "{kind:?}: {marked}"
-        );
-    }
+    let marked = profile_step(HarnessKind::Kimi);
+    assert!(marked.contains('⚠'), "{marked}");
+    assert!(marked.contains("No guardian approval mode"), "{marked}");
+    assert!(
+        marked.contains("do not run on a raw, unsandboxed target"),
+        "{marked}"
+    );
 
     for kind in [
         HarnessKind::Codex,
         HarnessKind::Claude,
         HarnessKind::Grok,
         HarnessKind::Muse,
+        HarnessKind::OpenCode,
     ] {
         let quiet = profile_step(kind);
         assert!(!quiet.contains('⚠'), "{kind:?}: {quiet}");

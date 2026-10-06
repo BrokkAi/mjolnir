@@ -241,6 +241,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
         HarnessKind::Kimi => "Kimi",
         HarnessKind::Grok => "Grok Build",
         HarnessKind::Muse => "Muse Code",
+        HarnessKind::OpenCode => "OpenCode",
     }
 }
 

@@ -1338,7 +1338,9 @@ mod tests {
                 ("skills/.system/imagegen/SKILL.md", b"imagegen"),
                 ("skills/.system/skill-creator/SKILL.md", b"creator"),
             ],
-            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => &[],
+            HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse | HarnessKind::OpenCode => {
+                &[]
+            }
         }
     }
 

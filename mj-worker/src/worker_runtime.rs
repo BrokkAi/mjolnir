@@ -369,7 +369,7 @@ fn credential_endpoint(
 
 #[cfg(unix)]
 fn resolve_relative_harness_home(config: &mut WorkerLaunchConfig, base: &Path) {
-    if config.harness == mj_core::config::HarnessKind::Muse
+    if config.harness.nested_home()
         && let Some(value) = config.environment.get_mut("XDG_DATA_HOME")
         && Path::new(value).is_relative()
     {
