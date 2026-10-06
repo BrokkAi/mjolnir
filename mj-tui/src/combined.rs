@@ -987,6 +987,7 @@ fn render_combined_themed(
                     TransitionSurface {
                         transition,
                         failed,
+                        pane_id,
                         pane_focused: false,
                         title_lead: crate::pane_controls::pane_chrome_width(
                             dashboard,
@@ -1082,6 +1083,7 @@ fn render_combined_themed(
                 TransitionSurface {
                     transition,
                     failed,
+                    pane_id,
                     pane_focused: focus_borders,
                     title_lead: crate::pane_controls::pane_chrome_width(
                         dashboard,
@@ -1612,11 +1614,12 @@ fn render_launch_standby_surface(
 /// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
 /// What one pane's transition panel reports: the operation under way, whether
-/// it failed, and whether the pane holding it has the keyboard.
+/// it failed, which pane holds it, and whether that pane has the keyboard.
 #[derive(Clone, Copy)]
 struct TransitionSurface {
     transition: SessionTransitionKind,
     failed: bool,
+    pane_id: PaneId,
     pane_focused: bool,
     /// Columns the pane chrome draws its label into at the left of the
     /// title row; the title starts after them.
@@ -1646,6 +1649,7 @@ fn render_transition_surface(
     let TransitionSurface {
         transition,
         failed,
+        pane_id,
         pane_focused,
         title_lead,
     } = surface;
@@ -1769,6 +1773,12 @@ fn render_transition_surface(
     } else {
         "This transition is owned by the daemon; select another session.".to_owned()
     };
+    let status = theme::panel(false).title(" Status ");
+    push_failure_surface(
+        dashboard,
+        pane_id,
+        failed.then(|| status.inner(prompt_area)),
+    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
@@ -1783,7 +1793,7 @@ fn render_transition_surface(
         ])
         .style(theme::muted())
         .wrap(Wrap { trim: true })
-        .block(theme::panel(false).title(" Status ")),
+        .block(status),
         prompt_area,
     );
 }
