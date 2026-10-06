@@ -207,7 +207,11 @@ mod windows_tests {
         let own = std::env::args().collect::<Vec<_>>().join(" ");
         let running = super::running_process_arguments(&crate::targets::ProcessExecutor)
             .expect("list running processes");
-        assert!(running.contains(&own), "{own:?} not in {} processes", running.len());
+        assert!(
+            running.contains(&own),
+            "{own:?} not in {} processes",
+            running.len()
+        );
     }
 }
 
