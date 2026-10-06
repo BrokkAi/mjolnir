@@ -2773,6 +2773,7 @@ fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay.record_session_update(tool_call_update()).unwrap();
+    submit_relay(&mut relay, "typed-mid-turn", prompt("wait for the cycle"));
 
     submit_relay(
         &mut relay,
@@ -2783,6 +2784,15 @@ fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
         relay.claim_pending_commands(true).unwrap().is_empty(),
         "a turn the harness started on its own must keep the barrier queued"
     );
+    assert_eq!(relay.operational_state().queued_prompts.len(), 1);
+    assert!(
+        !observations(&relay).iter().any(|observation| matches!(
+            observation,
+            RelayObservation::CommandStarted { command_id, .. }
+                if command_id == "barrier-command" || command_id == "typed-mid-turn"
+        )),
+        "the same open-turn state holds both checkpoint admission and prompt promotion"
+    );
 
     relay
         .claude_turn_result(&cycle_result("task-notification"))
@@ -2791,30 +2801,49 @@ fn a_harness_turn_holds_the_checkpoint_barrier_until_it_settles() {
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].command_id, "barrier-command");
+    assert_eq!(relay.operational_state().queued_prompts.len(), 1);
 }
 
+// Hard-won: #1225: Claude queued a live prompt behind its autonomous turn while the relay marked it active.
 #[test]
-fn a_prompt_queued_during_a_harness_turn_dispatches_at_once() {
+fn a_prompt_queued_during_a_harness_turn_waits_then_dispatches_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
     relay.record_session_update(tool_call_update()).unwrap();
 
     submit_relay(&mut relay, "typed-mid-turn", prompt("answer this too"));
-    let claimed = relay.claim_pending_commands(true).unwrap();
-
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].command_id, "typed-mid-turn");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let waiting = relay.operational_state();
+    assert_eq!(waiting.queued_prompts.len(), 1);
+    assert_eq!(waiting.queued_prompts[0].command_id, "typed-mid-turn");
+    assert!(waiting.active_prompt.is_none());
+    assert!(matches!(
+        mj_core::activity::classify(&relay.activity_facts()),
+        mj_core::activity::ActivityState::Turn { .. }
+    ));
     assert!(
-        observations(&relay).iter().any(|observation| matches!(
+        !observations(&relay).iter().any(|observation| matches!(
             observation,
             RelayObservation::CommandStarted { command_id, .. } if command_id == "typed-mid-turn"
         )),
-        "the prompt starts while the harness turn is still open"
+        "the queued prompt has no start event yet"
     );
-    assert!(
-        relay.operational_state().harness_turn.is_some(),
-        "dispatching a prompt does not end the turn the harness started"
-    );
+
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "typed-mid-turn");
+    let started = observations(&relay)
+        .iter()
+        .filter(|observation| matches!(
+            observation,
+            RelayObservation::CommandStarted { command_id, .. } if command_id == "typed-mid-turn"
+        ))
+        .count();
+    assert_eq!(started, 1, "the queued prompt starts exactly once");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
 
     // Barrier priority over queued prompts is an invariant: a pending
     // barrier still freezes a prompt typed after it.
@@ -2838,9 +2867,13 @@ fn a_prompt_queued_during_a_harness_turn_dispatches_at_once() {
 fn a_prompt_result_settles_a_lingering_harness_turn() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
-    relay.record_session_update(tool_call_update()).unwrap();
     submit_relay(&mut relay, "next-prompt", prompt("carry on"));
     assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    // A previous relay version could dispatch this prompt behind an
+    // autonomous Claude cycle; preserve the terminal cleanup for that state.
+    relay
+        .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
+        .unwrap();
 
     relay
         .record_command_completed(

@@ -131,8 +131,7 @@ impl DurableRelay {
     }
 
     pub(super) fn background_commands(&self) -> Vec<BackgroundCommand> {
-        let turn_in_flight =
-            self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some();
+        let turn_in_flight = self.turn_in_progress();
         let detached_terminals = self.detached_agent_terminals();
         let mut commands: Vec<BackgroundCommand> = match self.background_work {
             BackgroundWorkPolicy::HostedTerminals

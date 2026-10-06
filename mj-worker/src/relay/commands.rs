@@ -866,16 +866,15 @@ impl DurableRelay {
                 if !earlier_controls.is_empty() {
                     earlier_controls.truncate(maximum);
                     self.start_queued_controls(earlier_controls)?;
-                // A turn the harness started on its own is real work in the
-                // agent's workspace, so the barrier waits for it exactly as it
-                // waits for a prompt.
+                // Checkpoint admission and command promotion use the same
+                // relay-owned turn-boundary predicate.
                 } else if !self.effectful_command_in_progress()
                     && !self
                         .snapshot
                         .steering
                         .as_ref()
                         .is_some_and(|s| s.holds_queue())
-                    && self.snapshot.harness_turn.is_none()
+                    && !self.turn_in_progress()
                 {
                     self.append_relay_event(
                         Some(&barrier_id),
@@ -1016,6 +1015,9 @@ impl DurableRelay {
         if !self.automatic_steering || self.checkpoint_only {
             return None;
         }
+        // Automatic steering is only useful for a Hel-owned prompt. In a
+        // harness-initiated turn, the agent cannot read the steer until its
+        // current tool call returns; Esc can cancel that turn instead.
         let active = &self.snapshot.active_prompt.as_ref()?.command_id;
         if self.snapshot.cancelling_prompt_id.is_some()
             || self.snapshot.checkpoint_barrier.is_some()
@@ -1263,8 +1265,21 @@ impl DurableRelay {
                 {
                     return None;
                 }
-                let running_turn =
-                    self.snapshot.active_prompt.is_some() || self.snapshot.harness_turn.is_some();
+                let running_turn = self.turn_in_progress();
+                // ACP rejects session configuration requests while its prompt
+                // loop is running. Keep these queued until that turn ends;
+                // GoalControl and turn controls have dedicated live-turn
+                // handlers, and user shells run outside the ACP command loop.
+                if running_turn
+                    && matches!(
+                        dispatch.command,
+                        RelayCommand::ClearContext
+                            | RelayCommand::RestoreExecutionMode
+                            | RelayCommand::SetSessionMode { .. }
+                    )
+                {
+                    return None;
+                }
                 if accepted < before_ordinal
                     || (running_turn && matches!(dispatch.command, RelayCommand::CancelTurn))
                     || matches!(dispatch.command, RelayCommand::GoalControl { .. })
@@ -1283,14 +1298,13 @@ impl DurableRelay {
     }
 
     fn effectful_command_in_progress(&self) -> bool {
-        self.snapshot.active_prompt.is_some()
-            || self.snapshot.dispatches.values().any(|dispatch| {
-                (dispatch.command.is_effectful_acp() || dispatch.command.is_effectful_user_shell())
-                    && matches!(
-                        dispatch.state,
-                        RelayDispatchState::Pending | RelayDispatchState::InFlight
-                    )
-            })
+        self.snapshot.dispatches.values().any(|dispatch| {
+            (dispatch.command.is_effectful_acp() || dispatch.command.is_effectful_user_shell())
+                && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Pending | RelayDispatchState::InFlight
+                )
+        })
     }
 
     fn next_queued_checkpoint(&self) -> Option<(String, u64)> {
@@ -1624,12 +1638,12 @@ impl DurableRelay {
     /// Start the head of the durable command queue once the relay is idle.
     /// Entries run strictly one at a time, in the order they were accepted.
     pub(super) fn promote_next_queued_command(&mut self) -> Result<Option<u64>> {
-        // A turn the harness started on its own leaves execution Running, but
-        // it must not hold a queued prompt: the adapter queues a prompt that
-        // arrives mid-turn and answers it as soon as that turn ends.
-        // `active_prompt` is the real gate on dispatch.
+        // Keep turn-starting entries and configuration queue entries in this
+        // durable FIFO during a live turn. Claude's adapter queues mid-cycle
+        // prompts internally and cancel may discard them; ACP rejects
+        // configuration changes while its prompt loop is running.
         if self.checkpoint_only
-            || self.snapshot.active_prompt.is_some()
+            || self.turn_in_progress()
             || self
                 .snapshot
                 .steering

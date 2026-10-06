@@ -3052,11 +3052,10 @@ fn harness_turn_open(relay: &Arc<Mutex<DurableRelay>>) -> bool {
 }
 
 /// Claude Code re-invokes itself when a background task it started finishes.
-/// The coordinator must hand a prompt typed during that turn straight to the
-/// adapter, which queues it and answers it at the next turn boundary, while a
-/// checkpoint barrier waits for the turn to settle.
+/// The coordinator keeps a prompt typed during that turn in mj's queue until
+/// the turn boundary, while a checkpoint barrier waits on the same turn state.
 #[tokio::test]
-async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
+async fn a_self_started_turn_holds_prompt_promotion_and_checkpoint_admission() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
@@ -3091,25 +3090,51 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
         RelayExecutionState::Running
     );
 
-    // A prompt typed during that turn goes out at once.
+    // A prompt typed during that turn stays in the durable queue; it never
+    // enters the adapter's queue, which cancellation may discard.
     submit(
         &mut relay.lock().unwrap(),
         "prompt-mid-turn",
         prompt("also look at this"),
     );
     wake_tx.try_send(()).unwrap();
+    wait_until(
+        || {
+            let state = relay.lock().unwrap().operational_state();
+            state.harness_turn.is_some()
+                && state.active_prompt.is_none()
+                && state
+                    .queued_prompts
+                    .iter()
+                    .any(|queued| queued.command_id == "prompt-mid-turn")
+        },
+        "the prompt did not remain queued during the harness turn",
+    )
+    .await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "the adapter must not receive a prompt during the harness turn"
+    );
+
+    // A turn-end marker settles the autonomous cycle, then promotion sends the
+    // queued prompt exactly once.
+    event_tx
+        .send(RuntimeEvent::ClaudeTurnResult(claude_result(
+            "task-notification",
+            1,
+        )))
+        .unwrap();
     assert_prompt(
         next_command(&mut command_rx).await,
         "prompt-mid-turn",
         "also look at this",
     );
-    assert!(
-        harness_turn_open(&relay),
-        "dispatching a prompt does not end the turn the harness started"
-    );
+    wait_until(
+        || !harness_turn_open(&relay),
+        "the cycle result did not settle the harness turn",
+    )
+    .await;
 
-    // The prompt result is itself a turn boundary, so the turn it interrupted
-    // is over. A fresh cycle opens the next one.
     event_tx
         .send(RuntimeEvent::PromptFinished {
             diagnostic: None,
@@ -3119,8 +3144,15 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
         })
         .unwrap();
     wait_until(
-        || !harness_turn_open(&relay),
-        "a prompt result did not settle the harness turn",
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_prompt
+                .is_none()
+        },
+        "the queued prompt did not finish",
     )
     .await;
     event_tx
@@ -3178,6 +3210,191 @@ async fn a_self_started_turn_holds_a_barrier_but_not_a_prompt() {
     assert_eq!(state.execution, RelayExecutionState::Idle);
     assert!(state.last_harness_turn_started_ordinal.is_some());
 
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+/// A bridge replacement settles the old harness turn, but the queued prompt
+/// waits until the replacement session is configured before it is sent.
+// Hard-won: #1225: a bridge restart could leave a prompt held by a turn that no longer existed.
+#[tokio::test]
+async fn a_bridge_restart_releases_a_held_prompt_after_session_readiness() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    event_tx
+        .send(agent_output("working through a task", "restart-turn"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output did not open a harness turn",
+    )
+    .await;
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "prompt-after-restart",
+        prompt("continue after restart"),
+    );
+    wake_tx.try_send(()).unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .queued_prompts
+                .len()
+                == 1
+        },
+        "the prompt was not accepted into the relay queue",
+    )
+    .await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx
+        .send(RuntimeEvent::HarnessRestarting {
+            message: "test bridge restart".into(),
+        })
+        .unwrap();
+    wait_until(
+        || {
+            let state = relay.lock().unwrap().operational_state();
+            state.harness_turn.is_none() && state.acp_ready == Some(false)
+        },
+        "bridge restart did not close the old turn and readiness",
+    )
+    .await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "a held prompt must wait while the replacement bridge is opening"
+    );
+
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-after-restart",
+        "continue after restart",
+    );
+    tokio::task::yield_now().await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+/// A stopped harness exits its worker; recovery closes the old turn and sends
+/// the durable prompt only after the replacement worker configures ACP.
+// Hard-won: #1225: a harness exit could otherwise leave a queued prompt held by a dead turn.
+#[tokio::test]
+async fn harness_exit_during_a_turn_releases_held_prompt_after_worker_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    let relay = Arc::new(Mutex::new(durable));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    event_tx
+        .send(agent_output("working through a task", "exit-turn"))
+        .unwrap();
+    wait_until(
+        || harness_turn_open(&relay),
+        "agent output did not open a harness turn",
+    )
+    .await;
+
+    submit(
+        &mut relay.lock().unwrap(),
+        "prompt-after-exit",
+        prompt("continue after harness exit"),
+    );
+    wake_tx.try_send(()).unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .queued_prompts
+                .iter()
+                .any(|queued| queued.command_id == "prompt-after-exit")
+        },
+        "the prompt did not stay in the durable queue",
+    )
+    .await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
+    coordinator.await.unwrap().unwrap();
+    assert!(
+        harness_turn_open(&relay),
+        "Stopped leaves recovery to close the turn"
+    );
+    drop(relay);
+
+    let mut recovered = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
+    recovered.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
+    recovered
+        .record_observation(RelayObservation::SessionRestarted)
+        .unwrap();
+    let relay = Arc::new(Mutex::new(recovered));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-after-exit",
+        "continue after harness exit",
+    );
+    tokio::task::yield_now().await;
+    assert!(command_rx.try_recv().is_err());
+
+    event_tx.send(RuntimeEvent::Stopped).unwrap();
     drop(event_tx);
     drop(wake_tx);
     coordinator.await.unwrap().unwrap();
@@ -3363,11 +3580,11 @@ async fn a_claude_result_hands_the_running_prompt_to_the_prompt_loop() {
     coordinator.await.unwrap().unwrap();
 }
 
-/// Stop while Claude Code works on its own after a background task reaches
-/// the prompt loop as a cancel, and the interrupted cycle's result then ends
-/// the turn.
+/// Esc's non-targeted cancellation interrupts a Claude cycle with no active
+/// prompt; the queued user prompt starts once that cycle reports its result.
+// Hard-won: #1225: adapter cancellation could discard a prompt Hel had already shown as active.
 #[tokio::test]
-async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
+async fn cancel_turn_during_a_claude_harness_turn_dispatches_queued_prompt_once() {
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap();
     durable.set_harness_turn_policy(crate::relay::HarnessTurnPolicy::ClaudeAdapter);
@@ -3400,8 +3617,32 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
 
     submit(
         &mut relay.lock().unwrap(),
+        "prompt-after-stop",
+        prompt("continue with this"),
+    );
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .claim_pending_commands(true)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        relay
+            .lock()
+            .unwrap()
+            .operational_state()
+            .queued_prompts
+            .len(),
+        1,
+        "Esc's prompt remains owned by the relay until cancellation settles"
+    );
+
+    submit(
+        &mut relay.lock().unwrap(),
         "stop-harness-turn",
-        RelayCommand::Cancel,
+        RelayCommand::CancelTurn,
     );
     wake_tx.try_send(()).unwrap();
     let CommandRequest::Cancel {
@@ -3409,7 +3650,7 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
         steering_prompt: None,
     } = next_command(&mut command_rx).await
     else {
-        panic!("Stop must reach the prompt loop as a plain cancel");
+        panic!("CancelTurn must reach session/cancel without adapter-queued text");
     };
     assert_eq!(request_id, "stop-harness-turn");
     event_tx
@@ -3423,13 +3664,45 @@ async fn stop_during_a_claude_harness_turn_ends_at_the_interrupted_result() {
     event_tx
         .send(RuntimeEvent::ClaudeTurnResult(interrupted))
         .unwrap();
+    assert_prompt(
+        next_command(&mut command_rx).await,
+        "prompt-after-stop",
+        "continue with this",
+    );
     wait_until(
         || !harness_turn_open(&relay),
         "the interrupted cycle's result did not end the turn",
     )
     .await;
     let state = relay.lock().unwrap().operational_state();
-    assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert_eq!(state.execution, RelayExecutionState::Running);
+    assert_eq!(
+        state
+            .active_prompt
+            .as_ref()
+            .map(|prompt| prompt.command_id.as_str()),
+        Some("prompt-after-stop")
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        command_rx.try_recv().is_err(),
+        "the queued prompt must not be dispatched a second time"
+    );
+    let starts = relay
+        .lock()
+        .unwrap()
+        .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.observation,
+                RelayObservation::CommandStarted { command_id, .. }
+                    if command_id == "prompt-after-stop"
+            )
+        })
+        .count();
+    assert_eq!(starts, 1, "the queued prompt starts exactly once");
     assert!(
         relay
             .lock()
