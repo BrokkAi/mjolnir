@@ -955,7 +955,7 @@ fn render_combined_themed(
                     if transcript_area.height > 3 {
                         dashboard.failure_drawn(&session_id);
                     }
-                    render_empty_transcript(
+                    let failure_body = render_empty_transcript(
                         frame,
                         transcript_area,
                         EmptyConversation::Failed,
@@ -969,6 +969,7 @@ fn render_combined_themed(
                         false,
                         false,
                     );
+                    push_failure_surface(dashboard, pane_id, failure_body);
                     render_empty_prompt_advice(
                         frame,
                         prompt_area,
@@ -1188,7 +1189,7 @@ fn render_combined_themed(
                     {
                         dashboard.failure_drawn(session_id);
                     }
-                    render_empty_transcript(
+                    let failure_body = render_empty_transcript(
                         frame,
                         transcript_area,
                         reason,
@@ -1204,6 +1205,7 @@ fn render_combined_themed(
                         focus_borders,
                         dashboard.pane_shows_pin_hint(pane_id),
                     );
+                    push_failure_surface(dashboard, pane_id, failure_body);
                     if opening {
                         // The real composer parks in the prompt band while the
                         // attach runs, so anything typed lands in the chat that
@@ -1329,6 +1331,10 @@ enum EmptyConversation {
 /// that has live sessions just needs one opened, and an attach that is still
 /// running needs nothing but a moment. Telling the second user there is no
 /// live session would be a plain lie — the pane above is listing them.
+///
+/// Returns the failure text's area when it draws the failed state: a failed
+/// session has no chat to register a transcript surface, so the caller
+/// registers this one to keep the error selectable for a bug report.
 #[allow(clippy::too_many_arguments)]
 fn render_empty_transcript(
     frame: &mut Frame,
@@ -1339,7 +1345,7 @@ fn render_empty_transcript(
     title_controls: u16,
     pane_focused: bool,
     pin_hint: bool,
-) {
+) -> Option<Rect> {
     if matches!(reason, EmptyConversation::Failed) {
         let panel = theme::panel(pane_focused)
             .title(" Session failed ")
@@ -1370,7 +1376,7 @@ fn render_empty_transcript(
                 .map(|line| Line::styled(line.to_owned(), theme::muted())),
         );
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
-        return;
+        return Some(body);
     }
     let mut panel = theme::panel(pane_focused).title(" Conversation ");
     if matches!(reason, EmptyConversation::Opening) {
@@ -1421,6 +1427,18 @@ fn render_empty_transcript(
             .alignment(ratatui::layout::Alignment::Center),
             hero,
         );
+    }
+    None
+}
+
+/// Registers a failed session's error text so a drag copies it like any other
+/// pane's text.
+fn push_failure_surface(dashboard: &mut DashboardState, pane_id: PaneId, body: Option<Rect>) {
+    if let Some(body) = body {
+        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
+            SurfaceId::FailurePane(pane_id.raw()),
+            body,
+        ));
     }
 }
 

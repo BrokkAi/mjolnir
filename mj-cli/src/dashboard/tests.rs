@@ -64,6 +64,12 @@ fn open_test_chat_with_notices(session_id: &str, notices: Notices) -> ActiveChat
 /// A dashboard with profiles and a target, so the adaptive layout draws
 /// its three panes with text in them.
 fn populated_dashboard() -> DashboardState {
+    populated_dashboard_with(|_| {})
+}
+
+/// [`populated_dashboard`] with its two sessions adjusted before the
+/// dashboard first sees them.
+fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
     let mut config = Config::default();
     for (id, kind) in [
         ("claude-1", mj_core::config::HarnessKind::Claude),
@@ -155,6 +161,7 @@ fn populated_dashboard() -> DashboardState {
             },
         );
     }
+    adjust(&mut state);
     DashboardState::new(config, state, std::collections::BTreeMap::new())
 }
 
@@ -522,6 +529,63 @@ fn dragging_inside_a_pane_copies_only_that_panes_rows() {
         .flat_map(|y| (quotas.rect.x..quotas.rect.right()).map(move |x| (x, y)))
         .collect::<Vec<_>>();
     assert_eq!(reversed_cells(&terminal), expected);
+}
+
+/// A failed session has no chat, so nothing else registers its pane: the
+/// error a bug report needs must still copy without the box around it.
+// Hard-won: #1247: the "Session failed" error could not be selected.
+#[test]
+fn dragging_over_a_failed_session_copies_its_error() {
+    let mut dashboard = populated_dashboard_with(|state| {
+        let session = state.sessions.get_mut("session-1").expect("session-1");
+        session.state = mj_core::state::SessionState::Error;
+        session.last_error = Some("connect worker at /var/lib/hel/workers/abc: no such file".into());
+    });
+    dashboard.focus_sessions();
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    let mut selection = SelectionState::new();
+    draw_with_selection(&mut terminal, &mut dashboard, &selection);
+    let failure = *dashboard
+        .frame_surfaces()
+        .surface(SurfaceId::FailurePane(dashboard.focused_pane().raw()))
+        .expect("the failure text is registered");
+
+    let press = (failure.rect.x, failure.rect.y);
+    let release = (failure.rect.right() + 10, failure.rect.bottom() + 5);
+    for event in [
+        mouse(MouseEventKind::Down(MouseButton::Left), press.0, press.1),
+        mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            release.0,
+            release.1,
+        ),
+    ] {
+        assert_eq!(
+            route_selection_event(&mut selection, dashboard.frame_surfaces(), event),
+            SelectionRouting::Consumed
+        );
+    }
+    assert!(matches!(
+        route_selection_event(
+            &mut selection,
+            dashboard.frame_surfaces(),
+            mouse(MouseEventKind::Up(MouseButton::Left), release.0, release.1),
+        ),
+        SelectionRouting::Copy { surface, .. } if surface == failure.id
+    ));
+
+    let text = draw_with_selection(&mut terminal, &mut dashboard, &selection)
+        .expect("the selection covers the error");
+    assert!(
+        text.lines()
+            .any(|line| line == "connect worker at /var/lib/hel/workers/abc: no such file"),
+        "{text:?}"
+    );
+    assert!(
+        text.starts_with("The session's target failed")
+            && !text.contains(['│', '╭', '╰', '─']),
+        "{text:?}"
+    );
 }
 
 #[tokio::test]

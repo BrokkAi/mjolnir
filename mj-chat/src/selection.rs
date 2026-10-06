@@ -30,6 +30,9 @@ pub enum SurfaceId {
     PromptInput,
     /// Dashboard pane, numbered in render order.
     DashboardPane(u8),
+    /// Error text of a failed session, keyed by the raw id of the tiled pane
+    /// showing it: several panes can each show a failure at once.
+    FailurePane(u32),
     /// Session list inside the resume dialog.
     ResumeList,
     /// Scrollable transcript preview under the resume dialog's list.
