@@ -132,33 +132,6 @@ async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {
         .expect("Muse runtime stopped unexpectedly")
 }
 
-/// muse-acp 0.10's policy selectors as a fake bridge reports them: approvals
-/// on `approval_mode`, apart from Mode, and auto-review off in every session
-/// it opens. A guardian Muse session selects `promptUnmatched` and `on`.
-pub(crate) fn muse_policy_options() -> serde_json::Value {
-    serde_json::json!([
-        {"id": "approval_mode", "name": "Approvals", "type": "select",
-         "currentValue": "allowAll", "options": [
-            {"value": "allowAll", "name": "Allow all"},
-            {"value": "promptUnmatched", "name": "Prompt unmatched"}
-        ]},
-        {"id": "auto_review", "name": "Auto-review", "type": "select",
-         "currentValue": "off", "options": [
-            {"value": "off", "name": "Off"},
-            {"value": "on", "name": "On"}
-        ]}
-    ])
-}
-
-/// Apply a `session/set_config_option` request's params to `options`.
-pub(crate) fn select_option(options: &mut serde_json::Value, params: &serde_json::Value) {
-    for option in options.as_array_mut().expect("config options are a list") {
-        if option["id"] == params["configId"] {
-            option["currentValue"] = params["value"].clone();
-        }
-    }
-}
-
 /// What opening a session through the fake muse-acp produced.
 struct Opened {
     outcome: Result<()>,
@@ -220,7 +193,7 @@ for line in sys.stdin:
             ("MJ_FAKE_MUSE_HOST".into(), host.into()),
             (
                 "MJ_FAKE_MUSE_OPTIONS".into(),
-                muse_policy_options().to_string(),
+                super::tests::muse_policy_options().to_string(),
             ),
             (
                 "MJ_FAKE_MUSE_LOG".into(),
