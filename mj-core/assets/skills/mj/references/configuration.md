@@ -286,7 +286,7 @@ title = true
 
 | Field | TOML type | Default | Behavior |
 | --- | --- | --- | --- |
-| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS or `notify-send` on Linux. `off` reports nothing. |
+| `mode` | `"off"`, `"terminal"`, or `"system"` | `"terminal"` | `terminal` rings the terminal bell, which reaches you through SSH and multiplexers. `system` also posts a desktop notification through `osascript` on macOS, `notify-send` on Linux, or a PowerShell toast on Windows. `off` reports nothing. |
 | `bell` | boolean | `true` | Whether each notification rings the terminal bell. Turn it off with `mode = "system"` for silent desktop notifications. |
 | `delay_seconds` | integer | `2` | How long a session must keep needing you before it is reported, so a question the agent answers itself stays quiet. |
 | `title` | boolean | `true` | Keep the terminal window title showing the counts, for example `mj · 2 waiting · 1 unread`, independently of `mode`. |

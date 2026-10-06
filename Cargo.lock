@@ -891,6 +891,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "base64",
  "brokk-mj-chat",
  "brokk-mj-checkpoint",
  "brokk-mj-client",

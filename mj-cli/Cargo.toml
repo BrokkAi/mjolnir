@@ -28,6 +28,8 @@ mj-chat.workspace = true
 mj-tui.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
+# Encodes the PowerShell script that posts Windows desktop notifications.
+base64.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["env"] }
 crossterm = { workspace = true, features = ["osc52"] }
