@@ -214,6 +214,7 @@ async function captureWizardPath(output, page, state, label) {
       await captureNewSessionState(output, page, `${label}: ${progress}`, state);
       return;
     }
+    await expect(page.locator('#new-step')).not.toContainText('Refreshing recent projects');
     await captureNewSessionState(output, page, `${label}: ${progress}`, state);
 
     const current = await page.locator('#new-step').innerText();
@@ -364,6 +365,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     });
     await projectStep(page);
     await page.getByRole('button', { name: /^(Browse folders|Folders)/ }).click();
+    await expect(page.getByRole('button', { name: /^first / })).toBeVisible();
     await page.getByRole('textbox', { name: 'Filter folder names' }).fill('omitted');
     await expect(page.getByRole('button', { name: /^omitted / })).toBeVisible();
     await captureNewSessionState(output, page, 'filtered folder result', state);
