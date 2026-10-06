@@ -1,0 +1,215 @@
+=== inline code URL (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Agent                                                                     ▐│
+│ │ Run curl https://example.com/inline or:                                   ▐│
+│ │                                                                           ▐│
+│ │ code                                                                      ▐│
+│ │ GET https://example.com/block                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: OpenLink("https://example.com/inline")
+
+=== fenced code URL (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Agent                                                                     ▐│
+│ │ Run curl https://example.com/inline or:                                   ▐│
+│ │                                                                           ▐│
+│ │ code                                                                      ▐│
+│ │ GET https://example.com/block                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: OpenLink("https://example.com/block")
+
+=== ordinary code text (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Agent                                                                     ▐│
+│ │ Run curl https://example.com/inline or:                                   ▐│
+│ │                                                                           ▐│
+│ │ code                                                                      ▐│
+│ │ GET https://example.com/block                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: None
+
+=== wide table link (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Agent                                                                     ▐│
+│ │  Issue                        Status                                      ▐│
+│ │ ───────────────────────────  ────────                                     ▐│
+│ │  first bug                    open                                        ▐│
+│ │  see https://example.com/2    closed                                      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: OpenLink("https://example.com/1")
+
+=== wide table URL (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Agent                                                                     ▐│
+│ │  Issue                        Status                                      ▐│
+│ │ ───────────────────────────  ────────                                     ▐│
+│ │  first bug                    open                                        ▐│
+│ │  see https://example.com/2    closed                                      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: OpenLink("https://example.com/2")
+
+=== wide table plain cell (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Agent                                                                     ▐│
+│ │  Issue                        Status                                      ▐│
+│ │ ───────────────────────────  ────────                                     ▐│
+│ │  first bug                    open                                        ▐│
+│ │  see https://example.com/2    closed                                      ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send │ ctrl+b then : palette · ? keys
+action: None
+
+=== narrow table link (30x24) ===
+╭ Conversation ──────────────╮
+│ ● Agent                   ▐│
+│ │ Issue: first bug        ▐│
+│ │ Notes: a long           ▐│
+│ │        description that ▐│
+│ │        cannot fit a     ▐│
+│ │        narrow grid      ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭ 🎙︎ ─────────────────────────╮
+│> Message the agent, or /   │
+│  for commands              │
+╰────────────────────────────╯
+ctrl+b then : palette · ? keys
+action: OpenLink("https://example.com/1")
+
+=== narrow table label (30x24) ===
+╭ Conversation ──────────────╮
+│ ● Agent                   ▐│
+│ │ Issue: first bug        ▐│
+│ │ Notes: a long           ▐│
+│ │        description that ▐│
+│ │        cannot fit a     ▐│
+│ │        narrow grid      ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+│                           ▐│
+╰────────────────────────────╯
+╭ 🎙︎ ─────────────────────────╮
+│> Message the agent, or /   │
+│  for commands              │
+╰────────────────────────────╯
+ctrl+b then : palette · ? keys
+action: None

@@ -1379,7 +1379,7 @@ mod tests {
             35,
         );
 
-        mj_core::golden::assert_golden(
+        mj_core::golden::assert_platform_golden(
             env!("CARGO_MANIFEST_DIR"),
             "tui-command-discovery",
             &output,

@@ -1473,7 +1473,11 @@ mod tests {
             &[],
         );
 
-        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "turn-review-pane", &output);
+        mj_core::golden::assert_platform_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "turn-review-pane",
+            &output,
+        );
     }
 
     #[test]

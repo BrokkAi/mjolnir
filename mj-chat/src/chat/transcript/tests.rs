@@ -3460,7 +3460,11 @@ fn golden_transcript_navigation() {
         );
     }
 
-    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "transcript-navigation", &output);
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "transcript-navigation",
+        &output,
+    );
 }
 
 #[test]
@@ -3520,7 +3524,7 @@ fn golden_transcript_link_routing() {
         );
     }
 
-    mj_core::golden::assert_golden(
+    mj_core::golden::assert_platform_golden(
         env!("CARGO_MANIFEST_DIR"),
         "transcript-link-routing",
         &output,
@@ -3894,7 +3898,7 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
 
-    mj_core::golden::assert_golden(
+    mj_core::golden::assert_platform_golden(
         env!("CARGO_MANIFEST_DIR"),
         "rich-transcript-tool-presentation",
         &output,

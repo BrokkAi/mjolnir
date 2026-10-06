@@ -3122,5 +3122,9 @@ async fn golden_active_chat_render() {
         &[format!("cursor={focused_cursor:?}")],
     );
 
-    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "active-chat-render", &output);
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "active-chat-render",
+        &output,
+    );
 }

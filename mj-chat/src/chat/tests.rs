@@ -1460,12 +1460,7 @@ mod golden_cases {
     }
 
     fn save(name: &str, output: &str) {
-        let name = if cfg!(target_os = "macos") {
-            format!("{name}-macos")
-        } else {
-            name.to_owned()
-        };
-        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), &name, output);
+        mj_core::golden::assert_platform_golden(env!("CARGO_MANIFEST_DIR"), name, output);
     }
 
     #[test]
