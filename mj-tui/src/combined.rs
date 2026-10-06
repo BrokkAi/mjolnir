@@ -955,7 +955,7 @@ fn render_combined_themed(
                     if transcript_area.height > 3 {
                         dashboard.failure_drawn(&session_id);
                     }
-                    render_empty_transcript(
+                    let failure_body = render_empty_transcript(
                         frame,
                         transcript_area,
                         EmptyConversation::Failed,
@@ -969,6 +969,7 @@ fn render_combined_themed(
                         false,
                         false,
                     );
+                    push_failure_surface(dashboard, pane_id, failure_body);
                     render_empty_prompt_advice(
                         frame,
                         prompt_area,
@@ -986,6 +987,7 @@ fn render_combined_themed(
                     TransitionSurface {
                         transition,
                         failed,
+                        pane_id,
                         pane_focused: false,
                         title_lead: crate::pane_controls::pane_chrome_width(
                             dashboard,
@@ -1081,6 +1083,7 @@ fn render_combined_themed(
                 TransitionSurface {
                     transition,
                     failed,
+                    pane_id,
                     pane_focused: focus_borders,
                     title_lead: crate::pane_controls::pane_chrome_width(
                         dashboard,
@@ -1188,7 +1191,7 @@ fn render_combined_themed(
                     {
                         dashboard.failure_drawn(session_id);
                     }
-                    render_empty_transcript(
+                    let failure_body = render_empty_transcript(
                         frame,
                         transcript_area,
                         reason,
@@ -1204,6 +1207,7 @@ fn render_combined_themed(
                         focus_borders,
                         dashboard.pane_shows_pin_hint(pane_id),
                     );
+                    push_failure_surface(dashboard, pane_id, failure_body);
                     if opening {
                         // The real composer parks in the prompt band while the
                         // attach runs, so anything typed lands in the chat that
@@ -1329,6 +1333,10 @@ enum EmptyConversation {
 /// that has live sessions just needs one opened, and an attach that is still
 /// running needs nothing but a moment. Telling the second user there is no
 /// live session would be a plain lie — the pane above is listing them.
+///
+/// Returns the failure text's area when it draws the failed state: a failed
+/// session has no chat to register a transcript surface, so the caller
+/// registers this one to keep the error selectable for a bug report.
 #[allow(clippy::too_many_arguments)]
 fn render_empty_transcript(
     frame: &mut Frame,
@@ -1339,7 +1347,7 @@ fn render_empty_transcript(
     title_controls: u16,
     pane_focused: bool,
     pin_hint: bool,
-) {
+) -> Option<Rect> {
     if matches!(reason, EmptyConversation::Failed) {
         let panel = theme::panel(pane_focused)
             .title(" Session failed ")
@@ -1370,7 +1378,7 @@ fn render_empty_transcript(
                 .map(|line| Line::styled(line.to_owned(), theme::muted())),
         );
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
-        return;
+        return Some(body);
     }
     let mut panel = theme::panel(pane_focused).title(" Conversation ");
     if matches!(reason, EmptyConversation::Opening) {
@@ -1421,6 +1429,18 @@ fn render_empty_transcript(
             .alignment(ratatui::layout::Alignment::Center),
             hero,
         );
+    }
+    None
+}
+
+/// Registers a failed session's error text so a drag copies it like any other
+/// pane's text.
+fn push_failure_surface(dashboard: &mut DashboardState, pane_id: PaneId, body: Option<Rect>) {
+    if let Some(body) = body {
+        dashboard.frame_surfaces.push(SurfaceFrame::fixed(
+            SurfaceId::FailurePane(pane_id.raw()),
+            body,
+        ));
     }
 }
 
@@ -1594,11 +1614,12 @@ fn render_launch_standby_surface(
 /// conversation when the chat opens. Retiring and failed transitions have no
 /// conversation to type toward, so they keep the plain status panel.
 /// What one pane's transition panel reports: the operation under way, whether
-/// it failed, and whether the pane holding it has the keyboard.
+/// it failed, which pane holds it, and whether that pane has the keyboard.
 #[derive(Clone, Copy)]
 struct TransitionSurface {
     transition: SessionTransitionKind,
     failed: bool,
+    pane_id: PaneId,
     pane_focused: bool,
     /// Columns the pane chrome draws its label into at the left of the
     /// title row; the title starts after them.
@@ -1628,6 +1649,7 @@ fn render_transition_surface(
     let TransitionSurface {
         transition,
         failed,
+        pane_id,
         pane_focused,
         title_lead,
     } = surface;
@@ -1751,6 +1773,12 @@ fn render_transition_surface(
     } else {
         "This transition is owned by the daemon; select another session.".to_owned()
     };
+    let status = theme::panel(false).title(" Status ");
+    push_failure_surface(
+        dashboard,
+        pane_id,
+        failed.then(|| status.inner(prompt_area)),
+    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
@@ -1765,7 +1793,7 @@ fn render_transition_surface(
         ])
         .style(theme::muted())
         .wrap(Wrap { trim: true })
-        .block(theme::panel(false).title(" Status ")),
+        .block(status),
         prompt_area,
     );
 }
