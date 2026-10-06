@@ -12,7 +12,7 @@ Users must be able to select native sub-agents in Move and retry a failed sealed
 - [x] Trace Move selection and Claude configuration ownership.
 - [x] (2026-10-06) Fix Move policy selection and retained retry settings. Controller suite passed (1875); TUI suite passed except the expected golden action change, which passed after updating and rechecking its fixture. Workspace Clippy passed. Commit this coherent checkpoint.
 - [x] (2026-10-06) Fix effort-response model contamination and persist canonical aliases after successful startup restoration. Core tests passed (456 plus 2 integration tests), configuration regressions passed (15), worker binary/integration tests passed, and workspace plus final worker Clippy passed. Commit this coherent checkpoint.
-- [ ] Run final required checks and push both commits to upstream.
+- [x] (2026-10-06) Finish formatting, Clippy, unit, integration, binary, and documentation checks; push both fixes. Commits 652af909 and 45eb2acc reached origin/master through merge def2a40d.
 
 ## Surprises & Discoveries
 
@@ -26,7 +26,7 @@ Keep the sealed Move as the owner of retry settings and reject an explicitly dif
 
 ## Outcomes & Retrospective
 
-The TUI now sends its displayed policy explicitly and checks that confirmation matches it. The daemon takes omitted retry defaults from the sealed Move and accepts legacy equivalent policy spellings. Controller tests passed (1875), and the TUI tests passed (521) after the expected golden action update. Live recovery is complete; no further live session mutation is needed. Model implementation is complete. The full worker unit run passed 635 cases and found two failures: the expanded raw-ID fake affected the pin test, fixed by making that behavior opt-in; and a separate checkpoint ownership test failed once under parallel load and passed twice in isolation. All affected configuration tests (15), worker binary and integration targets, core tests, formatting, and Clippy passed. Documentation-test checks and push remain.
+The TUI now sends its displayed policy explicitly and checks that confirmation matches it. The daemon takes omitted retry defaults from the sealed Move and accepts legacy equivalent policy spellings. Controller tests passed (1875), and the TUI tests passed (521) after the expected golden action update. Live recovery is complete; no further live session mutation is needed. Model implementation is complete. The full worker unit run passed 635 cases and found two failures: the expanded raw-ID fake affected the pin test, fixed by making that behavior opt-in; and a separate checkpoint ownership test failed once under parallel load and passed twice in isolation. All affected configuration tests (15), worker binary and integration targets, core tests, formatting, and Clippy passed. Documentation tests passed for all four touched crates. Both code fixes are pushed to origin/master.
 
 ## Context and Orientation
 
@@ -64,4 +64,6 @@ Revision: user confirmed explicit Native selection in the TUI. Discarded unrelat
 
 Revision: Move implementation validated with the full controller and TUI suites, including the expected golden request change. The model fix additionally persists aliases accepted during startup, after session readiness, and checks the recovered journal value.
 
-Revision: model identity regressions and remaining binary/integration targets passed. The original Fable API refusal remains unreproduced; the code fixes the verified ownership and canonicalization defects without inventing model-family mappings. Documentation checks and upstream push remain.
+Revision: model identity regressions and remaining binary/integration targets passed. The original Fable API refusal remains unreproduced; the code fixes the verified ownership and canonicalization defects without inventing model-family mappings. Documentation checks completed and both code fixes were pushed.
+
+Revision: completion recorded. The first push was rejected because upstream advanced. Fetched and merged origin/master normally (def2a40d), confirmed the upstream changes touched none of the fix files, and pushed successfully. No rebase, branch change, or force push was used.
