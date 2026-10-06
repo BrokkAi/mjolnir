@@ -300,17 +300,23 @@ impl ApiClient {
 
     pub(crate) async fn github_token(
         &self,
-        owner: &str,
-        repository: Option<&str>,
+        owner: Option<&str>,
+        repositories: &[String],
     ) -> Result<String> {
-        let mut request = self
+        let mut query = Vec::with_capacity(repositories.len() + usize::from(owner.is_some()));
+        if let Some(owner) = owner {
+            query.push(("owner", owner));
+        }
+        query.extend(
+            repositories
+                .iter()
+                .map(|repository| ("repo", repository.as_str())),
+        );
+        let request = self
             .http
             .get(self.url("/github-token"))
-            .query(&[("owner", owner)])
+            .query(&query)
             .timeout(REQUEST_TIMEOUT);
-        if let Some(repository) = repository {
-            request = request.query(&[("repo", repository)]);
-        }
         let response = self.send(request).await?;
         Ok(decode::<GithubTokenResponse>(response).await?.token)
     }

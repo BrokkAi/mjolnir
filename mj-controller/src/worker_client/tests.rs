@@ -749,6 +749,7 @@ for line in sys.stdin:
         profile_home: std::path::PathBuf::new(),
         authenticates_with_api_key: true,
         sync_github_token: true,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Isolated,
         spec,
     };
@@ -789,6 +790,7 @@ async fn publishing_new_targets_starts_reconciliation_without_waiting_for_the_ti
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }]);
@@ -812,6 +814,7 @@ async fn publishing_changed_targets_reconciles_only_the_affected_profile() {
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -944,6 +947,7 @@ fn skills_sync_target(profile_home: &std::path::Path) -> CredentialSyncTarget {
         profile_home: profile_home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     }
@@ -1296,6 +1300,7 @@ fn codex_sync_target(
         profile_home: home.to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("sh", ["-c", "exit 1"]),
     };
@@ -1415,6 +1420,7 @@ async fn credential_sync_preempted_by_lifecycle_does_not_report_a_login_result()
         profile_home: profile.path().to_path_buf(),
         authenticates_with_api_key: false,
         sync_github_token: false,
+        github_app_configured: false,
         skills_scope: mj_core::skills::SkillsScope::Localhost,
         spec: CommandSpec::new("must-not-start-a-proxy", Vec::<String>::new()),
     };

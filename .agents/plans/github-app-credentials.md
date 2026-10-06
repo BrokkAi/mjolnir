@@ -4,7 +4,7 @@ This ExecPlan is a living document and follows `.agents/PLANS.md`. Keep its prog
 
 ## Purpose / Big Picture
 
-After this change, a Mjolnir controller can use a configured GitHub App to authenticate repository clones and pushes without placing the App private key or installation tokens in session checkpoints or the database. Owners may map directly to installation IDs or let the controller discover installations through GitHub. A session using more than one installation is rejected before creation. Operators and CI scripts can run `mj github-token --owner LOGIN` or `mj github-token --repo OWNER/REPO` to obtain a currently valid token through the daemon's shared cache.
+After this change, a Mjolnir controller can use a configured GitHub App to authenticate repository clones and pushes without placing the App private key or installation tokens in session checkpoints or the database. Owners may map directly to installation IDs or let the controller discover installations through GitHub. A session using more than one installation is rejected before creation, and its token is limited to the bundle's repositories. Operators and CI scripts can run `mj github-token --owner LOGIN` for an installation-wide token or repeat `mj github-token --repo OWNER/REPO` for a token scoped to repositories from one installation.
 
 The visible proof is a successful token command against an App installation, an actionable error when App configuration is absent, and tests showing token signing, refresh, lookup, session selection, and live relay delivery.
 
@@ -17,6 +17,14 @@ The visible proof is a successful token command against an App installation, an 
 - [x] (2026-10-05) Add `mj github-token` and user-facing configuration/setup documentation.
 - [x] (2026-10-05) Run all touched crate tests, `mbx clippy --all-targets -- -D warnings`, and `mbx fmt --all -- --check`; fix findings.
 - [x] (2026-10-05) Review the final diff and commit the validated changes on the current branch; report the commit SHA in the agent handback.
+
+### Independent review follow-up
+
+- [x] (2026-10-05) Scope session and repository-selected tokens to sorted repository sets and include that scope in the cache key; keep owner-selected CLI tokens installation-wide.
+- [x] (2026-10-05) Route installation selection and HTTPS rewriting through the canonical GitHub repository parser; cover SSH aliases and mixed-installation rejection.
+- [x] (2026-10-05) Check private-key ownership and read permissions before reading from the opened file; tell operators to fix ownership and run `chmod 600`.
+- [x] (2026-10-05) Let legacy credential sync branch before loading controller/session state when the published target has no GitHub App configuration.
+- [x] (2026-10-05) Re-run all touched crate tests, workspace clippy, and format validation after the review fixes.
 
 ## Surprises & Discoveries
 
@@ -31,6 +39,10 @@ The visible proof is a successful token command against an App installation, an 
 
 - Decision: use the existing `ring` crypto implementation and `base64` crate for RS256 JWT signing and PEM decoding, instead of adding a JWT library. The workspace already uses ring through rustls and has base64 as a direct dependency.
   Rationale: this avoids a second crypto implementation and a new JWT dependency while keeping JWT claims and signing explicit and testable.
+  Date/Author: 2026-10-05, Codex sub-agent.
+- Decision: scope session and `--repo` tokens with GitHub's `repositories` parameter, leave permissions unspecified so installation permissions apply, and key tokens by installation plus a normalized sorted repository set. `--owner` intentionally remains installation-wide.
+  Date/Author: 2026-10-05, Codex sub-agent.
+- Decision: publish whether App auth is configured on each credential-sync target so legacy sync can call its existing token lookup without loading controller configuration or session state.
   Date/Author: 2026-10-05, Codex sub-agent.
 - Decision: retain the existing environment/`gh auth token` lookup exactly when `[github.app]` is absent; App selection is based on the configured session bundle's GitHub owners and resolves all repository installations before accepting a multi-repository session.
   Rationale: this preserves existing setups while enforcing the decided one-installation-per-session v1 boundary.
@@ -59,7 +71,7 @@ Add a controller module that loads/parses RSA PEM keys, mints RS256 App JWTs wit
 
 Add a session-aware resolver that returns the legacy controller token if App credentials are absent. With App credentials, collect GitHub owner/repository pairs for the session bundle, resolve each installation, and reject the bundle if those repositories require different installations. Use the selected token for provisioning (including host Git cache setup), resume, and each session's periodic credential reconciliation. Preserve current local bare behavior: do not add it to periodic sync, and document that its App token can expire after at most one hour. Existing worker token files already supply the current credential to session export operations.
 
-Add authenticated daemon API support for minting a token by owner or repository. Run config reads, installation lookup, and HTTP requests through supervised background work. Add the `mj github-token` CLI command with a required choice of `--owner` or `--repo`, then document App setup, minimum permissions, the session installation limit, the bare-session expiry limit, and the command.
+Add authenticated daemon API support for minting a token by owner or one or more repositories. Run config reads, installation lookup, and HTTP requests through supervised background work. Add the `mj github-token` CLI command with a required choice of `--owner` or repeatable `--repo`, then document App setup, minimum permissions, the session installation limit, the bare-session expiry limit, and the command.
 
 Add behavior tests for default config compatibility, JWT claims/signature, lookup with mocked HTTP, cache and refresh timing, multi-installation rejection, relay delivery of a refreshed token, and the command/API behavior. Keep any new fixtures and tests within the owning crates.
 
@@ -81,4 +93,4 @@ The background investigation, including the exact existing token-sync and worker
 
 ## Interfaces and Dependencies
 
-Expose a typed optional GitHub App config through `mj_core::config::Config`. In `mj-controller`, provide a controller-owned provider with operations equivalent to `token_for_repo(owner, repo)`, `token_for_owner(owner)`, and `installation_for_bundle(bundle)`. Keep the private key, HTTP transport, clock, and token cache inside the controller provider. Extend the existing daemon backend/API contract rather than letting the CLI read controller credentials directly. The only crypto addition is a direct workspace dependency on the already-used `ring` crate; use its RSA PKCS#1 SHA-256 signer and the existing `base64` crate for JWT encoding and PEM decoding.
+Expose a typed optional GitHub App config through `mj_core::config::Config`. In `mj-controller`, provide a controller-owned provider with operations equivalent to `token_for_repositories(owner_repo_pairs)`, `token_for_owner(owner)`, and `installation_for_bundle(bundle)`. Keep the private key, HTTP transport, clock, and token cache inside the controller provider. Extend the existing daemon backend/API contract rather than letting the CLI read controller credentials directly. The only crypto addition is a direct workspace dependency on the already-used `ring` crate; use its RSA PKCS#1 SHA-256 signer and the existing `base64` crate for JWT encoding and PEM decoding.

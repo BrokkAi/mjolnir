@@ -2356,8 +2356,8 @@ impl SubagentBackend for ApiBackend {
 
     fn github_token(
         &self,
-        owner: String,
-        repository: Option<String>,
+        owner: Option<String>,
+        repositories: Vec<(String, String)>,
     ) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
             let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
@@ -2369,9 +2369,10 @@ impl SubagentBackend for ApiBackend {
                 )
             })?;
             let provider = crate::controller::GithubAppTokenProvider::shared(app)?;
-            match repository {
-                Some(repository) => provider.token_for_repo(&owner, &repository).await,
-                None => provider.token_for_owner(&owner).await,
+            match owner {
+                Some(owner) if repositories.is_empty() => provider.token_for_owner(&owner).await,
+                Some(_) => anyhow::bail!("choose an owner or repositories, not both"),
+                None => provider.token_for_repositories(&repositories).await,
             }
         })
     }

@@ -282,8 +282,11 @@ pub(super) async fn reconcile_profile_guarded(
                             return Ok(None);
                         }
                         let github_token = if target.sync_github_token {
-                            crate::controller::github_token_for_session(target.session_id.clone())
-                                .await?
+                            crate::controller::github_token_for_session(
+                                target.session_id.clone(),
+                                target.github_app_configured,
+                            )
+                            .await?
                         } else {
                             None
                         };
@@ -293,7 +296,11 @@ pub(super) async fn reconcile_profile_guarded(
                     .unwrap_or_else(|| Ok(None)),
                 None => {
                     let github_token = if target.sync_github_token {
-                        crate::controller::github_token_for_session(target.session_id.clone()).await
+                        crate::controller::github_token_for_session(
+                            target.session_id.clone(),
+                            target.github_app_configured,
+                        )
+                        .await
                     } else {
                         Ok(None)
                     };

@@ -21,12 +21,12 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
-    /// Return one currently valid App installation token for the owner or
-    /// repository named by the caller.
+    /// Return one currently valid token for an owner installation or a set of
+    /// repositories that resolve to one installation.
     fn github_token(
         &self,
-        _owner: String,
-        _repository: Option<String>,
+        _owner: Option<String>,
+        _repositories: Vec<(String, String)>,
     ) -> BoxFuture<'_, AnyResult<String>> {
         Box::pin(async {
             anyhow::bail!(

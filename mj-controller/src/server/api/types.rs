@@ -1,12 +1,10 @@
 use super::*;
 
 /// Query selecting the GitHub App installation whose token should be returned.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default)]
 pub struct GithubTokenQuery {
-    pub owner: String,
-    #[serde(default)]
-    pub repo: Option<String>,
+    pub owner: Option<String>,
+    pub repo: Vec<String>,
 }
 
 /// A currently valid installation access token. Callers must keep it out of

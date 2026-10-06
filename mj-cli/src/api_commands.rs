@@ -8,7 +8,7 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, ValueEnum};
 use mj_controller::server::api::{
     ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
@@ -808,9 +808,10 @@ pub(crate) struct GithubTokenArgs {
     /// GitHub owner login whose installation should receive a token.
     #[arg(long)]
     owner: Option<String>,
-    /// Repository in OWNER/NAME form.
-    #[arg(long)]
-    repo: Option<String>,
+    /// Repository in OWNER/NAME form. May be repeated to limit the token to
+    /// several repositories from one installation.
+    #[arg(long, action = clap::ArgAction::Append)]
+    repo: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1891,18 +1892,24 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
 
 /// Print a valid GitHub App installation token for a selected owner or repo.
 pub(crate) async fn github_token(args: GithubTokenArgs) -> Result<()> {
-    let (owner, repository) = match (args.owner, args.repo) {
-        (Some(owner), None) => (owner, None),
-        (None, Some(repo)) => {
-            let (owner, repository) = mj_core::remote_git::github_owner_repo(&repo)
-                .context("--repo must use OWNER/NAME form")?;
-            (owner, Some(repository))
+    let (owner, repositories) = match (args.owner, args.repo) {
+        (Some(owner), repositories) if repositories.is_empty() => (Some(owner), Vec::new()),
+        (None, repositories) if !repositories.is_empty() => {
+            for repository in &repositories {
+                let parsed = mj_core::remote_git::github_owner_repo(repository)
+                    .context("--repo values must use OWNER/NAME form")?;
+                ensure!(
+                    format!("{}/{}", parsed.0, parsed.1) == repository.as_str(),
+                    "--repo values must use OWNER/NAME form"
+                );
+            }
+            (None, repositories)
         }
-        _ => bail!("supply exactly one of --owner or --repo"),
+        _ => bail!("supply exactly one of --owner or one or more --repo values"),
     };
     let token = ApiClient::connect()
         .await?
-        .github_token(&owner, repository.as_deref())
+        .github_token(owner.as_deref(), &repositories)
         .await?;
     println!("{token}");
     Ok(())
@@ -2114,7 +2121,7 @@ mod tests {
             panic!("expected github-token command");
         };
         assert_eq!(owner.owner.as_deref(), Some("acme"));
-        assert_eq!(owner.repo, None);
+        assert!(owner.repo.is_empty());
 
         let Some(Command::GithubToken(repo)) =
             Cli::try_parse_from(["mj", "github-token", "--repo", "acme/project"])
@@ -2124,7 +2131,21 @@ mod tests {
             panic!("expected github-token command");
         };
         assert_eq!(repo.owner, None);
-        assert_eq!(repo.repo.as_deref(), Some("acme/project"));
+        assert_eq!(repo.repo, ["acme/project"]);
+        let Some(Command::GithubToken(repositories)) = Cli::try_parse_from([
+            "mj",
+            "github-token",
+            "--repo",
+            "acme/project",
+            "--repo",
+            "acme/tools",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected github-token command");
+        };
+        assert_eq!(repositories.repo, ["acme/project", "acme/tools"]);
         assert!(Cli::try_parse_from(["mj", "github-token"]).is_err());
         assert!(
             Cli::try_parse_from([

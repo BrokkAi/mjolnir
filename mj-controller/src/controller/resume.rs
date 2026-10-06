@@ -442,14 +442,16 @@ impl Controller {
                 .await
                 .context("replacement GitHub repository source task failed")??;
                 let provider = GithubAppTokenProvider::shared(app)?;
-                let installation = provider
+                let scope = provider
                     .token_for_owner_repo_pairs(&bundle_id, &repositories)
                     .await
                     .map_err(super::GithubBundleSelectionError::into_anyhow)?;
-                match installation {
-                    Some(installation) => {
-                        Some(provider.token_for_installation(installation).await?)
-                    }
+                match scope {
+                    Some(scope) => Some(
+                        provider
+                            .token_for_installation(scope.installation_id, &scope.repositories)
+                            .await?,
+                    ),
                     None => None,
                 }
             } else {

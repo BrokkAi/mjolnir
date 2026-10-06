@@ -72,16 +72,21 @@ async fn github_token_route_returns_the_selected_installation_token() {
     );
     let response = app
         .oneshot(
-            bearer(Request::get("/api/v1/github-token?owner=acme&repo=project"))
-                .body(Body::empty())
-                .unwrap(),
+            bearer(Request::get(
+                "/api/v1/github-token?repo=acme%2Fproject&repo=acme%2Ftools",
+            ))
+            .body(Body::empty())
+            .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
-    assert_eq!(response.headers()["cache-control"], "no-store");
+    let status = response.status();
+    let api_version = response.headers()[API_VERSION_HEADER].clone();
+    let cache_control = response.headers()["cache-control"].clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(api_version, API_VERSION);
+    assert_eq!(cache_control, "no-store");
     let token: GithubTokenResponse = serde_json::from_slice(&body).unwrap();
     assert_eq!(token.token, "installation-secret");
 }
@@ -605,8 +610,8 @@ impl FakeBackend {
 impl SubagentBackend for FakeBackend {
     fn github_token(
         &self,
-        _owner: String,
-        _repository: Option<String>,
+        _owner: Option<String>,
+        _repositories: Vec<(String, String)>,
     ) -> BoxFuture<'_, AnyResult<String>> {
         let token = self.installation_token.clone();
         Box::pin(async move {

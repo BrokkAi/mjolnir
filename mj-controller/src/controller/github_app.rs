@@ -37,7 +37,19 @@ pub(crate) struct GithubAppTokenProvider {
     now: Clock,
     signing_key: tokio::sync::OnceCell<Arc<RsaKeyPair>>,
     installations: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<Option<u64>>>>>,
-    tokens: Mutex<BTreeMap<u64, Arc<tokio::sync::Mutex<Option<TokenEntry>>>>>,
+    tokens: Mutex<BTreeMap<TokenCacheKey, Arc<tokio::sync::Mutex<Option<TokenEntry>>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TokenCacheKey {
+    installation_id: u64,
+    repositories: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InstallationScope {
+    pub(super) installation_id: u64,
+    pub(super) repositories: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -124,14 +136,22 @@ impl GithubAppTokenProvider {
         }
     }
 
-    pub(crate) async fn token_for_repo(&self, owner: &str, repository: &str) -> Result<String> {
-        let installation_id = self.installation_for_owner(owner, Some(repository)).await?;
-        self.token_for_installation(installation_id).await
-    }
-
     pub(crate) async fn token_for_owner(&self, owner: &str) -> Result<String> {
         let installation_id = self.installation_for_owner(owner, None).await?;
-        self.token_for_installation(installation_id).await
+        self.token_for_installation(installation_id, &[]).await
+    }
+
+    pub(crate) async fn token_for_repositories(
+        &self,
+        repositories: &[(String, String)],
+    ) -> Result<String> {
+        let scope = self
+            .resolve_repository_scope(None, repositories)
+            .await
+            .map_err(GithubBundleSelectionError::into_anyhow)?
+            .ok_or_else(|| anyhow!("at least one repository is required"))?;
+        self.token_for_installation(scope.installation_id, &scope.repositories)
+            .await
     }
 
     pub(crate) async fn installation_for_repo(&self, owner: &str, repository: &str) -> Result<u64> {
@@ -142,7 +162,16 @@ impl GithubAppTokenProvider {
         &self,
         bundle_id: &str,
         repositories: &[(String, String)],
-    ) -> std::result::Result<Option<u64>, GithubBundleSelectionError> {
+    ) -> std::result::Result<Option<InstallationScope>, GithubBundleSelectionError> {
+        self.resolve_repository_scope(Some(bundle_id), repositories)
+            .await
+    }
+
+    async fn resolve_repository_scope(
+        &self,
+        bundle_id: Option<&str>,
+        repositories: &[(String, String)],
+    ) -> std::result::Result<Option<InstallationScope>, GithubBundleSelectionError> {
         let mut selected = BTreeMap::<u64, Vec<String>>::new();
         for (owner, repository) in repositories {
             let installation_id = self
@@ -160,11 +189,31 @@ impl GithubAppTokenProvider {
                 .map(|(id, repositories)| format!("installation {id}: {}", repositories.join(", ")))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(GithubBundleSelectionError::MultipleInstallations(format!(
-                "bundle {bundle_id:?} requires more than one GitHub App installation; v1 supports one installation per session ({detail})"
-            )));
+            let message = if let Some(bundle_id) = bundle_id {
+                format!(
+                    "bundle {bundle_id:?} requires more than one GitHub App installation; v1 supports one installation per session ({detail})"
+                )
+            } else {
+                format!(
+                    "selected repositories span more than one GitHub App installation ({detail})"
+                )
+            };
+            return Err(GithubBundleSelectionError::MultipleInstallations(message));
         }
-        Ok(selected.keys().next().copied())
+        let Some((installation_id, repositories)) = selected.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut repository_names = repositories
+            .into_iter()
+            .filter_map(|repository| repository.split_once('/').map(|(_, name)| name.to_owned()))
+            .map(|repository| repository.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        repository_names.sort();
+        repository_names.dedup();
+        Ok(Some(InstallationScope {
+            installation_id,
+            repositories: repository_names,
+        }))
     }
 
     async fn installation_for_owner(&self, owner: &str, repo: Option<&str>) -> Result<u64> {
@@ -269,8 +318,22 @@ impl GithubAppTokenProvider {
         Ok(installation.id)
     }
 
-    pub(crate) async fn token_for_installation(&self, installation_id: u64) -> Result<String> {
+    pub(crate) async fn token_for_installation(
+        &self,
+        installation_id: u64,
+        repositories: &[String],
+    ) -> Result<String> {
         ensure!(installation_id != 0, "installation ID must be positive");
+        let mut repositories = repositories
+            .iter()
+            .map(|repository| repository.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        repositories.sort();
+        repositories.dedup();
+        let key = TokenCacheKey {
+            installation_id,
+            repositories: repositories.clone(),
+        };
         let cache = {
             let mut tokens = self
                 .tokens
@@ -278,7 +341,7 @@ impl GithubAppTokenProvider {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(
                 tokens
-                    .entry(installation_id)
+                    .entry(key)
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
             )
         };
@@ -293,7 +356,10 @@ impl GithubAppTokenProvider {
             return Ok(entry.token.clone());
         }
 
-        match self.mint_installation_token(installation_id).await {
+        match self
+            .mint_installation_token(installation_id, &repositories)
+            .await
+        {
             Ok(entry) => {
                 let token = entry.token.clone();
                 *cached = Some(entry);
@@ -315,8 +381,17 @@ impl GithubAppTokenProvider {
         }
     }
 
-    async fn mint_installation_token(&self, installation_id: u64) -> Result<TokenEntry> {
+    async fn mint_installation_token(
+        &self,
+        installation_id: u64,
+        repositories: &[String],
+    ) -> Result<TokenEntry> {
         let jwt = self.app_jwt().await?;
+        let body = if repositories.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "repositories": repositories })
+        };
         let response = self
             .http
             .post(self.api_url(&[
@@ -328,7 +403,7 @@ impl GithubAppTokenProvider {
             .bearer_auth(jwt)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .json(&serde_json::json!({}))
+            .json(&body)
             .send()
             .await
             .context("reach the GitHub App access-token API")?;
@@ -373,12 +448,9 @@ impl GithubAppTokenProvider {
             .signing_key
             .get_or_try_init(|| async move {
                 let path = config.private_key_path.clone();
-                let bytes = tokio::task::spawn_blocking(move || {
-                    fs::read(&path)
-                        .with_context(|| format!("read GitHub App private key {}", path.display()))
-                })
-                .await
-                .context("GitHub App private-key read task failed")??;
+                let bytes = tokio::task::spawn_blocking(move || read_private_key_file(&path))
+                    .await
+                    .context("GitHub App private-key read task failed")??;
                 parse_private_key(&bytes).map(Arc::new)
             })
             .await?;
@@ -393,6 +465,49 @@ impl GithubAppTokenProvider {
             .extend(segments.iter().copied());
         Ok(url)
     }
+}
+
+#[cfg(unix)]
+fn read_private_key_file(path: &std::path::Path) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open GitHub App private key {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect GitHub App private key {}", path.display()))?;
+    validate_private_key_metadata(
+        path,
+        metadata.uid(),
+        metadata.mode(),
+        // SAFETY: geteuid reads the effective UID of the current daemon process.
+        unsafe { libc::geteuid() },
+    )?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read GitHub App private key {}", path.display()))?;
+    Ok(bytes)
+}
+
+#[cfg(not(unix))]
+fn read_private_key_file(path: &std::path::Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("read GitHub App private key {}", path.display()))
+}
+
+fn validate_private_key_metadata(
+    path: &std::path::Path,
+    file_uid: u32,
+    mode: u32,
+    daemon_uid: u32,
+) -> Result<()> {
+    ensure!(
+        file_uid == daemon_uid && mode & 0o044 == 0,
+        "GitHub App private key {} must be owned by daemon UID {daemon_uid} and not readable by group or others; fix its ownership and run `chmod 600 -- {}`",
+        path.display(),
+        path.display(),
+    );
+    Ok(())
 }
 
 /// Why a bundle's GitHub repositories could not select one App installation.
@@ -520,7 +635,7 @@ impl Controller {
         .await
         .context("GitHub repository source task failed")??;
         let provider = GithubAppTokenProvider::shared(app)?;
-        let Some(installation_id) = provider
+        let Some(scope) = provider
             .token_for_owner_repo_pairs(&bundle_id, &repositories)
             .await
             .map_err(GithubBundleSelectionError::into_anyhow)?
@@ -528,13 +643,21 @@ impl Controller {
             return Ok(None);
         };
         provider
-            .token_for_installation(installation_id)
+            .token_for_installation(scope.installation_id, &scope.repositories)
             .await
             .map(Some)
     }
 }
 
-pub(crate) async fn github_token_for_session(session_id: String) -> Result<Option<String>> {
+pub(crate) async fn github_token_for_session(
+    session_id: String,
+    github_app_configured: bool,
+) -> Result<Option<String>> {
+    if !github_app_configured {
+        return tokio::task::spawn_blocking(controller_github_token)
+            .await
+            .context("GitHub token lookup task failed");
+    }
     let controller = tokio::task::spawn_blocking(Controller::load)
         .await
         .context("load controller for GitHub credential sync")??;
@@ -707,6 +830,7 @@ mod tests {
         now: Arc<AtomicU64>,
         lookups: Arc<AtomicU64>,
         exchanges: Arc<AtomicU64>,
+        scopes: Arc<Mutex<Vec<Vec<String>>>>,
     }
 
     async fn installation(State(fake): State<FakeGithub>) -> Json<Value> {
@@ -714,8 +838,19 @@ mod tests {
         Json(serde_json::json!({ "id": 77331 }))
     }
 
-    async fn access_token(State(fake): State<FakeGithub>) -> Json<Value> {
+    async fn access_token(State(fake): State<FakeGithub>, Json(body): Json<Value>) -> Json<Value> {
         let exchange = fake.exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+        let repositories = body
+            .get("repositories")
+            .and_then(Value::as_array)
+            .map(|repositories| {
+                repositories
+                    .iter()
+                    .map(|repository| repository.as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        fake.scopes.lock().unwrap().push(repositories);
         Json(serde_json::json!({
             "token": format!("test-installation-token-{exchange}"),
             "expires_at": chrono::DateTime::from_timestamp(
@@ -786,6 +921,36 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn private_key_permissions_require_daemon_ownership_and_private_mode() {
+        let path = std::path::Path::new("/var/lib/mj/github-app.pem");
+        assert!(validate_private_key_metadata(path, 1000, 0o100600, 1000).is_ok());
+
+        for (uid, mode) in [(1000, 0o100640), (1001, 0o100600)] {
+            let error = validate_private_key_metadata(path, uid, mode, 1000)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(path.to_str().unwrap()));
+            assert!(error.contains("chmod 600"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_file_check_rejects_group_read_permission() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("github-app.pem");
+        fs::write(&path, TEST_KEY).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let error = read_private_key_file(&path).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(path.to_str().unwrap()));
+        assert!(message.contains("chmod 600"));
+    }
+
     #[tokio::test]
     async fn installation_lookup_and_token_cache_refresh_below_ten_minutes() {
         let now = Arc::new(AtomicU64::new(1_800_000_000));
@@ -793,6 +958,7 @@ mod tests {
             now: Arc::clone(&now),
             lookups: Arc::new(AtomicU64::new(0)),
             exchanges: Arc::new(AtomicU64::new(0)),
+            scopes: Arc::new(Mutex::new(Vec::new())),
         };
         let (api_base, server) = test_server(fake.clone()).await;
         let now_for_clock = Arc::clone(&now);
@@ -813,29 +979,95 @@ mod tests {
             .set(Arc::new(parse_private_key(TEST_KEY).unwrap()));
         assert!(seeded.is_ok());
         assert_eq!(
-            provider.token_for_repo("Acme", "widget").await.unwrap(),
+            provider
+                .token_for_repositories(&[("Acme".into(), "widget".into())])
+                .await
+                .unwrap(),
             "test-installation-token-1"
         );
         assert_eq!(
-            provider.token_for_repo("acme", "widget").await.unwrap(),
+            provider
+                .token_for_repositories(&[("acme".into(), "widget".into())])
+                .await
+                .unwrap(),
             "test-installation-token-1"
         );
         assert_eq!(fake.lookups.load(Ordering::SeqCst), 1);
         assert_eq!(fake.exchanges.load(Ordering::SeqCst), 1);
+        assert_eq!(*fake.scopes.lock().unwrap(), [vec!["widget".to_owned()]]);
 
         now.store(1_800_000_000 + 3600 - 601, Ordering::SeqCst);
         assert_eq!(
-            provider.token_for_repo("acme", "widget").await.unwrap(),
+            provider
+                .token_for_repositories(&[("acme".into(), "widget".into())])
+                .await
+                .unwrap(),
             "test-installation-token-1"
         );
         assert_eq!(fake.exchanges.load(Ordering::SeqCst), 1);
 
         now.store(1_800_000_000 + 3600 - 599, Ordering::SeqCst);
         assert_eq!(
-            provider.token_for_repo("acme", "widget").await.unwrap(),
+            provider
+                .token_for_repositories(&[("acme".into(), "widget".into())])
+                .await
+                .unwrap(),
             "test-installation-token-2"
         );
         assert_eq!(fake.exchanges.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_cache_separates_installation_wide_and_sorted_repository_scopes() {
+        let fake = FakeGithub {
+            now: Arc::new(AtomicU64::new(1_800_000_000)),
+            lookups: Arc::new(AtomicU64::new(0)),
+            exchanges: Arc::new(AtomicU64::new(0)),
+            scopes: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (api_base, server) = test_server(fake.clone()).await;
+        let mut config = test_config();
+        config.installations.insert("acme".into(), 77331);
+        let provider = GithubAppTokenProvider::with_test_transport(
+            config,
+            reqwest::Client::new(),
+            api_base,
+            Arc::new(|| UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+        );
+        let seeded = provider
+            .signing_key
+            .set(Arc::new(parse_private_key(TEST_KEY).unwrap()));
+        assert!(seeded.is_ok());
+
+        let first_scope = vec!["Zebra".to_owned(), "Alpha".to_owned()];
+        let reordered_scope = vec!["alpha".to_owned(), "zebra".to_owned()];
+        let first = provider
+            .token_for_installation(77331, &first_scope)
+            .await
+            .unwrap();
+        let cached = provider
+            .token_for_installation(77331, &reordered_scope)
+            .await
+            .unwrap();
+        let narrower = provider
+            .token_for_installation(77331, &["alpha".to_owned()])
+            .await
+            .unwrap();
+        let installation_wide = provider.token_for_installation(77331, &[]).await.unwrap();
+
+        assert_eq!(first, cached);
+        assert_ne!(first, narrower);
+        assert_ne!(narrower, installation_wide);
+        assert_eq!(fake.exchanges.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            *fake.scopes.lock().unwrap(),
+            [
+                vec!["alpha".to_owned(), "zebra".to_owned()],
+                vec!["alpha".to_owned()],
+                vec![]
+            ]
+        );
         server.abort();
     }
 
@@ -845,6 +1077,7 @@ mod tests {
             now: Arc::new(AtomicU64::new(1_800_000_000)),
             lookups: Arc::new(AtomicU64::new(0)),
             exchanges: Arc::new(AtomicU64::new(0)),
+            scopes: Arc::new(Mutex::new(Vec::new())),
         };
         let (api_base, server) = test_server(fake.clone()).await;
         let now = Arc::clone(&fake.now);
@@ -891,7 +1124,7 @@ mod tests {
                     },
                     ProjectRepository {
                         id: "shared".into(),
-                        github: Some("widgets/shared".into()),
+                        github: Some("git@github.com:widgets/shared.git".into()),
                         destination: "shared".into(),
                         ..ProjectRepository::default()
                     },
@@ -912,6 +1145,17 @@ mod tests {
         };
         assert!(message.contains("one installation per session"));
         assert!(message.contains("acme/app") && message.contains("widgets/shared"));
+
+        let provider =
+            GithubAppTokenProvider::shared(controller.config.github.app.as_ref().unwrap()).unwrap();
+        let cli_error = provider
+            .token_for_repositories(&[
+                ("acme".into(), "app".into()),
+                ("widgets".into(), "shared".into()),
+            ])
+            .await
+            .unwrap_err();
+        assert!(format!("{cli_error:#}").contains("span more than one GitHub App installation"));
     }
 
     fn rsa_public_components(der: &[u8]) -> (&[u8], &[u8]) {

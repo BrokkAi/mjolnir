@@ -300,9 +300,11 @@ fn claude_credential_evidence_requires_a_nonempty_login_secret() {
 #[test]
 fn github_origin_parser_accepts_standard_https_and_ssh_forms() {
     for origin in [
+        "github.com:BrokkAi/hel",
         "https://github.com/BrokkAi/hel.git",
         "git@github.com:BrokkAi/hel.git",
         "ssh://git@github.com/BrokkAi/hel.git",
+        "ssh://git@ssh.github.com:443/BrokkAi/hel.git",
     ] {
         assert_eq!(
             github_repository_from_origin(origin),

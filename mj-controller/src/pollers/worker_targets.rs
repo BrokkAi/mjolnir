@@ -133,6 +133,7 @@ pub(crate) fn credential_sync_targets_from_sources(
                 profile_home: profile.home.clone(),
                 authenticates_with_api_key: *schemes.get(&session.last_profile)?,
                 sync_github_token,
+                github_app_configured: controller.config.github.app.is_some(),
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })

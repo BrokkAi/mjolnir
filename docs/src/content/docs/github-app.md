@@ -49,11 +49,12 @@ database or session checkpoints.
 
 Each session can use repositories from one GitHub App installation. Session
 creation reports an error when its bundle needs more than one installation.
-Installation tokens are cached by installation and refreshed when fewer than
-10 minutes of validity remain. Running remote and container sessions receive
-the refreshed token through credential sync. Local bare sessions are not
-periodically refreshed, so an App token used there expires within at most one
-hour.
+Session tokens are limited to the repositories in that bundle; the controller
+keeps a separate cache entry for each installation and sorted repository set.
+Tokens refresh when fewer than 10 minutes of validity remain. Running remote
+and container sessions receive the refreshed token through credential sync.
+Local bare sessions are not periodically refreshed, so an App token used there
+expires within at most one hour.
 
 Use the daemon's shared cache to obtain a token for host-side CI or automation:
 
@@ -62,11 +63,16 @@ export GH_TOKEN="$(mj github-token --owner acme)"
 gh api /user
 ```
 
-Or select the installation by repository:
+`--owner` returns an installation-wide token. Use `--repo` to restrict a token
+to the selected repository, or repeat it to select several repositories from
+the same installation:
 
 ```sh
 export GH_TOKEN="$(mj github-token --repo acme/project)"
+export GH_TOKEN="$(mj github-token --repo acme/project --repo acme/tools)"
 ```
+
+The command rejects repository sets that span installations.
 
 The command requires a running daemon and a configured App. Its output is a
 credential: keep it out of logs and discard it when the job finishes.
