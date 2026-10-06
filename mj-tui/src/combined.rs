@@ -580,9 +580,12 @@ fn render_combined_themed(
                 standby.desired_prompt_height(focused_width)
             })
     } else if standby_drawn && let Some(session_id) = selected_session_id.as_deref() {
+        let note = selected_transition
+            .as_ref()
+            .and_then(|(session_id, kind, _)| standby_note(dashboard, session_id, *kind));
         dashboard
             .standby_prompt_mut(session_id)
-            .desired_prompt_height(focused_width)
+            .desired_standby_height(focused_width, note.as_deref())
     } else if selected_transition.is_some() {
         PROMPT_MINIMUM
     } else {
@@ -1497,16 +1500,39 @@ fn render_empty_prompt_advice(
     );
 }
 
+/// The cancel chord a Starting or Resuming standby shows in its notice box.
+/// Layout sizes the band and the transition surface draws it from this one
+/// answer, so the box always has its rows.
+fn standby_note(
+    dashboard: &DashboardState,
+    session_id: &str,
+    transition: SessionTransitionKind,
+) -> Option<String> {
+    dashboard
+        .session_operations
+        .get(session_id)
+        .is_some_and(|operation| operation.cancellable)
+        .then(|| {
+            format!(
+                "{} to cancel {}.",
+                dashboard
+                    .first_key_label(crate::CommandId::CancelOperation)
+                    .unwrap_or_else(|| "The cancel key".to_owned()),
+                transition.label().to_lowercase()
+            )
+        })
+}
+
 /// Draws the session's standby composer — the real chat prompt — into the
 /// prompt band, and merges its surfaces into the dashboard's so clicks and
 /// selections inside the band behave like an attached chat's. `note` adds a
-/// left-aligned line to the band's bottom border.
+/// message to the notice box above the composer.
 fn draw_standby_prompt(
     frame: &mut Frame,
     prompt_area: Rect,
     dashboard: &mut DashboardState,
     session_id: &str,
-    note: Option<Line<'static>>,
+    note: Option<&str>,
 ) {
     let focused = dashboard.prompt_has_focus();
     let surfaces = {
@@ -1523,7 +1549,7 @@ fn draw_standby_band(
     prompt_area: Rect,
     standby: &mut ChatState,
     focused: bool,
-    note: Option<Line<'static>>,
+    note: Option<&str>,
 ) -> FrameSurfaces {
     standby.draw_prompt_band(frame, prompt_area, focused, note);
     standby.frame_surfaces().clone()
@@ -1715,22 +1741,8 @@ fn render_transition_surface(
         transcript_area,
     );
     if type_ahead {
-        let note = operation
-            .is_some_and(|operation| operation.cancellable)
-            .then(|| {
-                Line::styled(
-                    format!(
-                        " {} to cancel {} ",
-                        dashboard
-                            .first_key_label(crate::CommandId::CancelOperation)
-                            .unwrap_or_else(|| "the cancel key".to_owned()),
-                        transition.label().to_lowercase()
-                    ),
-                    theme::muted(),
-                )
-                .left_aligned()
-            });
-        draw_standby_prompt(frame, prompt_area, dashboard, session_id, note);
+        let note = standby_note(dashboard, session_id, transition);
+        draw_standby_prompt(frame, prompt_area, dashboard, session_id, note.as_deref());
         return;
     }
     let cancel_line = if !failed && operation.is_some_and(|operation| operation.cancellable) {
@@ -1979,10 +1991,10 @@ mod tests {
     }
 
     /// A Starting transition turns the prompt band into the standby composer —
-    /// the real chat prompt: the draft is on screen, the cancel chord moved
-    /// onto the pane's bottom border, and the old status panel is gone.
+    /// the real chat prompt: the draft is on screen, the cancel chord sits in
+    /// the notice box above it, and the old status panel is gone.
     #[test]
-    fn a_starting_transition_draws_the_standby_composer_with_the_cancel_chord_at_its_bottom() {
+    fn a_starting_transition_draws_the_standby_composer_with_the_cancel_chord_in_its_notice_box() {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.begin_session_operation(
             "session-1".into(),
@@ -2012,11 +2024,18 @@ mod tests {
                 .any(|line| line.contains("first message ahead")),
             "draft missing from {content:?}"
         );
-        // ...and the cancel chord sits on the pane's bottom border row.
+        // ...and the cancel chord has its own row in the notice box, not a
+        // slot on the composer's border where other hints can cover it.
         let border = &lines[prompt.bottom() as usize - 1];
         assert!(
-            border.contains("ctrl+b shift+c to cancel starting"),
-            "cancel chord missing from {border:?}"
+            !border.contains("to cancel starting"),
+            "cancel chord drawn on the border {border:?}"
+        );
+        assert!(
+            content
+                .iter()
+                .any(|line| line.contains("ctrl+b shift+c to cancel starting.")),
+            "cancel chord missing from {content:?}"
         );
         assert!(
             lines.iter().all(|line| !line.contains(" Status ")),
@@ -2287,6 +2306,11 @@ mod tests {
         standby.focus_prompt();
         let lines = render_combined_golden(&mut standby, 100, 40);
         append_combined_golden(&mut output, "empty standby composer", 100, 40, &lines);
+        append_pane_geometry(&mut output, &standby);
+        // Narrow enough that the cancel chord and the Enter hint once shared
+        // the composer's bottom border and drew over each other.
+        let lines = render_combined_golden(&mut standby, 60, 40);
+        append_combined_golden(&mut output, "narrow standby composer", 60, 40, &lines);
         append_pane_geometry(&mut output, &standby);
 
         let mut suspending = dashboard_with_session(running_session());

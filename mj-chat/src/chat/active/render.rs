@@ -468,22 +468,22 @@ pub(crate) fn test_footer(area: Rect) -> ChatFooter<'static> {
     }
 }
 
-/// Draws the composer band: the title, borders, queued-prompt previews,
-/// input, and cursor. The full chat render calls this for its ordinary
-/// prompt, and hosts call it through
-/// [`ChatState::draw_prompt_band`] to show the real composer while a session
-/// is not attached.
-///
-/// `note` adds a left-aligned line to the bottom border — the standby
-/// prompt's cancel chord; the ordinary render passes `None`.
-pub(crate) fn render_composer_band(
-    frame: &mut Frame,
-    prompt_area: Rect,
-    chat: &mut ChatState,
-    prompt_focused: bool,
-    note: Option<Line<'static>>,
-) {
-    let prompt_area = if let Some(feedback) = chat
+/// Rows of message text the notice box above the composer may hold; a longer
+/// message ends in an ellipsis on the last row.
+const NOTICE_BOX_MAX_ROWS: u16 = 3;
+
+/// The wrapped messages for the notice box above the composer, at most
+/// `max_rows` of them: this conversation's feedback, a standby composer's
+/// reason it cannot send yet, and the host's `note`. Measuring and drawing
+/// both come from here, so the band the host allocates always holds the box,
+/// and no message is ever drawn over the composer's border.
+fn composer_notice_rows(
+    chat: &ChatState,
+    note: Option<&str>,
+    width: u16,
+    max_rows: u16,
+) -> Vec<Line<'static>> {
+    let feedback = chat
         .feedback
         .current()
         .or_else(|| {
@@ -495,26 +495,92 @@ pub(crate) fn render_composer_band(
                     .join(" · ")
             })
         })
-        .or_else(|| chat.connection_feedback.clone())
-        .filter(|_| prompt_area.height > 3)
-    {
-        let feedback_area = Rect::new(prompt_area.x, prompt_area.y, prompt_area.width, 1);
+        .or_else(|| chat.connection_feedback.clone());
+    let standby = chat
+        .standby
+        .then_some("Sending opens when the session is live.");
+    let messages = feedback
+        .into_iter()
+        .chain(standby.map(str::to_owned))
+        .chain(note.map(str::to_owned))
+        .map(|text| Line::raw(sanitize_terminal_text(&text)))
+        .collect::<Vec<_>>();
+    if messages.is_empty() || max_rows == 0 {
+        return Vec::new();
+    }
+    // Borders and one column of padding on each side.
+    let text_width = width.saturating_sub(4).max(1);
+    let mut rows = crate::components::wrap_lines(messages, text_width);
+    if rows.len() > usize::from(max_rows) {
+        rows.truncate(usize::from(max_rows));
+        let last = rows.pop().expect("max_rows is at least one");
+        let mut text = last
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let ellipsis = theme::glyphs().ellipsis;
+        while !text.is_empty()
+            && display_width(&text) + display_width(ellipsis) > usize::from(text_width)
+        {
+            text.pop();
+        }
+        text.push_str(ellipsis);
+        rows.push(Line::raw(text));
+    }
+    rows
+}
+
+/// Rows the notice box above the composer needs at `width`, borders
+/// included; zero when there is nothing to say.
+pub(crate) fn notice_box_height(chat: &ChatState, note: Option<&str>, width: u16) -> u16 {
+    let rows = composer_notice_rows(chat, note, width, NOTICE_BOX_MAX_ROWS).len();
+    if rows == 0 {
+        0
+    } else {
+        u16::try_from(rows).unwrap_or(NOTICE_BOX_MAX_ROWS) + 2
+    }
+}
+
+/// Draws the composer band: the notice box, the title, borders,
+/// queued-prompt previews, input, and cursor. The full chat render calls this
+/// for its ordinary prompt, and hosts call it through
+/// [`ChatState::draw_prompt_band`] to show the real composer while a session
+/// is not attached.
+///
+/// `note` adds a host message to the notice box — the standby prompt's
+/// cancel chord; the ordinary render passes `None`.
+pub(crate) fn render_composer_band(
+    frame: &mut Frame,
+    prompt_area: Rect,
+    chat: &mut ChatState,
+    prompt_focused: bool,
+    note: Option<&str>,
+) {
+    // The composer keeps its border and one input row; the box takes what is
+    // left above it, up to its own maximum.
+    let notice_rows = composer_notice_rows(
+        chat,
+        note,
+        prompt_area.width,
+        NOTICE_BOX_MAX_ROWS.min(prompt_area.height.saturating_sub(3 + 2)),
+    );
+    let prompt_area = if notice_rows.is_empty() {
+        prompt_area
+    } else {
+        let height = u16::try_from(notice_rows.len()).unwrap_or(NOTICE_BOX_MAX_ROWS) + 2;
         frame.render_widget(
-            Paragraph::new(truncate_line_to_width(
-                Line::from(sanitize_terminal_text(&feedback)),
-                usize::from(prompt_area.width),
-            ))
-            .style(theme::muted()),
-            feedback_area,
+            Paragraph::new(notice_rows)
+                .style(theme::muted())
+                .block(theme::panel(false).padding(Padding::horizontal(1))),
+            Rect::new(prompt_area.x, prompt_area.y, prompt_area.width, height),
         );
         Rect::new(
             prompt_area.x,
-            prompt_area.y + 1,
+            prompt_area.y + height,
             prompt_area.width,
-            prompt_area.height - 1,
+            prompt_area.height - height,
         )
-    } else {
-        prompt_area
     };
     let prompt_width = prompt_content_width(prompt_area.width);
     let (prompt_title, activity_title, config_chips) = prompt_title_line(chat, prompt_area);
@@ -673,9 +739,6 @@ pub(crate) fn render_composer_band(
     if show_command_hints {
         prompt_block = prompt_block.title_bottom(command_hints.expect("presence checked"));
     }
-    if let Some(note) = note {
-        prompt_block = prompt_block.title_bottom(note);
-    }
     let prompt_inner = prompt_block.inner(prompt_area);
     chat.prompt_content_width = prompt_width;
     chat.voice_button_area = voice_button_area(prompt_area);
@@ -710,7 +773,7 @@ pub(crate) fn render_composer_band(
     } else if chat.input.is_empty() {
         vec![Line::from(Span::styled(
             if chat.standby {
-                "Type a draft · sending opens when the session is live"
+                "Type a draft"
             } else if chat.phase == WorkerPhase::Running {
                 "Add a follow-up while the agent works…"
             } else if chat.entries.is_empty()
@@ -897,7 +960,12 @@ pub(crate) fn prompt_title_line(
         chip_x += width - display_width(separator);
     }
     if !suffix.is_empty() {
-        spans.push(Span::raw(format!(" {suffix} ")));
+        // The state words stop before the activity spinner instead of
+        // running under it.
+        spans.push(Span::raw(truncate_to_width(
+            &format!(" {suffix} "),
+            chip_limit.saturating_sub(chip_x),
+        )));
     }
     let left_width = spans.iter().map(Span::width).sum::<usize>();
     let activity_title = chat.needs_animation().then(|| {

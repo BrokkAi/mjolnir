@@ -20,15 +20,15 @@
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭──────────────────────────────────────────────────────────╮
+│                                      ││ Sending opens when the session is live.                  │
+│                                      ││ ctrl+b shift+c to cancel resuming.                       │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ 🎙︎ ───────────────────────────────────────────────────────╮
-│                                      ││> Type a draft · sending opens when the session is live   │
+│                                      ││> Type a draft                                            │
 │                                      ││                                                          │
-│                                      │╰ ctrl+b shift+c to cancel resuming Enter  keeps the draft ╯
+│                                      │╰────────────────────────────────── Enter  keeps the draft ╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
 │                                      ││  Host / fleet  Targets  In Use                           │
 │                                      │╰──────────────────────────────────────────────────────────╯
@@ -39,7 +39,50 @@
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel resuming · : palette · ? keys
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 26 }; prompt=Rect { x: 40, y: 26, width: 60, height: 4 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 22 }; prompt=Rect { x: 40, y: 22, width: 60, height: 8 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
+
+=== narrow standby composer (60x40) ===
+╭ Workspaces ─────────────────────────── ✦ MJOLNIR v2.28.0 ╮
+│ default                                                ☰ │
+╰──────────────────────────────────────────────────────────╯
+╭ Sessions ───────────────────────────────────────── ▁   ▪ ╮
+│ Create   Open                                            │
+│hel ──────────────────────────────────────────────────────│
+│› ↻ ACP pretty name Resuming · waiting · 0s podman · c◇ ⋯ │
+╰──────────────────────────────────────────────────────────╯
+╭ Browse | Conversation  Transition · Resuming ─── ◇   ⋯ ? ╮
+│podman · ACP pretty name                                  │
+│Operation: Resuming                                       │
+│Current stage: waiting                                    │
+│Elapsed: 0s · Profile: codex-1                            │
+│                                                          │
+│Select another session to keep working.                   │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────╮
+│ Sending opens when the session is live.                  │
+│ ctrl+b shift+c to cancel resuming.                       │
+╰──────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────╮
+│> Type a draft                                            │
+│                                                          │
+╰────────────────────────────────── Enter  keeps the draft ╯
+╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
+│  Host / fleet  Targets  In Use                           │
+╰──────────────────────────────────────────────────────────╯
+╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│            Harness      Weekly      Resets  5H Resets    │
+│  claude-1  Claude Code  refreshing…                      │
+│  codex-1   Codex        refreshing…                      │
+│  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────────────────────────╯
+Tab pane │ ctrl+b then g sessions · : palette · ? keys
+layout: sessions=Rect { x: 0, y: 3, width: 60, height: 5 }; transcript=Rect { x: 0, y: 8, width: 60, height: 14 }; prompt=Rect { x: 0, y: 22, width: 60, height: 8 }; targets=Rect { x: 0, y: 30, width: 60, height: 3 }; quota=Rect { x: 0, y: 33, width: 60, height: 6 }
 
 === suspending status panel (100x40) ===
 ╭ Workspaces ─────── ✦ MJOLNIR v2.28.0 ╮╭ Browse | Conversation  Transition · Suspending ─ ◇   ⋯ ? ╮
@@ -101,10 +144,10 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭──────────────────────────────────────────────────────────╮
+│                                      ││ Sending opens when the session is live.                  │
+│                                      ││ ctrl+b shift+c to cancel starting.                       │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │                                      ││> a                                                       │
@@ -114,7 +157,7 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x
 │                                      ││  e                                                       │
 │                                      ││  f                                                       │
 │                                      ││  g                                                       │
-│                                      │╰ ctrl+b shift+c to cancel starting Enter  keeps the draft ╯
+│                                      │╰────────────────────────────────── Enter  keeps the draft ╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
 │                                      ││  Host / fleet  Targets  In Use                           │
 │                                      │╰──────────────────────────────────────────────────────────╯
@@ -125,8 +168,8 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel launch · q detach · : palette · ? keys
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 21 }; prompt=Rect { x: 40, y: 21, width: 60, height: 9 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
-desired prompt height: 9
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 17 }; prompt=Rect { x: 40, y: 17, width: 60, height: 13 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
+desired prompt height: 12
 standby prompt during suspension: false
 
 === prompt then maximized then standard pane allocation (100x40) ===
@@ -150,16 +193,16 @@ standby prompt during suspension: false
 │                                      ││                                                          │
 │                                      ││                                                          │
 │                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
-│                                      ││                                                          │
+│                                      │╰──────────────────────────────────────────────────────────╯
+│                                      │╭──────────────────────────────────────────────────────────╮
+│                                      ││ Sending opens when the session is live.                  │
+│                                      ││ ctrl+b shift+c to cancel starting.                       │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │                                      ││> first                                                   │
 │                                      ││  second                                                  │
 │                                      ││  third                                                   │
-│                                      │╰ ctrl+b shift+c to cancel starting Enter  keeps the draft ╯
+│                                      │╰────────────────────────────────── Enter  keeps the draft ╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
 │                                      ││  Host / fleet  Targets  In Use                           │
 │                                      │╰──────────────────────────────────────────────────────────╯
@@ -170,7 +213,7 @@ standby prompt during suspension: false
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · shift+c cancel launch · q detach · : palette · ? keys
-layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 25 }; prompt=Rect { x: 40, y: 25, width: 60, height: 5 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
+layout: sessions=Rect { x: 0, y: 3, width: 40, height: 36 }; transcript=Rect { x: 40, y: 0, width: 60, height: 21 }; prompt=Rect { x: 40, y: 21, width: 60, height: 9 }; targets=Rect { x: 40, y: 30, width: 60, height: 3 }; quota=Rect { x: 40, y: 33, width: 60, height: 6 }
 layout allocation: prompt=6; targets=15; sessions=10; quota=5; transcript=3
 
 === support panes side=Left sessions=Minimized threshold=80 (80x40) ===
