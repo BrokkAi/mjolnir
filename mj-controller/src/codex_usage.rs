@@ -5,14 +5,26 @@
 //! from the UI so protocol parsing and unavailable states remain testable.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs::File;
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mj_core::config::HarnessKind;
+#[cfg(unix)]
+use mj_core::harness_runtime::{
+    CODEX_CLI_ENTRYPOINT, LEASE_FILE, managed_harness_manifest_matches, pin,
+};
+use mj_core::harness_runtime::{managed_harness_cache_root, managed_harness_install_dir};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+#[cfg(unix)]
+use tokio::process::Command;
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
 // A cold Codex app-server start can be slow on busy machines. The client is
 // reused after initialization, so this primarily bounds the initial probe.
@@ -50,6 +62,7 @@ pub struct CodexUsageWindow {
 
 pub struct CodexUsageClient {
     child: Child,
+    _lease: File,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: StderrTail,
@@ -59,8 +72,16 @@ pub struct CodexUsageClient {
 }
 
 impl CodexUsageClient {
-    fn spawn(cwd: PathBuf, env: HashMap<String, String>) -> Result<Self, QueryError> {
-        let mut child = spawn_codex(cwd, env)?;
+    fn spawn(
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+        cache_root: Option<PathBuf>,
+    ) -> Result<Self, QueryError> {
+        let cache_root = match cache_root {
+            Some(root) => root,
+            None => process_managed_cache_root()?,
+        };
+        let (mut child, lease) = spawn_codex(cwd, env, cache_root)?;
 
         let stdin = child
             .stdin
@@ -77,6 +98,7 @@ impl CodexUsageClient {
         let (stderr, stderr_reader) = StderrTail::capture(stderr);
         Ok(Self {
             child,
+            _lease: lease,
             stdin,
             stdout: BufReader::new(stdout),
             stderr,
@@ -211,6 +233,9 @@ impl CodexUsageClient {
         if let Err(error) = self.child.wait().await {
             tracing::warn!(%error, "could not reap the Codex quota process");
         }
+        if let Err(error) = self._lease.unlock() {
+            tracing::warn!(%error, "could not release the managed Codex installation lease");
+        }
         self.stderr_reader
     }
 }
@@ -342,9 +367,10 @@ async fn prepare(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
+    cache_root: Option<PathBuf>,
 ) -> Result<&mut CodexUsageClient, QueryError> {
     if client.is_none() {
-        *client = Some(CodexUsageClient::spawn(cwd, env)?);
+        *client = Some(CodexUsageClient::spawn(cwd, env, cache_root)?);
     }
     let ready = client.as_mut().expect("client initialized above");
     ready.initialize().await?;
@@ -367,13 +393,14 @@ async fn discard_failed_client(client: &mut Option<CodexUsageClient>, replaceabl
 
 /// Refresh a persistent app-server client, recreating it after transport or
 /// protocol failures. Calls are awaited serially by the session worker.
-pub async fn refresh(
+pub(crate) async fn refresh_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
+    cache_root: Option<PathBuf>,
 ) -> CodexUsageStatus {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        prepare(client, cwd, env).await?.query().await
+        prepare(client, cwd, env, cache_root).await?.query().await
     })
     .await;
 
@@ -392,29 +419,33 @@ pub async fn refresh(
     }
 }
 
-/// Why [`refresh_login`] could not rotate the login.
+/// Why [`refresh_login_with_cache_root`] could not rotate the login.
 #[derive(Debug)]
 pub struct LoginRefreshFailure {
     /// The failure in full, for the log.
     pub detail: String,
-    /// The failure as [`refresh`] would report it to the user.
+    /// The failure as [`refresh_with_cache_root`] would report it to the user.
     pub reason: &'static str,
 }
 
 /// Rotate the profile's Codex login ahead of its expiry, reusing the cached
-/// client the way [`refresh`] does.
+/// client the way [`refresh_with_cache_root`] does.
 ///
 /// Codex refresh tokens are single use. A host and a container that reach
 /// expiry at the same instant both try to spend the same token, one wins, and
 /// the loser's turn dies. Rotating early on the host, so the sync can push the
 /// new file, keeps container copies away from that instant.
-pub async fn refresh_login(
+pub(crate) async fn refresh_login_with_cache_root(
     client: &mut Option<CodexUsageClient>,
     cwd: PathBuf,
     env: HashMap<String, String>,
+    cache_root: Option<PathBuf>,
 ) -> Result<(), LoginRefreshFailure> {
     let result = tokio::time::timeout(REQUEST_TIMEOUT, async {
-        prepare(client, cwd, env).await?.refresh_token().await
+        prepare(client, cwd, env, cache_root)
+            .await?
+            .refresh_token()
+            .await
     })
     .await;
 
@@ -437,14 +468,83 @@ pub async fn refresh_login(
     }
 }
 
-fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, QueryError> {
-    let programs: &[&str] = if cfg!(windows) {
-        &["codex.exe", "codex.cmd"]
-    } else {
-        &["codex"]
-    };
-    for (index, program) in programs.iter().enumerate() {
-        let mut command = Command::new(program);
+fn process_managed_cache_root() -> Result<PathBuf, QueryError> {
+    let xdg_cache_home = std::env::var_os("XDG_CACHE_HOME");
+    let home = std::env::var_os("HOME");
+    managed_harness_cache_root(xdg_cache_home.as_deref(), home.as_deref()).map_err(|error| {
+        QueryError::NotInstalled {
+            expected: None,
+            detail: Some(error.to_string()),
+        }
+    })
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn install_fake_managed_codex(cache_root: &Path, script: &str) -> PathBuf {
+    let install = managed_harness_install_dir(cache_root, HarnessKind::Codex);
+    let launcher = install.join(CODEX_CLI_ENTRYPOINT);
+    let launcher_directory = launcher.parent().expect("launcher parent");
+    std::fs::create_dir_all(launcher_directory).expect("create managed install");
+    mj_core::test_hooks::install_fake_command(launcher_directory, "codex", script);
+    std::fs::write(install.join(LEASE_FILE), []).expect("create managed install lease");
+    std::fs::write(
+        install.join(mj_core::harness_runtime::MANIFEST_FILE),
+        serde_json::to_vec(
+            &mj_core::harness_runtime::ManagedHarnessManifest::for_harness(HarnessKind::Codex),
+        )
+        .expect("serialize managed install manifest"),
+    )
+    .expect("write managed install manifest");
+    install
+}
+
+fn spawn_codex(
+    cwd: PathBuf,
+    env: HashMap<String, String>,
+    cache_root: PathBuf,
+) -> Result<(Child, File), QueryError> {
+    let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+
+    #[cfg(not(unix))]
+    {
+        let _ = (cwd, env);
+        Err(QueryError::NotInstalled {
+            expected: Some(install),
+            detail: Some("managed harnesses require a Unix target".to_owned()),
+        })
+    }
+
+    #[cfg(unix)]
+    {
+        let lease = open_managed_codex_lease(&install)?;
+        let manifest_matches = managed_harness_manifest_matches(
+            &install,
+            HarnessKind::Codex,
+            pin(HarnessKind::Codex).install_id,
+        )
+        .map_err(|error| QueryError::NotInstalled {
+            expected: Some(install.clone()),
+            detail: Some(error.to_string()),
+        })?;
+        if !manifest_matches {
+            return Err(QueryError::NotInstalled {
+                expected: Some(install),
+                detail: Some("missing or mismatched mj-harness.json".to_owned()),
+            });
+        }
+
+        let launcher = install.join(CODEX_CLI_ENTRYPOINT);
+        if !is_executable_file(&launcher) {
+            return Err(QueryError::NotInstalled {
+                expected: Some(install),
+                detail: Some(format!(
+                    "missing or non-executable launcher {}",
+                    launcher.display()
+                )),
+            });
+        }
+
+        let mut command = Command::new(&launcher);
         command
             .args(["app-server", "--stdio"])
             .current_dir(&cwd)
@@ -465,21 +565,68 @@ fn spawn_codex(cwd: PathBuf, env: HashMap<String, String>) -> Result<Child, Quer
             .stderr(Stdio::piped());
         command.kill_on_drop(true);
         match command.spawn() {
-            Ok(child) => return Ok(child),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && index + 1 < programs.len() => {}
+            Ok(child) => Ok((child, lease)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(QueryError::NotInstalled);
+                Err(QueryError::NotInstalled {
+                    expected: Some(install),
+                    detail: Some(format!(
+                        "launcher {} could not be found",
+                        launcher.display()
+                    )),
+                })
             }
-            Err(error) => return Err(QueryError::Launch(error.to_string())),
+            Err(error) => Err(QueryError::Launch(format!(
+                "could not start managed Codex launcher {}: {error}",
+                launcher.display()
+            ))),
         }
     }
-    Err(QueryError::NotInstalled)
+}
+
+#[cfg(unix)]
+fn open_managed_codex_lease(install: &Path) -> Result<File, QueryError> {
+    let lease_path = install.join(LEASE_FILE);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lease_path)
+        .map_err(|error| {
+            let detail = if error.kind() == std::io::ErrorKind::NotFound {
+                "lease file missing".to_owned()
+            } else {
+                format!("could not open lease file: {error}")
+            };
+            QueryError::NotInstalled {
+                expected: Some(install.to_path_buf()),
+                detail: Some(detail),
+            }
+        })?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(QueryError::NotInstalled {
+            expected: Some(install.to_path_buf()),
+            detail: Some("managed Codex installation is being repaired".to_owned()),
+        }),
+        Err(std::fs::TryLockError::Error(error)) => Err(QueryError::NotInstalled {
+            expected: Some(install.to_path_buf()),
+            detail: Some(format!("could not lock {}: {error}", lease_path.display())),
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 #[derive(Debug)]
 enum QueryError {
-    NotInstalled,
+    NotInstalled {
+        expected: Option<PathBuf>,
+        detail: Option<String>,
+    },
     Launch(String),
     NotSignedIn,
     UnsupportedAccount,
@@ -515,7 +662,12 @@ impl QueryError {
 
     fn user_reason(&self) -> &'static str {
         match self {
-            Self::NotInstalled => "Codex CLI is not installed",
+            Self::NotInstalled { .. } if cfg!(unix) => {
+                "Mjolnir's Codex installation is unavailable; start a Codex session on a local target to install it"
+            }
+            Self::NotInstalled { .. } => {
+                "Codex quota probing is unavailable because managed Codex installations require Unix"
+            }
             Self::Launch(_) => "could not start Codex CLI",
             Self::NotSignedIn => "not signed in with ChatGPT",
             Self::UnsupportedAccount => {
@@ -533,6 +685,16 @@ impl std::fmt::Display for QueryError {
         match self {
             Self::Launch(detail) => write!(f, "could not start Codex CLI: {detail}"),
             Self::Protocol(kind) => write!(f, "Codex app-server protocol error ({kind:?})"),
+            Self::NotInstalled { expected, detail } => {
+                f.write_str(self.user_reason())?;
+                if let Some(expected) = expected {
+                    write!(f, "; expected installation at {}", expected.display())?;
+                }
+                if let Some(detail) = detail {
+                    write!(f, ": {detail}")?;
+                }
+                Ok(())
+            }
             _ => f.write_str(self.user_reason()),
         }
     }
@@ -613,11 +775,17 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    fn test_cache_root(temp: &tempfile::TempDir) -> PathBuf {
+        temp.path().join("cache")
+    }
+
+    #[cfg(unix)]
     fn fake_codex_env(
         temp: &tempfile::TempDir,
         script: &str,
     ) -> (HashMap<String, String>, PathBuf) {
-        mj_core::test_hooks::install_fake_command(temp.path(), "codex", script);
+        let cache_root = test_cache_root(temp);
+        install_fake_managed_codex(&cache_root, script);
 
         let log = temp.path().join("requests.jsonl");
         let env = HashMap::from([
@@ -631,6 +799,144 @@ mod tests {
             ),
         ]);
         (env, log)
+    }
+
+    #[cfg(unix)]
+    async fn refresh_in_temp(
+        client: &mut Option<CodexUsageClient>,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+        temp: &tempfile::TempDir,
+    ) -> CodexUsageStatus {
+        refresh_with_cache_root(client, cwd, env, Some(test_cache_root(temp))).await
+    }
+
+    #[cfg(unix)]
+    async fn refresh_login_in_temp(
+        client: &mut Option<CodexUsageClient>,
+        cwd: PathBuf,
+        env: HashMap<String, String>,
+        temp: &tempfile::TempDir,
+    ) -> Result<(), LoginRefreshFailure> {
+        refresh_login_with_cache_root(client, cwd, env, Some(test_cache_root(temp))).await
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_managed_install_reports_its_expected_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_root = test_cache_root(&temp);
+        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        let Err(error) = spawn_codex(temp.path().to_path_buf(), HashMap::new(), cache_root) else {
+            panic!("missing managed Codex install unexpectedly spawned");
+        };
+
+        assert!(matches!(error, QueryError::NotInstalled { .. }));
+        assert_eq!(
+            error.user_reason(),
+            "Mjolnir's Codex installation is unavailable; start a Codex session on a local target to install it"
+        );
+        assert!(error.to_string().contains(&install.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_managed_install_lease_is_not_created_by_the_probe() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache_root = test_cache_root(&temp);
+        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        std::fs::create_dir_all(&install).expect("create incomplete managed install");
+
+        let Err(error) = spawn_codex(temp.path().to_path_buf(), HashMap::new(), cache_root) else {
+            panic!("managed install without a lease unexpectedly spawned");
+        };
+
+        assert!(matches!(error, QueryError::NotInstalled { .. }));
+        assert!(error.to_string().contains("lease file missing"));
+        assert!(!install.join(LEASE_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mismatched_managed_manifest_is_not_installed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, _log) = fake_codex_env(&temp, "#!/bin/sh\nexit 0\n");
+        let cache_root = test_cache_root(&temp);
+        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        let manifest = json!({
+            "schema": 1,
+            "harness": "codex",
+            "install_id": "different-codex-pin"
+        });
+        std::fs::write(
+            install.join(mj_core::harness_runtime::MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write mismatched manifest");
+
+        let Err(error) = spawn_codex(temp.path().to_path_buf(), env, cache_root) else {
+            panic!("mismatched managed Codex install unexpectedly spawned");
+        };
+
+        assert!(matches!(error, QueryError::NotInstalled { .. }));
+        assert!(error.to_string().contains("mismatched mj-harness.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_codex_is_not_used_when_managed_install_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("path");
+        std::fs::create_dir_all(&path).expect("create PATH directory");
+        let marker = temp.path().join("path-codex-ran");
+        mj_core::test_hooks::install_fake_command(
+            &path,
+            "codex",
+            &format!(
+                "#!/bin/sh\nprintf ran > {}\n",
+                mj_core::targets::posix_quote(&marker.to_string_lossy())
+            ),
+        );
+        let env = HashMap::from([("PATH".to_owned(), path.to_string_lossy().into_owned())]);
+        let cache_root = test_cache_root(&temp);
+        let Err(error) = spawn_codex(temp.path().to_path_buf(), env, cache_root) else {
+            panic!("PATH codex unexpectedly replaced the missing managed install");
+        };
+
+        assert!(matches!(error, QueryError::NotInstalled { .. }));
+        assert!(!marker.exists(), "the PATH codex must not run");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn client_holds_a_shared_install_lease_for_its_lifetime() {
+        use std::fs::OpenOptions;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (env, _log) = fake_codex_env(&temp, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n");
+        let cache_root = test_cache_root(&temp);
+        let install = managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        let lease_path = install.join(LEASE_FILE);
+        let lease_reader = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .expect("open lease to check repair exclusion");
+        let client = CodexUsageClient::spawn(temp.path().to_path_buf(), env, Some(cache_root))
+            .expect("spawn managed app-server");
+
+        assert!(matches!(
+            lease_reader.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(lease_reader);
+        client.shutdown().await;
+        let exclusive = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .expect("reopen lease for repair");
+        exclusive.try_lock().expect("lease released after shutdown");
     }
 
     #[test]
@@ -812,7 +1118,7 @@ mod tests {
         env.insert("RUST_LOG".to_owned(), "trace".to_owned());
         let mut client = None;
 
-        let _ = refresh(&mut client, temp.path().to_path_buf(), env).await;
+        let _ = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
         assert_eq!(
             std::fs::read_to_string(seen).expect("the fake codex ran"),
@@ -846,8 +1152,9 @@ printf '%s\n' '{"id":5,"result":{"rateLimits":{"primary":{"usedPercent":50,"wind
         );
         let mut client = None;
 
-        let first = refresh(&mut client, temp.path().to_path_buf(), env.clone()).await;
-        let second = refresh(&mut client, temp.path().to_path_buf(), env).await;
+        let first =
+            refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
+        let second = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
         assert!(matches!(
             first,
@@ -909,7 +1216,7 @@ printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"}}}'
         );
         let mut client = None;
 
-        refresh_login(&mut client, temp.path().to_path_buf(), env)
+        refresh_login_in_temp(&mut client, temp.path().to_path_buf(), env, &temp)
             .await
             .expect("proactive refresh");
 
@@ -951,12 +1258,12 @@ printf '%s\n' '{"id":4,"result":{"rateLimits":{"primary":{"usedPercent":10,"wind
         );
         let mut client = None;
 
-        refresh_login(&mut client, temp.path().to_path_buf(), env.clone())
+        refresh_login_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp)
             .await
             .expect("an app-server without the flag has nothing to refresh");
         assert!(client.is_some(), "the client stays usable for the poll");
 
-        let status = refresh(&mut client, temp.path().to_path_buf(), env).await;
+        let status = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
         assert!(matches!(
             status,
@@ -986,7 +1293,7 @@ printf '%s\n' '{"id":1,"error":{"code":-32601,"message":"unknown method"}}'
         );
         let mut client = None;
 
-        let status = refresh(&mut client, temp.path().to_path_buf(), env).await;
+        let status = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
 
         assert_eq!(
             status,
@@ -1038,7 +1345,7 @@ IFS= read -r line
         let (env, log) = fake_codex_env(&temp, SIGNED_OUT_UNTIL_RESTART);
         let mut client = None;
 
-        let failure = refresh_login(&mut client, temp.path().to_path_buf(), env)
+        let failure = refresh_login_in_temp(&mut client, temp.path().to_path_buf(), env, &temp)
             .await
             .expect_err("no account means the refresh failed");
 
@@ -1057,14 +1364,15 @@ IFS= read -r line
         let (env, log) = fake_codex_env(&temp, SIGNED_OUT_UNTIL_RESTART);
         let mut client = None;
 
-        let first = refresh(&mut client, temp.path().to_path_buf(), env.clone()).await;
+        let first =
+            refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
         assert_eq!(
             first,
             CodexUsageStatus::Unavailable("not signed in with ChatGPT".to_string())
         );
         assert!(client.is_none());
 
-        let second = refresh(&mut client, temp.path().to_path_buf(), env).await;
+        let second = refresh_in_temp(&mut client, temp.path().to_path_buf(), env, &temp).await;
         assert!(matches!(
             second,
             CodexUsageStatus::Available(CodexUsageReport {
@@ -1101,7 +1409,8 @@ IFS= read -r line
         let mut client = None;
 
         for poll in 1..=3 {
-            let status = refresh(&mut client, temp.path().to_path_buf(), env.clone()).await;
+            let status =
+                refresh_in_temp(&mut client, temp.path().to_path_buf(), env.clone(), &temp).await;
             assert_eq!(
                 status,
                 CodexUsageStatus::Unavailable("not signed in with ChatGPT".to_string())
@@ -1132,9 +1441,14 @@ IFS= read -r line
 "#,
         );
         let mut client = None;
-        prepare(&mut client, temp.path().to_path_buf(), env)
-            .await
-            .expect("initialized client");
+        prepare(
+            &mut client,
+            temp.path().to_path_buf(),
+            env,
+            Some(test_cache_root(&temp)),
+        )
+        .await
+        .expect("initialized client");
 
         let lines = client
             .take()

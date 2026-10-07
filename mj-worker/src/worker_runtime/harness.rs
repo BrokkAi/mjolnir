@@ -1,6 +1,7 @@
 //! Exact, target-local harness installations, including container fallbacks.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -9,14 +10,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
-use mj_core::harness_runtime::{GROK_VERSION, HarnessPin, KIMI_VERSION, pin};
+use mj_core::harness_runtime::{
+    GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
+    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches, pin,
+};
 use mj_core::worker_launch::HarnessRuntimePolicy;
-use serde::{Deserialize, Serialize};
 
-const MANIFEST_FILE: &str = "mj-harness.json";
-const LEASE_FILE: &str = ".lease";
 const INSTALL_LOCK_FILE: &str = ".install.lock";
-const CACHE_DIR: &str = "mjolnir/harnesses";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -67,14 +67,6 @@ pub(crate) fn spawn_gc_on(
     })
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct InstallManifest {
-    schema: u32,
-    harness: HarnessKind,
-    install_id: String,
-}
-
 pub(crate) async fn resolve(
     runtime: HarnessRuntimePolicy,
     harness: HarnessKind,
@@ -85,30 +77,13 @@ pub(crate) async fn resolve(
         return Ok(None);
     }
     let environment = mj_core::login_environment::with_overrides(environment).await?;
-    let root = cache_root(&environment)?;
+    let root = managed_harness_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?;
     resolve_at_async(&root, harness, execution_policy, &environment)
         .await
         .map(Some)
-}
-
-fn cache_root(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
-    let base = match environment.get("XDG_CACHE_HOME") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => PathBuf::from(
-            environment
-                .get("HOME")
-                .filter(|path| !path.is_empty())
-                .context("managed harness installation needs HOME or XDG_CACHE_HOME")?,
-        )
-        .join(".cache"),
-    };
-    if !base.is_absolute() {
-        bail!(
-            "managed harness cache root must be absolute: {}",
-            base.display()
-        );
-    }
-    Ok(base.join(CACHE_DIR))
 }
 
 #[cfg(test)]
@@ -144,7 +119,7 @@ async fn resolve_at_async(
     lock_file(&install_lock, false, "managed harness installer").await?;
     remove_abandoned_staging(&harness_root)?;
 
-    let install = harness_root.join(selected.install_id);
+    let install = managed_harness_install_dir(root, harness);
     if !complete_install(&install, harness, selected)? {
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
@@ -298,11 +273,7 @@ async fn install_into(
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
     open_lock(&staging.path().join(LEASE_FILE))?;
-    let manifest = InstallManifest {
-        schema: 1,
-        harness,
-        install_id: selected.install_id.to_owned(),
-    };
+    let manifest = ManagedHarnessManifest::for_install(harness, selected.install_id);
     let body = serde_json::to_vec_pretty(&manifest)?;
     let staging_path = staging.keep();
     match std::fs::rename(&staging_path, final_path) {
@@ -702,25 +673,7 @@ fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
 }
 
 fn complete_install(path: &Path, harness: HarnessKind, selected: HarnessPin) -> Result<bool> {
-    let body = match std::fs::read(path.join(MANIFEST_FILE)) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read managed harness manifest in {}", path.display()));
-        }
-    };
-    let manifest: InstallManifest = match serde_json::from_slice(&body) {
-        Ok(manifest) => manifest,
-        Err(_) => return Ok(false),
-    };
-    if manifest
-        != (InstallManifest {
-            schema: 1,
-            harness,
-            install_id: selected.install_id.to_owned(),
-        })
-    {
+    if !managed_harness_manifest_matches(path, harness, selected.install_id)? {
         return Ok(false);
     }
     Ok(validate_entrypoint(path, selected, harness).is_ok())
@@ -1027,12 +980,9 @@ INSTALLER
         std::fs::create_dir_all(&install).unwrap();
         executable(&install.join(entrypoint), "#!/bin/sh\nexit 0\n");
         open_lock(&install.join(LEASE_FILE)).unwrap();
-        let body = serde_json::to_vec_pretty(&InstallManifest {
-            schema: 1,
-            harness,
-            install_id: install_id.to_owned(),
-        })
-        .unwrap();
+        let body =
+            serde_json::to_vec_pretty(&ManagedHarnessManifest::for_install(harness, install_id))
+                .unwrap();
         mj_core::config::atomic_write(&install.join(MANIFEST_FILE), &body).unwrap();
     }
 

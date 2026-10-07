@@ -1,7 +1,7 @@
 //! One-pane quota collection for Mjolnir harness profiles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -188,6 +188,8 @@ pub struct QuotaRefreshOutcome {
 pub struct QuotaManager {
     codex_clients: HashMap<String, CodexUsageClient>,
     reports: BTreeMap<String, ProfileQuota>,
+    #[cfg(test)]
+    cache_root: Option<PathBuf>,
 }
 
 impl QuotaManager {
@@ -247,13 +249,21 @@ impl QuotaManager {
         F: FnMut(QuotaRefreshOutcome) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
+        #[cfg(test)]
+        let cache_root = self.cache_root.clone();
+        #[cfg(not(test))]
+        let cache_root = None;
+
         let mut tasks = tokio::task::JoinSet::new();
         for request in requests {
             let client = self.codex_clients.remove(&request.profile_id);
             // Probes run concurrently, so the span is what ties a quota
             // client's log lines to its profile.
             let span = tracing::info_span!("quota_probe", profile_id = %request.profile_id);
-            tasks.spawn(refresh_profile(request, client).instrument(span));
+            tasks.spawn(
+                refresh_profile_with_cache_root(request, client, cache_root.clone())
+                    .instrument(span),
+            );
         }
 
         while let Some(result) = tasks.join_next().await {
@@ -350,9 +360,10 @@ fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
     }
 }
 
-async fn refresh_profile(
+async fn refresh_profile_with_cache_root(
     request: QuotaRefreshRequest,
     mut codex_client: Option<CodexUsageClient>,
+    cache_root: Option<PathBuf>,
 ) -> (QuotaRefreshOutcome, Option<CodexUsageClient>) {
     let cache_identity = request.cache_identity();
     let credential_path = harness_authentication_marker(request.harness, &request.source_home);
@@ -429,13 +440,14 @@ async fn refresh_profile(
             let mut failed_rotation = None;
             if codex_login_is_near_expiry(&credential_path).await {
                 let started_here = codex_client.is_none();
-                match codex_usage::refresh_login(
+                let login_refresh = codex_usage::refresh_login_with_cache_root(
                     &mut codex_client,
                     cwd.clone(),
                     environment.clone(),
+                    cache_root.clone(),
                 )
-                .await
-                {
+                .await;
+                match login_refresh {
                     Ok(()) => tracing::info!(
                         profile_id = %profile_id,
                         "refreshed Codex login ahead of expiry"
@@ -454,7 +466,15 @@ async fn refresh_profile(
             }
             let status = match failed_rotation {
                 Some(reason) => CodexUsageStatus::Unavailable(reason.to_owned()),
-                None => codex_usage::refresh(&mut codex_client, cwd, environment).await,
+                None => {
+                    codex_usage::refresh_with_cache_root(
+                        &mut codex_client,
+                        cwd,
+                        environment,
+                        cache_root,
+                    )
+                    .await
+                }
             };
             match status {
                 CodexUsageStatus::Available(report) => Ok(ProfileQuota {
