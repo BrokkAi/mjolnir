@@ -91,6 +91,134 @@ fn persisted_relay_snapshot(root: &Path) -> RelaySnapshot {
     serde_json::from_slice(&fs::read(root.join(RELAY_STATE_FILE)).unwrap()).unwrap()
 }
 
+#[test]
+fn revision_16_snapshot_and_journal_replay_legacy_mailbox_text() {
+    use serde::Serialize;
+    use sha2::{Digest, Sha256};
+
+    let snapshot_root = tempfile::tempdir().unwrap();
+    let mut snapshot =
+        serde_json::to_value(mj_core::relay::RelaySnapshot::new(SESSION.to_owned())).unwrap();
+    snapshot["format_version"] = serde_json::json!(16);
+    snapshot["pending_mailbox_events"] = serde_json::json!([{
+        "key":"legacy:snapshot",
+        "source":"github",
+        "wake":false,
+        "text":"event from revision-16 snapshot",
+        "created_at_ms":10
+    }]);
+    fs::write(
+        snapshot_root.path().join(RELAY_STATE_FILE),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let snapshot_relay = DurableRelay::open(snapshot_root.path(), SESSION, "test").unwrap();
+    assert_eq!(snapshot_relay.snapshot.format_version, 17);
+    assert_eq!(
+        snapshot_relay.snapshot.pending_mailbox_events[0].body,
+        mj_core::mailbox::MailboxEventBody::PlainText {
+            text: "event from revision-16 snapshot".into()
+        }
+    );
+
+    #[derive(Serialize, Clone)]
+    struct LegacyEvent {
+        key: String,
+        source: String,
+        wake: bool,
+        text: String,
+        created_at_ms: u64,
+    }
+
+    #[derive(Serialize, Clone)]
+    #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+    enum LegacyCommand {
+        DeliverMailboxEvent { event: LegacyEvent },
+    }
+
+    #[derive(Serialize, Clone)]
+    #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+    enum LegacyObservation {
+        CommandQueued {
+            command_id: String,
+            command: LegacyCommand,
+            created_at_ms: i64,
+        },
+    }
+
+    #[derive(Serialize)]
+    struct DigestPayload<'a> {
+        ordinal: u64,
+        recorded_at_ms: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command_id: Option<&'a str>,
+        observation: &'a LegacyObservation,
+    }
+
+    let journal_root = tempfile::tempdir().unwrap();
+    let journal = journal_root.path().join(RELAY_JOURNAL_DIR);
+    fs::create_dir_all(&journal).unwrap();
+    let mut revision_16 =
+        serde_json::to_value(mj_core::relay::RelaySnapshot::new(SESSION.to_owned())).unwrap();
+    revision_16["format_version"] = serde_json::json!(16);
+    fs::write(
+        journal_root.path().join(RELAY_STATE_FILE),
+        serde_json::to_vec(&revision_16).unwrap(),
+    )
+    .unwrap();
+
+    let observation = LegacyObservation::CommandQueued {
+        command_id: "legacy-journal-command".into(),
+        command: LegacyCommand::DeliverMailboxEvent {
+            event: LegacyEvent {
+                key: "legacy:journal".into(),
+                source: "github".into(),
+                wake: false,
+                text: "event from revision-16 journal".into(),
+                created_at_ms: 20,
+            },
+        },
+        created_at_ms: 20,
+    };
+    let payload = DigestPayload {
+        ordinal: 1,
+        recorded_at_ms: 20,
+        command_id: Some("legacy-journal-command"),
+        observation: &observation,
+    };
+    let mut digest = Sha256::new();
+    digest.update(mj_core::relay::RELAY_EVENT_DIGEST_DOMAIN_V2);
+    digest.update(serde_json::to_vec(&payload).unwrap());
+    let record = serde_json::json!({
+        "format": 2,
+        "ordinal": 1,
+        "digest": mj_core::hex::lower_hex(digest.finalize()),
+        "recorded_at_ms": 20,
+        "command_id": "legacy-journal-command",
+        "observation": observation,
+    });
+    fs::write(
+        journal.join(RELAY_ACTIVE_SEGMENT),
+        format!("{}\n", serde_json::to_string(&record).unwrap()),
+    )
+    .unwrap();
+
+    let journal_relay = DurableRelay::open(journal_root.path(), SESSION, "test").unwrap();
+    assert!(journal_relay.latest_ordinal() >= 1);
+    assert_eq!(journal_relay.snapshot.format_version, 17);
+    assert!(
+        journal_relay
+            .snapshot
+            .pending_mailbox_events
+            .iter()
+            .any(|event| event.key == "legacy:journal"
+                && event.body
+                    == mj_core::mailbox::MailboxEventBody::PlainText {
+                        text: "event from revision-16 journal".into()
+                    })
+    );
+}
+
 /// A relay that dies mid-turn keeps every chunk it acknowledged, and the
 /// relay that reopens republishes the frontier it replayed.
 #[test]

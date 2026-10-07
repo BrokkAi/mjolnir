@@ -5456,8 +5456,10 @@ fn mailbox_fixture_event(key: &str, wake: bool) -> mj_core::mailbox::MailboxEven
         key: key.into(),
         source: "parent".into(),
         wake,
-        text: format!("message for {key}"),
         created_at_ms: 1,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: format!("message for {key}"),
+        },
     }
 }
 

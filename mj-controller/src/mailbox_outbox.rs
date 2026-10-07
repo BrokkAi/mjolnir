@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::daemon::RuntimeState;
 use crate::session_manager::SessionManagerControl;
 
-const MAILBOX_RELAY_PROTOCOL: u32 = 33;
+const TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR: &str = "This child runs an older mj worker that cannot receive trusted parent messages; use send_input, or wait for the worker to upgrade.";
 const PENDING_BATCH: usize = 256;
 const SESSION_CONCURRENCY: usize = 8;
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -137,8 +137,8 @@ async fn process_pending(
     Ok(())
 }
 
-async fn deliver_session_events(
-    state: std::sync::Arc<RuntimeState>,
+pub(crate) async fn deliver_session_events(
+    state: std::sync::Arc<dyn crate::server_runtime::api::ExportRuntime>,
     sessions: SessionManagerControl,
     stop: CancellationToken,
     session_id: String,
@@ -160,7 +160,7 @@ async fn deliver_session_events(
         match deliver_mailbox_event(state.clone(), &sessions, &session_id, event, entry.unpark)
             .await
         {
-            Ok(Some(ordinal)) => {
+            Ok(MailboxEventDelivery::Accepted(ordinal)) => {
                 let key = entry.event_key.clone();
                 let mark_id = command_id.clone();
                 match tokio::task::spawn_blocking(move || {
@@ -177,13 +177,61 @@ async fn deliver_session_events(
                     }
                 }
             }
-            Ok(None) => return,
+            Ok(MailboxEventDelivery::Pending) => return,
+            Ok(MailboxEventDelivery::Failed(reason)) => {
+                let key = entry.event_key.clone();
+                let persisted_reason = reason.clone();
+                match tokio::task::spawn_blocking(move || {
+                    crate::database::mark_mailbox_event_failed(&key, &persisted_reason)
+                })
+                .await
+                {
+                    Ok(Ok(())) => tracing::warn!(
+                        %session_id,
+                        event_key = %entry.event_key,
+                        %reason,
+                        "mailbox event cannot be delivered to this worker and was marked failed"
+                    ),
+                    Ok(Err(error)) => {
+                        tracing::warn!(%session_id, event_key = %entry.event_key, %error, "failed to persist mailbox delivery failure; event remains pending");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%session_id, event_key = %entry.event_key, %error, "mailbox failure persistence task failed; event remains pending");
+                        return;
+                    }
+                }
+            }
             Err(error) => {
                 tracing::debug!(%session_id, event_key = %entry.event_key, %command_id, %error, "mailbox delivery is pending and will retry with the same command id");
                 return;
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MailboxEventDelivery {
+    Pending,
+    Accepted(u64),
+    Failed(String),
+}
+
+/// Read the worker protocol only from the protocol version published in the
+/// session manager's current view. Request admission and outbox delivery use
+/// this same fact.
+pub(crate) fn published_worker_relay_protocol(
+    view: &mj_client::session::ManagedSessionView,
+) -> Option<u32> {
+    view.snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.operational.relay_protocol_version)
+}
+
+pub(crate) fn trusted_parent_message_protocol_error(protocol: Option<u32>) -> Option<&'static str> {
+    protocol
+        .filter(|version| *version < mj_core::relay::RELAY_STRUCTURED_MAILBOX_PROTOCOL)
+        .map(|_| TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR)
 }
 
 /// Submit one durable event through the existing session actor. Callers may
@@ -195,34 +243,40 @@ pub(crate) async fn deliver_mailbox_event(
     session_id: &str,
     event: mj_core::mailbox::MailboxEvent,
     unpark_parked: bool,
-) -> Result<Option<u64>> {
+) -> Result<MailboxEventDelivery> {
     let Some(record) = state.session_record(session_id) else {
-        return Ok(None);
+        return Ok(MailboxEventDelivery::Pending);
     };
     if record.state == mj_core::state::SessionState::Parked {
         if !unpark_parked {
-            return Ok(None);
+            return Ok(MailboxEventDelivery::Pending);
         }
         std::sync::Arc::clone(&state)
             .unpark_subagent(session_id.to_owned())
             .await?;
     }
     let Some(record) = state.session_record(session_id) else {
-        return Ok(None);
+        return Ok(MailboxEventDelivery::Pending);
     };
     if !record.state.has_live_worker() {
-        return Ok(None);
+        return Ok(MailboxEventDelivery::Pending);
     }
     let Some(handle) = sessions.find_session(session_id.to_owned()).await? else {
-        return Ok(None);
+        return Ok(MailboxEventDelivery::Pending);
     };
     let view = handle.view();
-    let protocol = view
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| snapshot.operational.relay_protocol_version);
-    if !view.connected || protocol.is_none_or(|version| version < MAILBOX_RELAY_PROTOCOL) {
-        return Ok(None);
+    let protocol = published_worker_relay_protocol(&view);
+    if matches!(
+        &event.body,
+        mj_core::mailbox::MailboxEventBody::ParentMessage { .. }
+    ) && let Some(reason) = trusted_parent_message_protocol_error(protocol)
+    {
+        return Ok(MailboxEventDelivery::Failed(reason.to_owned()));
+    }
+    if !view.connected
+        || protocol.is_none_or(|version| version < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL)
+    {
+        return Ok(MailboxEventDelivery::Pending);
     }
     let command_id = mailbox_command_id(&event.key);
     match tokio::time::timeout(
@@ -233,7 +287,7 @@ pub(crate) async fn deliver_mailbox_event(
     )
     .await
     {
-        Ok(result) => result.map(Some),
+        Ok(result) => result.map(MailboxEventDelivery::Accepted),
         Err(_) => anyhow::bail!("mailbox command acknowledgement timed out"),
     }
 }

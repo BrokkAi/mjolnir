@@ -97,7 +97,7 @@ pub(super) fn project_observation(
                     push_system(
                         mutation,
                         event,
-                        mailbox_delivery_notice(events.len(), "in a wake prompt", events),
+                        mailbox_delivery_notice(events.len(), "in a new turn", events),
                     );
                 }
                 let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
@@ -163,11 +163,7 @@ pub(super) fn project_observation(
             ),
             RelayCommand::DeliverMailboxEvent {
                 event: mailbox_event,
-            } => push_system(
-                mutation,
-                event,
-                format!("Mailbox event queued from {}", mailbox_event.source),
-            ),
+            } => push_system(mutation, event, mailbox_queued_notice(mailbox_event)),
             RelayCommand::RemoveQueuedPrompt { .. } | RelayCommand::ClearQueuedPrompts => {}
             RelayCommand::Close { .. } => {
                 close_streams(index, mutation, event.recorded_at_ms);
@@ -750,17 +746,14 @@ pub(super) fn project_observation(
         RelayObservation::MailboxEventsDelivered {
             event_keys,
             path,
-            hook_event,
+            hook_event: _,
             events,
             ..
         } => {
             let how = match path {
-                mj_core::mailbox::MailboxDeliveryPath::ToolHook => hook_event.as_ref().map_or_else(
-                    || "by tool hook".to_owned(),
-                    |event| format!("by tool hook ({event})"),
-                ),
-                mj_core::mailbox::MailboxDeliveryPath::Prompt => "with prompt".to_owned(),
-                mj_core::mailbox::MailboxDeliveryPath::Wake => "in a wake prompt".to_owned(),
+                mj_core::mailbox::MailboxDeliveryPath::ToolHook => "at a tool boundary".to_owned(),
+                mj_core::mailbox::MailboxDeliveryPath::Prompt => "with your prompt".to_owned(),
+                mj_core::mailbox::MailboxDeliveryPath::Wake => "in a new turn".to_owned(),
             };
             push_system(
                 mutation,
@@ -786,7 +779,12 @@ pub(super) fn project_observation(
 }
 
 fn mailbox_event_count(count: usize) -> String {
-    format!("{count} mailbox event{}", if count == 1 { "" } else { "s" })
+    format!("{count} event{}", if count == 1 { "" } else { "s" })
+}
+
+fn mailbox_queued_notice(event: &mj_core::mailbox::MailboxEvent) -> String {
+    let description = mj_core::mailbox::describe_mailbox_event(event);
+    format!("Queued 1 event:\n  {}", description.transcript_line)
 }
 
 fn mailbox_delivery_notice(
@@ -794,38 +792,13 @@ fn mailbox_delivery_notice(
     how: &str,
     events: &[mj_core::mailbox::MailboxEvent],
 ) -> String {
-    let mut notice = format!("Delivered {} {how}", mailbox_event_count(count));
-    let summaries = events
-        .iter()
-        .map(|event| {
-            format!(
-                "{} — {}",
-                short_mailbox_text(&event.source, 48),
-                short_mailbox_text(&event.text, 120)
-            )
-        })
-        .collect::<Vec<_>>();
-    if !summaries.is_empty() {
-        notice.push_str(": ");
-        notice.push_str(&summaries.join("; "));
+    let mut notice = format!("Sent {} {how}:", mailbox_event_count(count));
+    for event in events {
+        let description = mj_core::mailbox::describe_mailbox_event(event);
+        notice.push_str("\n  ");
+        notice.push_str(&description.transcript_line);
     }
     notice
-}
-
-fn short_mailbox_text(value: &str, limit: usize) -> String {
-    let first_line = value.lines().next().unwrap_or_default().trim();
-    let mut characters = first_line
-        .chars()
-        .filter(|character| !character.is_control());
-    let mut shortened = characters.by_ref().take(limit).collect::<String>();
-    if characters.next().is_some() {
-        shortened.push('…');
-    }
-    if shortened.is_empty() {
-        "(empty)".to_owned()
-    } else {
-        shortened
-    }
 }
 
 /// A stop applied while the harness runs a turn of its own (a goal

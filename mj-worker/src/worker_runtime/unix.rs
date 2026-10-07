@@ -1909,7 +1909,7 @@ pub(super) async fn serve_client_with_memory(
             // protocol error the controller can act on, and an unreadable
             // frame is answered rather than dropping the connection.
             let envelope = match decode_relay_request(line.as_bytes()) {
-                DecodedRelayRequest::Known(envelope) => envelope,
+                DecodedRelayRequest::Known(envelope) => *envelope,
                 DecodedRelayRequest::Unknown {
                     request_id,
                     protocol_version,

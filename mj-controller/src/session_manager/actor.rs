@@ -82,7 +82,7 @@ pub(super) async fn run_session_actor(
         Returned(Option<Box<ReturnedConnection>>),
         Reviewer(Option<std::result::Result<(), tokio::task::JoinError>>),
         Tick,
-        Command(Option<ActorCommand>),
+        Command(Option<Box<ActorCommand>>),
         Retirement(std::result::Result<(), watch::error::RecvError>),
         Storage(std::result::Result<(), watch::error::RecvError>),
     }
@@ -107,7 +107,7 @@ pub(super) async fn run_session_actor(
                 tokio::select! {
                     completed = reviewer_tasks.join_next(), if !reviewer_tasks.is_empty() => Event::Reviewer(completed),
                     () = tokio::time::sleep_until(schedule.deadline) => Event::Tick,
-                    command = commands.recv() => Event::Command(command),
+                    command = commands.recv() => Event::Command(command.map(Box::new)),
                     changed = retirement.changed() => Event::Retirement(changed),
                     changed = storage.changed(), if storage_wait.is_some() => Event::Storage(changed),
                 }
@@ -558,6 +558,7 @@ pub(super) async fn run_session_actor(
             }
             Event::Command(command) => {
                 let Some(command) = command else { break };
+                let command = *command;
                 handled_command = true;
                 lifecycle.set_retirement_requested(*retirement.borrow());
                 if !lifecycle.accepts_new_work() {

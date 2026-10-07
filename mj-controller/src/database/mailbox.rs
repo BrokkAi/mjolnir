@@ -16,6 +16,7 @@ pub(crate) struct SubagentMailboxMessage {
     pub target_session_id: String,
     pub event_json: String,
     pub accepted: bool,
+    pub failure: Option<String>,
     pub accepted_command_id: Option<String>,
     pub accepted_ordinal: Option<u64>,
 }
@@ -84,13 +85,13 @@ pub(crate) fn enqueue_mailbox_event_with(
     let original: mj_core::mailbox::MailboxEvent = serde_json::from_str(&existing.1)?;
     if existing.0 != target_session_id
         || original.key != event.key
-        || original.text != event.text
+        || original.body != event.body
         || original.wake != event.wake
         || existing.2 != wake
     {
         return Err(anyhow::Error::new(mj_core::refusal::Refusal::precondition(
             format!(
-                "mailbox event key {event_key:?} already names a different session, text, or wake value"
+                "mailbox event key {event_key:?} already names a different session, body, or wake value"
             ),
         )));
     }
@@ -127,7 +128,9 @@ pub(crate) fn subagent_mailbox_messages(
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT mailbox_outbox.event_key, mailbox_outbox.target_session_id,
-                mailbox_outbox.event_json, mailbox_outbox.accepted_at IS NOT NULL,
+                mailbox_outbox.event_json,
+                mailbox_outbox.accepted_at IS NOT NULL AND mailbox_outbox.failure IS NULL,
+                mailbox_outbox.failure,
                 mailbox_outbox.accepted_command_id, mailbox_outbox.accepted_ordinal
          FROM mailbox_outbox
          JOIN subagent_sessions
@@ -144,12 +147,29 @@ pub(crate) fn subagent_mailbox_messages(
                 target_session_id: row.get(1)?,
                 event_json: row.get(2)?,
                 accepted: row.get(3)?,
-                accepted_command_id: row.get(4)?,
-                accepted_ordinal: row.get(5)?,
+                failure: row.get(4)?,
+                accepted_command_id: row.get(5)?,
+                accepted_ordinal: row.get(6)?,
             })
         })?
         .map(|row| row.map_err(Into::into))
         .collect()
+}
+
+/// Permanently stop retrying a mailbox event that the published worker
+/// protocol cannot represent. `accepted_at` also makes protocol-75 daemons
+/// skip the row; newer readers distinguish this marker through `failure`.
+pub(crate) fn mark_mailbox_event_failed(event_key: &str, failure: &str) -> Result<()> {
+    let event_key = event_key.to_owned();
+    let failure = failure.to_owned();
+    submit_database_write("mark_mailbox_event_failed", move |connection| {
+        connection.execute(
+            "UPDATE mailbox_outbox SET accepted_at=?2, failure=?3
+             WHERE event_key=?1 AND accepted_at IS NULL AND failure IS NULL",
+            params![event_key, Utc::now().to_rfc3339(), failure],
+        )?;
+        Ok(())
+    })
 }
 
 pub(crate) fn mark_mailbox_event_accepted(

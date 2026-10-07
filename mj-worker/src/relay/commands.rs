@@ -363,11 +363,11 @@ impl DurableRelay {
             && (event.key.trim().is_empty()
                 || event.key.len() > 1024
                 || event.source.trim().is_empty()
-                || event.text.trim().is_empty())
+                || !event.has_renderable_content())
         {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidRequest,
-                "mailbox event key, source, and text are required",
+                "mailbox event key, source, and content are required",
                 false,
                 None,
             )));

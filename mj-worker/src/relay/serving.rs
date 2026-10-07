@@ -102,8 +102,10 @@ mod tests {
                     key: "parent:message:1".into(),
                     source: "parent".into(),
                     wake: true,
-                    text: "message".into(),
                     created_at_ms: 1,
+                    body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                        text: "message".into(),
+                    },
                 },
             },
         };

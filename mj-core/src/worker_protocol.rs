@@ -10,7 +10,7 @@ use crate::relay::{RELAY_PROTOCOL_VERSION, RelayRequest, RelayRequestEnvelope};
 
 #[derive(Debug)]
 pub enum DecodedRelayRequest {
-    Known(RelayRequestEnvelope),
+    Known(Box<RelayRequestEnvelope>),
     Unknown {
         request_id: String,
         protocol_version: u32,
@@ -60,11 +60,11 @@ pub fn decode_relay_request(bytes: &[u8]) -> DecodedRelayRequest {
         .unwrap_or_default()
         .to_owned();
     match serde_json::from_value::<RelayRequest>(raw.request) {
-        Ok(request) => DecodedRelayRequest::Known(RelayRequestEnvelope {
+        Ok(request) => DecodedRelayRequest::Known(Box::new(RelayRequestEnvelope {
             request_id: raw.request_id,
             protocol_version: raw.protocol_version,
             request,
-        }),
+        })),
         Err(_error) if !method.is_empty() && !is_served_relay_method(&method) => {
             DecodedRelayRequest::Unknown {
                 request_id: raw.request_id,

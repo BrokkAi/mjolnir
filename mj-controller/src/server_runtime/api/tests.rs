@@ -2288,13 +2288,36 @@ fn parking_backend(
     Arc<ApiBackend>,
     mpsc::UnboundedReceiver<(String, RelayCommand)>,
 ) {
+    parking_backend_with_protocol(
+        exports,
+        failures,
+        on_failure,
+        mj_core::relay::RELAY_PROTOCOL_VERSION,
+    )
+}
+
+fn parking_backend_with_protocol(
+    exports: Arc<ParkingExports>,
+    failures: &[bool],
+    on_failure: Arc<dyn Fn() + Send + Sync>,
+    protocol: u32,
+) -> (
+    Arc<ApiBackend>,
+    mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) {
     let (submitted, delivered) = mpsc::unbounded_channel();
+    let mut view = ready_view("model");
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(protocol);
     let session = ScriptedSession {
         inner: FakeSession {
             session_id: "child-1".into(),
             accepted_ordinal: 9,
             submitted,
-            view: Some(ready_view("model")),
+            view: Some(view),
         },
         failures: Arc::new(std::sync::Mutex::new(failures.iter().copied().collect())),
         on_failure,
@@ -2374,7 +2397,12 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
         serde_json::from_str(&pending[0].event_json).unwrap();
     assert_eq!(event.source, "parent");
     assert!(event.wake);
-    assert_eq!(event.text, "keep going");
+    assert_eq!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "keep going".into()
+        }
+    );
     assert_eq!(event.key, "subagent-message-message-request");
 
     let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
@@ -2443,13 +2471,18 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
                 key: "subagent-message-message-request".into(),
                 source: "parent".into(),
                 wake: true,
-                text: "keep going".into(),
                 created_at_ms: request.created_at_ms.max(0) as u64,
+                body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                    text: "keep going".into(),
+                },
             }
         }
     );
     reply.send(Ok(17)).unwrap();
-    assert_eq!(delivery.await.unwrap().unwrap(), Some(17));
+    assert_eq!(
+        delivery.await.unwrap().unwrap(),
+        crate::mailbox_outbox::MailboxEventDelivery::Accepted(17)
+    );
     crate::database::mark_mailbox_event_accepted(&pending[0].event_key, &command_id, 17).unwrap();
 
     let retried = backend
@@ -2511,6 +2544,186 @@ async fn send_message_refuses_a_stopped_child_without_queueing() {
     );
 }
 
+#[tokio::test]
+async fn send_message_refuses_a_protocol_33_child_without_queueing() {
+    if !isolated_parked_test("send_message_refuses_a_protocol_33_child_without_queueing") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let (backend, _) = parking_backend_with_protocol(
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL,
+    );
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "message-to-old-worker".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "trusted parent message".into(),
+        },
+    };
+
+    let answer = backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(answer.is_error, "{}", answer.message);
+    assert!(
+        answer.message.contains(
+            "This child runs an older mj worker that cannot receive trusted parent messages; use send_input, or wait for the worker to upgrade."
+        ),
+        "{}",
+        answer.message
+    );
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty(),
+        "a refused trusted message must not enter the outbox"
+    );
+}
+
+#[tokio::test]
+async fn outbox_fails_queued_parent_message_for_protocol_33_and_reports_it() {
+    if !isolated_parked_test("outbox_fails_queued_parent_message_for_protocol_33_and_reports_it") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "subagent-message-queued-before-worker-version".into(),
+        source: "parent".into(),
+        wake: true,
+        created_at_ms: 123,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "trusted parent message".into(),
+        },
+    };
+    crate::database::enqueue_mailbox_event(
+        &event.key,
+        "child-1",
+        &serde_json::to_string(&event).unwrap(),
+        true,
+        true,
+    )
+    .unwrap();
+
+    let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
+    remote
+        .targets
+        .send_replace(vec![crate::session_manager::RelaySessionTarget {
+            session_id: "child-1".into(),
+            spec: crate::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    let mut child_view = ready_view("model");
+    let snapshot = child_view.snapshot.as_mut().unwrap();
+    snapshot.materialized.session_id = "child-1".into();
+    snapshot.operational.session_id = "child-1".into();
+    snapshot.operational.relay_protocol_version =
+        Some(mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL);
+    remote
+        .publisher
+        .publish("child-1".into(), child_view)
+        .await
+        .unwrap();
+    remote
+        .control
+        .wait_for_session("child-1", Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let exports_trait: Arc<dyn ExportRuntime> = exports.clone();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    crate::mailbox_outbox::deliver_session_events(
+        exports_trait,
+        remote.control.clone(),
+        tokio_util::sync::CancellationToken::new(),
+        "child-1".into(),
+        pending,
+    )
+    .await;
+    let reason = "This child runs an older mj worker that cannot receive trusted parent messages; use send_input, or wait for the worker to upgrade.";
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), remote.requests.recv())
+            .await
+            .is_err(),
+        "no legacy submit is allowed"
+    );
+    let messages = crate::database::subagent_mailbox_messages("parent-1").unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(!messages[0].accepted);
+    assert_eq!(messages[0].failure.as_deref(), Some(reason));
+
+    let (submitted, _) = mpsc::unbounded_channel();
+    let mut parent_view = ready_view("model");
+    parent_view
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .materialized
+        .session_id = "parent-1".into();
+    let parent = FakeSession {
+        session_id: "parent-1".into(),
+        accepted_ordinal: 1,
+        submitted,
+        view: Some(parent_view),
+    };
+    let backend = Arc::new(ApiBackend::new(
+        SessionControl::new(FakeControl(parent)),
+        running_states(),
+        exports,
+    ));
+    for (request_id, action) in [
+        (
+            "list-after-message-failure",
+            mj_core::subagent::SubagentToolAction::ListAgents,
+        ),
+        (
+            "wait-after-message-failure",
+            mj_core::subagent::SubagentToolAction::WaitAgents,
+        ),
+    ] {
+        let answer = backend
+            .execute_subagent_tool(
+                "parent-1".into(),
+                mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: request_id.into(),
+                    created_at_ms: mj_core::clock::epoch_millis(),
+                    action,
+                },
+            )
+            .await;
+        assert!(!answer.is_error, "{}", answer.message);
+        let response: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+        let child = &response["agents"][0];
+        assert_eq!(child["state"], "failed", "{response}");
+        assert_eq!(
+            child["message_deliveries"][0],
+            serde_json::json!({
+                "request_id":"queued-before-worker-version",
+                "created_at_ms":123,
+                "status":"failed",
+                "error":reason
+            }),
+            "{response}"
+        );
+    }
+    remote.shutdown.shutdown().await.unwrap();
+}
+
 // Hard-won: 193f015e: pending parent messages for stopped children accumulated forever in the outbox.
 #[tokio::test]
 async fn outbox_prunes_pending_messages_for_stopped_children_only() {
@@ -2531,8 +2744,10 @@ async fn outbox_prunes_pending_messages_for_stopped_children_only() {
             key: key.into(),
             source: source.into(),
             wake: true,
-            text: format!("event {key}"),
             created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::PlainText {
+                text: format!("event {key}"),
+            },
         };
         crate::database::enqueue_mailbox_event(
             key,
@@ -2899,8 +3114,10 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
         key: format!("subagent-message-{request_id}"),
         source: "parent".into(),
         wake: true,
-        text: format!("message {request_id}"),
         created_at_ms,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: format!("message {request_id}"),
+        },
     };
     for (request_id, accepted) in [("pending-message", false), ("delivered-message", true)] {
         let event = mailbox_event(request_id, if accepted { 2 } else { 1 });

@@ -6,13 +6,16 @@
 use std::io::{BufRead, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::elicitation::ElicitationResponse;
 use crate::project_memory::{ProjectMemorySnapshot, ReplicaReplaceOutcome, TreeVersion};
 
 use super::snapshot::{RelayCommand, RelayEvent, RelayOperationalState};
-use super::{MAX_FRAME_BYTES, RELAY_MIN_PROTOCOL_VERSION, RELAY_PROTOCOL_VERSION};
+use super::{
+    MAX_FRAME_BYTES, RELAY_LEGACY_MAILBOX_PROTOCOL, RELAY_MIN_PROTOCOL_VERSION,
+    RELAY_PROTOCOL_VERSION,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,12 +409,70 @@ pub fn incompatible_request_protocol(protocol_version: u32) -> RelayResponseBody
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelayRequestEnvelope {
     pub request_id: String,
     pub protocol_version: u32,
     pub request: RelayRequest,
+}
+
+impl Serialize for RelayRequestEnvelope {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut request = serde_json::to_value(&self.request).map_err(serde::ser::Error::custom)?;
+        if self.protocol_version == RELAY_LEGACY_MAILBOX_PROTOCOL {
+            rewrite_protocol_33_mailbox_commands(&mut request)
+                .map_err(serde::ser::Error::custom)?;
+        }
+        #[derive(Serialize)]
+        struct Envelope<'a> {
+            request_id: &'a str,
+            protocol_version: u32,
+            request: serde_json::Value,
+        }
+        Envelope {
+            request_id: &self.request_id,
+            protocol_version: self.protocol_version,
+            request,
+        }
+        .serialize(serializer)
+    }
+}
+
+fn rewrite_protocol_33_mailbox_commands(request: &mut serde_json::Value) -> serde_json::Result<()> {
+    let command = match request["method"].as_str() {
+        Some("submit") => Some(&mut request["params"]["command"]),
+        Some("reviewer") if request["params"]["request"]["action"] == "submit" => {
+            Some(&mut request["params"]["request"]["params"]["command"])
+        }
+        _ => None,
+    };
+    if let Some(command) = command {
+        let command_type = command["type"].as_str().map(str::to_owned);
+        match command_type.as_deref() {
+            Some("deliver_mailbox_event") => {
+                rewrite_protocol_33_event(&mut command["data"]["event"])?;
+            }
+            Some("mailbox_wake") => {
+                if let Some(events) = command["data"]["events"].as_array_mut() {
+                    for event in events {
+                        rewrite_protocol_33_event(event)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_protocol_33_event(value: &mut serde_json::Value) -> serde_json::Result<()> {
+    let event: crate::mailbox::MailboxEvent = serde_json::from_value(value.clone())?;
+    *value = serde_json::to_value(event.legacy_representation())?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

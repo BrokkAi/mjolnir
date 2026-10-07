@@ -1347,6 +1347,21 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: adds a nullable mailbox failure column. Protocol-75 readers
+    // ignore it, and the accepted_at marker keeps them from retrying a row
+    // already failed by a newer daemon; their explicit-column updates preserve
+    // the failure value. The compatibility floor stays at 74.
+    if version < 76 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE mailbox_outbox ADD COLUMN failure TEXT;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (76, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 76;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2109,7 +2124,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 74 adds the OpenCode harness kind.
+    /// `SCHEMA_VERSION`. Migration 74 adds the OpenCode harness kind and 76
+    /// adds compatible mailbox failure reporting.
     const MINIMUM_COMPATIBLE_VERSION: i64 = 74;
 
     /// Rewrites a store's recorded schema version the way another build's

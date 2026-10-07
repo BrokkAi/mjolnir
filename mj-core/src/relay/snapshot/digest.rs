@@ -48,6 +48,128 @@ enum LegacyFlaggedObservation<'a> {
     },
 }
 
+#[derive(Serialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum LegacyMailboxCommand<'a> {
+    DeliverMailboxEvent {
+        event: crate::mailbox::LegacyMailboxEvent<'a>,
+    },
+    MailboxWake {
+        events: Vec<crate::mailbox::LegacyMailboxEvent<'a>>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum LegacyMailboxObservation<'a> {
+    CommandQueued {
+        command_id: &'a str,
+        command: LegacyMailboxCommand<'a>,
+        created_at_ms: i64,
+    },
+    MailboxHookLeaseCreated {
+        lease: LegacyMailboxHookLease<'a>,
+    },
+    MailboxEventsDelivered {
+        event_keys: &'a [String],
+        path: &'a crate::mailbox::MailboxDeliveryPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_command_id: &'a Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_event: &'a Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<crate::mailbox::LegacyMailboxEvent<'a>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_id: &'a Option<String>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyMailboxHookLease<'a> {
+    lease_id: &'a str,
+    events: Vec<crate::mailbox::LegacyMailboxEvent<'a>>,
+    hook_event: &'a str,
+    expires_at_ms: i64,
+}
+
+impl<'a> LegacyMailboxObservation<'a> {
+    fn from_observation(observation: &'a RelayObservation) -> Option<Self> {
+        match observation {
+            RelayObservation::CommandQueued {
+                command_id,
+                command,
+                created_at_ms,
+            } => {
+                let command = match command {
+                    super::RelayCommand::DeliverMailboxEvent { event } => {
+                        LegacyMailboxCommand::DeliverMailboxEvent {
+                            event: event.legacy_representation(),
+                        }
+                    }
+                    super::RelayCommand::MailboxWake { events } => {
+                        LegacyMailboxCommand::MailboxWake {
+                            events: events
+                                .iter()
+                                .map(|event| event.legacy_representation())
+                                .collect(),
+                        }
+                    }
+                    _ => return None,
+                };
+                Some(Self::CommandQueued {
+                    command_id,
+                    command,
+                    created_at_ms: *created_at_ms,
+                })
+            }
+            RelayObservation::MailboxHookLeaseCreated { lease } => {
+                Some(Self::MailboxHookLeaseCreated {
+                    lease: LegacyMailboxHookLease {
+                        lease_id: &lease.lease_id,
+                        events: lease
+                            .events
+                            .iter()
+                            .map(|event| event.legacy_representation())
+                            .collect(),
+                        hook_event: &lease.hook_event,
+                        expires_at_ms: lease.expires_at_ms,
+                    },
+                })
+            }
+            RelayObservation::MailboxEventsDelivered {
+                event_keys,
+                path,
+                prompt_command_id,
+                hook_event,
+                events,
+                lease_id,
+            } => Some(Self::MailboxEventsDelivered {
+                event_keys,
+                path,
+                prompt_command_id,
+                hook_event,
+                events: events
+                    .iter()
+                    .map(|event| event.legacy_representation())
+                    .collect(),
+                lease_id,
+            }),
+            _ => None,
+        }
+    }
+}
+
 fn digest_over(domain: &[u8], encoded: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
@@ -162,6 +284,11 @@ pub fn validate_relay_event_self(event: &RelayEvent) -> Result<()> {
         if event.digest == relay_event_digest_over(event, &legacy)? {
             return Ok(());
         }
+    }
+    if let Some(observation) = LegacyMailboxObservation::from_observation(&event.observation)
+        && event.digest == relay_event_digest_over(event, &observation)?
+    {
+        return Ok(());
     }
     bail!("relay event {} digest is invalid", event.ordinal);
 }

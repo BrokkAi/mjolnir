@@ -1006,13 +1006,34 @@ impl ApiBackend {
                     .session_record(child_session_id)
                     .context("child session no longer exists")?;
                 subagent_input::ensure_subagent_child_can_receive_work(&record, "message")?;
+                let published_protocol = match self.sessions.session(child_session_id.clone()).await
+                {
+                    Ok(handle) => {
+                        crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            child_session_id,
+                            error = %format!("{error:#}"),
+                            "child worker protocol is not published yet; parent message will remain in the durable outbox"
+                        );
+                        None
+                    }
+                };
+                if let Some(reason) =
+                    crate::mailbox_outbox::trusted_parent_message_protocol_error(published_protocol)
+                {
+                    bail!("{reason}");
+                }
                 let event_key = format!("subagent-message-{}", request.request_id);
                 let event = mj_core::mailbox::MailboxEvent {
                     key: event_key.clone(),
                     source: "parent".into(),
                     wake: true,
-                    text: message.clone(),
                     created_at_ms: request.created_at_ms.max(0) as u64,
+                    body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                        text: message.clone(),
+                    },
                 };
                 let event_json = serde_json::to_string(&event)?;
                 let target = child_session_id.clone();

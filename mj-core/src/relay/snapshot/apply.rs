@@ -228,9 +228,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 RelayCommand::DeliverMailboxEvent { event } => {
                     if event.key.trim().is_empty()
                         || event.source.trim().is_empty()
-                        || event.text.trim().is_empty()
+                        || !event.has_renderable_content()
                     {
-                        bail!("mailbox event key, source, and text are required");
+                        bail!("mailbox event key, source, and content are required");
                     }
                     if snapshot
                         .pending_mailbox_events

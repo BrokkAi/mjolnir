@@ -7445,8 +7445,10 @@ async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
         key: "parent:message:lease-timer".into(),
         source: "parent".into(),
         wake: true,
-        text: "Wake after the hook lease expires.".into(),
         created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "Wake after the hook lease expires.".into(),
+        },
     };
     {
         let mut durable = relay.lock().unwrap();

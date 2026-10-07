@@ -31,14 +31,14 @@ pub(super) async fn enqueue_event(
     let MailboxEventRequest { key, text, wake } = request;
     let event_key = format!("api:{session_id}:{key}");
     let created_at_ms = mj_core::clock::epoch_millis().max(0) as u64;
-    let event_json = serde_json::to_string(&serde_json::json!({
-        "key": event_key.clone(),
-        "source": "api",
-        "wake": wake,
-        "text": text,
-        "created_at_ms": created_at_ms,
-    }))
-    .map_err(anyhow::Error::from)?;
+    let event = mj_core::mailbox::MailboxEvent {
+        key: event_key.clone(),
+        source: "api".into(),
+        wake,
+        created_at_ms,
+        body: mj_core::mailbox::MailboxEventBody::PlainText { text },
+    };
+    let event_json = serde_json::to_string(&event).map_err(anyhow::Error::from)?;
     let target = session_id.clone();
     let admission = state
         .upgrade_gate

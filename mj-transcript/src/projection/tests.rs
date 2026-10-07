@@ -276,19 +276,39 @@ fn golden_session_title_projection() {
 #[test]
 fn golden_mailbox_delivery_transcript() {
     let mut session = MaterializedSession::empty("session-mailbox");
-    let github_event = mj_core::mailbox::MailboxEvent {
-        key: "github:owner/repo#12:comment:345".into(),
-        source: "github".into(),
-        wake: false,
-        text: "A review comment arrived.".into(),
-        created_at_ms: 100,
-    };
+    use mj_core::github_item::GithubItemKind;
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody, MailboxPullRequestChange};
+
+    let mailbox_event =
+        |key: &str, source: &str, wake: bool, created_at_ms: u64, body: MailboxEventBody| {
+            MailboxEvent {
+                key: key.into(),
+                source: source.into(),
+                wake,
+                created_at_ms,
+                body,
+            }
+        };
+    let github_event = mailbox_event(
+        "github:owner/repo#12:comment:345",
+        "github",
+        false,
+        100,
+        MailboxEventBody::GithubComment {
+            item_kind: GithubItemKind::PullRequest,
+            number: 12,
+            title: "Mailbox delivery".into(),
+            author: "alice".into(),
+            body: "The first comment line.\nThe second line is omitted from the notice.".into(),
+            repo: None,
+        },
+    );
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
             command_id: "github-event".into(),
             command: RelayCommand::DeliverMailboxEvent {
-                event: github_event,
+                event: github_event.clone(),
             },
             created_at_ms: 100,
         },
@@ -300,24 +320,20 @@ fn golden_mailbox_delivery_transcript() {
             path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
             prompt_command_id: None,
             hook_event: Some("PostToolUse".into()),
-            events: vec![mj_core::mailbox::MailboxEvent {
-                key: "github:owner/repo#12:comment:345".into(),
-                source: "github".into(),
-                wake: false,
-                text: "A review comment arrived.".into(),
-                created_at_ms: 100,
-            }],
+            events: vec![github_event.clone()],
             lease_id: Some("hook-lease".into()),
         },
     );
 
-    let parent_event = mj_core::mailbox::MailboxEvent {
-        key: "parent:message:1".into(),
-        source: "parent".into(),
-        wake: false,
-        text: "Please check this detail.".into(),
-        created_at_ms: 300,
-    };
+    let parent_event = mailbox_event(
+        "parent:message:1",
+        "parent",
+        false,
+        300,
+        MailboxEventBody::ParentMessage {
+            text: "Please check this detail.".into(),
+        },
+    );
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
@@ -340,30 +356,149 @@ fn golden_mailbox_delivery_transcript() {
         },
     );
 
-    let api_event = mj_core::mailbox::MailboxEvent {
-        key: "api:urgent-1".into(),
-        source: "api".into(),
-        wake: true,
-        text: "A new task is ready.".into(),
-        created_at_ms: 500,
-    };
+    let events = vec![
+        mailbox_event(
+            "github:repo#4623:interest:session",
+            "github",
+            false,
+            500,
+            MailboxEventBody::NewGithubItem {
+                kind: GithubItemKind::PullRequest,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4624:interest:session",
+            "github",
+            false,
+            501,
+            MailboxEventBody::NewGithubItem {
+                kind: GithubItemKind::Issue,
+                number: 4624,
+                title: "Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:comment:1",
+            "github",
+            true,
+            502,
+            MailboxEventBody::GithubComment {
+                item_kind: GithubItemKind::PullRequest,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                author: "alice".into(),
+                body: "Please check the macro edge case.\nMore detail.".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:review:2",
+            "github",
+            true,
+            503,
+            MailboxEventBody::GithubReview {
+                item_kind: GithubItemKind::PullRequest,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                author: "bob".into(),
+                body: "Could you revise the error path?".into(),
+                review_state: Some("changes_requested".into()),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:review-comment:3",
+            "github",
+            true,
+            504,
+            MailboxEventBody::GithubReviewComment {
+                item_kind: GithubItemKind::PullRequest,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                author: "carol".into(),
+                body: "This assertion needs a case.".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:merged",
+            "github",
+            true,
+            505,
+            MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                actor: "dana".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:closed",
+            "github",
+            true,
+            506,
+            MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::ClosedWithoutMerging,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                actor: "erin".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4623:reopened",
+            "github",
+            true,
+            507,
+            MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Reopened,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                actor: "frank".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "parent:message:2",
+            "parent",
+            true,
+            508,
+            MailboxEventBody::ParentMessage {
+                text: "Please verify the edge case.".into(),
+            },
+        ),
+        mailbox_event(
+            "api:plain-1",
+            "api",
+            true,
+            509,
+            MailboxEventBody::PlainText {
+                text: "A plain event from the CLI.".into(),
+            },
+        ),
+    ];
+    for (index, mailbox_event) in events.iter().enumerate() {
+        apply_observation(
+            &mut session,
+            RelayObservation::CommandQueued {
+                command_id: format!("mixed-event-{index}"),
+                command: RelayCommand::DeliverMailboxEvent {
+                    event: mailbox_event.clone(),
+                },
+                created_at_ms: mailbox_event.created_at_ms as i64,
+            },
+        );
+    }
     apply_observation(
         &mut session,
         RelayObservation::CommandQueued {
-            command_id: "api-event".into(),
-            command: RelayCommand::DeliverMailboxEvent {
-                event: api_event.clone(),
-            },
-            created_at_ms: 500,
-        },
-    );
-    apply_observation(
-        &mut session,
-        RelayObservation::CommandQueued {
-            command_id: "api-wake".into(),
-            command: RelayCommand::MailboxWake {
-                events: vec![api_event],
-            },
+            command_id: "mixed-event-wake".into(),
+            command: RelayCommand::MailboxWake { events },
             created_at_ms: 600,
         },
     );

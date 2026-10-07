@@ -289,6 +289,21 @@ impl InputProgress {
             if event.key != row.event_key || event.source != "parent" {
                 continue;
             }
+            if let Some(error) = row.failure {
+                if let Some(pending) = self.pending_messages.get_mut(&row.target_session_id) {
+                    pending.retain(|pending_id| pending_id != request_id);
+                }
+                self.message_deliveries
+                    .entry(row.target_session_id)
+                    .or_default()
+                    .push(serde_json::json!({
+                        "request_id":request_id,
+                        "created_at_ms":event.created_at_ms,
+                        "status":"failed",
+                        "error":error
+                    }));
+                continue;
+            }
             if row.accepted {
                 accepted
                     .entry(row.target_session_id.clone())
