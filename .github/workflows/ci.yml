@@ -162,6 +162,10 @@ jobs:
       if: runner.os == 'Windows'
       run: cargo test --no-run
 
+    - name: Test the Windows installer
+      if: runner.os == 'Windows'
+      run: node --test scripts/install-ps1.test.mjs
+
   # Ordinary check-ins run Linux and Windows; macOS runs here only for
   # macOS-sensitive changes (the path list in .github/macos-ci-paths.txt plus
   # any file with a macOS cfg gate), and nightly in macos-nightly.yml.
