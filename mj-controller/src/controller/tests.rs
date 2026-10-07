@@ -8,7 +8,7 @@ use mj_core::config::{
 use mj_core::path_completion::{CompletionHost, CompletionKind};
 use mj_core::state::{State, TargetLocator};
 
-use super::test_support::IsolatedTest;
+use super::test_support::{IsolatedTest, test_name};
 use super::*;
 
 /// One profile, one bundle with nothing checked out locally, and one
@@ -619,6 +619,82 @@ fn bundle_creation_reuses_an_exact_source_set_and_rejects_obsolete_pins() {
     let error = create_bundle_from_sources_in_config(&mut config, &exact_sources).unwrap_err();
     assert!(format!("{error:#}").contains("git_ref is no longer supported"));
     assert_eq!(config, before);
+}
+
+const STALE_CONFIGURED_REPOSITORY_CHILD: &str = "MJ_TEST_STALE_CONFIGURED_REPOSITORY_CHILD";
+
+// Hard-won: #1226: an unreadable local repository in another bundle aborted source lookup.
+#[test]
+fn bundle_creation_skips_unreadable_configured_repositories() {
+    if std::env::var_os(STALE_CONFIGURED_REPOSITORY_CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(test_name(
+            module_path!(),
+            "bundle_creation_skips_unreadable_configured_repositories",
+        ))
+        .env(STALE_CONFIGURED_REPOSITORY_CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+
+    let stale_local = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.bundles.insert(
+        "a-stale".into(),
+        ProjectBundle {
+            primary_repo: "stale".into(),
+            repositories: vec![ProjectRepository {
+                id: "stale".into(),
+                github: None,
+                local: Some(stale_local.path().to_owned()),
+                destination: "stale".into(),
+                git_ref: None,
+            }],
+        },
+    );
+    config.bundles.insert(
+        "z-existing".into(),
+        ProjectBundle {
+            primary_repo: "existing".into(),
+            repositories: vec![ProjectRepository {
+                id: "existing".into(),
+                github: Some("owner/existing".into()),
+                local: None,
+                destination: "existing".into(),
+                git_ref: None,
+            }],
+        },
+    );
+
+    let reused =
+        create_bundle_from_sources_in_config(&mut config, &["owner/existing".into()]).unwrap();
+    assert_eq!(reused, "z-existing");
+
+    let created =
+        create_bundle_from_sources_in_config(&mut config, &["owner/new-project".into()]).unwrap();
+    assert_eq!(created, "new-project");
+    assert_eq!(
+        config.bundles[&created]
+            .primary()
+            .unwrap()
+            .github
+            .as_deref(),
+        Some("owner/new-project")
+    );
+
+    config.save().unwrap();
+    let invalid_local = tempfile::tempdir().unwrap();
+    let error = create_bundle_from_sources(&[invalid_local.path().to_string_lossy().into_owned()])
+        .unwrap_err();
+    assert!(
+        matches!(&error, QuickBundleFailure::InvalidSource(_)),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("not a Git repository"),
+        "{error}"
+    );
 }
 
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
