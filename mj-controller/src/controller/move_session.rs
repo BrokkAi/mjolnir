@@ -1376,11 +1376,7 @@ impl Controller {
                 && op.phase != MovePhase::Completed
                 && op.restore_artifact().is_some()
         });
-        if retry.is_none()
-            && source.state == SessionState::Running
-            && source.last_profile == checked.selection.profile_id.as_deref().unwrap()
-            && move_environment_change(&source, &checked.selection, false).is_none()
-        {
+        if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
             return Ok(outcome(
                 &prepared.operation_id,
                 &prepared.selection,
@@ -2547,6 +2543,17 @@ fn move_subagent_policy(
         .clone()
         .or_else(|| source.subagents.clone())
         .unwrap_or_default()
+}
+
+/// Whether a Move would leave a running session exactly as it is: the same
+/// profile, the same environment, and the same delegation policy. The worker
+/// reads its delegation policy at launch, so a policy change alone still needs
+/// the restart a Move performs.
+fn move_changes_nothing(source: &mj_core::state::SessionRecord, selection: &MoveSelection) -> bool {
+    source.state == SessionState::Running
+        && selection.profile_id.as_deref() == Some(source.last_profile.as_str())
+        && move_environment_change(source, selection, false).is_none()
+        && move_subagent_policy(source, selection) == source.subagents.clone().unwrap_or_default()
 }
 
 pub(crate) fn parent_tools_enabled(

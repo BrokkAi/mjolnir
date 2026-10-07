@@ -1083,6 +1083,48 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
 }
 
 #[test]
+fn a_move_that_only_changes_delegation_still_restarts_the_session() {
+    use mj_core::subagent::SubagentPolicy;
+
+    let mut source = raw_session_on("local-bare", "/home/dev/project");
+    source.state = SessionState::Running;
+    source.subagents = Some(SubagentPolicy::Native);
+    let same = mj_core::state::MoveSelection {
+        subagents: None,
+        workspace: Default::default(),
+        clear_resource_allocation: false,
+        session_id: source.id.clone(),
+        profile_id: Some(source.last_profile.clone()),
+        target_template_id: Some(source.target_template_id.clone()),
+        additional_mounts: Some(source.additional_mounts.clone()),
+        resource_allocation: source.resource_allocation.clone(),
+    };
+    assert!(super::move_changes_nothing(&source, &same));
+
+    // A viewer may send the current policy explicitly; that changes nothing.
+    let explicit_same = mj_core::state::MoveSelection {
+        subagents: Some(SubagentPolicy::Native),
+        workspace: Default::default(),
+        ..same.clone()
+    };
+    assert!(super::move_changes_nothing(&source, &explicit_same));
+
+    let to_mjolnir = mj_core::state::MoveSelection {
+        subagents: Some(SubagentPolicy::SingleModel {
+            model: "sonnet".into(),
+            effort: None,
+        }),
+        workspace: Default::default(),
+        ..same.clone()
+    };
+    assert!(!super::move_changes_nothing(&source, &to_mjolnir));
+
+    let mut stopped = source.clone();
+    stopped.state = SessionState::Stopped;
+    assert!(!super::move_changes_nothing(&stopped, &same));
+}
+
+#[test]
 fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_live_ones() {
     let mut parent = raw_session_on("local-bare", "/workspace");
     parent.state = SessionState::Running;
