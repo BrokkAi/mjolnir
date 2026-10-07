@@ -169,6 +169,13 @@ impl Verdict {
     }
 
     pub fn action(&self, authorization_complete: bool) -> Action {
+        // A confident quota stop always recovers, whatever the input answer:
+        // question detection is unreliable, and the resume prompt tells the
+        // agent to ask again and stop if a decision is still open.
+        if self.failure.choice == Failure::Quota && self.failure.confidence >= AUTOMATION_CONFIDENCE
+        {
+            return Action::RecoverQuota;
+        }
         if self.requires_input() {
             return Action::AwaitInput;
         }
@@ -176,7 +183,6 @@ impl Verdict {
         if self.failure.confidence >= AUTOMATION_CONFIDENCE {
             match self.failure.choice {
                 Failure::TransientProvider => return Action::RetryProvider,
-                Failure::Quota => return Action::RecoverQuota,
                 Failure::Other => return Action::AwaitInput,
                 _ => {}
             }
@@ -739,16 +745,20 @@ mod tests {
             Action::AwaitInput
         );
     }
+    // Hard-won: 8cecc1c: a detected question beat a confident quota stop, so the session never resumed after the reset.
     #[test]
-    fn explicit_user_handoff_blocks_provider_automation() {
+    fn explicit_user_handoff_blocks_provider_retry_but_not_quota_recovery() {
         assert_eq!(
             verdict(Failure::TransientProvider, Input::Required, Work::Unclear).action(false),
             Action::AwaitInput
         );
         assert_eq!(
             verdict(Failure::Quota, Input::Required, Work::Unclear).action(true),
-            Action::AwaitInput
+            Action::RecoverQuota
         );
+        let mut low = verdict(Failure::Quota, Input::Required, Work::Unclear);
+        low.failure.confidence = 0.89;
+        assert_eq!(low.action(true), Action::AwaitInput);
     }
     #[test]
     fn authorization_survives_assistant_eviction_without_clipping_user_consent() {

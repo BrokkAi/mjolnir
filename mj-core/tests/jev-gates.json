@@ -42,6 +42,48 @@
     "requires_input": true
   },
   {
+    "name": "confident quota stop recovers even when a question was detected",
+    "answers": {
+      "failure": {
+        "type": "choice",
+        "choice": "quota",
+        "confidence": 1.0,
+        "probabilities": {
+          "none": 0,
+          "transient_provider": 0,
+          "quota": 1.0,
+          "other": 0,
+          "unclear": 0
+        }
+      },
+      "input": {
+        "type": "choice",
+        "choice": "required",
+        "confidence": 0.89,
+        "probabilities": {
+          "required": 0.89,
+          "none": 0.1,
+          "redundant_request": 0.01,
+          "unclear": 0
+        }
+      },
+      "work": {
+        "type": "choice",
+        "choice": "authorized_unfinished",
+        "confidence": 0.35,
+        "probabilities": {
+          "authorized_unfinished": 0.35,
+          "finished": 0.32,
+          "waiting": 0.33,
+          "unclear": 0
+        }
+      }
+    },
+    "authorization_complete": true,
+    "action": "recover_quota",
+    "requires_input": true
+  },
+  {
     "name": "required below probability floor despite clear lead",
     "answers": {
       "failure": {

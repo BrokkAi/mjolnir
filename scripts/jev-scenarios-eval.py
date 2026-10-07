@@ -62,13 +62,13 @@ def requires_input(input_):
 def action(verdict, authorization_complete):
     """Python port of `mj_core::assessment::Verdict::action`. Pinned by the test file."""
     failure, input_, work = verdict["failure"], verdict["input"], verdict["work"]
+    if failure["choice"] == "quota" and failure["confidence"] >= AUTOMATION_CONFIDENCE:
+        return "recover_quota"
     if requires_input(input_):
         return "await_input"
     if failure["confidence"] >= AUTOMATION_CONFIDENCE:
         if failure["choice"] == "transient_provider":
             return "retry_provider"
-        if failure["choice"] == "quota":
-            return "recover_quota"
         if failure["choice"] == "other":
             return "await_input"
     if failure["choice"] != "none" or failure["confidence"] < AUTOMATION_CONFIDENCE:

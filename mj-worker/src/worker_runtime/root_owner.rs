@@ -112,9 +112,86 @@ impl WorkerRootOwner {
 }
 
 #[cfg(test)]
+pub(crate) fn acquire_after_fork_exec_window(root: &Path) -> Result<WorkerRootOwner> {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match WorkerRootOwner::acquire(root) {
+            Ok(owner) => return Ok(owner),
+            Err(error) if error.to_string().starts_with("a worker already owns ") => {
+                if Instant::now() >= deadline {
+                    return Err(error).context("worker root stayed busy after a fork/exec window");
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) struct ForkedPreExecChild {
+    control: std::os::unix::net::UnixStream,
+    child: std::thread::JoinHandle<()>,
+}
+
+#[cfg(all(test, unix))]
+impl ForkedPreExecChild {
+    pub(crate) fn start() -> Self {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+
+        let (parent, child_control) = UnixStream::pair().unwrap();
+        let child = std::thread::spawn(move || {
+            let child_fd = child_control.as_raw_fd();
+            let mut command = std::process::Command::new("/bin/true");
+            // Hold the forked copy of the lock until the parent allows exec.
+            // SAFETY: the hook uses only async-signal-safe read/write syscalls.
+            unsafe {
+                command.pre_exec(move || {
+                    let ready = b'r';
+                    if libc::write(child_fd, (&ready as *const u8).cast(), 1) != 1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let mut release = 0u8;
+                    if libc::read(child_fd, (&mut release as *mut u8).cast(), 1) != 1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let output = mj_core::subprocess::run_capturing_stdout(&mut command).unwrap();
+            assert!(output.status.success());
+        });
+        let mut ready = [0u8; 1];
+        (&parent).read_exact(&mut ready).unwrap();
+        assert_eq!(ready, [b'r']);
+        Self {
+            control: parent,
+            child,
+        }
+    }
+
+    pub(crate) fn release_after(self, delay: std::time::Duration) -> std::thread::JoinHandle<()> {
+        use std::io::Write;
+
+        let Self { mut control, child } = self;
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            control.write_all(b"e").unwrap();
+            child.join().unwrap();
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    // Hard-won: #1257: a forked pre-exec child keeps the flock after the Rust owner drops.
     #[test]
     fn root_is_exclusive_before_a_control_socket_exists_and_released_on_exit() {
         let root = tempfile::tempdir().unwrap();
@@ -122,8 +199,21 @@ mod tests {
         assert!(WorkerRootOwner::acquire(root.path()).is_err());
         let other = tempfile::tempdir().unwrap();
         let _independent = WorkerRootOwner::acquire(other.path()).unwrap();
-        drop(owner);
-        assert!(WorkerRootOwner::acquire(root.path()).is_ok());
+        #[cfg(unix)]
+        let acquired = {
+            let child = ForkedPreExecChild::start();
+            drop(owner);
+            let release = child.release_after(std::time::Duration::from_millis(30));
+            let acquired = acquire_after_fork_exec_window(root.path());
+            release.join().unwrap();
+            acquired
+        };
+        #[cfg(not(unix))]
+        let acquired = {
+            drop(owner);
+            acquire_after_fork_exec_window(root.path())
+        };
+        assert!(acquired.is_ok());
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub enum CommandId {
     CancelOperation,
     ToggleProject,
     TargetActions,
+    TargetDisks,
     EditProfile,
     Refresh,
     OpenConfig,
@@ -1073,6 +1074,20 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: targets_visible,
     },
     CommandSpec {
+        id: CommandId::TargetDisks,
+        label: "Show disks",
+        description: "Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.",
+        scope: Scope::Targets,
+        pane_keys: &[KeyHint::plain(KeyCode::Char('d'), "d")],
+        action: None,
+        // The Disks cell shows it can be clicked; the key is listed in help
+        // and the palette rather than taking footer room from global keys.
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: targets_visible,
+    },
+    CommandSpec {
         id: CommandId::EditProfile,
         label: "Rename profile",
         description: "Rename the selected profile's configuration id.",
@@ -1867,6 +1882,13 @@ impl DashboardState {
                     return DashboardAction::None;
                 }
                 self.begin_target_actions();
+                DashboardAction::None
+            }
+            CommandId::TargetDisks => {
+                if self.pane_size(crate::SupportPane::Targets) == crate::PaneSize::Minimized {
+                    return DashboardAction::None;
+                }
+                self.toggle_selected_disks();
                 DashboardAction::None
             }
             CommandId::EditProfile => {

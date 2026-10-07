@@ -1,16 +1,15 @@
 ARG NODE_IMAGE=docker.io/library/node:24-trixie
-# Pinned to the same compiler as rust-toolchain.toml. A floating `rust:1`
-# tag would drift away from the pin, and rustup would then download the
-# pinned toolchain on the first cargo run without the musl target and
-# components this image adds below. Bump both together.
-ARG RUST_IMAGE=docker.io/library/rust:1.96.0-trixie
+# Bifrost sessions use 1.97.1. Keep Mjolnir's rust-toolchain.toml compiler
+# installed alongside it below, so neither repository downloads a toolchain
+# during a turn (concurrent first-use rustup installs can corrupt components).
+ARG RUST_IMAGE=docker.io/library/rust:1.97.1-trixie
+ARG MJ_RUST_TOOLCHAIN=1.96.0
 # Bifrost is the semantic-analysis tool every turn review depends on: the
 # review's `analyze_diff` pre-pass and the analyzer/navigation MCP servers the
 # reviewing agents call are both this one binary. Baking a pinned crates.io
 # release into the image means a review never fetches anything at review time,
-# and the version moves only when someone edits this line. Bifrost pins a newer
-# compiler than Hel does (its rust-toolchain.toml names 1.97.1), so it is built
-# in its own stage and only the binary is copied out.
+# and the version moves only when someone edits this line. Build in a separate
+# stage so the installed binary does not carry its build dependencies.
 # Keep REQUIRED_BIFROST_VERSION in mj-review/src/bifrost.rs equal to this value.
 ARG BIFROST_VERSION=0.12.0
 ARG BIFROST_BUILDER_IMAGE=docker.io/library/rust:1.97.1-trixie
@@ -23,6 +22,7 @@ RUN cargo install brokk-bifrost@${BIFROST_VERSION} --locked --bin bifrost --root
     && /opt/bifrost/bin/bifrost --version
 
 FROM ${RUST_IMAGE}
+ARG MJ_RUST_TOOLCHAIN
 
 # The Node image and Rust image share the Trixie base. Copying /usr/local
 # brings in Node, npm, npx, Corepack, and the headers needed by native modules.
@@ -41,7 +41,9 @@ COPY --from=node /usr/local/ /usr/local/
 # voice-worker) needs to compile; without it any build that includes
 # `brokk-mj-voice-worker` fails in the `alsa-sys` build script. This matches
 # the `libasound2-dev` install in the voice-worker CI job and the Linux
-# release builds.
+# release builds. `eatmydata` lets sessions run build and test commands with
+# fsync turned into a no-op (LD_PRELOAD=libeatmydata.so), the way CI jobs that
+# commit many small SQLite transactions do.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
@@ -50,6 +52,7 @@ RUN apt-get update \
         clang \
         cmake \
         curl \
+        eatmydata \
         fd-find \
         file \
         git \
@@ -111,6 +114,12 @@ RUN ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     esac \
     && rustup component add clippy rustfmt llvm-tools-preview \
     && rustup target add "$MUSL" \
+    && rustup toolchain install "$MJ_RUST_TOOLCHAIN" --profile minimal \
+        --component clippy,rustfmt,llvm-tools-preview --target "$MUSL" \
+    && rustc --version \
+    && cargo --version \
+    && rustc +"$MJ_RUST_TOOLCHAIN" --version \
+    && cargo +"$MJ_RUST_TOOLCHAIN" --version \
     && NEXTEST_ARCHIVE="cargo-nextest-${CARGO_NEXTEST_VERSION}-${MUSL}.tar.gz" \
     && NEXTEST_URL="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${CARGO_NEXTEST_VERSION}/${NEXTEST_ARCHIVE}" \
     && curl --fail --location --silent --show-error "$NEXTEST_URL" --output /tmp/cargo-nextest.tar.gz \

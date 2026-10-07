@@ -218,8 +218,10 @@ class ActionPolicy(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.parse_answers(answers)
 
-    def test_required_input_beats_everything(self):
+    def test_required_input_beats_everything_but_a_confident_quota_stop(self):
         self.assertEqual(module.action(verdict(input_=("required", 0.85), failure=("transient_provider", 0.99)), True), "await_input")
+        self.assertEqual(module.action(verdict(input_=("required", 0.85), failure=("quota", 0.99)), True), "recover_quota")
+        self.assertEqual(module.action(verdict(input_=("required", 0.85), failure=("quota", 0.89)), True), "await_input")
         self.assertEqual(module.action(verdict(input_=("required", 0.49), failure=("none", 0.99)), True), "uncertain")
 
     def test_provider_recovery_is_independent_of_work(self):
