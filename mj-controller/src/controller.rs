@@ -17,6 +17,7 @@ pub mod profile_config;
 mod provisioning;
 pub(crate) mod publication;
 mod readiness;
+pub(crate) use network_git::workspace_root;
 pub(crate) use readiness::HarnessPreparationFailure;
 pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;

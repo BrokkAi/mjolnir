@@ -70,7 +70,7 @@ impl Controller {
 /// The directory the session's repositories are checked out under.
 /// `container_workspace` is the session record's recorded container workspace,
 /// which only container locators use.
-pub(super) fn workspace_root(
+pub(crate) fn workspace_root(
     backend: &targets::TargetLocator,
     container_workspace: Option<&std::path::Path>,
 ) -> String {
