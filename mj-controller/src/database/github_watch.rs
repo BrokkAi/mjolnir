@@ -34,6 +34,14 @@ pub(crate) struct GithubItemWatch {
     pub title: String,
     pub url: String,
     pub created_at: String,
+    pub pull_request_etag: Option<String>,
+    pub pull_request_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GithubSessionTurnWindow {
+    pub started_at_ms: i64,
+    pub completed_at_ms: Option<i64>,
 }
 
 pub(crate) fn load_github_repo_cursor(owner: &str, repo: &str) -> Result<Option<GithubRepoCursor>> {
@@ -173,7 +181,8 @@ pub(crate) fn commit_github_item_classification(
 pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubItemWatch>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT owner, repo, number, creator_session_id, kind, title, url, created_at
+        "SELECT owner, repo, number, creator_session_id, kind, title, url, created_at,
+                pull_request_etag, pull_request_state
          FROM github_watch_items WHERE owner=?1 AND repo=?2
          ORDER BY number, creator_session_id",
     )?;
@@ -188,10 +197,177 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
                 title: row.get(5)?,
                 url: row.get(6)?,
                 created_at: row.get(7)?,
+                pull_request_etag: row.get(8)?,
+                pull_request_state: row.get(9)?,
             })
         })?
         .map(|row| row.map_err(Into::into))
         .collect()
+}
+
+pub(crate) fn commit_github_pull_request_status(
+    watch: GithubItemWatch,
+    etag: Option<String>,
+    state: String,
+    event: Option<(String, String)>,
+) -> Result<()> {
+    let has_event = event.is_some();
+    submit_database_write("commit_github_pull_request_status", move |connection| {
+        let tx = connection.transaction()?;
+        let updated = tx.execute(
+            "UPDATE github_watch_items
+             SET pull_request_etag=?4, pull_request_state=?5
+             WHERE owner=?1 AND repo=?2 AND number=?3 AND kind='pull_request'",
+            params![watch.owner, watch.repo, watch.number, etag, state],
+        )?;
+        ensure!(
+            updated == 1,
+            "GitHub pull request watch disappeared during polling"
+        );
+        if let Some((event_key, event_json)) = event {
+            enqueue_mailbox_event_with(
+                &tx,
+                &event_key,
+                &watch.creator_session_id,
+                &event_json,
+                true,
+                false,
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })?;
+    if has_event {
+        crate::mailbox_outbox::notify_mailbox_outbox_changed();
+    }
+    Ok(())
+}
+
+/// Reconstruct turn intervals from the same persisted start and completion
+/// facts exposed by the transcript projection. An unmatched start counts only
+/// when the materialized projection still names it as the active turn.
+pub(crate) fn load_github_session_turn_windows(
+    session_id: &str,
+) -> Result<Vec<GithubSessionTurnWindow>> {
+    let mut connection = open_reader(&database_path())?;
+    let tx = connection.transaction()?;
+    let bodies = {
+        let mut statement = tx.prepare(
+            "SELECT body FROM api_events
+             WHERE session_id=?1
+               AND json_extract(body, '$.type') IN ('turn_started', 'turn_ended')
+             ORDER BY seq",
+        )?;
+        statement
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut starts = BTreeMap::<String, i64>::new();
+    let mut windows = Vec::new();
+    for body in bodies {
+        let event: mj_core::storage::ApiEventData = serde_json::from_str(&body)?;
+        match event {
+            mj_core::storage::ApiEventData::TurnStarted { turn } => {
+                starts.insert(turn.command_id, turn.started_at_ms);
+            }
+            mj_core::storage::ApiEventData::TurnEnded { turn } => {
+                if let Some(started_at_ms) = starts.remove(&turn.command_id) {
+                    windows.push(GithubSessionTurnWindow {
+                        started_at_ms,
+                        completed_at_ms: Some(turn.completed_at_ms),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    let active_turn_json: Option<String> = tx
+        .query_row(
+            "SELECT active_turn_json FROM materialized_sessions WHERE session_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(active_turn) = active_turn_json
+        .map(|json| serde_json::from_str::<Option<MaterializedTurn>>(&json))
+        .transpose()?
+        .flatten()
+    {
+        let started_at_ms = starts
+            .remove(&active_turn.command_id)
+            .unwrap_or(active_turn.started_at_ms);
+        windows.push(GithubSessionTurnWindow {
+            started_at_ms,
+            completed_at_ms: None,
+        });
+    }
+    tx.commit()?;
+    Ok(windows)
+}
+
+#[cfg(test)]
+pub(crate) fn seed_github_test_turns(
+    session_id: &str,
+    completed_start_ms: i64,
+    completed_at_ms: i64,
+    active_start_ms: i64,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    submit_database_write("seed_github_test_turns", move |connection| {
+        let completed_start = serde_json::json!({
+            "type": "turn_started",
+            "data": {"turn": {
+                "command_id": "completed-turn",
+                "turn_start_position": 1,
+                "started_at_ms": completed_start_ms
+            }}
+        });
+        let completed_end = serde_json::json!({
+            "type": "turn_ended",
+            "data": {"turn": {
+                "command_id": "completed-turn",
+                "completed_ordinal": 1,
+                "completed_at_ms": completed_at_ms,
+                "outcome": {"kind": "completed"}
+            }}
+        });
+        let active_start = serde_json::json!({
+            "type": "turn_started",
+            "data": {"turn": {
+                "command_id": "active-turn",
+                "turn_start_position": 2,
+                "started_at_ms": active_start_ms
+            }}
+        });
+        let active_turn = serde_json::json!({
+            "command_id": "active-turn",
+            "turn_start_position": 2,
+            "started_at_ms": active_start_ms
+        });
+        let tx = connection.transaction()?;
+        for (timestamp, event) in [
+            (completed_start_ms, completed_start),
+            (completed_at_ms, completed_end),
+            (active_start_ms, active_start),
+        ] {
+            tx.execute(
+                "INSERT INTO api_events(session_id, recorded_at_ms, body) VALUES (?1, ?2, ?3)",
+                params![session_id, timestamp, event.to_string()],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO materialized_sessions(session_id, execution_state,
+                    running_started_at_ms, active_turn_json)
+             VALUES (?1, 'running', ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET execution_state='running',
+                    running_started_at_ms=excluded.running_started_at_ms,
+                    active_turn_json=excluded.active_turn_json",
+            params![session_id, active_start_ms, active_turn.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })
 }
 
 pub(crate) fn load_github_watched_repositories() -> Result<Vec<(String, String)>> {

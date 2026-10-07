@@ -83,7 +83,7 @@ def main():
         )
         script = script.replace(
             "        if wait_for_prompt_cancel():",
-            '        if "second turn" in text:\n            os.environ["MJ_FAKE_ACP_PROMPT_DELAY_MS"] = "60000"\n        if wait_for_prompt_cancel():',
+            '        if "second turn" in text:\n            os.environ["MJ_FAKE_ACP_PROMPT_DELAY_MS"] = "15000"\n        if wait_for_prompt_cancel():',
         )
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
@@ -180,6 +180,33 @@ def main():
             assert result is not None, reply
             assert not result["is_error"], result
             return json.loads(result["message"])
+
+        def run_mailbox_hook(session):
+            # Exercise the same worker boundary that the staged Codex
+            # PostToolUse handler calls, and verify the message is in its
+            # response before the child's current turn finishes.
+            control_socket = endpoint(session).with_name("control.sock")
+            result = subprocess.run(
+                [
+                    str(args.worker.resolve()),
+                    "worker",
+                    "mailbox-hook",
+                    "--socket",
+                    str(control_socket),
+                    "--event",
+                    "PostToolUse",
+                ],
+                env=env,
+                input="{}\n",
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            if result.returncode:
+                raise RuntimeError(
+                    f"mailbox hook failed: {result.stderr or result.stdout}"
+                )
+            return json.loads(result.stdout)
 
         endpoint(parent)
         deadline = time.monotonic() + 60
@@ -288,14 +315,39 @@ def main():
             assert elapsed < 30, (
                 f"daemon replacement waited for a worker turn: {elapsed}"
             )
+            message = tool(
+                parent,
+                "send_message",
+                {"child_session_id": child, "message": "after daemon replacement"},
+            )
+            assert message["status"] == "queued", (
+                "a child message is queued without cancelling its turn"
+            )
+            hook = run_mailbox_hook(child)
+            additional_context = hook.get("hookSpecificOutput", {}).get(
+                "additionalContext", ""
+            )
+            assert "after daemon replacement" in additional_context, hook
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                listed = tool(parent, "list_agents")
+                deliveries = listed["agents"][0].get("message_deliveries", [])
+                if any(
+                    delivery["request_id"] == message["request_id"]
+                    and delivery["status"] == "delivered"
+                    for delivery in deliveries
+                ):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"child mailbox message was not delivered: {listed}")
+            assert listed["agents"][0]["state"] == "running", (
+                "send_message must not cancel the child's current turn"
+            )
             tool(
                 child,
                 "handback",
                 {"message": "second report across daemon replacement"},
-            )
-            interrupted = tool(parent, "interrupt_agent", {"child_session_id": child})
-            assert interrupted["interrupted"], (
-                "the child turn must survive daemon replacement"
             )
             second = waiting.result(timeout=40)
             assert second["status"] == "reported", second

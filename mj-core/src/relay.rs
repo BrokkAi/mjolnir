@@ -60,7 +60,8 @@ pub const RELAY_RETRY_ID_RETENTION: usize = 512;
 /// counts to a review capture. 31 added delivery status to sub-agent results
 /// (older completion responses mean delivered) and compare-and-replace for
 /// project memory trees. 32 added worker-owned sub-agent mutation admission.
-/// 33 adds durable mailbox events and their hook drain request. An older
+/// 33 adds durable mailbox events, their leased hook drain/ack requests, and
+/// parent mailbox messages in the sub-agent request queue. An older
 /// controller's requests are refused whole by a newer worker, rather than
 /// half-decoded.
 pub const RELAY_PROTOCOL_VERSION: u32 = 33;

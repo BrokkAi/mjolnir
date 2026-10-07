@@ -97,6 +97,11 @@ pub trait ExportRuntime: Send + Sync {
         false
     }
 
+    /// Whether daemon configuration currently enables agent mailboxes.
+    fn agent_mailboxes_enabled(&self) -> bool {
+        true
+    }
+
     fn workspace_session(
         &self,
         _session_id: String,
@@ -199,6 +204,10 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn agent_mailboxes_enabled(&self) -> bool {
+        self.with_config(mj_core::config::Config::agent_mailboxes_enabled)
+    }
+
     fn revisions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         Some(RuntimeState::revisions(self))
     }
@@ -600,24 +609,11 @@ impl ApiBackend {
             }
             prepared
         } else {
-            let turn_session = match &request.action {
-                mj_core::subagent::SubagentToolAction::InterruptAgent { child_session_id } => {
-                    Some(child_session_id.clone())
-                }
-                mj_core::subagent::SubagentToolAction::Handback { .. } => None,
-                _ => None,
-            };
             let turn_target = if matches!(
                 request.action,
                 mj_core::subagent::SubagentToolAction::Handback { .. }
             ) {
                 request.originating_command_id.clone()
-            } else if let Some(session) = turn_session {
-                self.session_handle(session)
-                    .await?
-                    .and_then(|handle| handle.view().snapshot)
-                    .and_then(|snapshot| snapshot.materialized.active_turn)
-                    .map(|turn| turn.command_id)
             } else {
                 None
             };
@@ -701,10 +697,16 @@ impl ApiBackend {
                 &mut reported_finishes,
             )
             .await;
-        if let mj_core::subagent::SubagentToolAction::SendInput {
-            child_session_id, ..
-        } = &request.action
-        {
+        let child_id = match &request.action {
+            mj_core::subagent::SubagentToolAction::SendInput {
+                child_session_id, ..
+            } => Some((child_session_id, "input")),
+            mj_core::subagent::SubagentToolAction::SendMessage {
+                child_session_id, ..
+            } => Some((child_session_id, "message")),
+            _ => None,
+        };
+        if let Some((child_session_id, kind)) = child_id {
             let (mut value, is_error) = match outcome {
                 Ok(value) => (value, false),
                 Err(error) => (
@@ -715,6 +717,7 @@ impl ApiBackend {
             value["child_session_id"] = child_session_id.clone().into();
             value["request_id"] = request.request_id.clone().into();
             value["created_at_ms"] = request.created_at_ms.into();
+            value["kind"] = kind.into();
             return (
                 mj_core::subagent::SubagentToolResult {
                     request_id: request.request_id,
@@ -980,6 +983,41 @@ impl ApiBackend {
                     serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id,"status":"submitted"}),
                 )
             }
+            SubagentToolAction::SendMessage {
+                child_session_id,
+                message,
+            } => {
+                ensure!(
+                    self.exports.agent_mailboxes_enabled(),
+                    "agent mailboxes are disabled; send_message was not queued"
+                );
+                self.require_owned_child(parent_session_id, child_session_id)
+                    .await?;
+                let event_key = format!("subagent-message-{}", request.request_id);
+                let event = mj_core::mailbox::MailboxEvent {
+                    key: event_key.clone(),
+                    source: "parent".into(),
+                    wake: true,
+                    text: message.clone(),
+                    created_at_ms: request.created_at_ms.max(0) as u64,
+                };
+                let event_json = serde_json::to_string(&event)?;
+                let target = child_session_id.clone();
+                blocking("enqueue parent message for child", move || {
+                    crate::database::enqueue_mailbox_event(
+                        &event_key,
+                        &target,
+                        &event_json,
+                        true,
+                        true,
+                    )
+                })
+                .await?;
+                Ok(serde_json::json!({
+                    "child_session_id":child_session_id,
+                    "status":"queued"
+                }))
+            }
             SubagentToolAction::WaitAgents => {
                 // The budget runs from when the caller made the request, not
                 // from when this daemon picked it up. A request that is
@@ -1128,55 +1166,8 @@ impl ApiBackend {
                         .await?;
                 }
             }
-            SubagentToolAction::InterruptAgent { child_session_id } => {
-                self.require_owned_child(parent_session_id, child_session_id)
-                    .await?;
-                let handle = self.session_handle(child_session_id.clone()).await?;
-                let target = match prepared {
-                    Some(prepared) => prepared.turn_target.clone(),
-                    None => handle
-                        .as_ref()
-                        .and_then(|handle| handle.view().snapshot)
-                        .and_then(|snapshot| snapshot.materialized.active_turn)
-                        .map(|turn| turn.command_id),
-                };
-                let Some(target) = target else {
-                    return Ok(
-                        serde_json::json!({"child_session_id":child_session_id,"interrupted":false}),
-                    );
-                };
-                let handle = handle.context("interrupt target worker is unavailable")?;
-                let result = handle
-                    .submit(
-                        format!("subagent-interrupt-{}", request.request_id),
-                        RelayCommand::CancelTurnFor {
-                            active_prompt_id: target.clone(),
-                        },
-                    )
-                    .await;
-                if let Err(error) = result {
-                    // An explicit refusal because that turn already ended is a
-                    // no-op, never permission to cancel the next turn instead.
-                    if error
-                        .downcast_ref::<mj_client::session::DeliveryUnconfirmed>()
-                        .is_some()
-                    {
-                        return Err(error);
-                    }
-                    handle.sync_now().await?;
-                    let still_active = handle
-                        .view()
-                        .snapshot
-                        .and_then(|s| s.materialized.active_turn)
-                        .is_some_and(|turn| turn.command_id == target);
-                    if still_active {
-                        return Err(error);
-                    }
-                    return Ok(
-                        serde_json::json!({"child_session_id":child_session_id,"interrupted":false}),
-                    );
-                }
-                Ok(serde_json::json!({"child_session_id":child_session_id,"interrupted":true}))
+            SubagentToolAction::LegacyInterruptAgent { .. } => {
+                bail!("the legacy interrupt action is no longer supported; use send_message")
             }
             SubagentToolAction::CloseAgent { child_session_id } => {
                 self.require_owned_child(parent_session_id, child_session_id)

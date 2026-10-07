@@ -29,8 +29,6 @@ impl GithubConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubWatchConfig {
-    /// Poll repository activity while at least one matching session is live.
-    pub enabled: bool,
     /// Delay between polls, bounded to avoid a tight retry loop.
     pub interval_seconds: u64,
     /// GitHub REST API base URL; configurable for isolated fake-server tests.
@@ -46,7 +44,6 @@ impl GithubWatchConfig {
 impl Default for GithubWatchConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             interval_seconds: 60,
             api_base: "https://api.github.com".into(),
         }

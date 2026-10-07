@@ -148,7 +148,9 @@ impl SubagentDispatch {
 fn execution_lane(request: &SubagentToolRequest) -> usize {
     usize::from(matches!(
         request.action,
-        SubagentToolAction::InterruptAgent { .. } | SubagentToolAction::CloseAgent { .. }
+        SubagentToolAction::SendMessage { .. }
+            | SubagentToolAction::LegacyInterruptAgent { .. }
+            | SubagentToolAction::CloseAgent { .. }
     ))
 }
 
@@ -178,11 +180,12 @@ mod tests {
         }
     }
     #[test]
-    fn orders_child_inputs_without_blocking_other_children_or_interrupts() {
+    fn orders_child_inputs_without_blocking_other_children_or_messages() {
         let mut queue = SubagentDispatch::default();
-        let mut interrupt = input("interrupt", "a", 3);
-        interrupt.action = SubagentToolAction::InterruptAgent {
+        let mut message = input("message", "a", 3);
+        message.action = SubagentToolAction::SendMessage {
             child_session_id: "a".into(),
+            message: "note".into(),
         };
         queue.observe(
             "p",
@@ -190,13 +193,13 @@ mod tests {
                 input("second", "a", 2),
                 input("first", "a", 1),
                 input("other", "b", 2),
-                interrupt,
+                message,
             ],
         );
         let now = Instant::now() + Duration::from_secs(1);
         let ids =
             |ready: Vec<(Identity, Job)>| ready.into_iter().map(|(id, _)| id.1).collect::<Vec<_>>();
-        assert_eq!(ids(queue.ready(now)), ["first", "other", "interrupt"]);
+        assert_eq!(ids(queue.ready(now)), ["first", "other", "message"]);
         assert!(queue.ready(now).is_empty());
         let first = ("p".into(), "first".into());
         queue.unaccepted(&first);
@@ -288,15 +291,16 @@ mod tests {
         assert_eq!(first.len(), 32);
         assert!(queue.ready(Instant::now()).is_empty());
         let mut requests = requests;
-        let mut interrupt = input("interrupt", "child-0", 101);
-        interrupt.action = SubagentToolAction::InterruptAgent {
+        let mut message = input("message", "child-0", 101);
+        message.action = SubagentToolAction::SendMessage {
             child_session_id: "child-0".into(),
+            message: "note".into(),
         };
-        requests.push(interrupt);
+        requests.push(message);
         queue.observe("parent", &requests);
         let control = queue.ready(Instant::now());
         assert_eq!(control.len(), 1);
-        assert_eq!(control[0].0.1, "interrupt");
+        assert_eq!(control[0].0.1, "message");
         queue.executed(&first[0].0, result(&first[0].0.1));
         let next = queue.ready(Instant::now());
         assert_eq!(next.len(), 2);

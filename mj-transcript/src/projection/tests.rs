@@ -300,6 +300,14 @@ fn golden_mailbox_delivery_transcript() {
             path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
             prompt_command_id: None,
             hook_event: Some("PostToolUse".into()),
+            events: vec![mj_core::mailbox::MailboxEvent {
+                key: "github:owner/repo#12:comment:345".into(),
+                source: "github".into(),
+                wake: false,
+                text: "A review comment arrived.".into(),
+                created_at_ms: 100,
+            }],
+            lease_id: Some("hook-lease".into()),
         },
     );
 
@@ -327,6 +335,8 @@ fn golden_mailbox_delivery_transcript() {
             path: mj_core::mailbox::MailboxDeliveryPath::Prompt,
             prompt_command_id: Some("user-prompt".into()),
             hook_event: None,
+            events: vec![parent_event.clone()],
+            lease_id: None,
         },
     );
 

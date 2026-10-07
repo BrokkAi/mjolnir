@@ -1323,6 +1323,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  title TEXT NOT NULL,
                  url TEXT NOT NULL,
                  created_at TEXT NOT NULL,
+                 pull_request_etag TEXT,
+                 pull_request_state TEXT CHECK(pull_request_state IS NULL OR pull_request_state IN ('open', 'closed')),
                  PRIMARY KEY(owner, repo, number)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS mailbox_outbox (

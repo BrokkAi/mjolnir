@@ -13,6 +13,10 @@ pub(crate) fn take_viewer_row_visits() -> usize {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSnapshot {
+    /// Controller-owned runtime policy for the API event route. This is not
+    /// published to clients; it follows config reloads with each snapshot.
+    #[serde(skip, default = "default_agent_mailboxes_enabled")]
+    pub(crate) agent_mailboxes_enabled: bool,
     #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     #[serde(default)]
@@ -45,6 +49,10 @@ pub struct ViewerSnapshot {
     /// Recent failed launches, independent of provisional session rollback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launch_failures: Vec<ViewerLaunchFailure>,
+}
+
+fn default_agent_mailboxes_enabled() -> bool {
+    true
 }
 
 /// The public wire shape remains an array; in-process publications share rows.
@@ -387,6 +395,7 @@ impl ViewerSnapshot {
             })
             .collect();
         Self {
+            agent_mailboxes_enabled: config.agent_mailboxes_enabled(),
             profile_capabilities: Default::default(),
             last_subagent_policy: state.last_subagent_policy.clone(),
             revision,

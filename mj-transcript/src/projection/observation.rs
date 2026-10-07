@@ -97,10 +97,7 @@ pub(super) fn project_observation(
                     push_system(
                         mutation,
                         event,
-                        format!(
-                            "Delivered {} in a wake prompt",
-                            mailbox_event_count(events.len())
-                        ),
+                        mailbox_delivery_notice(events.len(), "in a wake prompt", events),
                     );
                 }
                 let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
@@ -754,9 +751,9 @@ pub(super) fn project_observation(
             event_keys,
             path,
             hook_event,
+            events,
             ..
         } => {
-            let count = mailbox_event_count(event_keys.len());
             let how = match path {
                 mj_core::mailbox::MailboxDeliveryPath::ToolHook => hook_event.as_ref().map_or_else(
                     || "by tool hook".to_owned(),
@@ -765,8 +762,14 @@ pub(super) fn project_observation(
                 mj_core::mailbox::MailboxDeliveryPath::Prompt => "with prompt".to_owned(),
                 mj_core::mailbox::MailboxDeliveryPath::Wake => "in a wake prompt".to_owned(),
             };
-            push_system(mutation, event, format!("Delivered {count} {how}"));
+            push_system(
+                mutation,
+                event,
+                mailbox_delivery_notice(event_keys.len(), &how, events),
+            );
         }
+        RelayObservation::MailboxHookLeaseCreated { .. }
+        | RelayObservation::MailboxHookLeaseReturned { .. } => {}
         RelayObservation::Closing => {
             close_streams(index, mutation, event.recorded_at_ms);
             mutation.execution = Some(MaterializedExecutionState::Closing);
@@ -784,6 +787,45 @@ pub(super) fn project_observation(
 
 fn mailbox_event_count(count: usize) -> String {
     format!("{count} mailbox event{}", if count == 1 { "" } else { "s" })
+}
+
+fn mailbox_delivery_notice(
+    count: usize,
+    how: &str,
+    events: &[mj_core::mailbox::MailboxEvent],
+) -> String {
+    let mut notice = format!("Delivered {} {how}", mailbox_event_count(count));
+    let summaries = events
+        .iter()
+        .map(|event| {
+            format!(
+                "{} — {}",
+                short_mailbox_text(&event.source, 48),
+                short_mailbox_text(&event.text, 120)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !summaries.is_empty() {
+        notice.push_str(": ");
+        notice.push_str(&summaries.join("; "));
+    }
+    notice
+}
+
+fn short_mailbox_text(value: &str, limit: usize) -> String {
+    let first_line = value.lines().next().unwrap_or_default().trim();
+    let mut characters = first_line
+        .chars()
+        .filter(|character| !character.is_control());
+    let mut shortened = characters.by_ref().take(limit).collect::<String>();
+    if characters.next().is_some() {
+        shortened.push('…');
+    }
+    if shortened.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        shortened
+    }
 }
 
 /// A stop applied while the harness runs a turn of its own (a goal

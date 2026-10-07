@@ -6,6 +6,7 @@ use super::*;
 pub struct SubagentMcpSocket {
     pub path: PathBuf,
     pub role: mj_core::subagent::SubagentMcpRole,
+    pub agent_mailboxes_enabled: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
 }
@@ -262,6 +263,8 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
                 spec.harness.id().to_owned(),
                 "--role".into(),
                 socket.role.id().to_owned(),
+                "--agent-mailboxes-enabled".into(),
+                socket.agent_mailboxes_enabled.to_string(),
             ]),
         )));
     }

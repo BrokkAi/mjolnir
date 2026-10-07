@@ -117,6 +117,7 @@ pub(super) fn configure_claude_subagent_mcp(
     profile_stage: &Path,
     worker_root: &str,
     role: mj_core::subagent::SubagentMcpRole,
+    agent_mailboxes_enabled: bool,
 ) -> Result<()> {
     use mj_core::subagent::SUBAGENT_MCP_SERVER;
 
@@ -154,7 +155,9 @@ pub(super) fn configure_claude_subagent_mcp(
                     "--harness",
                     mj_core::config::HarnessKind::Claude.id(),
                     "--role",
-                    role.id()
+                    role.id(),
+                    "--agent-mailboxes-enabled",
+                    agent_mailboxes_enabled.to_string()
                 ]
             }),
         );
@@ -195,7 +198,14 @@ pub(super) fn configure_claude_subagent_mcp(
 /// Add the worker-owned mailbox drain to Claude's session-private settings.
 /// The command is finalized on the worker because remote worker roots are
 /// home-relative while staging runs on the controller.
-pub(super) fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &str) -> Result<()> {
+pub(super) fn configure_claude_mailbox_hook(
+    profile_stage: &Path,
+    worker_root: &str,
+    enabled: bool,
+) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
     let path = profile_stage.join("settings.json");
     let worker = Path::new(worker_root).join("hel");
     let socket = Path::new(worker_root).join("control.sock");

@@ -335,6 +335,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         subagent_mcp_socket: subagent_role.map(|role| crate::acp::SubagentMcpSocket {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,
+            agent_mailboxes_enabled: config.agent_mailboxes_enabled,
             profile_registration,
         }),
         project_memory: config.project_memory,
@@ -1525,6 +1526,7 @@ async fn prepare_and_start_harness(
             let mut environment = config.environment.clone();
             let role = subagent_role;
             let policy = config.execution_policy;
+            let mailboxes_enabled = config.agent_mailboxes_enabled;
             let (registered, environment) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -1536,6 +1538,7 @@ async fn prepare_and_start_harness(
                         &mut environment,
                         role,
                         policy,
+                        mailboxes_enabled,
                     )?;
                     Ok((registered, environment))
                 })
@@ -1559,6 +1562,7 @@ async fn prepare_and_start_harness(
                 .clone();
             let root = root.to_owned();
             let configure_subagents = subagent_role.is_some();
+            let mailboxes_enabled = config.agent_mailboxes_enabled;
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring the Claude profile");
@@ -1566,7 +1570,7 @@ async fn prepare_and_start_harness(
                 if configure_subagents {
                     super::subagents::resolve_claude_mcp_paths(&root, &home)?;
                 }
-                super::subagents::configure_claude_mailbox_hook(&root, &home)?;
+                super::subagents::configure_claude_mailbox_hook(&root, &home, mailboxes_enabled)?;
                 Ok(true)
             })
             .await?

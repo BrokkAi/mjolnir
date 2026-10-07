@@ -5461,7 +5461,10 @@ fn mailbox_fixture_event(key: &str, wake: bool) -> mj_core::mailbox::MailboxEven
     }
 }
 
-fn drain_mailbox_for_test(relay: &mut DurableRelay, request_id: &str) -> (Option<String>, usize) {
+fn request_mailbox_drain_for_test(
+    relay: &mut DurableRelay,
+    request_id: &str,
+) -> (Option<String>, usize, Option<String>) {
     let response = relay.handle(relay_request(
         request_id,
         RelayRequest::DrainMailbox {
@@ -5469,11 +5472,39 @@ fn drain_mailbox_for_test(relay: &mut DurableRelay, request_id: &str) -> (Option
         },
     ));
     let RelayResponseBody::Ok {
-        payload: RelayResponsePayload::MailboxDrained { text, count },
+        payload:
+            RelayResponsePayload::MailboxDrained {
+                lease_id,
+                text,
+                count,
+            },
     } = response.body
     else {
         panic!("mailbox drain failed: {:?}", response.body);
     };
+    (text, count, lease_id)
+}
+
+fn acknowledge_mailbox_for_test(relay: &mut DurableRelay, request_id: &str, lease_id: &str) {
+    let response = relay.handle(relay_request(
+        request_id,
+        RelayRequest::AckMailbox {
+            lease_id: lease_id.to_owned(),
+        },
+    ));
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::MailboxAcknowledged { acknowledged: true }
+        }
+    ));
+}
+
+fn drain_mailbox_for_test(relay: &mut DurableRelay, request_id: &str) -> (Option<String>, usize) {
+    let (text, count, lease_id) = request_mailbox_drain_for_test(relay, request_id);
+    if let Some(lease_id) = lease_id {
+        acknowledge_mailbox_for_test(relay, &format!("{request_id}-ack"), &lease_id);
+    }
     (text, count)
 }
 
@@ -5612,6 +5643,193 @@ fn pending_mailbox_events_and_dedup_keys_survive_journal_replay() {
         "same-key resubmission after delivery is an accepted no-op"
     );
     assert_eq!(replayed.latest_ordinal(), frontier);
+}
+
+#[test]
+fn mailbox_hook_lease_acknowledgement_is_the_delivery_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let event = mailbox_fixture_event("leased-event", false);
+    submit_relay(
+        &mut relay,
+        "leased-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: event.clone(),
+        },
+    );
+
+    let (text, count, lease_id) = request_mailbox_drain_for_test(&mut relay, "lease-drain");
+    let lease_id = lease_id.expect("nonempty drain creates a lease");
+    assert_eq!(count, 1);
+    assert_eq!(
+        text.as_deref(),
+        Some(mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event)).as_str())
+    );
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    assert_eq!(
+        relay
+            .snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .map(|lease| lease.lease_id.as_str()),
+        Some(lease_id.as_str())
+    );
+    assert!(
+        !relay
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&event.key)
+    );
+
+    acknowledge_mailbox_for_test(&mut relay, "lease-ack", &lease_id);
+    assert!(relay.snapshot.mailbox_hook_lease.is_none());
+    assert!(
+        relay
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&event.key)
+    );
+    assert!(retained_events(&relay).iter().any(|record| matches!(
+        &record.observation,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys,
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            events,
+            lease_id: Some(recorded_lease_id),
+            ..
+        } if event_keys == std::slice::from_ref(&event.key)
+            && events.as_slice() == std::slice::from_ref(&event)
+            && recorded_lease_id == &lease_id
+    )));
+}
+
+#[test]
+fn mailbox_hook_lease_timeout_returns_events_before_newer_pending_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let leased = mailbox_fixture_event("leased-first", false);
+    let newer = mailbox_fixture_event("pending-second", false);
+    submit_relay(
+        &mut relay,
+        "leased-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: leased.clone(),
+        },
+    );
+    let (_, _, lease_id) = request_mailbox_drain_for_test(&mut relay, "timeout-drain");
+    assert!(lease_id.is_some());
+    submit_relay(
+        &mut relay,
+        "newer-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: newer.clone(),
+        },
+    );
+    submit_relay(&mut relay, "timeout-prompt", prompt("continue"));
+    relay
+        .snapshot
+        .mailbox_hook_lease
+        .as_mut()
+        .unwrap()
+        .expires_at_ms = 0;
+
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some(mj_core::mailbox::render_mailbox_events(&[leased.clone(), newer.clone()]).as_str())
+    );
+    assert!(relay.snapshot.mailbox_hook_lease.is_none());
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
+}
+
+#[test]
+fn unacknowledged_mailbox_lease_returns_on_restart_and_replay_is_deterministic() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = mailbox_fixture_event("restart-lease-first", false);
+    let second = mailbox_fixture_event("restart-lease-second", false);
+    {
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        submit_relay(
+            &mut relay,
+            "restart-lease-first-command",
+            RelayCommand::DeliverMailboxEvent {
+                event: first.clone(),
+            },
+        );
+        let (_, count, lease_id) =
+            request_mailbox_drain_for_test(&mut relay, "restart-lease-drain");
+        assert_eq!(count, 1);
+        assert!(lease_id.is_some());
+        submit_relay(
+            &mut relay,
+            "restart-lease-second-command",
+            RelayCommand::DeliverMailboxEvent {
+                event: second.clone(),
+            },
+        );
+    }
+
+    fs::remove_file(temp.path().join(RELAY_STATE_FILE)).unwrap();
+    let replayed = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        replayed.snapshot.pending_mailbox_events,
+        [first.clone(), second.clone()]
+    );
+    assert!(replayed.snapshot.mailbox_hook_lease.is_none());
+    assert!(retained_events(&replayed).iter().any(|record| matches!(
+        &record.observation,
+        RelayObservation::MailboxHookLeaseReturned {
+            reason: mj_core::relay::MailboxHookLeaseReturnReason::WorkerRestart,
+            ..
+        }
+    )));
+    let replay_digest = replayed.latest_digest().to_owned();
+    drop(replayed);
+
+    fs::remove_file(temp.path().join(RELAY_STATE_FILE)).unwrap();
+    let replayed_again = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        replayed_again.snapshot.pending_mailbox_events,
+        [first, second]
+    );
+    assert_eq!(replayed_again.latest_digest(), replay_digest);
+}
+
+#[test]
+fn a_live_mailbox_lease_is_not_claimed_by_a_prompt_or_idle_wake() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "active-prompt", prompt("running"));
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    let event = mailbox_fixture_event("leased-waking-event", true);
+    submit_relay(
+        &mut relay,
+        "leased-waking-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: event.clone(),
+        },
+    );
+    let (_, count, lease_id) = request_mailbox_drain_for_test(&mut relay, "live-lease-drain");
+    assert_eq!(count, 1);
+    assert!(lease_id.is_some());
+
+    submit_relay(&mut relay, "prompt-during-lease", prompt("next"));
+    finish_prompt(&mut relay, "active-prompt");
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "prompt-during-lease");
+    assert!(claimed[0].hidden_prompt_context.is_none());
+    finish_prompt(&mut relay, "prompt-during-lease");
+    assert!(relay.snapshot.mailbox_hook_lease.is_some());
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    assert!(
+        relay
+            .snapshot
+            .dispatches
+            .values()
+            .all(|dispatch| !matches!(dispatch.command, RelayCommand::MailboxWake { .. }))
+    );
 }
 
 #[test]

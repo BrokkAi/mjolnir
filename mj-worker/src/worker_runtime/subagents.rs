@@ -71,15 +71,7 @@ pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path) -> Result<()> {
 
 /// Install the mailbox command hook in the session-private Claude settings and
 /// resolve staged remote paths on the worker target before Claude reads them.
-pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path) -> Result<()> {
-    anyhow::ensure!(root.is_absolute(), "Claude worker root must be absolute");
-    let worker = std::env::current_exe().context("locate worker for Claude mailbox hook")?;
-    let socket = root.join("control.sock");
-    let command = format!(
-        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
-        mj_core::targets::posix_quote(&worker.to_string_lossy()),
-        mj_core::targets::posix_quote(&socket.to_string_lossy())
-    );
+pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: bool) -> Result<()> {
     let path = home.join("settings.json");
     let body = match std::fs::read(&path) {
         Ok(body) => body,
@@ -94,6 +86,50 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path) -> Result<
             path.display()
         )
     })?;
+    if !enabled {
+        let Some(groups) = root_object
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|hooks| hooks.get_mut("PostToolBatch"))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(());
+        };
+        let mut changed = false;
+        groups.retain_mut(|group| {
+            let Some(hooks) = group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return true;
+            };
+            let previous_len = hooks.len();
+            hooks.retain(|hook| {
+                !hook
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command.starts_with(CLAUDE_MAILBOX_HOOK_MARKER))
+            });
+            let removed = previous_len != hooks.len();
+            changed |= removed;
+            !(removed && hooks.is_empty())
+        });
+        if changed {
+            let mut resolved = serde_json::to_vec_pretty(&settings)?;
+            resolved.push(b'\n');
+            mj_core::config::atomic_write(&path, &resolved)
+                .with_context(|| format!("write staged Claude settings {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    anyhow::ensure!(root.is_absolute(), "Claude worker root must be absolute");
+    let worker = std::env::current_exe().context("locate worker for Claude mailbox hook")?;
+    let socket = root.join("control.sock");
+    let command = format!(
+        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
+        mj_core::targets::posix_quote(&worker.to_string_lossy()),
+        mj_core::targets::posix_quote(&socket.to_string_lossy())
+    );
     let groups = root_object
         .entry("hooks")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
@@ -142,11 +178,22 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path) -> Result<
 /// Register the owned server in Codex's session-private profile. The ACP bridge
 /// cannot carry omit_tools_from. Do this on the worker before launching the
 /// harness so an upgraded worker also repairs an older staged profile.
+#[cfg(test)]
 pub(super) fn configure_codex_mcp(
     root: &Path,
     home: &Path,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
+) -> Result<bool> {
+    configure_codex_mcp_with_mailboxes(root, home, role, policy, true)
+}
+
+fn configure_codex_mcp_with_mailboxes(
+    root: &Path,
+    home: &Path,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
+    policy: mj_core::config::ExecutionPolicy,
+    mailboxes_enabled: bool,
 ) -> Result<bool> {
     // Earlier local workers used the person's original profile, directly or
     // through <root>/profile as a symlink. Keep those on ACP until restaging;
@@ -188,7 +235,8 @@ pub(super) fn configure_codex_mcp(
         let mut server = serde_json::json!({
             "command": worker,
             "args": ["worker", "subagent-mcp", "--socket", root.join(SUBAGENT_SOCKET),
-                     "--harness", "codex", "--role", role.id()],
+                     "--harness", "codex", "--role", role.id(),
+                     "--agent-mailboxes-enabled", mailboxes_enabled.to_string()],
             // Keep direct and code-mode access; other servers retain their policy.
             "omit_tools_from": ["deferred"]
         });
@@ -210,9 +258,10 @@ pub(super) fn configure_codex_profile(
     environment: &mut BTreeMap<String, String>,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
+    mailboxes_enabled: bool,
 ) -> Result<bool> {
-    configure_codex_mailbox_hook(root, environment)?;
-    configure_codex_mcp(root, home, role, policy)
+    configure_codex_mailbox_hook(root, environment, mailboxes_enabled)?;
+    configure_codex_mcp_with_mailboxes(root, home, role, policy, mailboxes_enabled)
 }
 
 /// Put the mailbox hook in codex-acp's per-thread config override. Its state
@@ -221,7 +270,83 @@ pub(super) fn configure_codex_profile(
 fn configure_codex_mailbox_hook(
     root: &Path,
     environment: &mut BTreeMap<String, String>,
+    enabled: bool,
 ) -> Result<()> {
+    if !enabled {
+        let Some(existing) = environment.get(CODEX_CONFIG_ENV) else {
+            return Ok(());
+        };
+        let mut config = serde_json::from_str::<serde_json::Value>(existing)
+            .ok()
+            .and_then(|value| match value {
+                serde_json::Value::Object(map) => Some(map),
+                _ => None,
+            })
+            .with_context(|| {
+                format!("{CODEX_CONFIG_ENV} must be a JSON object for mailbox hooks")
+            })?;
+        let Some(hooks) = config
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Ok(());
+        };
+        let mut removed_paths = Vec::new();
+        if let Some(groups) = hooks
+            .get_mut("PostToolUse")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for (group_index, group) in groups.iter().enumerate() {
+                if let Some(handlers) = group.get("hooks").and_then(serde_json::Value::as_array) {
+                    for (handler_index, handler) in handlers.iter().enumerate() {
+                        if handler
+                            .get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|command| command.starts_with(CODEX_MAILBOX_HOOK_MARKER))
+                        {
+                            removed_paths.push(format!(
+                                "/<session-flags>/config.toml:post_tool_use:{group_index}:{handler_index}"
+                            ));
+                        }
+                    }
+                }
+            }
+            if !removed_paths.is_empty() {
+                groups.retain_mut(|group| {
+                    let Some(handlers) = group
+                        .get_mut("hooks")
+                        .and_then(serde_json::Value::as_array_mut)
+                    else {
+                        return true;
+                    };
+                    let previous_len = handlers.len();
+                    handlers.retain(|handler| {
+                        !handler
+                            .get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|command| command.starts_with(CODEX_MAILBOX_HOOK_MARKER))
+                    });
+                    !(handlers.len() != previous_len && handlers.is_empty())
+                });
+            }
+        }
+        if removed_paths.is_empty() {
+            return Ok(());
+        }
+        if let Some(state) = hooks
+            .get_mut("state")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for path in removed_paths {
+                state.remove(&path);
+            }
+        }
+        environment.insert(
+            CODEX_CONFIG_ENV.to_owned(),
+            serde_json::Value::Object(config).to_string(),
+        );
+        return Ok(());
+    }
     anyhow::ensure!(root.is_absolute(), "Codex worker root must be absolute");
     let worker = std::env::current_exe().context("locate worker for Codex mailbox hook")?;
     let socket = root.join("control.sock");
@@ -742,9 +867,9 @@ mod tests {
         )
         .unwrap();
 
-        configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap();
+        configure_claude_mailbox_hook(worker_root.path(), &staged_home, true).unwrap();
         let first = std::fs::read(&path).unwrap();
-        configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap();
+        configure_claude_mailbox_hook(worker_root.path(), &staged_home, true).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), first);
 
         let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
@@ -779,7 +904,7 @@ mod tests {
         let legacy_root = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(source_profile.path(), legacy_root.path().join("profile"))
             .unwrap();
-        configure_claude_mailbox_hook(legacy_root.path(), &source_home).unwrap();
+        configure_claude_mailbox_hook(legacy_root.path(), &source_home, true).unwrap();
         assert_eq!(
             std::fs::read(source_settings).unwrap(),
             br#"{"user":"source"}"#
@@ -801,9 +926,9 @@ mod tests {
             .to_string(),
         )]);
 
-        configure_codex_mailbox_hook(worker_root.path(), &mut environment).unwrap();
+        configure_codex_mailbox_hook(worker_root.path(), &mut environment, true).unwrap();
         let first = environment[CODEX_CONFIG_ENV].clone();
-        configure_codex_mailbox_hook(worker_root.path(), &mut environment).unwrap();
+        configure_codex_mailbox_hook(worker_root.path(), &mut environment, true).unwrap();
         assert_eq!(environment[CODEX_CONFIG_ENV], first);
 
         let config: serde_json::Value = serde_json::from_str(&first).unwrap();
@@ -828,6 +953,60 @@ mod tests {
         assert_eq!(state["trusted_hash"], expected_hash);
         assert_eq!(config["hooks"]["state"].as_object().unwrap().len(), 1);
         assert!(config.get("bypass_hook_trust").is_none());
+    }
+
+    #[test]
+    fn disabled_mailbox_hooks_are_removed_from_both_staged_harness_profiles() {
+        let claude_root = tempfile::tempdir().unwrap();
+        let claude_home = claude_root.path().join(".claude");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let claude_settings_path = claude_home.join("settings.json");
+        std::fs::write(
+            &claude_settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "hooks": {"PostToolBatch": [{"hooks": [
+                    {"type": "command", "command": "user-hook"},
+                    {"type": "command", "command": "MJOLNIR_MAILBOX_HOOK=1 old-worker worker mailbox-hook"}
+                ]}]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        configure_claude_mailbox_hook(claude_root.path(), &claude_home, false).unwrap();
+        let claude: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(claude_settings_path).unwrap()).unwrap();
+        let claude_hooks = claude["hooks"]["PostToolBatch"][0]["hooks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(claude_hooks.len(), 1);
+        assert_eq!(claude_hooks[0]["command"], "user-hook");
+
+        let codex_root = tempfile::tempdir().unwrap();
+        let user_hook = serde_json::json!({
+            "hooks": [{"type": "command", "command": "user-hook"}]
+        });
+        let mut environment = BTreeMap::from([(
+            CODEX_CONFIG_ENV.to_owned(),
+            serde_json::json!({
+                "hooks": {
+                    "PostToolUse": [user_hook.clone(), {"hooks": [
+                        {"type": "command", "command": "MJOLNIR_MAILBOX_HOOK=1 old-worker worker mailbox-hook"}
+                    ]}],
+                    "state": {
+                        "/<session-flags>/config.toml:post_tool_use:1:0": {"enabled": true}
+                    }
+                }
+            })
+            .to_string(),
+        )]);
+        configure_codex_mailbox_hook(codex_root.path(), &mut environment, false).unwrap();
+        let codex: serde_json::Value =
+            serde_json::from_str(&environment[CODEX_CONFIG_ENV]).unwrap();
+        assert_eq!(
+            codex["hooks"]["PostToolUse"].as_array().unwrap(),
+            &[user_hook]
+        );
+        assert!(codex["hooks"]["state"].as_object().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1010,7 +1189,9 @@ enabled = false
                         "--harness",
                         "codex",
                         "--role",
-                        role.id()
+                        role.id(),
+                        "--agent-mailboxes-enabled",
+                        "true"
                     ]
                 );
                 assert_eq!(
@@ -1151,7 +1332,11 @@ enabled = false
                 child_session_id: "child".into(),
                 message: "continue".into(),
             },
-            SubagentToolAction::InterruptAgent {
+            SubagentToolAction::SendMessage {
+                child_session_id: "child".into(),
+                message: "note".into(),
+            },
+            SubagentToolAction::LegacyInterruptAgent {
                 child_session_id: "child".into(),
             },
             SubagentToolAction::CloseAgent {
@@ -1179,8 +1364,9 @@ enabled = false
         assert_eq!(queued.len(), 2);
         reopened.set_mutating_admission(true).unwrap();
         let mut request = request("reopened");
-        request.action = SubagentToolAction::InterruptAgent {
+        request.action = SubagentToolAction::SendMessage {
             child_session_id: "child".into(),
+            message: "note".into(),
         };
         assert!(reopened.enqueue_marked(request).unwrap().0);
     }
@@ -1279,7 +1465,7 @@ enabled = false
     }
 
     #[tokio::test]
-    async fn saturated_wait_lane_rejects_before_queueing_and_keeps_interrupt_available() {
+    async fn saturated_wait_lane_rejects_before_queueing_and_keeps_send_message_available() {
         let root = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(root.path()).unwrap();
         let mut tasks = tokio::task::JoinSet::new();
@@ -1333,11 +1519,12 @@ enabled = false
         let (server, mut client) = UnixStream::pair().unwrap();
         let service = endpoint.clone();
         tasks.spawn(async move { serve_one(server, service).await });
-        let mut interrupt = request("interrupt-request");
-        interrupt.action = SubagentToolAction::InterruptAgent {
+        let mut message = request("message-request");
+        message.action = SubagentToolAction::SendMessage {
             child_session_id: "child".into(),
+            message: "note".into(),
         };
-        let mut body = serde_json::to_vec(&interrupt).unwrap();
+        let mut body = serde_json::to_vec(&message).unwrap();
         body.push(b'\n');
         client.write_all(&body).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1345,14 +1532,14 @@ enabled = false
                 .snapshot()
                 .0
                 .iter()
-                .any(|r| r.request_id == "interrupt-request")
+                .any(|r| r.request_id == "message-request")
             {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        endpoint.complete(done("interrupt-request")).unwrap();
+        endpoint.complete(done("message-request")).unwrap();
         let mut line = String::new();
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -1363,7 +1550,7 @@ enabled = false
         .unwrap();
         let completed: SocketReply = serde_json::from_str(&line).unwrap();
         assert!(completed.accepted);
-        assert_eq!(completed.result, Some(done("interrupt-request")));
+        assert_eq!(completed.result, Some(done("message-request")));
         assert_eq!(endpoint.snapshot().0.len(), LONG_SOCKET_TASKS);
         tasks.abort_all();
         while let Some(result) = tasks.join_next().await {

@@ -65,9 +65,13 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     Status,
-    /// Atomically claim pending mailbox events for a harness tool hook.
+    /// Atomically lease pending mailbox events to a harness tool hook.
     DrainMailbox {
         hook_event: String,
+    },
+    /// Confirm that a hook wrote and flushed the leased events to its output.
+    AckMailbox {
+        lease_id: String,
     },
     /// Atomically admit a checkpoint barrier only when no work would be lost.
     /// Uses the existing barrier journal and connection-disconnect cleanup.
@@ -309,6 +313,7 @@ impl RelayRequest {
             Self::Submit { .. } => "submit",
             Self::Status => "status",
             Self::DrainMailbox { .. } => "drain_mailbox",
+            Self::AckMailbox { .. } => "ack_mailbox",
             Self::ReserveIdle { .. } => "reserve_idle",
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
@@ -346,7 +351,7 @@ impl RelayRequest {
     pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
-            Self::DrainMailbox { .. } => 33,
+            Self::DrainMailbox { .. } | Self::AckMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
@@ -461,8 +466,14 @@ pub enum RelayResponsePayload {
     },
     Status(RelayOperationalState),
     MailboxDrained {
+        /// Present only when a nonempty event batch is leased to the hook.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_id: Option<String>,
         text: Option<String>,
         count: usize,
+    },
+    MailboxAcknowledged {
+        acknowledged: bool,
     },
     AttachmentPresent {
         present: bool,

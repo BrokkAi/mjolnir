@@ -546,6 +546,7 @@ fn sample_config() -> Config {
         phone: PhoneConfig::default(),
         github: GithubConfig::default(),
         continuation: Default::default(),
+        mailbox: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -880,6 +881,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
     fs::write(&path, "version = 1\n").unwrap();
     let legacy = Config::load_from(&path).unwrap();
     assert_eq!(legacy.github, GithubConfig::default());
+    assert!(legacy.mailbox.enabled);
+    assert!(legacy.agent_mailboxes_enabled());
     legacy.save_to(&path).unwrap();
     assert!(!fs::read_to_string(&path).unwrap().contains("[github"));
 
@@ -897,9 +900,10 @@ fn github_app_configuration_is_optional_and_round_trips() {
             GithubPermissionLevel::Read,
         )])),
     });
-    configured.github.watch.enabled = false;
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
+    configured.mailbox.enabled = false;
+    assert!(!configured.agent_mailboxes_enabled());
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
@@ -907,7 +911,14 @@ fn github_app_configuration_is_optional_and_round_trips() {
     assert!(body.contains("[github.app.session_permissions]"), "{body}");
     assert!(body.contains("[github.app.token_permissions]"), "{body}");
     assert!(body.contains("[github.watch]"), "{body}");
+    assert!(body.contains("[mailbox]\nenabled = false"), "{body}");
+    let serialized: toml::Value = toml::from_str(&body).unwrap();
+    assert!(serialized["github"]["watch"].get("enabled").is_none());
     assert_eq!(Config::load_from(&path).unwrap(), configured);
+
+    let mut jev_off = Config::default();
+    jev_off.jev.enabled = false;
+    assert!(!jev_off.agent_mailboxes_enabled());
 
     fs::write(
         &path,

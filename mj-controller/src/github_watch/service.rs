@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -15,6 +15,7 @@ use mj_core::mailbox::MailboxEvent;
 use mj_core::repository::RepositoryIdentity;
 use mj_core::state::SessionRecord;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +27,7 @@ const CLASSIFICATION_CONCURRENCY: usize = 4;
 const REPOSITORY_CONCURRENCY: usize = 4;
 const COMMENT_BODY_LIMIT: usize = 8 * 1024;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
+const CONFIG_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -56,8 +58,13 @@ async fn run_with_classifier(
 ) -> Result<()> {
     loop {
         let projection = state.controller_projection();
+        let mailboxes_enabled = projection.config.agent_mailboxes_enabled();
         let config = projection.config.github.watch;
-        let delay = Duration::from_secs(config.interval_seconds).clamp(MIN_INTERVAL, MAX_INTERVAL);
+        let delay = if mailboxes_enabled {
+            Duration::from_secs(config.interval_seconds).clamp(MIN_INTERVAL, MAX_INTERVAL)
+        } else {
+            CONFIG_RECHECK_INTERVAL
+        };
         tokio::select! {
             _ = stop.cancelled() => return Ok(()),
             _ = tokio::time::sleep(delay) => {}
@@ -66,10 +73,10 @@ async fn run_with_classifier(
             return Ok(());
         }
         let projection = state.controller_projection();
-        let config = projection.config.github.watch;
-        if !config.enabled {
+        if !projection.config.agent_mailboxes_enabled() {
             continue;
         }
+        let config = projection.config.github.watch;
         let sessions_by_repo = sessions_by_github_repo(&projection.state);
         let watched_repositories =
             tokio::task::spawn_blocking(crate::database::load_github_watched_repositories)
@@ -474,13 +481,15 @@ async fn poll_repository_comments(
         })
         .await;
     };
+    let overlapping_since = overlap_timestamp(&since);
     let mut comments = api
-        .comment_pages(owner, repo, "issues/comments", &since)
+        .comment_pages(owner, repo, "issues/comments", &overlapping_since)
         .await?;
     comments.extend(
-        api.comment_pages(owner, repo, "pulls/comments", &since)
+        api.comment_pages(owner, repo, "pulls/comments", &overlapping_since)
             .await?,
     );
+    let credential_login = api.credential_login().await;
     let mut watches_by_number = BTreeMap::<u64, Vec<crate::database::GithubItemWatch>>::new();
     for watch in watches {
         watches_by_number
@@ -488,13 +497,14 @@ async fn poll_repository_comments(
             .or_default()
             .push(watch);
     }
+    let mut turn_windows_by_session = BTreeMap::new();
     let mut outbox = Vec::new();
     let mut newest = None::<String>;
     for comment in comments {
         if let Some(timestamp) = comment_timestamp(&comment)
             && newest
                 .as_ref()
-                .is_none_or(|current| timestamp > current.as_str())
+                .is_none_or(|current| timestamp_precedes(current, timestamp))
         {
             newest = Some(timestamp.to_owned());
         }
@@ -518,6 +528,14 @@ async fn poll_repository_comments(
         };
         let key = format!("github:{owner}/{repo}#{number}:{kind}:{id}");
         for watch in item_watches {
+            let suppress_wake = authored_during_session_turn(
+                credential_login.as_deref(),
+                comment["user"]["login"].as_str(),
+                comment_creation_timestamp(&comment),
+                &watch.creator_session_id,
+                &mut turn_windows_by_session,
+            )
+            .await;
             let text = format!(
                 "GitHub comment by {login} on #{number} {} ({}):\n{}",
                 watch.title, watch.url, body
@@ -526,7 +544,7 @@ async fn poll_repository_comments(
                 key.clone(),
                 watch.creator_session_id.clone(),
                 text,
-                true,
+                !suppress_wake,
                 comment_timestamp_ms(&comment),
             )?);
         }
@@ -542,14 +560,48 @@ async fn poll_repository_comments(
         if stop.is_cancelled() {
             return Ok(());
         }
-        let pull: Value = api
-            .get_json(
-                &format!("repos/{owner}/{repo}/pulls/{}", watch.number),
-                &[],
-                None,
+        let response = api
+            .pull_request(
+                owner,
+                repo,
+                watch.number as u64,
+                watch.pull_request_etag.as_deref(),
             )
             .await?;
-        if pull["state"].as_str() != Some("open") {
+        let state = if response.not_modified {
+            watch
+                .pull_request_state
+                .as_deref()
+                .context("GitHub returned 304 before a pull request state was stored")?
+                .to_owned()
+        } else {
+            let state = response.value["state"]
+                .as_str()
+                .context("GitHub pull request response has no state")?
+                .to_owned();
+            ensure!(
+                state == "open" || state == "closed",
+                "GitHub pull request response has invalid state {state:?}"
+            );
+            let event = pull_request_lifecycle_event(
+                owner,
+                repo,
+                &watch,
+                &response.value,
+                watch.pull_request_state.as_deref(),
+            )?;
+            blocking_db({
+                let watch = watch.clone();
+                let state = state.clone();
+                let etag = response.etag.clone();
+                move || {
+                    crate::database::commit_github_pull_request_status(watch, etag, state, event)
+                }
+            })
+            .await?;
+            state
+        };
+        if state != "open" {
             continue;
         }
         for review in api
@@ -562,7 +614,7 @@ async fn poll_repository_comments(
             let Some(timestamp) = review["submitted_at"].as_str() else {
                 continue;
             };
-            if timestamp < since.as_str() {
+            if timestamp_precedes(timestamp, &overlapping_since) {
                 continue;
             }
             let Some(id) = review["id"].as_u64() else {
@@ -581,28 +633,148 @@ async fn poll_repository_comments(
                 "GitHub review by {login} on #{} {} ({}):\n{}",
                 watch.number, watch.title, watch.url, summary
             );
+            let suppress_wake = authored_during_session_turn(
+                credential_login.as_deref(),
+                review["user"]["login"].as_str(),
+                comment_creation_timestamp(&review),
+                &watch.creator_session_id,
+                &mut turn_windows_by_session,
+            )
+            .await;
             outbox.push(mailbox_outbox_row(
                 key,
                 watch.creator_session_id.clone(),
                 text,
-                true,
+                !suppress_wake,
                 comment_timestamp_ms(&review),
             )?);
             if newest
                 .as_ref()
-                .is_none_or(|current| timestamp > current.as_str())
+                .is_none_or(|current| timestamp_precedes(current, timestamp))
             {
                 newest = Some(timestamp.to_owned());
             }
         }
     }
-    let comments_cursor = newest.unwrap_or(since);
+    let comments_cursor = newest
+        .filter(|newest| timestamp_precedes(&since, newest))
+        .unwrap_or(since);
     let owner = owner.to_owned();
     let repo = repo.to_owned();
     blocking_db(move || {
         crate::database::commit_github_comment_events(&owner, &repo, comments_cursor, outbox)
     })
     .await
+}
+
+async fn authored_during_session_turn(
+    credential_login: Option<&str>,
+    author_login: Option<&str>,
+    created_at: Option<&str>,
+    session_id: &str,
+    turn_windows_by_session: &mut BTreeMap<
+        String,
+        Option<Vec<crate::database::GithubSessionTurnWindow>>,
+    >,
+) -> bool {
+    let Some((credential_login, author_login)) = credential_login.zip(author_login) else {
+        return false;
+    };
+    if !credential_login.eq_ignore_ascii_case(author_login) {
+        return false;
+    }
+    let Some(created_at_ms) = created_at.and_then(timestamp_millis) else {
+        return false;
+    };
+    if !turn_windows_by_session.contains_key(session_id) {
+        let owned_session_id = session_id.to_owned();
+        let loaded = blocking_db(move || {
+            crate::database::load_github_session_turn_windows(&owned_session_id)
+        })
+        .await;
+        let windows = match loaded {
+            Ok(windows) => Some(windows),
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    error = %format!("{error:#}"),
+                    "could not read transcript turn windows for GitHub comment or review; preserving wake"
+                );
+                None
+            }
+        };
+        turn_windows_by_session.insert(session_id.to_owned(), windows);
+    }
+    turn_windows_by_session
+        .get(session_id)
+        .and_then(Option::as_ref)
+        .is_some_and(|windows| {
+            windows.iter().any(|window| {
+                created_at_ms >= window.started_at_ms
+                    && window
+                        .completed_at_ms
+                        .is_none_or(|completed_at_ms| created_at_ms < completed_at_ms)
+            })
+        })
+}
+
+fn pull_request_lifecycle_event(
+    owner: &str,
+    repo: &str,
+    watch: &crate::database::GithubItemWatch,
+    pull: &Value,
+    previous_state: Option<&str>,
+) -> Result<Option<(String, String)>> {
+    let repo_label = format!("{owner}/{repo}");
+    let number = watch.number;
+    let (key, text, timestamp) = if let Some(merged_at) = pull["merged_at"].as_str() {
+        let login = pull["merged_by"]["login"].as_str().unwrap_or("unknown");
+        (
+            format!("github:{repo_label}#{number}:merged"),
+            format!(
+                "Your pull request {repo_label}#{number} \"{}\" was merged by {login} at {merged_at} ({})",
+                watch.title, watch.url
+            ),
+            merged_at,
+        )
+    } else if pull["state"].as_str() == Some("closed") {
+        let closed_at = pull["closed_at"]
+            .as_str()
+            .context("closed GitHub pull request response has no closing timestamp")?;
+        let login = pull["closed_by"]["login"].as_str().unwrap_or("unknown");
+        (
+            format!("github:{repo_label}#{number}:closed:{closed_at}"),
+            format!(
+                "Your pull request {repo_label}#{number} \"{}\" was closed without merging by {login} at {closed_at} ({})",
+                watch.title, watch.url
+            ),
+            closed_at,
+        )
+    } else if previous_state == Some("closed") && pull["state"].as_str() == Some("open") {
+        let reopened_at = pull["updated_at"]
+            .as_str()
+            .context("reopened GitHub pull request response has no update timestamp")?;
+        (
+            format!("github:{repo_label}#{number}:reopened:{reopened_at}"),
+            format!(
+                "Your pull request {repo_label}#{number} \"{}\" was reopened at {reopened_at} ({})",
+                watch.title, watch.url
+            ),
+            reopened_at,
+        )
+    } else {
+        return Ok(None);
+    };
+    let event = MailboxEvent {
+        key: key.clone(),
+        source: "github".into(),
+        wake: true,
+        text,
+        created_at_ms: timestamp_millis(timestamp)
+            .unwrap_or_else(mj_core::clock::epoch_millis)
+            .max(0) as u64,
+    };
+    Ok(Some((key, serde_json::to_string(&event)?)))
 }
 
 fn mailbox_outbox_row(
@@ -691,10 +863,41 @@ fn comment_timestamp(comment: &Value) -> Option<&str> {
         .or_else(|| comment["created_at"].as_str())
 }
 
+fn comment_creation_timestamp(comment: &Value) -> Option<&str> {
+    comment["created_at"]
+        .as_str()
+        .or_else(|| comment["submitted_at"].as_str())
+        .or_else(|| comment["updated_at"].as_str())
+}
+
+fn timestamp_millis(timestamp: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn timestamp_precedes(timestamp: &str, boundary: &str) -> bool {
+    match (
+        DateTime::parse_from_rfc3339(timestamp),
+        DateTime::parse_from_rfc3339(boundary),
+    ) {
+        (Ok(timestamp), Ok(boundary)) => timestamp < boundary,
+        _ => timestamp < boundary,
+    }
+}
+
+fn overlap_timestamp(timestamp: &str) -> String {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|timestamp| {
+            (timestamp - chrono::Duration::seconds(5)).to_rfc3339_opts(SecondsFormat::Millis, true)
+        })
+        .unwrap_or_else(|_| timestamp.to_owned())
+}
+
 fn comment_timestamp_ms(comment: &Value) -> u64 {
     comment_timestamp(comment)
-        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
-        .map(|timestamp| timestamp.timestamp_millis().max(0) as u64)
+        .and_then(timestamp_millis)
+        .map(|timestamp| timestamp.max(0) as u64)
         .unwrap_or_else(|| mj_core::clock::epoch_millis().max(0) as u64)
 }
 
@@ -730,19 +933,59 @@ struct GithubPage {
     not_modified: bool,
 }
 
+#[derive(Default)]
+struct GithubCredentialState {
+    rate_limit_until: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    login: tokio::sync::OnceCell<Option<String>>,
+}
+
+fn credential_state(token: Option<&str>) -> Arc<GithubCredentialState> {
+    static CREDENTIALS: OnceLock<Mutex<HashMap<[u8; 32], Arc<GithubCredentialState>>>> =
+        OnceLock::new();
+    let mut digest = Sha256::new();
+    match token {
+        Some(token) => {
+            digest.update(b"token\0");
+            digest.update(token.as_bytes());
+        }
+        None => digest.update(b"anonymous"),
+    }
+    let key: [u8; 32] = digest.finalize().into();
+    let mut credentials = CREDENTIALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    credentials
+        .entry(key)
+        .or_insert_with(|| Arc::new(GithubCredentialState::default()))
+        .clone()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 struct GithubApi {
     base: String,
     client: reqwest::Client,
-    rate_limit_until: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    credential: Arc<GithubCredentialState>,
 }
 
 impl GithubApi {
     fn new(base: &str, token: Option<String>) -> Result<Self> {
         let parsed = url::Url::parse(base).context("parse GitHub API base URL")?;
+        let host = parsed
+            .host_str()
+            .context("GitHub API base URL has no host")?;
         ensure!(
-            matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some(),
-            "GitHub API base URL must be an HTTP(S) URL"
+            parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_host(host)),
+            "GitHub API base URL must use HTTPS except for loopback HTTP hosts"
         );
+        let credential = credential_state(token.as_deref());
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::ACCEPT,
@@ -771,7 +1014,7 @@ impl GithubApi {
         Ok(Self {
             base: base.trim_end_matches('/').to_owned(),
             client: builder.build()?,
-            rate_limit_until: tokio::sync::Mutex::new(None),
+            credential,
         })
     }
 
@@ -906,6 +1149,41 @@ impl GithubApi {
         Ok(response.value)
     }
 
+    async fn pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        etag: Option<&str>,
+    ) -> Result<GithubResponse> {
+        let mut request = self
+            .client
+            .get(format!("{}/repos/{owner}/{repo}/pulls/{number}", self.base));
+        if let Some(etag) = etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        self.get(request).await
+    }
+
+    async fn credential_login(&self) -> Option<String> {
+        self.credential
+            .login
+            .get_or_init(|| async {
+                match self.get_json("user", &[], None).await {
+                    Ok(user) => user["login"].as_str().map(str::to_owned),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %format!("{error:#}"),
+                            "GitHub credential login is unknown; comment events retain wake"
+                        );
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+
     async fn get(&self, request: reqwest::RequestBuilder) -> Result<GithubResponse> {
         self.wait_for_rate_limit().await?;
         let response = request.send().await.context("request GitHub REST API")?;
@@ -951,16 +1229,23 @@ impl GithubApi {
     }
 
     async fn wait_for_rate_limit(&self) -> Result<()> {
-        let deadline = *self.rate_limit_until.lock().await;
-        if let Some(deadline) = deadline {
+        loop {
+            let deadline = *self.credential.rate_limit_until.lock().await;
+            let Some(deadline) = deadline else {
+                return Ok(());
+            };
             tokio::time::sleep_until(deadline).await;
-            *self.rate_limit_until.lock().await = None;
+            let now = tokio::time::Instant::now();
+            let mut shared_deadline = self.credential.rate_limit_until.lock().await;
+            if shared_deadline.is_some_and(|current| current <= now) {
+                *shared_deadline = None;
+            }
         }
-        Ok(())
     }
 
     async fn record_rate_limit(&self, response: &reqwest::Response) {
         let headers = response.headers();
+        let now = Utc::now();
         let reset = headers
             .get("x-ratelimit-reset")
             .and_then(|value| value.to_str().ok())
@@ -969,8 +1254,19 @@ impl GithubApi {
         let retry_after = headers
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(|seconds| Utc::now() + chrono::Duration::seconds(seconds as i64));
+            .and_then(|value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .map(|seconds| {
+                        now + chrono::Duration::seconds(seconds.min(i64::MAX as u64) as i64)
+                    })
+                    .or_else(|| {
+                        DateTime::parse_from_rfc2822(value)
+                            .ok()
+                            .map(|date| date.with_timezone(&Utc))
+                    })
+            });
         let has_retry_after = retry_after.is_some();
         let exhausted = headers
             .get("x-ratelimit-remaining")
@@ -981,11 +1277,16 @@ impl GithubApi {
             || has_retry_after
         {
             let retry_at = retry_after
-                .or(reset)
-                .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(1));
-            let delay = (retry_at - Utc::now()).to_std().unwrap_or_default();
+                .into_iter()
+                .chain(reset)
+                .max()
+                .unwrap_or_else(|| now + chrono::Duration::minutes(1));
+            let delay = (retry_at - now).to_std().unwrap_or_default();
             let next = tokio::time::Instant::now() + delay;
-            *self.rate_limit_until.lock().await = Some(next);
+            let mut deadline = self.credential.rate_limit_until.lock().await;
+            if deadline.is_none_or(|current| current < next) {
+                *deadline = Some(next);
+            }
             tracing::warn!(
                 retry_seconds = delay.as_secs(),
                 "GitHub API rate limit reached; polling will back off"
@@ -1003,8 +1304,8 @@ struct GithubResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::{Query, State};
-    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use axum::response::{IntoResponse, Response};
     use axum::routing::get;
     use axum::{Json, Router};
@@ -1014,16 +1315,87 @@ mod tests {
     const CHILD: &str = "MJ_GITHUB_WATCH_INTEGRATION_CHILD";
 
     #[derive(Clone)]
+    struct RateLimitServer {
+        accepted: Arc<AtomicUsize>,
+    }
+
+    #[tokio::test]
+    async fn github_rate_limit_deadline_is_shared_after_failed_requests() {
+        let state = RateLimitServer {
+            accepted: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/retry-after", get(rate_limited_retry_after))
+            .route("/reset", get(rate_limited_reset))
+            .route("/ok", get(rate_limit_ok))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for (path, token) in [
+            ("retry-after", "watch-rate-retry-after-test-token"),
+            ("reset", "watch-rate-reset-test-token"),
+        ] {
+            let limited_api = GithubApi::new(&base, Some(token.into())).unwrap();
+            assert!(limited_api.get_json(path, &[], None).await.is_err());
+            let second_repository_api = GithubApi::new(&base, Some(token.into())).unwrap();
+            let blocked = tokio::time::timeout(
+                Duration::from_millis(150),
+                second_repository_api.get_json("ok", &[], None),
+            )
+            .await;
+            assert!(
+                blocked.is_err(),
+                "the credential deadline must block requests"
+            );
+            assert_eq!(state.accepted.load(Ordering::SeqCst), 0);
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                second_repository_api.get_json("ok", &[], None),
+            )
+            .await
+            .expect("rate-limit deadline expires")
+            .unwrap();
+            assert_eq!(state.accepted.load(Ordering::SeqCst), 1);
+            state.accepted.store(0, Ordering::SeqCst);
+        }
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn github_api_base_allows_plain_http_only_for_loopback_hosts() {
+        assert!(GithubApi::new("http://example.com", Some("secret".into())).is_err());
+        assert!(GithubApi::new("http://127.0.0.1:1234", None).is_ok());
+        assert!(GithubApi::new("http://localhost:1234", None).is_ok());
+        assert!(GithubApi::new("https://api.github.com", None).is_ok());
+    }
+
+    #[derive(Clone)]
     struct FakeGithub {
         data: Arc<tokio::sync::Mutex<FakeGithubData>>,
         not_modified: Arc<AtomicUsize>,
+        pull_not_modified: Arc<AtomicUsize>,
+        user_requests: Arc<AtomicUsize>,
+        review_requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct FakePull {
+        value: Value,
+        etag: String,
     }
 
     #[derive(Clone)]
     struct FakeGithubData {
         items: Vec<Value>,
         comments: Vec<Value>,
+        review_comments: Vec<Value>,
+        reviews: Vec<Value>,
         etag: String,
+        pulls: BTreeMap<u64, FakePull>,
     }
 
     struct FakeClassifier {
@@ -1067,8 +1439,8 @@ mod tests {
         let writer = crate::database::install_isolated_test_writer();
         let now = Utc::now();
         let old = now - chrono::Duration::minutes(5);
-        let later = now + chrono::Duration::seconds(52);
         let creator_id = "creator-session";
+        let credential = "watcher-lifecycle-integration-token";
         let mut session = crate::database::test_session(creator_id, "project");
         session.state = mj_core::state::SessionState::Running;
         session.project = Some(mj_core::repository::ProjectBundleSnapshot {
@@ -1105,17 +1477,27 @@ mod tests {
                     false,
                 )],
                 comments: Vec::new(),
+                review_comments: Vec::new(),
+                reviews: Vec::new(),
                 etag: "\"v1\"".into(),
+                pulls: BTreeMap::new(),
             })),
             not_modified: Arc::new(AtomicUsize::new(0)),
+            pull_not_modified: Arc::new(AtomicUsize::new(0)),
+            user_requests: Arc::new(AtomicUsize::new(0)),
+            review_requests: Arc::new(AtomicUsize::new(0)),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
             .route("/repos/{owner}/{repo}/issues", get(fake_issues))
             .route("/repos/{owner}/{repo}/issues/comments", get(fake_comments))
-            .route("/repos/{owner}/{repo}/pulls/comments", get(fake_comments))
+            .route(
+                "/repos/{owner}/{repo}/pulls/comments",
+                get(fake_review_comments),
+            )
             .route("/repos/{owner}/{repo}/pulls/{number}", get(fake_pull))
+            .route("/user", get(fake_user))
             .route(
                 "/repos/{owner}/{repo}/pulls/{number}/reviews",
                 get(fake_reviews),
@@ -1127,7 +1509,7 @@ mod tests {
             calls: calls.clone(),
         });
         let stop = CancellationToken::new();
-        let api = GithubApi::new(&base, None).unwrap();
+        let api = GithubApi::new(&base, Some(credential.into())).unwrap();
 
         poll_repository_with_api(
             "acme",
@@ -1163,7 +1545,7 @@ mod tests {
                 .map(|number| {
                     let title = match number {
                         2 => "interesting issue",
-                        52 => "created pull request",
+                        51 | 52 => "created pull request",
                         _ => "ordinary issue",
                     };
                     github_item(
@@ -1171,7 +1553,7 @@ mod tests {
                         number,
                         title,
                         (now + chrono::Duration::seconds(number as i64)).to_rfc3339(),
-                        number == 52,
+                        matches!(number, 51 | 52),
                     )
                 })
                 .chain(std::iter::once(github_item(
@@ -1195,11 +1577,9 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 50);
-        assert!(
-            crate::database::load_github_watches("acme", "repo")
-                .unwrap()
-                .is_empty()
-        );
+        let watches = crate::database::load_github_watches("acme", "repo").unwrap();
+        assert_eq!(watches.len(), 1);
+        assert_eq!(watches[0].number, 51);
         let pending = crate::database::pending_mailbox_events(20).unwrap();
         let interest = pending
             .iter()
@@ -1227,7 +1607,7 @@ mod tests {
             crate::mailbox_outbox::mailbox_command_id(&interest.event_key),
             "an unacknowledged row retains its stable relay identity after restart"
         );
-        let restarted_api = GithubApi::new(&base, None).unwrap();
+        let restarted_api = GithubApi::new(&base, Some(credential.into())).unwrap();
         poll_repository_with_api(
             "acme",
             "repo",
@@ -1240,28 +1620,115 @@ mod tests {
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 51);
         let watches = crate::database::load_github_watches("acme", "repo").unwrap();
-        assert_eq!(watches.len(), 1);
-        assert_eq!(watches[0].number, 52);
+        assert_eq!(watches.len(), 2);
+        assert!(watches.iter().any(|watch| watch.number == 51));
+        assert!(watches.iter().any(|watch| watch.number == 52));
         assert_eq!(watches[0].creator_session_id, creator_id);
+        let comments_cursor = crate::database::load_github_repo_cursor("acme", "repo")
+            .unwrap()
+            .unwrap()
+            .comments_cursor
+            .unwrap();
+        let cursor_at_ms = timestamp_millis(&comments_cursor).unwrap();
+        crate::database::seed_github_test_turns(
+            creator_id,
+            cursor_at_ms - 3_000,
+            cursor_at_ms - 2_000,
+            cursor_at_ms - 1_000,
+        )
+        .unwrap();
+        let comment_at = |offset_ms: i64| {
+            DateTime::<Utc>::from_timestamp_millis(cursor_at_ms + offset_ms)
+                .unwrap()
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+        };
         {
             let mut data = fake.data.lock().await;
-            data.comments = vec![json!({
-                "id": 9001,
-                "issue_url": "http://api/repos/acme/repo/issues/52",
-                "user": {"login": "reviewer"},
-                "body": "Please update the changelog.",
-                "created_at": (later + chrono::Duration::seconds(1)).to_rfc3339(),
-                "updated_at": (later + chrono::Duration::seconds(1)).to_rfc3339()
-            })];
+            data.comments = vec![
+                json!({
+                    "id": 9001,
+                    "issue_url": "http://api/repos/acme/repo/issues/52",
+                    "user": {"login": "reviewer"},
+                    "body": "Please update the changelog.",
+                    "created_at": comment_at(0),
+                    "updated_at": comment_at(0)
+                }),
+                json!({
+                    "id": 9002,
+                    "issue_url": "http://api/repos/acme/repo/issues/52",
+                    "user": {"login": "watcher-bot"},
+                    "body": "agent reply during completed turn",
+                    "created_at": comment_at(-2_500),
+                    "updated_at": comment_at(-2_500)
+                }),
+                json!({
+                    "id": 9003,
+                    "issue_url": "http://api/repos/acme/repo/issues/52",
+                    "user": {"login": "watcher-bot"},
+                    "body": "user reply while idle",
+                    "created_at": comment_at(-1_500),
+                    "updated_at": comment_at(-1_500)
+                }),
+                json!({
+                    "id": 9004,
+                    "issue_url": "http://api/repos/acme/repo/issues/52",
+                    "user": {"login": "watcher-bot"},
+                    "body": "agent reply during active turn",
+                    "created_at": comment_at(-500),
+                    "updated_at": comment_at(-500)
+                }),
+                json!({
+                    "id": 9007,
+                    "issue_url": "http://api/repos/acme/repo/issues/52",
+                    "user": {"login": "watcher-bot"},
+                    "body": "agent reply exactly when the turn ended",
+                    "created_at": comment_at(-2_000),
+                    "updated_at": comment_at(-2_000)
+                }),
+            ];
+            data.review_comments = vec![
+                json!({
+                    "id": 9005,
+                    "pull_request_url": "http://api/repos/acme/repo/pulls/52",
+                    "user": {"login": "reviewer"},
+                    "body": "inline note at the cursor boundary",
+                    "created_at": comment_at(-3_500),
+                    "updated_at": comment_at(-3_500)
+                }),
+                json!({
+                    "id": 9006,
+                    "pull_request_url": "http://api/repos/acme/repo/pulls/52",
+                    "user": {"login": "watcher-bot"},
+                    "body": "agent inline reply during active turn",
+                    "created_at": comment_at(-500),
+                    "updated_at": comment_at(-500)
+                }),
+            ];
+            data.reviews = vec![
+                json!({
+                    "id": 9101,
+                    "user": {"login": "reviewer"},
+                    "body": "approved at the cursor boundary",
+                    "state": "APPROVED",
+                    "submitted_at": comment_at(-3_500)
+                }),
+                json!({
+                    "id": 9102,
+                    "user": {"login": "watcher-bot"},
+                    "body": "approved during active turn",
+                    "state": "APPROVED",
+                    "submitted_at": comment_at(-500)
+                }),
+            ];
         }
-        let restarted_api = GithubApi::new(&base, None).unwrap();
+        let restarted_api = GithubApi::new(&base, Some(credential.into())).unwrap();
         poll_repository_with_api(
             "acme",
             "repo",
-            vec![session],
-            classifier,
+            vec![session.clone()],
+            classifier.clone(),
             &restarted_api,
-            stop,
+            stop.clone(),
         )
         .await
         .unwrap();
@@ -1275,16 +1742,200 @@ mod tests {
             1,
             "the stored ETag handles 304"
         );
-        let pending = crate::database::pending_mailbox_events(20).unwrap();
-        let comment = pending
+        assert_eq!(fake.user_requests.load(Ordering::SeqCst), 1);
+        let pending = crate::database::pending_mailbox_events(100).unwrap();
+        let event = |key: &str| {
+            let row = pending
+                .iter()
+                .find(|entry| entry.event_key == key)
+                .unwrap_or_else(|| panic!("missing mailbox event {key}"));
+            assert_eq!(row.target_session_id, creator_id);
+            serde_json::from_str::<MailboxEvent>(&row.event_json).unwrap()
+        };
+        let reviewer_comment = event("github:acme/repo#52:comment:9001");
+        assert!(reviewer_comment.wake);
+        assert!(reviewer_comment.text.contains("reviewer"));
+        assert!(
+            reviewer_comment
+                .text
+                .contains("Please update the changelog.")
+        );
+        assert!(!event("github:acme/repo#52:comment:9002").wake);
+        assert!(event("github:acme/repo#52:comment:9003").wake);
+        assert!(!event("github:acme/repo#52:comment:9004").wake);
+        assert!(event("github:acme/repo#52:comment:9007").wake);
+        assert!(event("github:acme/repo#52:review-comment:9005").wake);
+        assert!(!event("github:acme/repo#52:review-comment:9006").wake);
+        assert!(event("github:acme/repo#52:review:9101").wake);
+        assert!(!event("github:acme/repo#52:review:9102").wake);
+
+        let review_requests_before_terminal = fake.review_requests.load(Ordering::SeqCst);
+        let closed_at = comment_at(2_000);
+        let merged_at = comment_at(3_000);
+        {
+            let mut data = fake.data.lock().await;
+            data.pulls.insert(
+                51,
+                FakePull {
+                    value: json!({
+                        "state": "closed",
+                        "closed_at": closed_at,
+                        "updated_at": closed_at,
+                        "closed_by": {"login": "closer"}
+                    }),
+                    etag: "\"pull-51-v2\"".into(),
+                },
+            );
+            data.pulls.insert(
+                52,
+                FakePull {
+                    value: json!({
+                        "state": "closed",
+                        "closed_at": merged_at,
+                        "merged_at": merged_at,
+                        "updated_at": merged_at,
+                        "merged_by": {"login": "merger"}
+                    }),
+                    etag: "\"pull-52-v2\"".into(),
+                },
+            );
+            data.comments.push(json!({
+                "id": 9010,
+                "issue_url": "http://api/repos/acme/repo/issues/51",
+                "user": {"login": "reviewer"},
+                "body": "comment after the pull request closed",
+                "created_at": comment_at(5_000),
+                "updated_at": comment_at(5_000)
+            }));
+        }
+        let api = GithubApi::new(&base, Some(credential.into())).unwrap();
+        poll_repository_with_api(
+            "acme",
+            "repo",
+            vec![session.clone()],
+            classifier.clone(),
+            &api,
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fake.review_requests.load(Ordering::SeqCst),
+            review_requests_before_terminal,
+            "closed and merged pull requests stop review polling"
+        );
+        let closed_key = format!("github:acme/repo#51:closed:{closed_at}");
+        let merged_key = "github:acme/repo#52:merged";
+        let pending = crate::database::pending_mailbox_events(100).unwrap();
+        let closed_event = serde_json::from_str::<MailboxEvent>(
+            &pending
+                .iter()
+                .find(|entry| entry.event_key == closed_key)
+                .expect("closed pull request creates an outbox event")
+                .event_json,
+        )
+        .unwrap();
+        let merged_event = serde_json::from_str::<MailboxEvent>(
+            &pending
+                .iter()
+                .find(|entry| entry.event_key == merged_key)
+                .expect("merged pull request creates an outbox event")
+                .event_json,
+        )
+        .unwrap();
+        assert!(closed_event.wake && closed_event.text.contains("closed without merging"));
+        assert!(closed_event.text.contains("closer"));
+        assert!(merged_event.wake);
+        assert!(
+            pending
+                .iter()
+                .any(|entry| entry.event_key == "github:acme/repo#51:comment:9010")
+        );
+        assert_eq!(
+            merged_event.text,
+            format!(
+                "Your pull request acme/repo#52 \"created pull request\" was merged by merger at {merged_at} (https://github.com/acme/repo/pull/52)"
+            )
+        );
+
+        writer.shutdown().unwrap();
+        let writer = crate::database::install_isolated_test_writer();
+        let pull_304_before_restart_poll = fake.pull_not_modified.load(Ordering::SeqCst);
+        let restarted_api = GithubApi::new(&base, Some(credential.into())).unwrap();
+        poll_repository_with_api(
+            "acme",
+            "repo",
+            vec![session.clone()],
+            classifier.clone(),
+            &restarted_api,
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fake.pull_not_modified.load(Ordering::SeqCst),
+            pull_304_before_restart_poll + 2
+        );
+        let pending = crate::database::pending_mailbox_events(100).unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|entry| entry.event_key == closed_key)
+                .count(),
+            1,
+            "restart does not enqueue the closed transition again"
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|entry| entry.event_key == merged_key)
+                .count(),
+            1,
+            "restart does not enqueue the merged transition again"
+        );
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|entry| entry.event_key == "github:acme/repo#51:comment:9010")
+                .count(),
+            1,
+            "comments continue to be delivered after a pull request closes"
+        );
+
+        let reopened_at = comment_at(4_000);
+        fake.data.lock().await.pulls.insert(
+            51,
+            FakePull {
+                value: json!({"state": "open", "updated_at": reopened_at}),
+                etag: "\"pull-51-v3\"".into(),
+            },
+        );
+        let review_requests_before_reopen = fake.review_requests.load(Ordering::SeqCst);
+        poll_repository_with_api(
+            "acme",
+            "repo",
+            vec![session],
+            classifier,
+            &restarted_api,
+            stop,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fake.review_requests.load(Ordering::SeqCst),
+            review_requests_before_reopen + 1,
+            "reviews resume only for the reopened pull request"
+        );
+        let pending = crate::database::pending_mailbox_events(100).unwrap();
+        let reopened = pending
             .iter()
-            .find(|entry| entry.event_key == "github:acme/repo#52:comment:9001")
-            .expect("watched creator receives later comments");
-        let comment_event: MailboxEvent = serde_json::from_str(&comment.event_json).unwrap();
-        assert_eq!(comment.target_session_id, creator_id);
-        assert!(comment_event.wake);
-        assert!(comment_event.text.contains("reviewer"));
-        assert!(comment_event.text.contains("Please update the changelog."));
+            .find(|entry| entry.event_key == format!("github:acme/repo#51:reopened:{reopened_at}"))
+            .expect("reopening a watched pull request is reported once");
+        assert!(
+            serde_json::from_str::<MailboxEvent>(&reopened.event_json)
+                .unwrap()
+                .wake
+        );
         writer.shutdown().unwrap();
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
@@ -1343,15 +1994,108 @@ mod tests {
             .into_response()
     }
 
-    async fn fake_comments(State(fake): State<FakeGithub>) -> Json<Vec<Value>> {
-        Json(fake.data.lock().await.comments.clone())
+    async fn fake_comments(
+        State(fake): State<FakeGithub>,
+        Query(query): Query<BTreeMap<String, String>>,
+    ) -> Json<Vec<Value>> {
+        let since = query.get("since").expect("comment requests include since");
+        let comments = fake.data.lock().await.comments.clone();
+        Json(comments_after(&comments, since))
     }
 
-    async fn fake_pull() -> Json<Value> {
-        Json(json!({"state": "open"}))
+    async fn fake_review_comments(
+        State(fake): State<FakeGithub>,
+        Query(query): Query<BTreeMap<String, String>>,
+    ) -> Json<Vec<Value>> {
+        let since = query
+            .get("since")
+            .expect("review comment requests include since");
+        let comments = fake.data.lock().await.review_comments.clone();
+        Json(comments_after(&comments, since))
     }
 
-    async fn fake_reviews() -> Json<Vec<Value>> {
-        Json(Vec::new())
+    fn comments_after(comments: &[Value], since: &str) -> Vec<Value> {
+        comments
+            .iter()
+            .filter(|comment| {
+                comment_timestamp(comment)
+                    .is_some_and(|timestamp| timestamp_precedes(since, timestamp))
+            })
+            .cloned()
+            .collect()
+    }
+
+    async fn fake_pull(
+        State(fake): State<FakeGithub>,
+        Path((_owner, _repo, number)): Path<(String, String, u64)>,
+        headers: HeaderMap,
+    ) -> Response {
+        let pull = fake
+            .data
+            .lock()
+            .await
+            .pulls
+            .get(&number)
+            .cloned()
+            .unwrap_or_else(|| FakePull {
+                value: json!({"state": "open"}),
+                etag: format!("\"pull-{number}-v1\""),
+            });
+        if headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|value| value.to_str().ok())
+            == Some(pull.etag.as_str())
+        {
+            fake.pull_not_modified.fetch_add(1, Ordering::SeqCst);
+            return (StatusCode::NOT_MODIFIED, [(header::ETAG, pull.etag)]).into_response();
+        }
+        (
+            StatusCode::OK,
+            [(header::ETAG, pull.etag)],
+            Json(pull.value),
+        )
+            .into_response()
+    }
+
+    async fn fake_reviews(
+        State(fake): State<FakeGithub>,
+        Path((_owner, _repo, _number)): Path<(String, String, u64)>,
+    ) -> Json<Vec<Value>> {
+        fake.review_requests.fetch_add(1, Ordering::SeqCst);
+        Json(fake.data.lock().await.reviews.clone())
+    }
+
+    async fn fake_user(State(fake): State<FakeGithub>) -> Json<Value> {
+        fake.user_requests.fetch_add(1, Ordering::SeqCst);
+        Json(json!({"login": "watcher-bot"}))
+    }
+
+    async fn rate_limited_retry_after() -> Response {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (header::RETRY_AFTER, "1"),
+                (
+                    header::HeaderName::from_static("x-ratelimit-remaining"),
+                    "0",
+                ),
+            ],
+        )
+            .into_response()
+    }
+
+    async fn rate_limited_reset() -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-reset",
+            HeaderValue::from_str(&(Utc::now().timestamp() + 2).to_string()).unwrap(),
+        );
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        (StatusCode::FORBIDDEN, headers).into_response()
+    }
+
+    async fn rate_limit_ok(State(state): State<RateLimitServer>) -> Json<Value> {
+        state.accepted.fetch_add(1, Ordering::SeqCst);
+        Json(json!({"ok": true}))
     }
 }

@@ -386,8 +386,15 @@ pub enum SubagentToolAction {
         child_session_id: String,
         message: String,
     },
+    SendMessage {
+        child_session_id: String,
+        message: String,
+    },
     WaitAgents,
-    InterruptAgent {
+    /// An accepted request from an older parent worker. New MCP servers do
+    /// not expose interrupt, and the daemon rejects this legacy action.
+    #[serde(rename = "interrupt_agent")]
+    LegacyInterruptAgent {
         child_session_id: String,
     },
     CloseAgent {
@@ -430,8 +437,13 @@ enum SubagentToolActionWire {
         child_session_id: String,
         message: String,
     },
+    SendMessage {
+        child_session_id: String,
+        message: String,
+    },
     WaitAgents,
-    InterruptAgent {
+    #[serde(rename = "interrupt_agent")]
+    LegacyInterruptAgent {
         child_session_id: String,
     },
     CloseAgent {
@@ -451,7 +463,8 @@ impl SubagentToolAction {
             self,
             Self::Spawn { .. }
                 | Self::SendInput { .. }
-                | Self::InterruptAgent { .. }
+                | Self::SendMessage { .. }
+                | Self::LegacyInterruptAgent { .. }
                 | Self::CloseAgent { .. }
         )
     }
@@ -517,9 +530,16 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 child_session_id,
                 message,
             },
+            SubagentToolActionWire::SendMessage {
+                child_session_id,
+                message,
+            } => Self::SendMessage {
+                child_session_id,
+                message,
+            },
             SubagentToolActionWire::WaitAgents => Self::WaitAgents,
-            SubagentToolActionWire::InterruptAgent { child_session_id } => {
-                Self::InterruptAgent { child_session_id }
+            SubagentToolActionWire::LegacyInterruptAgent { child_session_id } => {
+                Self::LegacyInterruptAgent { child_session_id }
             }
             SubagentToolActionWire::CloseAgent { child_session_id } => {
                 Self::CloseAgent { child_session_id }
@@ -634,16 +654,16 @@ impl SubagentMcpRole {
                 "spawn",
                 "list_agents",
                 "send_input",
+                "send_message",
                 "wait",
-                "interrupt",
                 "close",
             ],
             Self::FixedParent => &[
                 "spawn",
                 "list_agents",
                 "send_input",
+                "send_message",
                 "wait",
-                "interrupt",
                 "close",
             ],
             Self::Child => &["handback"],
@@ -1160,7 +1180,7 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
         .to_owned(),
     );
     lines.push(
-        "A stopped sub-agent no longer exists: wait, send_input, interrupt and close cannot reach it."
+        "A stopped sub-agent no longer exists: wait, send_input, send_message and close cannot reach it."
             .to_owned(),
     );
     lines.push(format!("</{STOPPED_SUBAGENTS_TAG}>"));
@@ -1315,7 +1335,11 @@ mod tests {
                 child_session_id: "child".into(),
                 message: "continue".into(),
             },
-            SubagentToolAction::InterruptAgent {
+            SubagentToolAction::SendMessage {
+                child_session_id: "child".into(),
+                message: "note".into(),
+            },
+            SubagentToolAction::LegacyInterruptAgent {
                 child_session_id: "child".into(),
             },
             SubagentToolAction::CloseAgent {
@@ -1783,6 +1807,26 @@ mod tests {
     }
 
     #[test]
+    fn an_old_interrupt_request_remains_readable_but_is_not_an_offered_tool() {
+        let old: SubagentToolRequest = serde_json::from_str(
+            r#"{"request_id":"old-interrupt","created_at_ms":1,"action":{"action":"interrupt_agent","params":{"child_session_id":"child"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old.action,
+            SubagentToolAction::LegacyInterruptAgent {
+                child_session_id: "child".into()
+            }
+        );
+        assert!(
+            SubagentMcpRole::Parent
+                .tool_names()
+                .contains(&"send_message")
+        );
+        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+    }
+
+    #[test]
     fn wait_serializes_without_params_and_old_shapes_deserialize() {
         let wait = SubagentToolAction::WaitAgents;
         let encoded = serde_json::to_value(&wait).unwrap();
@@ -1966,7 +2010,7 @@ mod tests {
              - \"Fix the parser\" (child_session_id id-Fix the parser), task: Fix the off-by-one.; had not handed back\n\
              - \"Review the docs\" (child_session_id id-Review the docs); had not handed back\n\
              Their work was not handed back; spawn them again if you still need it.\n\
-             A stopped sub-agent no longer exists: wait, send_input, interrupt and close cannot reach it.\n\
+             A stopped sub-agent no longer exists: wait, send_input, send_message and close cannot reach it.\n\
              </mj-stopped-subagents>"
         );
         assert_eq!(

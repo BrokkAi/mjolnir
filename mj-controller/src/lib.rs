@@ -52,8 +52,8 @@ pub mod image_pull_gate;
 pub mod recovery_gate;
 
 mod continuation;
-mod github_watch;
 pub mod github_item_verdict;
+mod github_watch;
 mod jev_transport;
 mod mailbox_outbox;
 #[cfg(test)]

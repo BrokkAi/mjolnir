@@ -822,6 +822,15 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
             "migration 75 creates {table}"
         );
     }
+    let watch_columns = connection
+        .prepare("PRAGMA table_info(github_watch_items)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(watch_columns.contains(&"pull_request_etag".to_owned()));
+    assert!(watch_columns.contains(&"pull_request_state".to_owned()));
     assert_eq!(
         connection
             .query_row(

@@ -483,6 +483,11 @@ impl DurableRelay {
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
+        if !checkpoint_only {
+            relay.return_mailbox_hook_lease(
+                mj_core::relay::MailboxHookLeaseReturnReason::WorkerRestart,
+            )?;
+        }
         let recovered_native_history =
             missing_native_history && !checkpoint_only && relay.recover_native_history_evidence();
         // Startup already reads the active journal into the bounded hot window.

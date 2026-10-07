@@ -10,6 +10,16 @@ pub(crate) struct MailboxOutboxEntry {
     pub unpark: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubagentMailboxMessage {
+    pub event_key: String,
+    pub target_session_id: String,
+    pub event_json: String,
+    pub accepted: bool,
+    pub accepted_command_id: Option<String>,
+    pub accepted_ordinal: Option<u64>,
+}
+
 /// Insert one event once. Reusing a key for a different target or payload is a
 /// producer error; silently treating it as the original event could deliver
 /// the wrong message to the wrong session.
@@ -47,6 +57,11 @@ pub(crate) fn enqueue_mailbox_event_with(
     wake: bool,
     unpark: bool,
 ) -> Result<bool> {
+    let event: mj_core::mailbox::MailboxEvent = serde_json::from_str(event_json)?;
+    ensure!(
+        event.key == event_key && event.wake == wake,
+        "mailbox event JSON does not match its outbox key and wake value"
+    );
     connection.execute(
         "INSERT INTO mailbox_outbox(event_key, target_session_id, event_json, wake, unpark, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -61,18 +76,26 @@ pub(crate) fn enqueue_mailbox_event_with(
         ],
     )?;
     let inserted = connection.changes() == 1;
-    let existing: (String, String, bool, bool) = connection.query_row(
-        "SELECT target_session_id, event_json, wake, unpark FROM mailbox_outbox WHERE event_key=?1",
+    let existing: (String, String, bool) = connection.query_row(
+        "SELECT target_session_id, event_json, wake FROM mailbox_outbox WHERE event_key=?1",
         [event_key],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    ensure!(
-        existing.0 == target_session_id
-            && existing.1 == event_json
-            && existing.2 == wake
-            && existing.3 == unpark,
-        "mailbox event key {event_key:?} already names a different event"
-    );
+    let original: mj_core::mailbox::MailboxEvent = serde_json::from_str(&existing.1)?;
+    if existing.0 != target_session_id
+        || original.key != event.key
+        || original.text != event.text
+        || original.wake != event.wake
+        || existing.2 != wake
+    {
+        return Err(anyhow::Error::new(mj_core::refusal::Refusal::precondition(
+            format!(
+                "mailbox event key {event_key:?} already names a different session, text, or wake value"
+            ),
+        )));
+    }
+    // The durable row is authoritative on a retry. Timestamp, source, and
+    // unpark metadata from a later request do not rewrite the first event.
     Ok(inserted)
 }
 
@@ -90,6 +113,39 @@ pub(crate) fn pending_mailbox_events(limit: usize) -> Result<Vec<MailboxOutboxEn
                 target_session_id: row.get(1)?,
                 event_json: row.get(2)?,
                 unpark: row.get(3)?,
+            })
+        })?
+        .map(|row| row.map_err(Into::into))
+        .collect()
+}
+
+/// Recent parent messages addressed to this session's children, including
+/// whether the child's relay has accepted each waking event.
+pub(crate) fn subagent_mailbox_messages(
+    parent_session_id: &str,
+) -> Result<Vec<SubagentMailboxMessage>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT mailbox_outbox.event_key, mailbox_outbox.target_session_id,
+                mailbox_outbox.event_json, mailbox_outbox.accepted_at IS NOT NULL,
+                mailbox_outbox.accepted_command_id, mailbox_outbox.accepted_ordinal
+         FROM mailbox_outbox
+         JOIN subagent_sessions
+           ON subagent_sessions.child_session_id = mailbox_outbox.target_session_id
+         WHERE subagent_sessions.parent_session_id = ?1
+           AND mailbox_outbox.event_key LIKE 'subagent-message-%'
+         ORDER BY mailbox_outbox.created_at DESC, mailbox_outbox.event_key DESC
+         LIMIT 64",
+    )?;
+    statement
+        .query_map([parent_session_id], |row| {
+            Ok(SubagentMailboxMessage {
+                event_key: row.get(0)?,
+                target_session_id: row.get(1)?,
+                event_json: row.get(2)?,
+                accepted: row.get(3)?,
+                accepted_command_id: row.get(4)?,
+                accepted_ordinal: row.get(5)?,
             })
         })?
         .map(|row| row.map_err(Into::into))

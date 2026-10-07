@@ -527,15 +527,15 @@ Enter open · / searc                                                           
 
 === Build cache summary before keyboard open (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
-╭ Sessions ───────────────────                                                                                                                                 │
-│ Create   Open   Filter: ____  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│hel ─────────────────────────  │ Settings › Machines › local                                                                  │                               │
-│› ■ ACP pretty name            │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local                                                                  │                               │
+│hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+│› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │                                                                                              │                               │
-│  │                            │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                               │
+│  │ No messages yet            │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                               │
+│  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -556,31 +556,31 @@ Enter open · / searc                                                           
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │ Resolving the build cache defaults on the machine…                                           │  ────────────────────── ▁   ▪ ╮
-│                               │                                                                                              │                               │
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │   Back     Save and Close                                                                    │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
-│                                                   ││  codex-2   Codex        refreshing…                                                                     │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === Build cache opened by keyboard (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
-╭ Sessions ───────────────────                                                                                                                                 │
-│ Create   Open   Filter: ____  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│hel ─────────────────────────  │ Settings › Machines › local › Build cache (mbx)                                              │                               │
-│› ■ ACP pretty name            │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                               │
-│  Stopped  podman  codex-1     │ Machines.                                                                                    │                               │
-│  │ No messages yet            │                                                                                              │                               │
-│  │                            │   Enabled                                                                                 ☑  │                               │
-│                               │   Cache directory                                                                Resolving…  │                               │
+╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local › Build cache (mbx)                                              │                               │
+│hel ─────────────────────────  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                               │
+│› ■ ACP pretty name            │ Machines.                                                                                    │                               │
+│  Stopped  podman  codex-1     │                                                                                              │                               │
+│  │ No messages yet            │   Enabled                                                                                 ☑  │                               │
+│  │                            │   Cache directory                                                                Resolving…  │                               │
 │                               │   Total cache budget (GB)                                                        Resolving…  │                               │
 │                               │   Compile scheduling                                                          2 settings  ›  │                               │
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -601,25 +601,25 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │   Back     Save and Close                                                                    │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
-│                                                   ││  codex-2   Codex        refreshing…                                                                     │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === disabled cache summary after keyboard journey (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
-╭ Sessions ───────────────────                                                                                                                                 │
-│ Create   Open   Filter: ____  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│hel ─────────────────────────  │ Settings › Machines › local                                                                  │                               │
-│› ■ ACP pretty name            │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local                                                                  │                               │
+│hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+│› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │                                                                                              │                               │
-│  │                            │   Build cache (mbx)                                             Disabled · 100 GB budget  ›  │                               │
+│  │ No messages yet            │   Build cache (mbx)                                             Disabled · 100 GB budget  ›  │                               │
+│  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -640,29 +640,29 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │ Resolving the build cache defaults on the machine…                                           │  ────────────────────── ▁   ▪ ╮
-│                               │                                                                                              │                               │
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │   Back     Save and Close                                                                    │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
-│                                                   ││  codex-2   Codex        refreshing…                                                                     │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 summary contains changed state: true
 
 === Build cache summary before mouse open (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
-╭ Sessions ───────────────────                                                                                                                                 │
-│ Create   Open   Filter: ____  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│hel ─────────────────────────  │ Settings › Machines › local                                                                  │                               │
-│› ■ ACP pretty name            │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local                                                                  │                               │
+│hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+│› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │                                                                                              │                               │
-│  │                            │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                               │
+│  │ No messages yet            │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                               │
+│  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -683,31 +683,31 @@ summary contains changed state: true
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │ Resolving the build cache defaults on the machine…                                           │  ────────────────────── ▁   ▪ ╮
-│                               │                                                                                              │                               │
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │   Back     Save and Close                                                                    │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
-│                                                   ││  codex-2   Codex        refreshing…                                                                     │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === Build cache opened by mouse (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
-╭ Sessions ───────────────────                                                                                                                                 │
-│ Create   Open   Filter: ____  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│hel ─────────────────────────  │ Settings › Machines › local › Build cache (mbx)                                              │                               │
-│› ■ ACP pretty name            │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                               │
-│  Stopped  podman  codex-1     │ Machines.                                                                                    │                               │
-│  │ No messages yet            │                                                                                              │                               │
-│  │                            │   Enabled                                                                                 ☑  │                               │
-│                               │   Cache directory                                                                Resolving…  │                               │
+╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local › Build cache (mbx)                                              │                               │
+│hel ─────────────────────────  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                               │
+│› ■ ACP pretty name            │ Machines.                                                                                    │                               │
+│  Stopped  podman  codex-1     │                                                                                              │                               │
+│  │ No messages yet            │   Enabled                                                                                 ☑  │                               │
+│  │                            │   Cache directory                                                                Resolving…  │                               │
 │                               │   Total cache budget (GB)                                                        Resolving…  │                               │
 │                               │   Compile scheduling                                                          2 settings  ›  │                               │
+│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -728,25 +728,25 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │   Back     Save and Close                                                                    │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
-│                                                   ││  codex-2   Codex        refreshing…                                                                     │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 
 === disabled cache summary after mouse journey (160x40) ===
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                         ☰ ││                                                                                                         │
+│ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
-╭ Sessions ───────────────────                                                                                                                                 │
-│ Create   Open   Filter: ____  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│hel ─────────────────────────  │ Settings › Machines › local                                                                  │                               │
-│› ■ ACP pretty name            │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local                                                                  │                               │
+│hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
+│› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │                                                                                              │                               │
-│  │                            │   Build cache (mbx)                                             Disabled · 100 GB budget  ›  │                               │
+│  │ No messages yet            │   Build cache (mbx)                                             Disabled · 100 GB budget  ›  │                               │
+│  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -767,14 +767,14 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │ Resolving the build cache defaults on the machine…                                           │  ────────────────────── ▁   ▪ ╮
-│                               │                                                                                              │                               │
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │ Resolving the build cache defaults on the machine…                                           │                               │
 │                               │                                                                                              │  ─────────────────────────────╯
-│                               │   Back     Save and Close                                                                    │  ────────────────────── ▁   ▪ ╮
+│                               │                                                                                              │  ────────────────────── ▁   ▪ ╮
+│                               │   Back     Save and Close                                                                    │                               │
 │                               ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                               │
 │                                                                                                                                                              │
 │                                                                                                                                                              │
-│                                                   ││  codex-2   Codex        refreshing…                                                                     │
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · : palette · ? keys
 summary contains changed state: true

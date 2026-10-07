@@ -5,7 +5,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "mailbox":{}, "jev":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -22,6 +22,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"enabled":false,"profile":null,"model":null,"effort":null})
         }
         "continuation" => json!({"enabled":true}),
+        "mailbox" => json!({"enabled":true}),
         "jev" => json!({"enabled":true}),
         "sessionwiki" => {
             json!({"archive_after_days":null})
@@ -235,6 +236,7 @@ pub(super) fn label(key: &str) -> String {
         "phone" => "Web Access",
         "review" => "Code Review",
         "continuation" => "Continuation",
+        "mailbox" => "Agent mailboxes",
         "jev" => "Jev (hosted service)",
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
@@ -461,6 +463,17 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
                 "On · 3 continuations plus quota recovery".to_owned()
             }
         }
+        "mailbox" => {
+            if section["enabled"] == Value::Bool(false) {
+                "Off".to_owned()
+            } else if !jev_enabled(draft) {
+                // `Config::agent_mailboxes_enabled`: GitHub items are
+                // classified by Jev, so no mailbox events are delivered.
+                "Off · Jev is off (Privacy)".to_owned()
+            } else {
+                "On · external events at tool boundaries".to_owned()
+            }
+        }
         "jev" => {
             if section["enabled"] == Value::Bool(false) {
                 "Off · new sessions send nothing".to_owned()
@@ -661,6 +674,9 @@ pub(super) fn page_help(path: &[String], draft: &Value) -> &'static str {
         [section] if section == "continuation" && !jev_enabled(draft) => {
             "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }
+        [section] if section == "mailbox" && !jev_enabled(draft) => {
+            "Off because Jev is off: agent mailboxes need Jev to classify GitHub activity. Turn Jev on under Privacy to use them."
+        }
         _ => help(path),
     }
 }
@@ -759,6 +775,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "continuation" => {
             "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
+        }
+        "mailbox" => {
+            "Deliver external events such as GitHub activity and parent messages at agent tool boundaries. Jev classifies GitHub items. Running sessions pick up hook changes after their next resume or restart."
         }
         "jev" => {
             "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."

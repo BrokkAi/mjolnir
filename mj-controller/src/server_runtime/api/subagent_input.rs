@@ -9,18 +9,24 @@ use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 impl ApiBackend {
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
-        let Some(handle) = self.session_handle(parent.to_owned()).await? else {
-            return Ok(InputProgress::default());
-        };
-        // The snapshot that scheduled this tool includes preceding inputs.
+        let snapshot = self
+            .session_handle(parent.to_owned())
+            .await?
+            .and_then(|handle| handle.view().snapshot);
+        // The snapshot that scheduled these tools includes preceding requests.
         // The actor publishes completion updates; forcing a sync here would
         // race the lease used to deliver those very completions.
-        Ok(handle
-            .view()
-            .snapshot
+        let mut progress = snapshot
             .as_ref()
             .map(InputProgress::from_snapshot)
-            .unwrap_or_default())
+            .unwrap_or_default();
+        let parent = parent.to_owned();
+        let messages = blocking("read sub-agent mailbox delivery status", move || {
+            crate::database::subagent_mailbox_messages(&parent)
+        })
+        .await?;
+        progress.add_mailbox_messages(messages);
+        Ok(progress)
     }
 
     pub(super) async fn deliver_subagent_input(
@@ -197,6 +203,8 @@ async fn prompt_acceptance(child: &str, command: &str) -> Result<Option<u64>> {
 pub(super) struct InputProgress {
     pending: BTreeMap<String, Vec<String>>,
     deliveries: BTreeMap<String, Vec<serde_json::Value>>,
+    pending_messages: BTreeMap<String, Vec<String>>,
+    message_deliveries: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 impl InputProgress {
@@ -205,15 +213,22 @@ impl InputProgress {
         let mut requests = snapshot.subagent_requests.iter().collect::<Vec<_>>();
         requests.sort_by_key(|r| (r.created_at_ms, &r.request_id));
         for request in requests {
-            if let SubagentToolAction::SendInput {
-                child_session_id, ..
-            } = &request.action
-            {
-                progress
+            match &request.action {
+                SubagentToolAction::SendInput {
+                    child_session_id, ..
+                } => progress
                     .pending
                     .entry(child_session_id.clone())
                     .or_default()
-                    .push(request.request_id.clone());
+                    .push(request.request_id.clone()),
+                SubagentToolAction::SendMessage {
+                    child_session_id, ..
+                } => progress
+                    .pending_messages
+                    .entry(child_session_id.clone())
+                    .or_default()
+                    .push(request.request_id.clone()),
+                _ => {}
             }
         }
         for result in &snapshot.subagent_results {
@@ -232,7 +247,17 @@ impl InputProgress {
                 continue;
             }
             value["request_id"] = result.request_id.clone().into();
-            progress.deliveries.entry(child).or_default().push(value);
+            if value["kind"] == "message" {
+                if value["status"] == "failed" {
+                    progress
+                        .message_deliveries
+                        .entry(child)
+                        .or_default()
+                        .push(value);
+                }
+            } else {
+                progress.deliveries.entry(child).or_default().push(value);
+            }
         }
         for deliveries in progress.deliveries.values_mut() {
             deliveries.sort_by(|a, b| {
@@ -241,6 +266,65 @@ impl InputProgress {
             });
         }
         progress
+    }
+
+    fn add_mailbox_messages(&mut self, messages: Vec<crate::database::SubagentMailboxMessage>) {
+        let mut accepted = BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+        for row in messages {
+            let Some(request_id) = row.event_key.strip_prefix("subagent-message-") else {
+                continue;
+            };
+            let Ok(event) = serde_json::from_str::<mj_core::mailbox::MailboxEvent>(&row.event_json)
+            else {
+                continue;
+            };
+            if event.key != row.event_key || event.source != "parent" {
+                continue;
+            }
+            if row.accepted {
+                accepted
+                    .entry(row.target_session_id.clone())
+                    .or_default()
+                    .insert(request_id.to_owned());
+            } else {
+                self.pending_messages
+                    .entry(row.target_session_id.clone())
+                    .or_default()
+                    .push(request_id.to_owned());
+                continue;
+            }
+            let mut delivery = serde_json::json!({
+                "request_id":request_id,
+                "created_at_ms":event.created_at_ms,
+                "status":"delivered"
+            });
+            if let Some(command_id) = row.accepted_command_id {
+                delivery["command_id"] = command_id.into();
+            }
+            if let Some(ordinal) = row.accepted_ordinal {
+                delivery["accepted_ordinal"] = ordinal.into();
+            }
+            self.message_deliveries
+                .entry(row.target_session_id)
+                .or_default()
+                .push(delivery);
+        }
+        for pending in self.pending_messages.values_mut() {
+            pending.sort();
+            pending.dedup();
+        }
+        self.pending_messages.retain(|child, pending| {
+            if let Some(delivered) = accepted.get(child) {
+                pending.retain(|request_id| !delivered.contains(request_id));
+            }
+            !pending.is_empty()
+        });
+        for deliveries in self.message_deliveries.values_mut() {
+            deliveries.sort_by(|a, b| {
+                (a["created_at_ms"].as_i64(), a["request_id"].as_str())
+                    .cmp(&(b["created_at_ms"].as_i64(), b["request_id"].as_str()))
+            });
+        }
     }
 
     pub fn status(
@@ -255,6 +339,10 @@ impl InputProgress {
             .pending
             .get(child)
             .is_some_and(|requests| !requests.is_empty())
+            || self
+                .pending_messages
+                .get(child)
+                .is_some_and(|requests| !requests.is_empty())
         {
             return ("running".into(), None, false);
         }
@@ -271,6 +359,22 @@ impl InputProgress {
                 true,
             );
         }
+        if let Some(last) = self
+            .message_deliveries
+            .get(child)
+            .and_then(|items| items.last())
+            && last["status"] == "failed"
+        {
+            return (
+                "failed".into(),
+                Some(format!(
+                    "Message {}: {}",
+                    last["request_id"].as_str().unwrap_or_default(),
+                    last["error"].as_str().unwrap_or("message delivery failed")
+                )),
+                true,
+            );
+        }
         current
     }
 
@@ -280,6 +384,12 @@ impl InputProgress {
         }
         if let Some(deliveries) = self.deliveries.get(child) {
             entry["input_deliveries"] = serde_json::json!(deliveries);
+        }
+        if let Some(pending) = self.pending_messages.get(child) {
+            entry["pending_messages"] = serde_json::json!(pending);
+        }
+        if let Some(deliveries) = self.message_deliveries.get(child) {
+            entry["message_deliveries"] = serde_json::json!(deliveries);
         }
     }
 }

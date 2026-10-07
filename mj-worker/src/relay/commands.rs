@@ -1,5 +1,7 @@
 use super::*;
 
+const MAILBOX_HOOK_LEASE_TIMEOUT_MS: i64 = 30_000;
+
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     if value.len() < 8
         || value.len() > 128
@@ -187,7 +189,12 @@ impl DurableRelay {
                 || self
                     .snapshot
                     .delivered_mailbox_event_keys
-                    .contains_key(&event.key))
+                    .contains_key(&event.key)
+                || self
+                    .snapshot
+                    .mailbox_hook_lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.events.iter().any(|leased| leased.key == event.key)))
         {
             // A producer may retry after losing the ACK, or independently
             // submit the same event under a fresh command ID. Pending events
@@ -369,6 +376,9 @@ impl DurableRelay {
         }
         if let RelayCommand::DeliverMailboxEvent { event } = &command {
             let mut pending = self.snapshot.pending_mailbox_events.clone();
+            if let Some(lease) = &self.snapshot.mailbox_hook_lease {
+                pending.extend(lease.events.iter().cloned());
+            }
             pending.push(event.clone());
             if ensure_serialized_budget(
                 &pending,
@@ -881,6 +891,7 @@ impl DurableRelay {
         if self.checkpoint_only || !acp_session_configured || maximum == 0 {
             return Ok(Vec::new());
         }
+        self.expire_mailbox_hook_lease_at(epoch_millis())?;
         // Reject controls whose targets settled between admission and dispatch.
         let stale: Vec<_> = self
             .snapshot
@@ -1000,6 +1011,8 @@ impl DurableRelay {
                     path: mj_core::mailbox::MailboxDeliveryPath::Prompt,
                     prompt_command_id: Some(command_id.clone()),
                     hook_event: None,
+                    events: self.snapshot.pending_mailbox_events.clone(),
+                    lease_id: None,
                 },
             )?;
         }
@@ -1746,6 +1759,7 @@ impl DurableRelay {
         {
             return Ok(None);
         }
+        self.expire_mailbox_hook_lease_at(epoch_millis())?;
         let Some(queued) = self.snapshot.queued_prompts.first().cloned() else {
             if self.mailbox_wake_is_allowed() {
                 self.enqueue_mailbox_wake()?;
@@ -1819,34 +1833,108 @@ impl DurableRelay {
         Ok(())
     }
 
-    /// Atomically claim pending events for one harness hook.
+    /// Atomically lease pending events to one harness hook.
     pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
             "unsupported mailbox hook event"
         );
-        let events = self.snapshot.pending_mailbox_events.clone();
-        if events.is_empty() {
+        self.expire_mailbox_hook_lease_at(epoch_millis())?;
+        if self.snapshot.mailbox_hook_lease.is_some() {
             return Ok(RelayResponsePayload::MailboxDrained {
+                lease_id: None,
                 text: None,
                 count: 0,
             });
         }
-        let event_keys = events.iter().map(|event| event.key.clone()).collect();
+        let events = self.snapshot.pending_mailbox_events.clone();
+        if events.is_empty() {
+            return Ok(RelayResponsePayload::MailboxDrained {
+                lease_id: None,
+                text: None,
+                count: 0,
+            });
+        }
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow!("generate mailbox hook lease ID: {error}"))?;
+        let lease = mj_core::relay::MailboxHookLease {
+            lease_id: format!("mailbox-hook-{}", mj_core::hex::lower_hex(random)),
+            events: events.clone(),
+            hook_event: hook_event.to_owned(),
+            expires_at_ms: epoch_millis().saturating_add(MAILBOX_HOOK_LEASE_TIMEOUT_MS),
+        };
         let text = mj_core::mailbox::render_mailbox_events(&events);
+        self.append_relay_event(
+            None,
+            RelayObservation::MailboxHookLeaseCreated {
+                lease: lease.clone(),
+            },
+        )?;
+        Ok(RelayResponsePayload::MailboxDrained {
+            lease_id: Some(lease.lease_id),
+            text: Some(text),
+            count: events.len(),
+        })
+    }
+
+    pub(super) fn ack_mailbox(&mut self, lease_id: &str) -> Result<RelayResponsePayload> {
+        let Some(lease) = self.snapshot.mailbox_hook_lease.as_ref() else {
+            return Ok(RelayResponsePayload::MailboxAcknowledged {
+                acknowledged: false,
+            });
+        };
+        if lease.lease_id != lease_id {
+            return Ok(RelayResponsePayload::MailboxAcknowledged {
+                acknowledged: false,
+            });
+        }
+        let events = lease.events.clone();
+        let event_keys = events.iter().map(|event| event.key.clone()).collect();
+        let hook_event = lease.hook_event.clone();
         self.append_relay_event(
             None,
             RelayObservation::MailboxEventsDelivered {
                 event_keys,
                 path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
                 prompt_command_id: None,
-                hook_event: Some(hook_event.to_owned()),
+                hook_event: Some(hook_event),
+                events,
+                lease_id: Some(lease_id.to_owned()),
             },
         )?;
-        Ok(RelayResponsePayload::MailboxDrained {
-            text: Some(text),
-            count: events.len(),
-        })
+        Ok(RelayResponsePayload::MailboxAcknowledged { acknowledged: true })
+    }
+
+    fn expire_mailbox_hook_lease_at(&mut self, now_ms: i64) -> Result<()> {
+        if self
+            .snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .is_some_and(|lease| lease.expires_at_ms <= now_ms)
+        {
+            self.return_mailbox_hook_lease(mj_core::relay::MailboxHookLeaseReturnReason::Timeout)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn return_mailbox_hook_lease(
+        &mut self,
+        reason: mj_core::relay::MailboxHookLeaseReturnReason,
+    ) -> Result<()> {
+        let Some(lease_id) = self
+            .snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .map(|lease| lease.lease_id.clone())
+        else {
+            return Ok(());
+        };
+        self.append_relay_event(
+            None,
+            RelayObservation::MailboxHookLeaseReturned { lease_id, reason },
+        )?;
+        Ok(())
     }
 
     /// A promoted configuration change leaves execution idle while it reaches

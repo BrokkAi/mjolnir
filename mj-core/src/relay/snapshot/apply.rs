@@ -26,6 +26,8 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::RetryAssessmentResolved { .. }
         | RelayObservation::CommandRejected { .. }
         | RelayObservation::CommandInterrupted { .. }
+        | RelayObservation::MailboxHookLeaseCreated { .. }
+        | RelayObservation::MailboxHookLeaseReturned { .. }
         | RelayObservation::MailboxEventsDelivered { .. }
         | RelayObservation::ConfigurationUpdated { .. }
         | RelayObservation::CheckpointReady { .. }
@@ -1303,11 +1305,49 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => {}
+        RelayObservation::MailboxHookLeaseCreated { lease } => {
+            if snapshot.mailbox_hook_lease.is_some() {
+                bail!("a mailbox hook lease is already active");
+            }
+            if lease.lease_id.trim().is_empty()
+                || !matches!(lease.hook_event.as_str(), "PostToolUse" | "PostToolBatch")
+                || lease.events.is_empty()
+            {
+                bail!("mailbox hook lease is missing its ID, event, or events");
+            }
+            let unique_keys: std::collections::BTreeSet<_> = lease
+                .events
+                .iter()
+                .map(|event| event.key.as_str())
+                .collect();
+            if unique_keys.len() != lease.events.len() {
+                bail!("mailbox hook lease repeats an event key");
+            }
+            if snapshot.pending_mailbox_events != lease.events {
+                bail!("mailbox hook lease does not claim all pending events in order");
+            }
+            snapshot.pending_mailbox_events.clear();
+            snapshot.mailbox_hook_lease = Some(lease.clone());
+        }
+        RelayObservation::MailboxHookLeaseReturned { lease_id, .. } => {
+            let Some(lease) = snapshot.mailbox_hook_lease.take() else {
+                bail!("mailbox hook lease return names no active lease");
+            };
+            if lease.lease_id != *lease_id {
+                snapshot.mailbox_hook_lease = Some(lease);
+                bail!("mailbox hook lease return names a different lease");
+            }
+            let mut pending = lease.events;
+            pending.append(&mut snapshot.pending_mailbox_events);
+            snapshot.pending_mailbox_events = pending;
+        }
         RelayObservation::MailboxEventsDelivered {
             event_keys,
             path,
             prompt_command_id,
             hook_event,
+            events,
+            lease_id,
         } => {
             if event_keys.is_empty() {
                 bail!("mailbox delivery claim has no event keys");
@@ -1316,19 +1356,19 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if unique_keys.len() != event_keys.len() {
                 bail!("mailbox delivery claim repeats an event key");
             }
-            let mut claimed = Vec::with_capacity(event_keys.len());
-            for key in event_keys {
-                let Some(mailbox_event) = snapshot
-                    .pending_mailbox_events
-                    .iter()
-                    .find(|mailbox_event| mailbox_event.key == *key)
-                else {
-                    bail!("mailbox delivery claim names an event that is not pending");
-                };
-                claimed.push(mailbox_event.clone());
-            }
-            match (path, prompt_command_id, hook_event.as_deref()) {
-                (MailboxDeliveryPath::Prompt, Some(command_id), None) => {
+            let claimed = match (path, prompt_command_id, hook_event.as_deref(), lease_id) {
+                (MailboxDeliveryPath::Prompt, Some(command_id), None, None) => {
+                    let mut claimed = Vec::with_capacity(event_keys.len());
+                    for key in event_keys {
+                        let Some(mailbox_event) = snapshot
+                            .pending_mailbox_events
+                            .iter()
+                            .find(|mailbox_event| mailbox_event.key == *key)
+                        else {
+                            bail!("prompt mailbox claim names an event that is not pending");
+                        };
+                        claimed.push(mailbox_event.clone());
+                    }
                     let Some(dispatch) = snapshot.dispatches.get(command_id) else {
                         bail!("prompt mailbox claim names an unknown command");
                     };
@@ -1351,21 +1391,75 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         command_id.clone(),
                         crate::mailbox::render_mailbox_events(&claimed),
                     );
+                    claimed
                 }
-                (MailboxDeliveryPath::Prompt, _, _) => {
+                (MailboxDeliveryPath::Prompt, _, _, _) => {
                     bail!("prompt mailbox claim has no command ID");
                 }
-                (MailboxDeliveryPath::ToolHook, None, Some("PostToolUse" | "PostToolBatch")) => {}
-                (MailboxDeliveryPath::ToolHook, _, _) => {
+                (
+                    MailboxDeliveryPath::ToolHook,
+                    None,
+                    Some("PostToolUse" | "PostToolBatch"),
+                    Some(lease_id),
+                ) => {
+                    let Some(lease) = snapshot.mailbox_hook_lease.as_ref() else {
+                        bail!("tool-hook acknowledgement names no active lease");
+                    };
+                    if lease.lease_id != *lease_id
+                        || lease.hook_event != hook_event.as_deref().unwrap_or_default()
+                        || lease
+                            .events
+                            .iter()
+                            .map(|event| &event.key)
+                            .ne(event_keys.iter())
+                    {
+                        bail!("tool-hook acknowledgement does not match its active lease");
+                    }
+                    lease.events.clone()
+                }
+                // Older revision-16 journal entries claimed hook delivery
+                // directly from pending. Keep them readable when upgrading.
+                (
+                    MailboxDeliveryPath::ToolHook,
+                    None,
+                    Some("PostToolUse" | "PostToolBatch"),
+                    None,
+                ) => {
+                    let mut claimed = Vec::with_capacity(event_keys.len());
+                    for key in event_keys {
+                        let Some(mailbox_event) = snapshot
+                            .pending_mailbox_events
+                            .iter()
+                            .find(|mailbox_event| mailbox_event.key == *key)
+                        else {
+                            bail!(
+                                "legacy mailbox delivery claim names an event that is not pending"
+                            );
+                        };
+                        claimed.push(mailbox_event.clone());
+                    }
+                    claimed
+                }
+                (MailboxDeliveryPath::ToolHook, _, _, _) => {
                     bail!("tool-hook mailbox claim has invalid hook metadata");
                 }
-                (MailboxDeliveryPath::Wake, _, _) => {
+                (MailboxDeliveryPath::Wake, _, _, _) => {
                     bail!("wake mailbox claims are recorded by MailboxWake commands");
                 }
+            };
+            if !events.is_empty() && events != &claimed {
+                bail!("mailbox delivery event details do not match the claimed events");
             }
-            snapshot
-                .pending_mailbox_events
-                .retain(|mailbox_event| !unique_keys.contains(&mailbox_event.key));
+            if lease_id.is_some() && events != &claimed {
+                bail!("leased hook delivery is missing its event details");
+            }
+            if path == &MailboxDeliveryPath::ToolHook && lease_id.is_some() {
+                snapshot.mailbox_hook_lease = None;
+            } else {
+                snapshot
+                    .pending_mailbox_events
+                    .retain(|mailbox_event| !unique_keys.contains(&mailbox_event.key));
+            }
             retain_delivered_mailbox_event_keys(
                 snapshot,
                 event_keys.iter().cloned(),

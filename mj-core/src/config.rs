@@ -379,8 +379,8 @@ impl Default for LegacyBuildCacheConfig {
 }
 
 /// The one switch for the hosted Jev service. When it is off, Mjolnir sends
-/// nothing to Jev: no turn classification, no automatic continuation
-/// verdicts, and no semantic help search. `[jev] enabled = false`.
+/// nothing to Jev: no turn or GitHub-item classification, no automatic
+/// continuation verdicts, and no semantic help search. `[jev] enabled = false`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JevConfig {
@@ -395,6 +395,26 @@ impl Default for JevConfig {
 }
 
 impl JevConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// External events delivered to agent mailboxes through harness hooks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MailboxConfig {
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Default for MailboxConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl MailboxConfig {
     fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -443,6 +463,13 @@ impl Config {
     pub fn automatic_continuation_enabled(&self) -> bool {
         self.continuation.enabled && self.jev.enabled
     }
+
+    /// Agent mailboxes deliver external events and use Jev to classify GitHub
+    /// activity, so both switches must be enabled.
+    #[must_use]
+    pub fn agent_mailboxes_enabled(&self) -> bool {
+        self.mailbox.enabled && self.jev.enabled
+    }
 }
 
 pub const CONFIG_VERSION: u32 = 14;
@@ -480,6 +507,7 @@ pub struct Config {
     pub github: GithubConfig,
     pub review: ReviewConfig,
     pub continuation: crate::continuation::ContinuationConfig,
+    pub mailbox: MailboxConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
@@ -529,6 +557,8 @@ struct StoredConfig {
         skip_serializing_if = "crate::continuation::ContinuationConfig::is_default"
     )]
     continuation: crate::continuation::ContinuationConfig,
+    #[serde(default, skip_serializing_if = "MailboxConfig::is_default")]
+    mailbox: MailboxConfig,
     #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
     sessionwiki: SessionWikiConfig,
     #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
@@ -688,6 +718,7 @@ impl TryFrom<StoredConfig> for Config {
             github,
             review,
             continuation,
+            mailbox,
             sessionwiki,
             subagents,
             build_cache,
@@ -756,6 +787,7 @@ impl TryFrom<StoredConfig> for Config {
             github,
             review,
             continuation,
+            mailbox,
             sessionwiki,
             subagents,
             jev,
@@ -795,6 +827,7 @@ impl From<Config> for StoredConfig {
             github: config.github,
             review: config.review,
             continuation: config.continuation,
+            mailbox: config.mailbox,
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
             build_cache: LegacyBuildCacheConfig::default(),
@@ -822,6 +855,7 @@ impl Default for Config {
             github: GithubConfig::default(),
             review: ReviewConfig::default(),
             continuation: crate::continuation::ContinuationConfig::enabled(),
+            mailbox: MailboxConfig::default(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),

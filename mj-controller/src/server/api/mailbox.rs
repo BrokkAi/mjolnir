@@ -8,7 +8,16 @@ pub(super) async fn enqueue_event(
     Path(session_id): Path<String>,
     Json(request): Json<MailboxEventRequest>,
 ) -> Result<(StatusCode, Json<MailboxEventResponse>), ApiFailure> {
-    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let mailboxes_enabled = {
+        let snapshot = state.snapshot_rx.borrow();
+        require_session_record(&snapshot, &session_id)?;
+        snapshot.agent_mailboxes_enabled
+    };
+    if !mailboxes_enabled {
+        return Err(ApiFailure::conflict(
+            "agent mailboxes are disabled; enable Agent mailboxes and Jev in Settings",
+        ));
+    }
     if request.key.trim().is_empty() || request.key.len() > MAX_EVENT_KEY_BYTES {
         return Err(ApiFailure::bad_request(format!(
             "event key must contain 1 to {MAX_EVENT_KEY_BYTES} bytes"
@@ -31,7 +40,13 @@ pub(super) async fn enqueue_event(
     }))
     .map_err(anyhow::Error::from)?;
     let target = session_id.clone();
+    let admission = state
+        .upgrade_gate
+        .enter("API mailbox event")
+        .map_err(|_| ApiFailure::shutdown(&state))?;
+    let blocking_admission = admission.clone();
     let inserted = tokio::task::spawn_blocking(move || {
+        let _admission = blocking_admission;
         crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, wake, false)
     })
     .await

@@ -259,7 +259,7 @@ mod tests {
                 originating_command_id: None,
                 request_id: "request".into(),
                 created_at_ms: 1,
-                action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+                action: mj_core::subagent::SubagentToolAction::LegacyInterruptAgent {
                     child_session_id: "child".into(),
                 },
             },

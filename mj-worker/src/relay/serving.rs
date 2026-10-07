@@ -89,6 +89,12 @@ mod tests {
         assert_eq!(drain_mailbox.minimum_protocol(), 33);
         assert!(!drain_mailbox.supported_at(32));
         assert!(drain_mailbox.supported_at(33));
+        let ack_mailbox = RelayRequest::AckMailbox {
+            lease_id: "mailbox-hook-lease".into(),
+        };
+        assert_eq!(ack_mailbox.minimum_protocol(), 33);
+        assert!(!ack_mailbox.supported_at(32));
+        assert!(ack_mailbox.supported_at(33));
         let mailbox_event = RelayRequest::Submit {
             command_id: "event".into(),
             command: RelayCommand::DeliverMailboxEvent {

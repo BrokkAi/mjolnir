@@ -18,6 +18,8 @@ use super::super::{
     ViewerProfile, ViewerSnapshot, router, tests::sample_config_state,
 };
 
+const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
+
 fn error_event(seq: u64) -> crate::database::ApiEvent {
     crate::database::ApiEvent {
         seq,
@@ -29,6 +31,111 @@ fn error_event(seq: u64) -> crate::database::ApiEvent {
             command_id: None,
         },
     }
+}
+
+#[tokio::test]
+async fn disabled_agent_mailboxes_refuse_external_events_with_a_clear_reason() {
+    let (app, _actions, snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    snapshots.send_modify(|snapshot| snapshot.agent_mailboxes_enabled = false);
+    let response = app
+        .oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/events"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"key":"test","text":"event","wake":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let message = error["error"].as_str().unwrap();
+    assert!(
+        message.contains("agent mailboxes are disabled"),
+        "{message}"
+    );
+    assert!(message.contains("Agent mailboxes and Jev"), "{message}");
+}
+
+#[tokio::test]
+async fn external_event_same_key_retries_ignore_creation_time() {
+    if std::env::var_os(MAILBOX_EVENT_RETRY_CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "external_event_same_key_retries_ignore_creation_time",
+            ),
+        )
+        .env(MAILBOX_EVENT_RETRY_CHILD, "1")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+
+    let writer = crate::database::install_isolated_test_writer();
+    crate::database::save_session(&crate::database::test_session("session-1", "project")).unwrap();
+    crate::database::save_session(&crate::database::test_session("session-2", "project")).unwrap();
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let request = |text: &str, wake: bool| {
+        bearer(Request::post("/api/v1/sessions/session-1/events"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({"key":"retry","text":text,"wake":wake}).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = app
+        .clone()
+        .oneshot(request("same event", false))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    assert!(json_body(first).await["inserted"].as_bool().unwrap());
+    let event_key = "api:session-1:retry";
+    let first_row = crate::database::pending_mailbox_events(10)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.event_key == event_key)
+        .unwrap();
+    let original_created_at = serde_json::from_str::<serde_json::Value>(&first_row.event_json)
+        .unwrap()["created_at_ms"]
+        .as_u64()
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let retry = app
+        .clone()
+        .oneshot(request("same event", false))
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::ACCEPTED);
+    assert!(!json_body(retry).await["inserted"].as_bool().unwrap());
+    let rows = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].event_json).unwrap()["created_at_ms"],
+        original_created_at
+    );
+
+    for request in [request("changed text", false), request("same event", true)] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    let original = serde_json::from_str::<serde_json::Value>(&first_row.event_json).unwrap();
+    assert!(
+        crate::database::enqueue_mailbox_event(
+            event_key,
+            "session-2",
+            &original.to_string(),
+            false,
+            false,
+        )
+        .is_err()
+    );
+
+    writer.shutdown().unwrap();
 }
 
 #[tokio::test]

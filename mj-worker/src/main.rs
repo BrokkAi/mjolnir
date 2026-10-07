@@ -123,6 +123,9 @@ enum WorkerCommand {
         /// `handback`, a child's report to the session that started it.
         #[arg(long, default_value_t = mj_core::subagent::SubagentMcpRole::Parent)]
         role: mj_core::subagent::SubagentMcpRole,
+        /// Disable parent-to-child mailbox messages for this worker's config.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        agent_mailboxes_enabled: bool,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -495,7 +498,10 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             socket,
             harness,
             role,
-        } => mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness, role),
+            agent_mailboxes_enabled,
+        } => {
+            mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness, role, agent_mailboxes_enabled)
+        }
         WorkerCommand::Diff {
             repository,
             base,

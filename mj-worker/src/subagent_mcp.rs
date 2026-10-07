@@ -13,13 +13,20 @@ use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 
 /// Delegation policy is delivered through initialization, never a tool description.
-const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before gathering that context yourself; keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices, each with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice only when it needs your whole context, briefing would cost more than doing it, or a child already failed it once; say why in one sentence. You own design, integrated review, the commit and final acceptance. Collect reports with wait or list_agents; nothing is pushed to you, and a prompt saying children finished has no child output. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Re-task a wrong or incomplete handback once with the correction and failing evidence; take over a second failure and note it in your report. In instructions, give the outcome, constraints, ownership boundaries and required evidence, with pointers to files, symbols, line ranges and earlier reports. Children share your target and filesystem, not your conversation; named files are pointers, not a whitelist. Children running suites report test names, reasons and log paths; run a suite yourself only to reproduce a reported failure, never to repeat a green one. Children can collect profiles and timings; decide performance design yourself. Do not duplicate work children are doing. Before spawning, give follow-up work through send_input to an idle child that already has useful context; spawn for independent work or when old context would mislead.";
+const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before gathering that context yourself; keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices, each with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice only when it needs your whole context, briefing would cost more than doing it, or a child already failed it once; say why in one sentence. You own design, integrated review, the commit and final acceptance. Collect reports with wait or list_agents; nothing is pushed to you, and a prompt saying children finished has no child output. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Re-task a wrong or incomplete handback once with the correction and failing evidence; take over a second failure and note it in your report. In instructions, give the outcome, constraints, ownership boundaries and required evidence, with pointers to files, symbols, line ranges and earlier reports. Children share your target and filesystem, not your conversation; named files are pointers, not a whitelist. Children report test names, reasons and log paths; rerun only to reproduce a reported failure, never to repeat a green one. Children can collect profiles and timings; decide performance design yourself. Do not duplicate work children are doing.";
+const MAILBOX_ROUTING: &str = " Use send_message for a note delivered at a running child's next tool boundary or to wake an idle child; it does not cancel the turn.";
+const INPUT_ROUTING: &str = " Use send_input for new turns. Before spawning, give follow-up work through send_input to an idle child with useful context; spawn for independent work or misleading context.";
 
 /// Reports reach the model through `wait`; a prompt can tell the parent one is
 /// ready without including the child's output.
 static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{DELEGATION_ROUTING} Finished children are parked and hold no processes; send_input resumes one with its conversation intact. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
+        "{DELEGATION_ROUTING}{MAILBOX_ROUTING}{INPUT_ROUTING} Finished children are parked and hold no processes; send_input resumes one with its conversation intact. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
+    )
+});
+static SERVER_INSTRUCTIONS_MAILBOXES_DISABLED: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{DELEGATION_ROUTING}{INPUT_ROUTING} Finished children are parked and hold no processes; send_input resumes one with its conversation intact. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
     )
 });
 
@@ -29,6 +36,12 @@ static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS. In code mode a wait runs inside an exec script that yields to you while the wait is still blocking; when that happens, poll that script with the longest yield your exec tool allows, never one second, and do other work between polls only when you have some: every poll re-sends your whole context, and in one measured run second-by-second polls were a quarter of the parent's cost.",
         SERVER_INSTRUCTIONS.as_str()
+    )
+});
+static CODEX_SERVER_INSTRUCTIONS_MAILBOXES_DISABLED: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS. In code mode a wait runs inside an exec script that yields to you while the wait is still blocking; when that happens, poll that script with the longest yield your exec tool allows, never one second, and do other work between polls only when you have some: every poll re-sends your whole context, and in one measured run second-by-second polls were a quarter of the parent's cost.",
+        SERVER_INSTRUCTIONS_MAILBOXES_DISABLED.as_str()
     )
 });
 
@@ -277,9 +290,17 @@ pub fn run_mcp_stdio(
     socket: &Path,
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
+    agent_mailboxes_enabled: bool,
 ) -> Result<()> {
     let stdin = std::io::stdin();
-    run(stdin.lock(), std::io::stdout(), socket, harness, role)
+    run_with_mailboxes(
+        stdin.lock(),
+        std::io::stdout(),
+        socket,
+        harness,
+        role,
+        agent_mailboxes_enabled,
+    )
 }
 
 /// Serve MCP over `reader`/`writer` against the worker `socket`. Calls are
@@ -287,6 +308,7 @@ pub fn run_mcp_stdio(
 /// `wait` never blocks a cheap `list_agents` queued after it. `harness` is the
 /// parent's own harness, whose client decides how long one call may stay open.
 /// `role` picks the tool set: a parent delegates, a child hands back.
+#[cfg(test)]
 fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     reader: R,
     writer: W,
@@ -294,14 +316,33 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
 ) -> Result<()> {
+    run_with_mailboxes(reader, writer, socket, harness, role, true)
+}
+
+fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
+    reader: R,
+    writer: W,
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+    agent_mailboxes_enabled: bool,
+) -> Result<()> {
     let socket = socket.to_path_buf();
-    let parent_instructions = match harness {
-        Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
-        _ => SERVER_INSTRUCTIONS.as_str(),
+    let parent_instructions = match (harness, agent_mailboxes_enabled) {
+        (Some(HarnessKind::Codex), true) => CODEX_SERVER_INSTRUCTIONS.as_str(),
+        (Some(HarnessKind::Codex), false) => CODEX_SERVER_INSTRUCTIONS_MAILBOXES_DISABLED.as_str(),
+        (_, true) => SERVER_INSTRUCTIONS.as_str(),
+        (_, false) => SERVER_INSTRUCTIONS_MAILBOXES_DISABLED.as_str(),
     };
     let (instructions, tools) = match role {
-        SubagentMcpRole::Parent => (parent_instructions, tool_definitions(harness)),
-        SubagentMcpRole::FixedParent => (parent_instructions, fixed_tool_definitions(harness)),
+        SubagentMcpRole::Parent => (
+            parent_instructions,
+            tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
+        ),
+        SubagentMcpRole::FixedParent => (
+            parent_instructions,
+            fixed_tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
+        ),
         SubagentMcpRole::Child => (CHILD_INSTRUCTIONS.as_str(), child_tool_definitions()),
     };
     crate::mcp_stdio::serve(
@@ -313,7 +354,14 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
-                call(&socket, harness, role, params, progress)
+                call_with_mailboxes(
+                    &socket,
+                    harness,
+                    role,
+                    params,
+                    progress,
+                    agent_mailboxes_enabled,
+                )
             },
         },
     )
@@ -359,6 +407,7 @@ struct HandbackArgs {
 #[serde(deny_unknown_fields)]
 struct WaitArgs {}
 
+#[cfg(test)]
 fn call(
     socket: &Path,
     harness: Option<HarnessKind>,
@@ -366,13 +415,31 @@ fn call(
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
 ) -> Result<(Value, bool)> {
-    call_with_budget(socket, harness, role, params, progress, |action| {
-        reply_timeout(action, harness)
-    })
+    call_with_mailboxes(socket, harness, role, params, progress, true)
+}
+
+fn call_with_mailboxes(
+    socket: &Path,
+    harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+    params: Option<&Value>,
+    progress: &crate::mcp_stdio::Progress,
+    agent_mailboxes_enabled: bool,
+) -> Result<(Value, bool)> {
+    call_with_budget_and_mailboxes(
+        socket,
+        harness,
+        role,
+        params,
+        progress,
+        |action| reply_timeout(action, harness),
+        agent_mailboxes_enabled,
+    )
 }
 
 /// Answer one tool call, waiting for the worker as long as `budget` allows
 /// for the call's action.
+#[cfg(test)]
 fn call_with_budget(
     socket: &Path,
     _harness: Option<HarnessKind>,
@@ -380,6 +447,18 @@ fn call_with_budget(
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
+) -> Result<(Value, bool)> {
+    call_with_budget_and_mailboxes(socket, _harness, role, params, progress, budget, true)
+}
+
+fn call_with_budget_and_mailboxes(
+    socket: &Path,
+    _harness: Option<HarnessKind>,
+    role: SubagentMcpRole,
+    params: Option<&Value>,
+    progress: &crate::mcp_stdio::Progress,
+    budget: impl Fn(&SubagentToolAction) -> Duration,
+    agent_mailboxes_enabled: bool,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     if !role.tool_names().contains(&params.name.as_str()) {
@@ -432,15 +511,20 @@ fn call_with_budget(
                 message,
             }
         }
+        "send_message" => {
+            if !agent_mailboxes_enabled {
+                bail!("send_message is unavailable while agent mailboxes are disabled");
+            }
+            let args: ChildArgs = serde_json::from_value(params.arguments)?;
+            let message = args.message.context("send_message requires message")?;
+            SubagentToolAction::SendMessage {
+                child_session_id: args.child_session_id,
+                message,
+            }
+        }
         "wait" => {
             let _args: WaitArgs = serde_json::from_value(params.arguments)?;
             SubagentToolAction::WaitAgents
-        }
-        "interrupt" => {
-            let args: ChildArgs = serde_json::from_value(params.arguments)?;
-            SubagentToolAction::InterruptAgent {
-                child_session_id: args.child_session_id,
-            }
         }
         "close" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
@@ -543,13 +627,21 @@ fn send(
     answer
 }
 
+#[cfg(test)]
 fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
+    tool_definitions_with_mailboxes(_harness, true)
+}
+
+fn tool_definitions_with_mailboxes(
+    _harness: Option<HarnessKind>,
+    agent_mailboxes_enabled: bool,
+) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     let current = mj_core::subagent::CURRENT_MODEL;
     let model = format!(
         "A model value from list_profiles, or \"{current}\" for this session's own model. Unless profile_id is given, Mjolnir runs the child on the eligible profile that offers this model and has the most quota left (the lower of its 5-hour and weekly remaining)."
     );
-    vec![
+    let mut definitions = vec![
         tool(
             "list_profiles",
             "List eligible sub-agent profiles and the models and efforts each offers. Profiles that offer the same models are listed once, as the one with the most quota left.",
@@ -570,7 +662,7 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
         ),
         tool(
             "list_agents",
-            "List this parent's Mjolnir child sessions and status, including pending_inputs and recent input_deliveries with request IDs and delivery errors.",
+            "List this parent's Mjolnir child sessions and status, including pending_inputs and recent input_deliveries, plus pending_messages and recent message_deliveries.",
             json!({"type":"object","additionalProperties":false}),
         ),
         tool(
@@ -579,28 +671,40 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
             json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
         ),
         tool(
+            "send_message",
+            "Store a message for one child in its mailbox. A running child sees it at its next tool boundary without its turn being cancelled; an idle child wakes, and a parked child is restarted before delivery. This does not start a new turn. Check pending_messages and message_deliveries in wait or list_agents before retrying.",
+            json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
+        ),
+        tool(
             "wait",
             &format!(
-                "Wait for every child of yours that is not stopped. A child that you closed is not covered for report collection, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. A report is returned only once for each finish; a child resumed with send_input can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Entries without a new report have no output. A wait may end before work is done, and another wait is normal. A finished child has parked true when its processes were released; send_input resumes it. A child being closed may remain as a status-only entry while state is \"stopping\" and leaves the wait result when stopped. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
+                "Wait for every child of yours that is not stopped. A child that you closed is not covered for report collection, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. A report is returned only once for each finish; a child resumed with send_input can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Entries without a new report have no output. A wait may end before work is done, and another wait is normal. A finished child has parked true when its processes were released; send_input resumes it. A child being closed may remain as a status-only entry while state is \"stopping\" and leaves the wait result when stopped. Pending input keeps a child unfinished: pending_inputs names queued requests and input_deliveries records delivery outcomes. Mailbox messages appear in pending_messages until accepted by the child's worker, then in message_deliveries. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{},"additionalProperties":false}),
-        ),
-        tool(
-            "interrupt",
-            "Interrupt only the currently active turn of one child. Returns interrupted false immediately if no turn is active, including during startup or while parked. Queued input is not cancelled and may run afterward.",
-            child.clone(),
         ),
         tool(
             "close",
             "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait after close and wait until the closing child is no longer listed before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
-    ]
+    ];
+    if !agent_mailboxes_enabled {
+        definitions.retain(|tool| tool["name"] != "send_message");
+    }
+    definitions
 }
 
+#[cfg(test)]
 fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
-    let mut tools = tool_definitions(harness);
+    fixed_tool_definitions_with_mailboxes(harness, true)
+}
+
+fn fixed_tool_definitions_with_mailboxes(
+    harness: Option<HarnessKind>,
+    agent_mailboxes_enabled: bool,
+) -> Vec<Value> {
+    let mut tools = tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled);
     tools.retain(|tool| tool["name"] != "list_profiles");
     let spawn = tools
         .iter_mut()
@@ -727,6 +831,20 @@ mod tests {
                         role == SubagentMcpRole::Parent
                     );
                     assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
+                    assert!(tools.iter().any(|t| t["name"] == "send_message"));
+                    assert!(!tools.iter().any(|t| t["name"] == "interrupt"));
+                    let send_message = tools.iter().find(|t| t["name"] == "send_message").unwrap();
+                    assert_eq!(
+                        send_message["inputSchema"]["required"],
+                        json!(["child_session_id", "message"])
+                    );
+                    assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
+                    assert!(
+                        send_message["description"]
+                            .as_str()
+                            .unwrap()
+                            .contains("without its turn being cancelled")
+                    );
                 }
             }
         }
@@ -736,7 +854,8 @@ mod tests {
     fn fixed_parent_exposes_no_selector_arguments_and_refuses_hidden_tools_and_overrides() {
         let tools = fixed_tool_definitions(None);
         assert!(!tools.iter().any(|tool| tool["name"] == "list_profiles"));
-        assert!(tools.iter().any(|tool| tool["name"] == "interrupt"));
+        assert!(tools.iter().any(|tool| tool["name"] == "send_message"));
+        assert!(!tools.iter().any(|tool| tool["name"] == "interrupt"));
         let spawn = tools.iter().find(|tool| tool["name"] == "spawn").unwrap();
         assert_eq!(
             spawn["inputSchema"]["required"],
@@ -764,6 +883,56 @@ mod tests {
                 "{error:#}"
             );
         }
+    }
+
+    #[test]
+    fn disabled_mailboxes_omit_send_message_from_the_mcp_server() {
+        let input = format!(
+            "{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+        );
+        let output = Arc::new(Mutex::new(Vec::new()));
+        run_with_mailboxes(
+            input.as_bytes(),
+            ContractWriter(output.clone()),
+            Path::new("unused.sock"),
+            Some(HarnessKind::Claude),
+            SubagentMcpRole::Parent,
+            false,
+        )
+        .unwrap();
+        let output = output.lock().unwrap();
+        let replies = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let instructions =
+            replies.iter().find(|reply| reply["id"] == 1).unwrap()["result"]["instructions"]
+                .as_str()
+                .unwrap();
+        assert!(!instructions.contains("send_message"));
+        let tools = replies.iter().find(|reply| reply["id"] == 2).unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap();
+        assert!(!tools.iter().any(|tool| tool["name"] == "send_message"));
+        assert!(!tools.iter().any(|tool| tool["name"] == "interrupt"));
+
+        let error = call_with_budget_and_mailboxes(
+            Path::new("unused.sock"),
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({
+                "name":"send_message",
+                "arguments":{"child_session_id":"child","message":"note"}
+            })),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_millis(50),
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("mailboxes are disabled"));
     }
 
     /// #1160: a parent read a child's failed login as the child's report and
@@ -1291,6 +1460,59 @@ mod tests {
         assert_eq!(
             request["action"],
             json!({"action": "handback", "params": {"message": "the report"}})
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_message_sends_a_mailbox_action_instead_of_a_turn_cancel() {
+        use std::io::{BufReader, Read};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (sent, received) = std::sync::mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            let request_id = request["request_id"].clone();
+            sent.send(request).unwrap();
+            let reply = json!({"accepted":true,"result":{
+                "request_id":request_id,"completed_at_ms":1,"is_error":false,
+                "message":"{\"child_session_id\":\"child\",\"status\":\"queued\"}"
+            }});
+            let mut body = serde_json::to_vec(&reply).unwrap();
+            body.push(b'\n');
+            let mut stream = reader.into_inner();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+            let _ = stream.read(&mut [0u8; 1]);
+        });
+        let (value, is_error) = call_with_budget(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({
+                "name":"send_message",
+                "arguments":{"child_session_id":"child","message":"keep going"}
+            })),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(!is_error, "{value}");
+        assert_eq!(value["status"], "queued");
+        let request = received.recv().unwrap();
+        assert_eq!(
+            request["action"],
+            json!({
+                "action":"send_message",
+                "params":{"child_session_id":"child","message":"keep going"}
+            })
         );
     }
 

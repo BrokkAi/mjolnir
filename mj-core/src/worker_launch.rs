@@ -118,6 +118,10 @@ fn default_worker_workspace_id() -> String {
     crate::workspace::DEFAULT_WORKSPACE_ID.to_owned()
 }
 
+fn default_agent_mailboxes_enabled() -> bool {
+    true
+}
+
 /// Internal launch directive: include this absolute Git config file in the
 /// worker-owned session global config, then remove the key before harness use.
 pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH";
@@ -151,6 +155,10 @@ pub struct WorkerLaunchConfig {
     /// the `mj-agents` MCP server's `handback` tool. Children suppress native delegation.
     #[serde(default)]
     pub handback_tool: bool,
+    /// Mailbox hook policy captured from the daemon config at worker launch.
+    /// Running workers pick up changes on their next resume or restart.
+    #[serde(default = "default_agent_mailboxes_enabled")]
+    pub agent_mailboxes_enabled: bool,
     /// The model this session was created for, when its creator chose one: a
     /// sub-agent's spawn model. The harness opens a new session on it rather
     /// than on the profile default; once the session has accepted a model,
@@ -577,6 +585,12 @@ mod tests {
     fn old_launch_configs_default_to_ambient_harnesses() {
         let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
         assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Ambient);
+        assert!(launch.agent_mailboxes_enabled);
+
+        let mut disabled = launch_json();
+        disabled["agent_mailboxes_enabled"] = serde_json::json!(false);
+        let launch: WorkerLaunchConfig = serde_json::from_value(disabled).unwrap();
+        assert!(!launch.agent_mailboxes_enabled);
     }
 
     #[test]

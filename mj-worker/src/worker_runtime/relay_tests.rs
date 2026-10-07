@@ -63,6 +63,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
     WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        agent_mailboxes_enabled: true,
         initial_model: None,
         review_capture: true,
         goal_resume_request: Default::default(),

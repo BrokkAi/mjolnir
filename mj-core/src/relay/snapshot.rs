@@ -975,6 +975,22 @@ pub struct RelayEvent {
     pub observation: RelayObservation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxHookLeaseReturnReason {
+    Timeout,
+    WorkerRestart,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxHookLease {
+    pub lease_id: String,
+    pub events: Vec<MailboxEvent>,
+    pub hook_event: String,
+    pub expires_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
@@ -1115,8 +1131,18 @@ pub enum RelayObservation {
     Notice {
         message: String,
     },
-    /// Events were claimed by a tool hook or attached to one queued prompt.
-    /// MailboxWake's CommandQueued event records the wake path itself.
+    /// A hook has temporarily claimed these events. They become delivered
+    /// only when the hook acknowledges its flushed stdout response.
+    MailboxHookLeaseCreated {
+        lease: MailboxHookLease,
+    },
+    /// Return an unacknowledged hook lease to the head of the pending queue.
+    MailboxHookLeaseReturned {
+        lease_id: String,
+        reason: MailboxHookLeaseReturnReason,
+    },
+    /// Events were acknowledged by a tool hook or attached to one queued
+    /// prompt. MailboxWake's CommandQueued event records the wake path itself.
     MailboxEventsDelivered {
         event_keys: Vec<String>,
         path: MailboxDeliveryPath,
@@ -1124,6 +1150,13 @@ pub enum RelayObservation {
         prompt_command_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hook_event: Option<String>,
+        /// Event content for a useful user-facing delivery notice. Empty on
+        /// older journal records, whose summaries remain count-only.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<MailboxEvent>,
+        /// Present for hook delivery acknowledged against a durable lease.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_id: Option<String>,
     },
     /// The harness began working. Claude records this when output arrives
     /// without a prompt in flight; Codex records native execution starts,
@@ -1366,6 +1399,9 @@ pub struct RelaySnapshot {
     /// Events waiting for a hook, prompt, or idle wake to claim them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_mailbox_events: Vec<MailboxEvent>,
+    /// Events exposed to a hook whose output has not yet been acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_hook_lease: Option<MailboxHookLease>,
     /// Recently delivered event keys and their journal ordinals. Pending keys
     /// remain represented by `pending_mailbox_events` until delivery.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1445,6 +1481,7 @@ impl RelaySnapshot {
             pending_prompt_context: None,
             pending_user_shell_contexts: Vec::new(),
             pending_mailbox_events: Vec::new(),
+            mailbox_hook_lease: None,
             delivered_mailbox_event_keys: BTreeMap::new(),
             mailbox_prompt_contexts: BTreeMap::new(),
             active_user_shells: BTreeMap::new(),

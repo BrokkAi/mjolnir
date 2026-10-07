@@ -3620,6 +3620,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
     let launch = WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        agent_mailboxes_enabled: true,
         initial_model: None,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -3750,6 +3751,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         session_id: session.id.clone(),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        agent_mailboxes_enabled: true,
         initial_model: None,
         review_capture: false,
         target_environment: Default::default(),
@@ -3843,6 +3845,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
     let launch = WorkerLaunchConfig {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        agent_mailboxes_enabled: true,
         initial_model: None,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -4568,7 +4571,7 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child, true).unwrap();
     let (settings, allow) = allowed(stage.path());
     assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
     assert_eq!(
@@ -4579,7 +4582,7 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
 
     // A profile with no settings file gets one.
     let stage = tempfile::tempdir().unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child, true).unwrap();
     assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
 
     // A parent delegates without asking; a rule the person already has is
@@ -4590,7 +4593,7 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent, true).unwrap();
     let (_, allow) = allowed(stage.path());
     assert_eq!(allow[0], "mcp__mj-agents__wait");
     assert_eq!(
@@ -4606,8 +4609,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         "spawn",
         "list_agents",
         "send_input",
+        "send_message",
         "wait",
-        "interrupt",
         "close",
     ] {
         assert!(
@@ -4643,9 +4646,9 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
     .unwrap();
 
     let remote_root = ".local/share/hel/workers/session";
-    configure_claude_mailbox_hook(stage.path(), remote_root).unwrap();
+    configure_claude_mailbox_hook(stage.path(), remote_root, true).unwrap();
     let first = std::fs::read(&path).unwrap();
-    configure_claude_mailbox_hook(stage.path(), remote_root).unwrap();
+    configure_claude_mailbox_hook(stage.path(), remote_root, true).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), first);
 
     let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
@@ -4675,7 +4678,7 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
         )
     );
 
-    configure_claude_mailbox_hook(stage.path(), "/worker path/session").unwrap();
+    configure_claude_mailbox_hook(stage.path(), "/worker path/session", true).unwrap();
     let restaged: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let updated_commands = restaged["hooks"]["PostToolBatch"]
@@ -4688,6 +4691,19 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
         .collect::<Vec<_>>();
     assert_eq!(updated_commands.len(), 1);
     assert!(updated_commands[0].contains("'/worker path/session/control.sock'"));
+}
+
+#[test]
+fn staged_claude_mailbox_hook_is_absent_when_mailboxes_are_disabled() {
+    let stage = tempfile::tempdir().unwrap();
+    let path = stage.path().join("settings.json");
+    let original =
+        br#"{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"user-hook"}]}]}}"#;
+    std::fs::write(&path, original).unwrap();
+
+    configure_claude_mailbox_hook(stage.path(), "/worker/session", false).unwrap();
+
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }
 
 #[cfg(unix)]

@@ -849,6 +849,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
     SubagentMcpSocket {
         path: "/worker/subagents.sock".into(),
         role,
+        agent_mailboxes_enabled: true,
         profile_registration: false,
     }
 }
@@ -905,8 +906,12 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     };
     assert_eq!(server.name, "mj-agents");
     assert_eq!(
-        server.args.iter().rev().take(2).collect::<Vec<_>>(),
+        server.args.iter().rev().skip(2).take(2).collect::<Vec<_>>(),
         ["child", "--role"]
+    );
+    assert_eq!(
+        server.args.iter().rev().take(2).collect::<Vec<_>>(),
+        ["true", "--agent-mailboxes-enabled"]
     );
 }
 
@@ -4829,6 +4834,7 @@ for line in sys.stdin:
         subagent_mcp_socket: Some(SubagentMcpSocket {
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
+            agent_mailboxes_enabled: true,
             profile_registration: false,
         }),
         clear_context_request: None,

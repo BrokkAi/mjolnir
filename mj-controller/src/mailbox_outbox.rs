@@ -60,6 +60,13 @@ async fn process_pending(
     sessions: SessionManagerControl,
     stop: CancellationToken,
 ) -> Result<()> {
+    if !state
+        .controller_projection()
+        .config
+        .agent_mailboxes_enabled()
+    {
+        return Ok(());
+    }
     let pruned =
         tokio::task::spawn_blocking(crate::database::prune_mailbox_events_for_missing_sessions)
             .await
@@ -173,7 +180,7 @@ async fn deliver_session_events(
 /// opt into unpark for deliberate parent-to-child messages; GitHub and the
 /// public events API always pass `false`.
 pub(crate) async fn deliver_mailbox_event(
-    state: std::sync::Arc<RuntimeState>,
+    state: std::sync::Arc<dyn crate::server_runtime::api::ExportRuntime>,
     sessions: &SessionManagerControl,
     session_id: &str,
     event: mj_core::mailbox::MailboxEvent,
@@ -186,7 +193,9 @@ pub(crate) async fn deliver_mailbox_event(
         if !unpark_parked {
             return Ok(None);
         }
-        state.unpark_subagent(session_id.to_owned()).await?;
+        std::sync::Arc::clone(&state)
+            .unpark_subagent(session_id.to_owned())
+            .await?;
     }
     let Some(record) = state.session_record(session_id) else {
         return Ok(None);

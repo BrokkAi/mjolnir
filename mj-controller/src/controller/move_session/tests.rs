@@ -1216,10 +1216,14 @@ fn in_place_drain_waits_for_mutations_and_durable_effects_but_not_wait_or_list()
             child_session_id: "child".into(),
             message: "continue".into(),
         },
+        Action::SendMessage {
+            child_session_id: "child".into(),
+            message: "note".into(),
+        },
         Action::CloseAgent {
             child_session_id: "child".into(),
         },
-        Action::InterruptAgent {
+        Action::LegacyInterruptAgent {
             child_session_id: "child".into(),
         },
     ];

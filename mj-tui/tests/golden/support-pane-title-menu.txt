@@ -131,16 +131,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Targets Runtimes… action: None
 === Targets targets setup page (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Runtimes                                                                          │                     │
-│› · ACP pretty name  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Runtimes                                                                          │                     │
+│hel ───────────────  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │                     │
+│› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   podman                                                 9 settings  ›     Add               │                     │
-│                     │                                                                            Remove            │                     │
+│  │ No messages yet  │   podman                                                 9 settings  ›     Add               │                     │
+│  │                  │                                                                            Remove            │                     │
 │                     │                                                                            Detect runtimes   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -155,6 +154,7 @@ Targets Runtimes… action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -163,26 +163,26 @@ Targets Runtimes… action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 Targets Machines… action: None
 === Targets machines setup page (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Machines                                                                          │                     │
-│› · ACP pretty name  │ Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes  │                     │
-│  Idle  podman  cod  │ share them.                                                                                  │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   local                                                           2 settings  ›     Add      │                     │
-│                     │                                                                                     Remove   │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Machines                                                                          │                     │
+│hel ───────────────  │ Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes  │                     │
+│› · ACP pretty name  │ share them.                                                                                  │                     │
+│  Idle  podman  cod  │                                                                                              │                     │
+│  │ No messages yet  │   local                                                           2 settings  ›     Add      │                     │
+│  │                  │                                                                                     Remove   │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -205,11 +205,11 @@ Targets Machines… action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 Profiles Refresh action: RefreshAll
@@ -257,17 +257,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 Profiles Settings… action: None
 === Profiles profiles setup page (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Agent Profiles                                                                    │                     │
-│› · ACP pretty name  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
-│  Idle  podman  cod  │ agents.                                                                                      │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   claude-1                                               7 settings  ›     Add               │                     │
-│                     │   codex-1                                                7 settings  ›     Remove            │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Agent Profiles                                                                    │                     │
+│hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
+│› · ACP pretty name  │ agents.                                                                                      │                     │
+│  Idle  podman  cod  │                                                                                              │                     │
+│  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
+│  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -289,11 +289,11 @@ Profiles Settings… action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
 Targets dot action: None
@@ -341,16 +341,15 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Targets number 2 action: None
 === Targets number 2: Runtimes…, targets (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Runtimes                                                                          │                     │
-│› · ACP pretty name  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Runtimes                                                                          │                     │
+│hel ───────────────  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │                     │
+│› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   podman                                                 9 settings  ›     Add               │                     │
-│                     │                                                                            Remove            │                     │
+│  │ No messages yet  │   podman                                                 9 settings  ›     Add               │                     │
+│  │                  │                                                                            Remove            │                     │
 │                     │                                                                            Detect runtimes   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -365,6 +364,7 @@ Targets number 2 action: None
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ───────────────────╮
 │                     │                                                                                              │                     │
@@ -373,26 +373,26 @@ Targets number 2 action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 Targets number 3 action: None
 === Targets number 3: Machines…, machines (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Machines                                                                          │                     │
-│› · ACP pretty name  │ Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes  │                     │
-│  Idle  podman  cod  │ share them.                                                                                  │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   local                                                           2 settings  ›     Add      │                     │
-│                     │                                                                                     Remove   │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Machines                                                                          │                     │
+│hel ───────────────  │ Add an SSH host or EC2 launch template. Build cache settings are here: a machine's runtimes  │                     │
+│› · ACP pretty name  │ share them.                                                                                  │                     │
+│  Idle  podman  cod  │                                                                                              │                     │
+│  │ No messages yet  │   local                                                           2 settings  ›     Add      │                     │
+│  │                  │                                                                                     Remove   │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -415,11 +415,11 @@ Targets number 3 action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 === Targets keyboard menu (140x40) ===
@@ -552,17 +552,17 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 Targets Enter setup action: None
 === Targets setup from keyboard (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Runtimes                                                                          │                     │
-│› · ACP pretty name  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Runtimes                                                                          │                     │
+│hel ───────────────  │ Add a runtime and choose its machine, or use Detect runtimes to find container engines here. │                     │
+│› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   podman                                                 9 settings  ›     Add               │                     │
-│                     │                                                                            Remove            │                     │
+│  │ No messages yet  │   podman                                                 9 settings  ›     Add               │                     │
+│  │                  │                                                                            Remove            │                     │
 │                     │                                                                            Detect runtimes   │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -584,11 +584,11 @@ Targets Enter setup action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : palette · ? keys
 Profiles dot action: None
@@ -636,17 +636,17 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 Profiles number 2 action: None
 === Profiles number 2: Settings…, profiles (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Agent Profiles                                                                    │                     │
-│› · ACP pretty name  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
-│  Idle  podman  cod  │ agents.                                                                                      │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   claude-1                                               7 settings  ›     Add               │                     │
-│                     │   codex-1                                                7 settings  ›     Remove            │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Agent Profiles                                                                    │                     │
+│hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
+│› · ACP pretty name  │ agents.                                                                                      │                     │
+│  Idle  podman  cod  │                                                                                              │                     │
+│  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
+│  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -668,11 +668,11 @@ Profiles number 2 action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 === Profiles keyboard menu (140x40) ===
@@ -805,17 +805,17 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 Profiles Enter setup action: None
 === Profiles setup from keyboard (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ default                                  ☰ ││                                                                                            │
+│ default                                                                                                                                  │
 ╰───────────────────                                                                                                                       │
-╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│hel ───────────────  │ Settings › Agent Profiles                                                                    │                     │
-│› · ACP pretty name  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
-│  Idle  podman  cod  │ agents.                                                                                      │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   claude-1                                               7 settings  ›     Add               │                     │
-│                     │   codex-1                                                7 settings  ›     Remove            │                     │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Agent Profiles                                                                    │                     │
+│hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
+│› · ACP pretty name  │ agents.                                                                                      │                     │
+│  Idle  podman  cod  │                                                                                              │                     │
+│  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
+│  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
 │                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
+│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -837,11 +837,11 @@ Profiles Enter setup action: None
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
-│                     │   Back     Save and Close                                                                    │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
 │                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 Targets Minimized size action: None

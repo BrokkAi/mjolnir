@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::time::Duration;
 
@@ -54,6 +54,30 @@ fn run_hook(
     serde_json::from_slice(&output.stdout).expect("mailbox hook writes JSON")
 }
 
+fn relay_events(relay: &mut DurableRelay, request_id: &str) -> Vec<mj_core::relay::RelayEvent> {
+    let response = relay.handle(RelayRequestEnvelope {
+        request_id: request_id.into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Attach {
+            after_ordinal: 0,
+            after_digest: RELAY_EVENT_GENESIS_DIGEST.into(),
+        },
+    });
+    let RelayResponseBody::Ok {
+        payload:
+            RelayResponsePayload::Attached {
+                events,
+                through_ordinal: _,
+                through_digest: _,
+                state: _,
+            },
+    } = response.body
+    else {
+        panic!("could not inspect relay event journal");
+    };
+    events
+}
+
 #[test]
 fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
     let root = tempfile::tempdir().expect("isolated mailbox hook root");
@@ -91,7 +115,7 @@ fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
     ));
 
     let server = std::thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..3 {
             let (stream, _) = listener.accept().expect("accept mailbox hook connection");
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut writer = stream;
@@ -155,4 +179,227 @@ fn real_mailbox_hook_drains_once_over_the_control_socket_with_large_stdin() {
             ..
         } if hook_event == "PostToolUse"
     )));
+}
+
+#[test]
+fn a_lost_drain_response_keeps_mailbox_events_for_a_restarted_worker() {
+    let root = tempfile::tempdir().expect("isolated mailbox hook root");
+    let relay_root = root.path().join("relay");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let socket = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let event = MailboxEvent {
+        key: "api:lost-hook-response".into(),
+        source: "api".into(),
+        wake: false,
+        text: "Keep this event if the response disappears.".into(),
+        created_at_ms: 1,
+    };
+    let accepted = relay.handle(RelayRequestEnvelope {
+        request_id: "seed-lost-response".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "seed-lost-response-command".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        },
+    });
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+
+    let lost_response_server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept mailbox drain request");
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_slice(&line).unwrap();
+        let response = relay.handle(request);
+        assert!(matches!(
+            response.body,
+            RelayResponseBody::Ok {
+                payload: RelayResponsePayload::MailboxDrained {
+                    lease_id: Some(_),
+                    count: 1,
+                    ..
+                }
+            }
+        ));
+        drop(reader);
+        drop(stream);
+        relay
+    });
+
+    let lost_output = run_hook(&socket, &data_dir, &config_dir);
+    assert_eq!(lost_output, serde_json::json!({}));
+    let mut relay = lost_response_server
+        .join()
+        .expect("lost-response relay server");
+    let events = relay_events(&mut relay, "inspect-lost-lease");
+    assert!(events.iter().any(|event| matches!(
+        event.observation,
+        RelayObservation::MailboxHookLeaseCreated { .. }
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event.observation,
+        RelayObservation::MailboxEventsDelivered {
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            ..
+        }
+    )));
+    let still_leased = relay.handle(RelayRequestEnvelope {
+        request_id: "drain-during-live-lease".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::DrainMailbox {
+            hook_event: "PostToolUse".into(),
+        },
+    });
+    assert!(matches!(
+        still_leased.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::MailboxDrained {
+                lease_id: None,
+                text: None,
+                count: 0,
+            }
+        }
+    ));
+    drop(relay);
+
+    std::fs::remove_file(&socket).unwrap();
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+
+    let listener = UnixListener::bind(&socket).expect("rebind the restarted worker socket");
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().expect("accept drain and acknowledgement");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+                .expect("serve the restarted relay");
+        }
+        relay
+    });
+    let delivered = run_hook(&socket, &data_dir, &config_dir);
+    let mut relay = server.join().expect("restarted relay socket server");
+    assert_eq!(
+        delivered["hookSpecificOutput"]["additionalContext"],
+        mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event))
+    );
+    assert!(
+        relay_events(&mut relay, "inspect-restarted-delivery")
+            .iter()
+            .any(|event| {
+                matches!(
+                    &event.observation,
+                    RelayObservation::MailboxEventsDelivered {
+                        event_keys,
+                        path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+                        ..
+                    } if event_keys.len() == 1 && event_keys[0] == "api:lost-hook-response"
+                )
+            })
+    );
+}
+
+#[test]
+fn an_unacknowledged_hook_output_can_be_delivered_again_after_restart() {
+    let root = tempfile::tempdir().expect("isolated mailbox hook root");
+    let relay_root = root.path().join("relay");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let socket = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let event = MailboxEvent {
+        key: "api:lost-hook-ack".into(),
+        source: "api".into(),
+        wake: false,
+        text: "The hook output was written before its ack was lost.".into(),
+        created_at_ms: 1,
+    };
+    let accepted = relay.handle(RelayRequestEnvelope {
+        request_id: "seed-lost-ack".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "seed-lost-ack-command".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        },
+    });
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+
+    let lost_ack_server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept mailbox drain request");
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+            .expect("serve mailbox drain and return its lease");
+
+        let (stream, _) = listener.accept().expect("accept mailbox acknowledgement");
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).unwrap();
+        let request: RelayRequestEnvelope = serde_json::from_slice(&line).unwrap();
+        assert!(matches!(request.request, RelayRequest::AckMailbox { .. }));
+        drop(reader);
+        drop(stream);
+        relay
+    });
+
+    let first_output = run_hook(&socket, &data_dir, &config_dir);
+    assert_eq!(
+        first_output["hookSpecificOutput"]["additionalContext"],
+        mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event))
+    );
+    let mut relay = lost_ack_server.join().expect("lost-ack relay server");
+    let first_journal = relay_events(&mut relay, "inspect-lost-ack");
+    assert!(!first_journal.iter().any(|record| matches!(
+        record.observation,
+        RelayObservation::MailboxEventsDelivered {
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            ..
+        }
+    )));
+    drop(relay);
+
+    std::fs::remove_file(&socket).unwrap();
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let listener = UnixListener::bind(&socket).expect("rebind the restarted worker socket");
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().expect("accept drain and acknowledgement");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+                .expect("serve the restarted relay");
+        }
+        relay
+    });
+    let second_output = run_hook(&socket, &data_dir, &config_dir);
+    let mut relay = server.join().expect("restarted relay socket server");
+    assert_eq!(
+        second_output["hookSpecificOutput"]["additionalContext"],
+        first_output["hookSpecificOutput"]["additionalContext"]
+    );
+    assert!(
+        relay_events(&mut relay, "inspect-redelivered-ack")
+            .iter()
+            .any(|record| {
+                matches!(
+                    &record.observation,
+                    RelayObservation::MailboxEventsDelivered {
+                        event_keys,
+                        path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+                        ..
+                    } if event_keys.len() == 1 && event_keys[0] == "api:lost-hook-ack"
+                )
+            })
+    );
 }

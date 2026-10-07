@@ -58,6 +58,7 @@ fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread
 fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
         ("continuation", "Enabled"),
+        ("mailbox", "Enabled"),
         ("jev", "Enabled"),
         ("phone", "Enabled"),
         ("phone", "Detect Tailscale"),
@@ -117,6 +118,40 @@ fn continuation_reads_as_off_while_jev_is_off() {
         .find(|line| line.contains("Continuation"))
         .unwrap();
     assert!(row.contains("On · 3 continuations"), "{row:?}");
+}
+
+#[test]
+fn agent_mailboxes_reads_as_off_while_jev_is_off() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.config.jev.enabled = false;
+    dashboard.begin_setup();
+    let lines = drawn(&mut dashboard, 140, 48);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Agent mailboxes"))
+        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
+    assert!(row.contains("Off"), "{row:?}");
+    assert!(row.contains("Jev"), "{row:?}");
+    assert!(!row.contains("On ·"), "{row:?}");
+
+    dashboard.begin_settings_section("mailbox", None);
+    let page = drawn(&mut dashboard, 140, 40).join("\n");
+    assert!(page.contains("Jev is off"), "{page}");
+    assert!(page.contains("Privacy"), "{page}");
+    let help = schema::help(&["mailbox".to_owned()]);
+    assert!(help.contains("GitHub activity"), "{help}");
+    assert!(help.contains("parent messages"), "{help}");
+    assert!(help.contains("tool boundaries"), "{help}");
+    assert!(help.contains("resume or restart"), "{help}");
+
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_setup();
+    let lines = drawn(&mut dashboard, 140, 48);
+    let row = lines
+        .iter()
+        .find(|line| line.contains("Agent mailboxes"))
+        .unwrap();
+    assert!(row.contains("On · external events"), "{row:?}");
 }
 
 /// Workers read the Jev switch when they start, so a running session keeps

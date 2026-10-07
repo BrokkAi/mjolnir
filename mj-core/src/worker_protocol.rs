@@ -93,6 +93,7 @@ fn is_served_relay_method(method: &str) -> bool {
             | "submit"
             | "status"
             | "drain_mailbox"
+            | "ack_mailbox"
             | "credential_state"
             | "read_credentials"
             | "install_credentials"
@@ -150,6 +151,12 @@ mod tests {
         let request = br#"{"request_id":"r1","protocol_version":1,"request":{"method":"acknowledge","params":{}}}"#;
         assert!(matches!(
             decode_relay_request(request),
+            DecodedRelayRequest::Invalid { .. }
+        ));
+
+        let malformed_ack = br#"{"request_id":"r2","protocol_version":33,"request":{"method":"ack_mailbox","params":{}}}"#;
+        assert!(matches!(
+            decode_relay_request(malformed_ack),
             DecodedRelayRequest::Invalid { .. }
         ));
     }

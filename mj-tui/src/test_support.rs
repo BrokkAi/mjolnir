@@ -226,6 +226,7 @@ pub(crate) fn config() -> Config {
     Config {
         keys: Default::default(),
         jev: Default::default(),
+        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),

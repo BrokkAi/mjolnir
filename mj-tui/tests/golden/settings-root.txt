@@ -1,15 +1,14 @@
 === grouped Settings root (140x42) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ default                                  ☰ ││                                                                                            │
-╰────────────────────────────────────────────╯│                                                                                            │
+╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────                                                                                                                       │
-│ Create   Open   Fi                                                                                                                       │
-│hel ───────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-│› ■ ACP pretty name  │ Changes stay in this draft until you save.                                                   │                     │
+│ Create   Open   Fi  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│hel ───────────────  │ Changes stay in this draft until you save.                                                   │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
-│  │ No messages yet  │                                                                                              │                     │
-│  │                  │   Setup                                                                                      │                     │
-│                     │   Agent Profiles                                                 claude-1, codex-1, codex-2  │                     │
+│  │ No messages yet  │   Setup                                                                                      │                     │
+│  │                  │   Agent Profiles                                                 claude-1, codex-1, codex-2  │                     │
 │                     │   Projects                                                                              hel  │                     │
 │                     │   Runtimes                                                                           podman  │                     │
 │                     │   Machines                                                                            local  │                     │
@@ -26,22 +25,23 @@
 │                     │   Notifications                                                                    Terminal  │                     │
 │                     │   Advanced                                                                          All off  │                     │
 │                     │                                                                                              │                     │
-│                     │   Privacy                                                                                    │  ───────────────────╯
-│                     │   Jev (hosted service)                              On · sends turn text for classification  │  ───────────────────╮
-│                     │                                                                                              │                     │
-│                     │                                                                                              │                     │
+│                     │   Privacy                                                                                    │                     │
+│                     │   Jev (hosted service)                              On · sends turn text for classification  │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │   Other                                                                                      │                     │
+│                     │   Agent mailboxes                                   On · external events at tool boundaries  │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │                                                                                              │  ──────────── ▁   ▪ ╮
 │                     │                                                                                              │                     │
-│                     │   Save and Close                                                                             │  ───────────────────╯
-│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │  ───────────────────╯
+│                     │   Save and Close                                                                             │  ──────────── ▁   ▪ ╮
+│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
 │                                                                                                                                          │
 │                                                                                                                                          │
-│                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
-root footer alignment: save=(24,34); body=(26,12)
+root footer alignment: save=(24,35); body=(26,11)
 
 === virtual Interface page (100x30) ===
 

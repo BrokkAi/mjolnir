@@ -2337,6 +2337,140 @@ fn reserved_parking_backend(
     (backend, delivered)
 }
 
+#[tokio::test]
+async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
+    if !isolated_parked_test("send_message_to_parked_child_unparks_and_delivers_once_on_retry") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    let (backend, _) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "message-request".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "keep going".into(),
+        },
+    };
+
+    for _ in 0..2 {
+        let answer = backend
+            .execute_subagent_tool("parent-1".into(), request.clone())
+            .await;
+        assert!(!answer.is_error, "{}", answer.message);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["status"],
+            "queued"
+        );
+    }
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1, "a request retry inserts one outbox event");
+    assert_eq!(pending[0].target_session_id, "child-1");
+    assert!(pending[0].unpark);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert_eq!(event.source, "parent");
+    assert!(event.wake);
+    assert_eq!(event.text, "keep going");
+    assert_eq!(event.key, "subagent-message-message-request");
+
+    let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
+    remote
+        .targets
+        .send_replace(vec![crate::session_manager::RelaySessionTarget {
+            session_id: "child-1".into(),
+            spec: crate::targets::CommandSpec::new("true", Vec::<String>::new()),
+            worker_recovery: None,
+            project_memory: None,
+        }]);
+    let mut view = ready_view("model");
+    let snapshot = view.snapshot.as_mut().unwrap();
+    snapshot.materialized.session_id = "child-1".into();
+    snapshot.operational.session_id = "child-1".into();
+    remote
+        .publisher
+        .publish("child-1".into(), view)
+        .await
+        .unwrap();
+    remote
+        .control
+        .wait_for_session("child-1", Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let state: Arc<dyn ExportRuntime> = exports.clone();
+    let sessions = remote.control.clone();
+    let row = pending[0].clone();
+    let delivery = tokio::spawn(async move {
+        crate::mailbox_outbox::deliver_mailbox_event(
+            state,
+            &sessions,
+            &row.target_session_id,
+            event,
+            row.unpark,
+        )
+        .await
+    });
+    let command = tokio::time::timeout(Duration::from_secs(2), remote.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::session_manager::RemoteSessionRequest::Submit {
+        command_id,
+        command,
+        reply,
+        ..
+    } = command
+    else {
+        panic!("mailbox delivery must submit to the child relay")
+    };
+    assert_eq!(
+        exports.unparks(),
+        1,
+        "the parked child starts before delivery"
+    );
+    assert_eq!(
+        command_id,
+        crate::mailbox_outbox::mailbox_command_id("subagent-message-message-request")
+    );
+    assert_eq!(
+        command,
+        RelayCommand::DeliverMailboxEvent {
+            event: mj_core::mailbox::MailboxEvent {
+                key: "subagent-message-message-request".into(),
+                source: "parent".into(),
+                wake: true,
+                text: "keep going".into(),
+                created_at_ms: request.created_at_ms.max(0) as u64,
+            }
+        }
+    );
+    reply.send(Ok(17)).unwrap();
+    assert_eq!(delivery.await.unwrap().unwrap(), Some(17));
+    crate::database::mark_mailbox_event_accepted(&pending[0].event_key, &command_id, 17).unwrap();
+
+    let retried = backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(!retried.is_error, "{}", retried.message);
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    let messages = crate::database::subagent_mailbox_messages("parent-1").unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].accepted);
+    assert_eq!(
+        messages[0].accepted_command_id.as_deref(),
+        Some(command_id.as_str())
+    );
+    remote.shutdown.shutdown().await.unwrap();
+}
+
 async fn send_input(
     backend: &Arc<ApiBackend>,
     message: &str,
@@ -2376,8 +2510,8 @@ fn hold_child_start(_backend: &ApiBackend) -> String {
 }
 
 #[tokio::test]
-async fn queued_input_waits_for_initial_prompt_without_blocking_interrupt() {
-    if !isolated_parked_test("queued_input_waits_for_initial_prompt_without_blocking_interrupt") {
+async fn queued_input_waits_for_initial_prompt_while_message_enqueues() {
+    if !isolated_parked_test("queued_input_waits_for_initial_prompt_while_message_enqueues") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -2400,25 +2534,30 @@ async fn queued_input_waits_for_initial_prompt_without_blocking_interrupt() {
             .iter()
             .any(|label| label.starts_with("subagent input delivery"))
     );
-    let interrupt = backend.execute_subagent_tool(
+    let message = backend.execute_subagent_tool(
         "parent-1".into(),
         mj_core::subagent::SubagentToolRequest {
             originating_command_id: None,
-            request_id: "interrupt-start".into(),
+            request_id: "message-start".into(),
             created_at_ms: mj_core::clock::epoch_millis(),
-            action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+            action: mj_core::subagent::SubagentToolAction::SendMessage {
                 child_session_id: "child-1".into(),
+                message: "message while starting".into(),
             },
         },
     );
-    let answer = tokio::time::timeout(Duration::from_secs(1), interrupt)
+    let answer = tokio::time::timeout(Duration::from_secs(1), message)
         .await
         .unwrap();
     assert!(!answer.is_error, "{}", answer.message);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["interrupted"],
-        false
+        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["status"],
+        "queued"
     );
+    let queued = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].target_session_id, "child-1");
+    assert!(queued[0].unpark);
     assert!(!pending.is_finished());
     let handle = backend.sessions.session("child-1").await.unwrap();
     let turn = submit_prompt(&handle, "initial".into()).await.unwrap();
@@ -2661,6 +2800,28 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
+    let mailbox_event = |request_id: &str, created_at_ms| mj_core::mailbox::MailboxEvent {
+        key: format!("subagent-message-{request_id}"),
+        source: "parent".into(),
+        wake: true,
+        text: format!("message {request_id}"),
+        created_at_ms,
+    };
+    for (request_id, accepted) in [("pending-message", false), ("delivered-message", true)] {
+        let event = mailbox_event(request_id, if accepted { 2 } else { 1 });
+        let key = event.key.clone();
+        crate::database::enqueue_mailbox_event(
+            &key,
+            "child-1",
+            &serde_json::to_string(&event).unwrap(),
+            true,
+            true,
+        )
+        .unwrap();
+        if accepted {
+            crate::database::mark_mailbox_event_accepted(&key, "mailbox-delivered", 12).unwrap();
+        }
+    }
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
     conversation.applied_event_ordinal = 9;
     conversation.applied_event_digest = format!("{:064x}", 9);
@@ -2696,6 +2857,19 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
                     },
                 });
         }
+        for request_id in ["pending-message", "delivered-message"] {
+            snapshot
+                .subagent_requests
+                .push(mj_core::subagent::SubagentToolRequest {
+                    originating_command_id: None,
+                    request_id: request_id.into(),
+                    created_at_ms: 1,
+                    action: mj_core::subagent::SubagentToolAction::SendMessage {
+                        child_session_id: "child-1".into(),
+                        message: format!("message {request_id}"),
+                    },
+                });
+        }
         let backend = Arc::new(ApiBackend::new(
             SessionControl::new(FakeControl(FakeSession {
                 session_id: "parent-1".into(),
@@ -2726,20 +2900,32 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
             assert!(!answer.is_error, "{}", answer.message);
             let value: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
             let child = &value["agents"][0];
-            assert_eq!(child["state"], if failed { "failed" } else { "running" });
+            // A pending waking message supersedes an older failed input and
+            // keeps the parked child active for the queued delivery.
+            assert_eq!(child["state"], "running");
             if failed {
                 assert_eq!(child["input_deliveries"][0]["error"], "restart refused");
             } else {
                 assert_eq!(child["pending_inputs"], serde_json::json!(["follow-up"]));
             }
+            assert_eq!(
+                child["pending_messages"],
+                serde_json::json!(["pending-message"])
+            );
+            assert_eq!(
+                child["message_deliveries"],
+                serde_json::json!([{
+                    "request_id":"delivered-message",
+                    "created_at_ms":2,
+                    "status":"delivered",
+                    "command_id":"mailbox-delivered",
+                    "accepted_ordinal":12
+                }])
+            );
             if wait {
                 assert_eq!(
                     value["status"],
-                    if failed {
-                        mj_core::subagent::WAIT_STATUS_REPORTED
-                    } else {
-                        mj_core::subagent::WAIT_STATUS_STILL_RUNNING
-                    }
+                    mj_core::subagent::WAIT_STATUS_STILL_RUNNING
                 );
                 assert_ne!(child["output"], "old result");
             }
@@ -2748,8 +2934,8 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
 }
 
 #[tokio::test]
-async fn child_interrupt_is_bound_to_the_observed_turn() {
-    if !isolated_parked_test("child_interrupt_is_bound_to_the_observed_turn") {
+async fn legacy_child_interrupt_is_rejected_without_cancelling_a_turn() {
+    if !isolated_parked_test("legacy_child_interrupt_is_rejected_without_cancelling_a_turn") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -2779,28 +2965,23 @@ async fn child_interrupt_is_bound_to_the_observed_turn() {
             "parent-1".into(),
             mj_core::subagent::SubagentToolRequest {
                 originating_command_id: None,
-                request_id: "interrupt".into(),
+                request_id: "legacy-interrupt".into(),
                 created_at_ms: 1,
-                action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+                action: mj_core::subagent::SubagentToolAction::LegacyInterruptAgent {
                     child_session_id: "child-1".into(),
                 },
             },
         )
         .await;
-    assert!(!answer.is_error, "{}", answer.message);
-    assert_eq!(
-        delivered.recv().await.unwrap().1,
-        RelayCommand::CancelTurnFor {
-            active_prompt_id: "original-turn".into()
-        }
-    );
+    assert!(answer.is_error);
+    assert!(answer.message.contains("use send_message"));
     assert!(delivered.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_executes() {
+async fn recovered_legacy_interrupt_is_rejected_and_cached_without_cancelling_a_turn() {
     if !isolated_parked_test(
-        "recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_executes",
+        "recovered_legacy_interrupt_is_rejected_and_cached_without_cancelling_a_turn",
     ) {
         return;
     }
@@ -2808,9 +2989,9 @@ async fn recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_
     store_parent_and_child("child-1");
     let request = mj_core::subagent::SubagentToolRequest {
         originating_command_id: None,
-        request_id: "restart-interrupt".into(),
+        request_id: "restart-legacy-interrupt".into(),
         created_at_ms: 1,
-        action: mj_core::subagent::SubagentToolAction::InterruptAgent {
+        action: mj_core::subagent::SubagentToolAction::LegacyInterruptAgent {
             child_session_id: "child-1".into(),
         },
     };
@@ -2848,13 +3029,9 @@ async fn recovered_interrupt_never_selects_a_newer_turn_and_cached_result_never_
         .execute_subagent_tool_durable("parent-1".into(), request.clone())
         .await
         .unwrap();
-    assert!(!result.result.is_error, "{}", result.result.message);
-    assert_eq!(
-        delivered.recv().await.unwrap().1,
-        RelayCommand::CancelTurnFor {
-            active_prompt_id: "original-turn".into()
-        }
-    );
+    assert!(result.result.is_error);
+    assert!(result.result.message.contains("use send_message"));
+    assert!(delivered.try_recv().is_err());
     let cached = backend
         .execute_subagent_tool_durable("parent-1".into(), request)
         .await
