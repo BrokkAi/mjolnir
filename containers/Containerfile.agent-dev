@@ -43,7 +43,8 @@ COPY --from=node /usr/local/ /usr/local/
 # the `libasound2-dev` install in the voice-worker CI job and the Linux
 # release builds. `eatmydata` lets sessions run build and test commands with
 # fsync turned into a no-op (LD_PRELOAD=libeatmydata.so), the way CI jobs that
-# commit many small SQLite transactions do.
+# commit many small SQLite transactions do. `python3-dev` supplies Python.h,
+# python3-config, and libpython for native/PyO3 builds that embed Python.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
@@ -71,6 +72,7 @@ RUN apt-get update \
         pkg-config \
         procps \
         python3 \
+        python3-dev \
         python3-pip \
         python3-venv \
         ripgrep \
@@ -80,6 +82,11 @@ RUN apt-get update \
         unzip \
         zip \
     && rm -rf /var/lib/apt/lists/*
+
+# Astral's distroless image provides native binaries for both supported
+# architectures. Keep uv on the shared PATH, including unprivileged sessions.
+COPY --from=ghcr.io/astral-sh/uv:0.12.20 /uv /uvx /usr/local/bin/
+RUN uv --version && uvx --version && python3-config --embed --ldflags
 
 # Keep these in lockstep with mj-core/src/harness_runtime.rs (see "Harness
 # pins" in AGENTS.md). Kimi and Grok are not in the image; they install on

@@ -897,7 +897,10 @@ fn write_session_tags(
 /// runs several profile homes expects every session Mjolnir can start to be
 /// searchable, and a home no profile names is not Mjolnir's to walk. So the
 /// stock Codex and Claude adapters are dropped and one adapter per enabled
-/// profile home takes their place; every other built-in adapter is kept as is.
+/// profile home takes their place; of the rest, only OpenCode is kept, the
+/// only other harness Mjolnir can start. Every other built-in adapter (aider,
+/// gemini, cline, ...) is dropped, so a tool Mjolnir cannot run can neither
+/// trigger a home-directory walk nor add rows Resume cannot act on.
 ///
 /// Kimi Code, Grok Build and Muse have no SessionWiki adapter at all, so
 /// Mjolnir supplies one per enabled profile home of its own (see
@@ -930,11 +933,9 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
         };
         adapters.push(adapter);
     }
-    adapters.extend(
-        sessionwiki::adapters::all()
-            .into_iter()
-            .filter(|adapter| !matches!(adapter.name(), "codex" | "claude-code")),
-    );
+    adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
+        harness_adapters::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
+    }));
     adapters
 }
 
@@ -4147,6 +4148,47 @@ mod tests {
             .unwrap()
             .updated_at = "2099-01-01T00:00:00Z".into();
         assert_eq!(unindexed(&source, &ids).unwrap(), [session_id]);
+    }
+
+    // Hard-won: #1259: the stock Aider adapter walks $HOME at startup looking for history files.
+    #[test]
+    fn adapters_cover_every_supported_harness_and_no_unsupported_tool() {
+        use mj_core::config::HarnessProfile;
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+            let home = directory.path().join(format!("home-{index}"));
+            std::fs::create_dir_all(&home).unwrap();
+            config.profiles.insert(
+                format!("profile-{index}"),
+                HarnessProfile {
+                    enabled: true,
+                    kind,
+                    home,
+                    environment: Default::default(),
+                    context_window_bytes: None,
+                    subagents: Default::default(),
+                    guardian_review_model: None,
+                },
+            );
+        }
+        let mut names: Vec<&str> = native_adapters(&config)
+            .iter()
+            .map(|adapter| adapter.name())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "claude-code",
+                "codex",
+                "grok-build",
+                "kimi-code",
+                "muse",
+                "opencode"
+            ],
+            "one adapter per supported harness, none for tools Mjolnir cannot run"
+        );
     }
 
     /// The text search over an in-memory index shaped like SessionWiki's.
