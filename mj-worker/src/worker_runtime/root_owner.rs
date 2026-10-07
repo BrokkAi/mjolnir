@@ -147,7 +147,8 @@ impl ForkedPreExecChild {
         let (parent, child_control) = UnixStream::pair().unwrap();
         let child = std::thread::spawn(move || {
             let child_fd = child_control.as_raw_fd();
-            let mut command = std::process::Command::new("/bin/true");
+            // macOS keeps `true` in /usr/bin, Linux in /bin; PATH finds either.
+            let mut command = std::process::Command::new("true");
             // Hold the forked copy of the lock until the parent allows exec.
             // SAFETY: the hook uses only async-signal-safe read/write syscalls.
             unsafe {
