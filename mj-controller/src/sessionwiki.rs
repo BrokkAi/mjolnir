@@ -14,6 +14,7 @@ pub(crate) mod history;
 mod provenance;
 pub mod tags;
 mod top_level;
+mod transcript_grep;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,7 @@ use harness_adapters::HarnessAdapter;
 /// search partition; reconciliation is scoped per instance instead (see
 /// [`Adapter::reconcile_scope`]).
 const TOOL: &str = "mjolnir";
+const CONVERSATION_ROLES: &[Role] = &[Role::User, Role::Assistant];
 
 /// The low token slot identifies the `Session` projection format. Raising it
 /// makes rows indexed by older parse rules stale exactly once.
@@ -1545,34 +1547,24 @@ fn query_rows_from(
         fill_session_tags(connection, &mut rows)?;
         return Ok(rows);
     }
-    // Search and native-child filtering happen after SessionWiki applies its
-    // session limit. Over-fetch so children ranked first do not shorten a page.
+    // SessionWiki filters conversational roles before its candidate cap and
+    // session grouping. Native-child filtering still happens here, so
+    // over-fetch to keep children ranked first from shortening a page.
     let search_limit = MAX_WIKI_LIMIT;
-    let hits = if query.chars().count() < MIN_FULLTEXT_QUERY {
-        sessionwiki::index::search_like(connection, query, search_limit, None, None)
+    let roles = if include_tool_matches {
+        None
     } else {
-        sessionwiki::index::search(connection, query, search_limit, None, None)
-    }
-    .context("search the SessionWiki index")?;
-    // SessionWiki's full-text search has no sub-agent filter of its own.
+        Some(CONVERSATION_ROLES)
+    };
+    let hits =
+        sessionwiki::index::search_with_roles(connection, query, search_limit, None, None, roles)
+            .context("search the SessionWiki index")?;
     let mut rows = Vec::with_capacity(hits.len().min(limit));
     for hit in hits {
         if rows.len() >= limit {
             break;
         }
         if top_level::is_child(&hit.row, ownership, cache)? {
-            continue;
-        }
-        // A match only in tool text is not one the preview can show: it
-        // never anchors on tool output. It is also how a sub-agent's words
-        // reach its parent, as the Task prompt and result Claude Code records
-        // in the parent's transcript. Keep such a hit only when the
-        // conversation itself matches too. The agents' history search, which
-        // includes tool-only text, keeps tool matches.
-        if !include_tool_matches
-            && !matches!(hit.role.as_str(), "user" | "assistant")
-            && !conversation_matches(connection, &hit.row, query)?
-        {
             continue;
         }
         rows.push(wiki_row(hit.row, Some(hit.snippet), live));
@@ -1744,6 +1736,7 @@ fn named_like(
     let rows = statement
         .query_map([], |row| {
             Ok(sessionwiki::index::SessionRow {
+                last_active: None,
                 session_id: row.get(0)?,
                 tool: row.get(1)?,
                 path: row.get(2)?,
@@ -1769,18 +1762,6 @@ fn named_like(
                 || row.project.to_lowercase().contains(&needle)
         })
         .collect())
-}
-
-/// Whether a user or assistant message of an indexed session matches the
-/// query, by the same rule the preview's passages use.
-fn conversation_matches(
-    connection: &rusqlite::Connection,
-    row: &sessionwiki::index::SessionRow,
-    query: &str,
-) -> Result<bool> {
-    let session = sessionwiki::index::session_from_index(connection, row)
-        .context("read an indexed session")?;
-    Ok(!hit_transcript(&session, query, 0, 1).blocks.is_empty())
 }
 
 /// The briefing for one indexed session, or `None` when the id names none.
@@ -1833,25 +1814,23 @@ pub fn transcript_hits(
     )))
 }
 
-/// The matching passages of one loaded session, converted from SessionWiki's
-/// own grep. Pure, so the conversion can be tested without an index on disk.
+/// The matching passages of one loaded session, converted to the daemon
+/// response shape. Pure, so the conversion can be tested without an index.
 ///
-/// Matching, redaction and the excerpt window are `sessionwiki::grep`'s, so the
-/// `sessionwiki grep` CLI and this preview report the same hits. Tool output
-/// never anchors a passage: it is machine chatter the reader did not write,
-/// a hit buried in it would open the preview on a wall of command output, and
-/// the preview collapses tool runs anyway. Tool messages still appear as
-/// context around a real match.
+/// Tool output never anchors a passage: it is machine chatter the reader did
+/// not write, a hit buried in it would open the preview on a wall of command
+/// output, and the preview collapses tool runs anyway. Tool messages still
+/// appear as context around a real match.
 fn hit_transcript(
     session: &Session,
     query: &str,
     context_messages: usize,
     per_message_chars: usize,
 ) -> WikiHitTranscript {
-    let found = sessionwiki::grep::grep_session(
+    let found = transcript_grep::grep_session(
         session,
         query,
-        &sessionwiki::grep::GrepOpts {
+        &transcript_grep::GrepOpts {
             context_messages,
             chars: per_message_chars,
             max_matches: None,
@@ -3957,6 +3936,22 @@ mod tests {
         // Agent history keeps the parent's tool text, but never child rows.
         assert_eq!(ids("quokka", true), ["parent"]);
         assert_eq!(ids("parent zebra", false), ["parent"]);
+
+        let history = history::query_in_with(
+            &connection,
+            &mj_core::history::HistoryRequest {
+                request_id: "test-tool-search".into(),
+                query: mj_core::history::HistoryQuery::SearchSessions {
+                    query: "quokka".into(),
+                    limit: 10,
+                },
+                blame: None,
+            },
+            &top_level::Snapshot::default(),
+            &crate::import::NativeScanCache::new(),
+        )
+        .expect("search indexed history");
+        assert_eq!(history["sessions"][0]["id"], "parent");
     }
 
     // Hard-won: e53bc221: Short-query fallback must not restore the tool-only false match fixed in trigram search.
@@ -3976,6 +3971,145 @@ mod tests {
                 .expect("query the index")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn resume_search_uses_conversational_hits_and_ands_terms_in_one_message() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        let insert_message = |session_id: &str, role: &str, text: &str| {
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id, role, text],
+                )
+                .expect("insert a message");
+            connection
+                .execute(
+                    "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+                    rusqlite::params![connection.last_insert_rowid(), text],
+                )
+                .expect("index a message");
+        };
+
+        tags::testing::index_row(&connection, "mixed", "claude");
+        insert_message("mixed", "tool", &"amber manta tool output ".repeat(20));
+        insert_message(
+            "mixed",
+            "user",
+            "amber and manta appear in this conversation",
+        );
+        tags::testing::index_row(&connection, "same-message", "claude");
+        insert_message("same-message", "assistant", "amber appears before manta");
+        tags::testing::index_row(&connection, "split-messages", "claude");
+        insert_message("split-messages", "user", "amber appears here");
+        insert_message("split-messages", "assistant", "manta appears there");
+
+        let rows =
+            query_rows_for_test("amber manta", 10, false).expect("search conversational messages");
+        let ids: BTreeSet<_> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, BTreeSet::from(["mixed", "same-message"]));
+        let mixed = rows.iter().find(|row| row.id == "mixed").unwrap();
+        let snippet = mixed.snippet.as_deref().expect("role-filtered snippet");
+        assert!(
+            snippet.contains(" and ") && snippet.contains("appe"),
+            "{snippet:?}"
+        );
+        assert!(!snippet.contains("tool output"), "{snippet:?}");
+    }
+
+    #[test]
+    fn resume_search_preserves_short_nfc_and_cjk_queries() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        let insert_message = |session_id: &str, role: &str, text: &str| {
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id, role, text],
+                )
+                .expect("insert a message");
+            connection
+                .execute(
+                    "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+                    rusqlite::params![connection.last_insert_rowid(), text],
+                )
+                .expect("index a message");
+        };
+        for (id, text) in [
+            ("short-query", "The short token qx appears here"),
+            ("nfc-query", "The café is open"),
+            ("cjk-query", "東京の会話を検索する"),
+        ] {
+            tags::testing::index_row(&connection, id, "codex");
+            insert_message(id, "assistant", text);
+        }
+
+        for (query, expected) in [
+            ("qx", "short-query"),
+            ("cafe\u{301}", "nfc-query"),
+            ("東京", "cjk-query"),
+        ] {
+            let rows = query_rows_for_test(query, 10, false)
+                .unwrap_or_else(|error| panic!("search {query:?}: {error:#}"));
+            assert_eq!(
+                rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+                [expected],
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn role_filter_keeps_a_full_page_after_more_than_200_tool_only_hits() {
+        let _held = tags::testing::lock();
+        let (_directory, connection) = tags::testing::isolated_index();
+        let insert_message = |session_id: &str, role: &str, text: &str| {
+            connection
+                .execute(
+                    "INSERT INTO messages(session_id, role, text) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![session_id, role, text],
+                )
+                .expect("insert a message");
+            connection
+                .execute(
+                    "INSERT INTO msgs(rowid, text) VALUES (?1, ?2)",
+                    rusqlite::params![connection.last_insert_rowid(), text],
+                )
+                .expect("index a message");
+        };
+
+        let query = "quokka kalimba";
+        let tool_text = format!("{} tool output", "quokka kalimba ".repeat(16));
+        for index in 0..250 {
+            let id = format!("tool-only-{index:03}");
+            tags::testing::index_row(&connection, &id, "claude");
+            insert_message(&id, "tool", &tool_text);
+        }
+        for index in 0..200 {
+            let id = format!("conversation-{index:03}");
+            tags::testing::index_row(&connection, &id, "claude");
+            insert_message(
+                &id,
+                "user",
+                "quokka kalimba appears once in this conversation",
+            );
+        }
+
+        let unfiltered = sessionwiki::index::search(&connection, query, 200, None, None)
+            .expect("search all indexed roles");
+        assert_eq!(unfiltered.len(), 200);
+        assert!(
+            unfiltered
+                .iter()
+                .all(|hit| hit.row.session_id.starts_with("tool-only-")),
+            "tool-only hits must outrank conversational hits in the fixture"
+        );
+
+        let rows =
+            query_rows_for_test(query, 200, false).expect("search a full conversational page");
+        assert_eq!(rows.len(), 200);
+        assert!(rows.iter().all(|row| row.id.starts_with("conversation-")));
     }
 
     #[test]

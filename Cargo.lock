@@ -694,7 +694,6 @@ dependencies = [
  "brokk-mj-review",
  "brokk-mj-transcript",
  "brokk-mj-worker",
- "brokk-sessionwiki",
  "chrono",
  "chrono-tz",
  "dirs 6.0.0",
@@ -713,6 +712,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sessionwiki",
  "sha2 0.11.0",
  "signal-hook",
  "sysinfo",
@@ -923,26 +923,6 @@ dependencies = [
  "tracing-subscriber",
  "vte",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "brokk-sessionwiki"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d2715d364361a28c7eccaeeddf6ee04e4889a0b14e2fa2f29b3c98bf6dfae8e"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs 7.0.0",
- "libc",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tiny_http",
- "unicode-normalization",
- "walkdir",
 ]
 
 [[package]]
@@ -5343,6 +5323,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
+]
+
+[[package]]
+name = "sessionwiki"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed0af43a008edcf99bfdff83789959b1907cc2b1ea8276d375441455ded461a8"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs 7.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tiny_http",
+ "unicode-normalization",
+ "walkdir",
 ]
 
 [[package]]
