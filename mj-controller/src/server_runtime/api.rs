@@ -565,6 +565,10 @@ impl ApiBackend {
         self
     }
 
+    pub(crate) fn profile_catalog(&self) -> &Arc<super::profile_catalog::ProfileCatalog> {
+        &self.profile_catalog
+    }
+
     /// Recover the immutable effect selection before doing any external work.
     pub(crate) async fn execute_subagent_tool_durable(
         self: &Arc<Self>,

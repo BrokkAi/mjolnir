@@ -284,13 +284,46 @@ async fn serialized_until(
     .context("profile discovery supervisor panicked")?
 }
 
-/// Update a model-specific entry only when a managed worker matches the local
-/// probe binary. Container/ambient installations cannot establish that match.
-pub async fn observe(
+/// What a session's worker must show before its observed choices are cached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservationCheck {
+    /// Its build matches the local probe binary, so it reports what a probe
+    /// would.
+    ProbeBuild,
+    /// None: this machine runs no worker, so no probe can ever describe a
+    /// profile, and a session's worker is the only source there is.
+    NoProbe,
+}
+
+/// The one decision of whose observations may fill the profile cache. Where
+/// a probe can run, only a managed bare worker that matches it may;
+/// container and ambient installations cannot establish that match.
+pub(crate) fn observation_check(
+    target: &mj_core::state::TargetLocator,
+) -> Option<ObservationCheck> {
+    use mj_core::state::TargetLocator;
+    if !mj_core::targets::HOST_RUNS_WORKERS {
+        return Some(ObservationCheck::NoProbe);
+    }
+    matches!(
+        target,
+        TargetLocator::LocalBare { .. }
+            | TargetLocator::SshBare { .. }
+            | TargetLocator::AwsEc2 { .. }
+    )
+    .then_some(ObservationCheck::ProbeBuild)
+}
+
+/// Cache the choices a session's worker reports, when `check` allows it.
+/// Returns whether anything was cached.
+pub(crate) async fn observe(
     profile_id: String,
     worker_build: String,
     state: mj_core::relay::RelayOperationalState,
-) -> Result<()> {
+    check: ObservationCheck,
+) -> Result<bool> {
+    let stored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let job_stored = stored.clone();
     serialized(profile_id.clone(), move |cancelled| {
         let config = Config::load()?;
         let profile = config
@@ -314,26 +347,37 @@ pub async fn observe(
         if profile.kind == mj_core::config::HarnessKind::Claude {
             return Ok(choices);
         }
-        // Only the local probe binary can vouch for an observing worker, and
-        // a machine that runs no worker has none.
-        if !mj_core::targets::HOST_RUNS_WORKERS {
-            return Ok(choices);
+        let fingerprint = fingerprint(profile);
+        match check {
+            ObservationCheck::ProbeBuild => {
+                let executor = CancellableProcessExecutor::new(cancelled)
+                    .with_deadline(Duration::from_secs(30));
+                let worker = super::worker_binary::worker_binary_for(
+                    &TargetLocator::LocalBare {
+                        worker_root: String::new(),
+                    },
+                    &executor,
+                )?;
+                if mj_core::worker_launch::worker_executable_digest(&worker)? != worker_build {
+                    return Ok(choices);
+                }
+            }
+            ObservationCheck::NoProbe => {
+                // Nothing else will ever fill the profile's default entry, so
+                // the first session observed stands in for it.
+                if crate::database::load_profile_config_cache(&profile_id, "", &fingerprint)?
+                    .is_none()
+                {
+                    store(&profile_id, &fingerprint, &None, &choices)?;
+                }
+            }
         }
-        let executor =
-            CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-        let worker = super::worker_binary::worker_binary_for(
-            &TargetLocator::LocalBare {
-                worker_root: String::new(),
-            },
-            &executor,
-        )?;
-        if mj_core::worker_launch::worker_executable_digest(&worker)? == worker_build {
-            store(&profile_id, &fingerprint(profile), &choices.model, &choices)?;
-        }
+        store(&profile_id, &fingerprint, &choices.model, &choices)?;
+        job_stored.store(true, std::sync::atomic::Ordering::Release);
         Ok(choices)
     })
-    .await
-    .map(|_| ())
+    .await?;
+    Ok(stored.load(std::sync::atomic::Ordering::Acquire))
 }
 
 /// Persistent identity follows configured definitions only. Harness-home

@@ -527,16 +527,19 @@ pub(crate) async fn run_server(
                         if snapshot.operational.native_session_is_ready()
                             && operational.get(&update.session_id).is_none_or(|old: &mj_core::relay::RelayOperationalState| old.config_options != snapshot.operational.config_options)
                             && let Some(session) = controller.state.sessions.get(&update.session_id)
-                            && matches!(session.target, Some(mj_core::state::TargetLocator::LocalBare { .. } | mj_core::state::TargetLocator::SshBare { .. } | mj_core::state::TargetLocator::AwsEc2 { .. }))
+                            && let Some(check) = session.target.as_ref().and_then(crate::controller::profile_config::observation_check)
                             && let Some(build) = snapshot.worker_build.clone()
                         {
                             let profile = session.last_profile.clone();
                             let state = snapshot.operational.clone();
+                            let catalog = api_backend.profile_catalog().clone();
                             let Ok(upgrade_task) = crate::upgrade::activity("profile choice cache") else { continue };
                             tokio::spawn(async move {
                                 let _upgrade_task = upgrade_task;
-                                if let Err(error) = crate::controller::profile_config::observe(profile, build, state).await {
-                                    tracing::warn!(%error, "could not cache observed profile choices");
+                                match crate::controller::profile_config::observe(profile.clone(), build, state, check).await {
+                                    Ok(true) => catalog.reread_failed(&profile),
+                                    Ok(false) => {}
+                                    Err(error) => tracing::warn!(%error, "could not cache observed profile choices"),
                                 }
                             });
                         }
