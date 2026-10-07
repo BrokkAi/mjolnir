@@ -392,6 +392,32 @@ Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
 
+=== reopened transcript tail (60x24) ===
+╭ Conversation ────────────────────────────────────────────╮
+│ │ output                                                ││
+│                                                         ││
+│ ─ Mjolnir                                               ││
+│ │ terminal failure 7                                    ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ▐│
+│ │ output                                                ▐│
+│ │ output                                                ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste │ ctrl+b then : palette · ? keys
+
 === short transcript ignores scrolling (40x24) ===
 ╭ Conversation ────────────────────────╮
 │ ❯ You                               ▐│

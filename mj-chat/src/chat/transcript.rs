@@ -343,12 +343,38 @@ impl TranscriptSnapshot {
 /// Where the transcript viewport is pinned. Anchoring to an entry rather than an
 /// absolute row keeps the view stable while the agent appends new rows below,
 /// and lets the renderer touch only the entries the viewport covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TranscriptAnchor {
     /// Follow the newest rows.
     Bottom,
     /// The top visible row is `row` rows into `entry`.
     Row { entry: usize, row: usize },
+    /// Keep the saved position until its entry is available, including across
+    /// draws or another detach while the history is still loading.
+    Restoring(TranscriptPosition),
+}
+
+/// A session-local transcript position, retained when its view is replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptPosition(SavedTranscriptAnchor);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum SavedTranscriptAnchor {
+    Bottom,
+    /// Previous builds wrote entry indexes into terminal upgrade handoffs.
+    Row {
+        entry: usize,
+        row: usize,
+    },
+    /// Durable entry identity, independent of how much history is loaded.
+    Entry {
+        start_seq: u64,
+        row: usize,
+        /// An opening reveal follows new content, but keeps its visible row
+        /// when the conversation has not changed since the last draw.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revealed_through: Option<u64>,
+    },
 }
 
 /// A concrete transcript position: `row` rendered rows into `entry`.
@@ -551,6 +577,74 @@ impl TranscriptRenderCache {
 }
 
 impl ChatState {
+    /// Where the reader is, independent of the tail-first loading window.
+    pub fn transcript_position(&self) -> TranscriptPosition {
+        match self.anchor {
+            TranscriptAnchor::Restoring(position) => position,
+            TranscriptAnchor::Row { entry, row } => {
+                let Some(entry) = self.entries.get(entry) else {
+                    return TranscriptPosition(SavedTranscriptAnchor::Bottom);
+                };
+                TranscriptPosition(SavedTranscriptAnchor::Entry {
+                    start_seq: entry.start_seq,
+                    row,
+                    revealed_through: self
+                        .revealed_anchor
+                        .filter(|_| self.rests_on_opening_reveal())
+                        .map(|(_, last)| last),
+                })
+            }
+            TranscriptAnchor::Bottom => TranscriptPosition(SavedTranscriptAnchor::Bottom),
+        }
+    }
+
+    pub fn restore_transcript_position(&mut self, position: TranscriptPosition) {
+        // Restoration owns the viewport; a fresh opening reveal would move
+        // an explicitly followed tail back to the start of the latest reply.
+        self.reveal_latest_agent_on_draw = false;
+        self.revealed_anchor = None;
+        self.anchor = TranscriptAnchor::Restoring(position);
+        self.resolve_transcript_position();
+    }
+
+    fn resolve_transcript_position(&mut self) {
+        let TranscriptAnchor::Restoring(TranscriptPosition(position)) = self.anchor else {
+            return;
+        };
+        let anchor = match position {
+            SavedTranscriptAnchor::Bottom => Some(TranscriptAnchor::Bottom),
+            SavedTranscriptAnchor::Row { entry, row } => entry
+                .checked_sub(self.unconverted_prefix)
+                .filter(|entry| *entry < self.entries.len())
+                .map(|entry| TranscriptAnchor::Row { entry, row }),
+            SavedTranscriptAnchor::Entry { start_seq, row, .. } => self
+                .entries
+                .iter()
+                .position(|entry| entry.start_seq == start_seq)
+                .map(|entry| TranscriptAnchor::Row { entry, row }),
+        };
+        if let Some(anchor) = anchor {
+            self.anchor = anchor;
+            if let SavedTranscriptAnchor::Entry {
+                start_seq,
+                revealed_through: Some(last),
+                ..
+            } = position
+            {
+                self.revealed_anchor = Some((start_seq, last));
+            }
+        } else if self.unconverted_prefix == 0 && !self.transcript_loading {
+            // The complete projection no longer contains the saved entry.
+            self.anchor = TranscriptAnchor::Bottom;
+        }
+    }
+
+    pub(super) fn cancel_transcript_position_restore(&mut self) {
+        if matches!(self.anchor, TranscriptAnchor::Restoring(_)) {
+            self.anchor = TranscriptAnchor::Bottom;
+        }
+    }
+
     /// Whether the host must keep routing left-button motion to this chat.
     /// The pointer may leave the pane while a thumb is held.
     pub fn transcript_scrollbar_dragging(&self) -> bool {
@@ -800,6 +894,14 @@ impl ChatState {
     }
 
     fn viewport(&mut self, width: u16, height: usize) -> TranscriptViewport {
+        self.resolve_transcript_position();
+        if matches!(self.anchor, TranscriptAnchor::Restoring(_)) {
+            return TranscriptViewport {
+                rows: vec![empty_transcript_row(true)],
+                anchor: self.anchor,
+                top: AnchorRow { entry: 0, row: 0 },
+            };
+        }
         let trailing = self.trailing_entries();
         prepare_render_cache(
             &self.entries,
@@ -1036,6 +1138,7 @@ impl ChatState {
             return None;
         }
         Some(match self.anchor {
+            TranscriptAnchor::Restoring(_) => return None,
             TranscriptAnchor::Row { entry, row } if entry < self.entries.len() => {
                 TranscriptAnchor::Row { entry, row }
             }
