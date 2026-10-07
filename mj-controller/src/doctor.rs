@@ -714,6 +714,9 @@ fn harness_profile_check(
             "Make the change named above. Sessions on this profile are refused until then; the rest of Mjolnir keeps working.",
         );
     }
+    if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
+        return aws_harness_authentication_check(id, profile, executor);
+    }
     if !harness_is_authenticated_with_executor(profile, executor) {
         return DoctorCheck::fixable(
             format!("harness.{id}"),
@@ -733,6 +736,52 @@ fn harness_profile_check(
             profile.home.display()
         ),
     )
+}
+
+/// Probe the same AWS environment the harness uses, without requiring a native
+/// Claude or Codex login. The CLI is optional for SDK credential chains.
+fn aws_harness_authentication_check(
+    id: &str,
+    profile: &HarnessProfile,
+    executor: &impl CommandExecutor,
+) -> DoctorCheck {
+    let check_id = format!("harness.{id}");
+    let title = format!("Harness profile {id}");
+    if profile
+        .environment
+        .get("AWS_BEARER_TOKEN_BEDROCK")
+        .is_some_and(|token| !token.trim().is_empty())
+    {
+        return DoctorCheck::ready(check_id, title, "An Amazon Bedrock API key is available.");
+    }
+    let mut command = CommandSpec::new("aws", ["sts", "get-caller-identity", "--output", "json"])
+        .purpose("check harness AWS credentials");
+    command.env = profile.environment.resolved().clone();
+    match executor.execute(&command) {
+        Ok(output) if output.status == 0 => DoctorCheck::ready(
+            check_id,
+            title,
+            "The AWS credential chain is available; model access is checked by the harness.",
+        ),
+        Ok(output) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "The AWS credential chain failed (exit {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            "Configure AWS credentials for this profile's AWS_PROFILE, renew its SSO login with `aws sso login --profile <AWS_PROFILE>`, or supply an authorized AWS role. Native harness login is not required.",
+        ),
+        Err(error) => DoctorCheck::warning(
+            check_id,
+            title,
+            format!(
+                "The profile uses the AWS credential chain, but doctor could not probe it: {error:#}"
+            ),
+            "Install the AWS CLI to let doctor verify the chain, or verify the profile's AWS credentials through the harness. Native harness login is not required.",
+        ),
+    }
 }
 
 /// One sentence saying what a profile is: its harness, where its quota comes
@@ -762,6 +811,9 @@ fn profile_summary(config: &Config, id: &str, profile: &HarnessProfile) -> Strin
 /// uses: a Codex profile is read through a custom provider only when that
 /// provider's API key is in the profile's environment.
 fn profile_quota_source(profile: &HarnessProfile) -> String {
+    if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
+        return "Amazon Bedrock usage billing".to_owned();
+    }
     match profile.kind {
         HarnessKind::Claude => "Claude subscription quota".to_owned(),
         HarnessKind::Codex => match crate::quota::provider_credential(profile) {

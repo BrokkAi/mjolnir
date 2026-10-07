@@ -798,6 +798,14 @@ impl HarnessProfile {
     /// A custom provider that inlines its key as `experimental_bearer_token`
     /// retains the existing `NativeLogin` behavior.
     pub fn auth_scheme(&self) -> AuthScheme {
+        if self.kind == HarnessKind::Claude
+            && self
+                .environment
+                .get("CLAUDE_CODE_USE_BEDROCK")
+                .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        {
+            return AuthScheme::AwsCredentialChain;
+        }
         match self.codex_provider() {
             Ok(Some(provider)) if provider.uses_aws_credentials() => AuthScheme::AwsCredentialChain,
             Ok(Some(provider)) if provider.needs_no_authentication() => {
@@ -989,7 +997,7 @@ pub enum AuthScheme {
     NativeLogin,
     /// A long-lived API key supplied through this environment variable.
     ApiKey { env_key: String },
-    /// Codex obtains AWS credentials from its configured AWS provider chain.
+    /// The harness obtains AWS credentials from its configured AWS provider chain.
     AwsCredentialChain,
     /// A built-in local provider does not require credentials.
     NoAuthentication,

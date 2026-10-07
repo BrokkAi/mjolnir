@@ -57,6 +57,7 @@ fn failed(stderr: impl AsRef<[u8]>) -> CommandOutput {
     }
 }
 
+// Hard-won: #1266: a working Claude Bedrock profile was reported as needing subscription login.
 #[test]
 fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     // Fixture shapes follow aws-cli v2, EC2 JSON, OpenSSH, and Docker CLI
@@ -187,6 +188,73 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     let subagent_checks = subagent_eligibility_checks(Ok(&config));
     let mut checks = vec![aws_check, docker_check, podman_check, missing_ssh_check];
     checks.extend(subagent_checks);
+
+    let home = tempfile::tempdir().unwrap();
+    let claude = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Claude,
+        home: home.path().to_path_buf(),
+        environment: [
+            ("CLAUDE_CODE_USE_BEDROCK".to_owned(), "1".to_owned()),
+            ("AWS_PROFILE".to_owned(), "example-bedrock".to_owned()),
+            ("AWS_REGION".to_owned(), "us-east-1".to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+    assert!(crate::setup::harness_is_authenticated_with_executor(
+        &claude,
+        &FakeExecutor::new([]),
+    ));
+    assert!(
+        login_command(&claude)
+            .unwrap_err()
+            .to_string()
+            .contains("AWS credential chain")
+    );
+    assert!(!claude.auth_scheme().uses_native_login_file());
+    assert_eq!(claude.credential_expiry(b"{}"), None);
+    assert_eq!(claude.credential_freshness(b"{}"), None);
+    let aws = FakeExecutor::new([
+        Ok(output(br#"{"Account":"123456789012"}"#)),
+        Ok(failed(b"Unable to locate credentials")),
+        Err(anyhow!("aws executable is unavailable")),
+    ]);
+    config.profiles.insert("bedrock".to_owned(), claude.clone());
+    for _ in 0..3 {
+        checks.extend(
+            harness_checks(Ok(&config), &aws)
+                .into_iter()
+                .filter(|check| check.id == "harness.bedrock"),
+        );
+    }
+    for command in aws.commands.borrow().iter() {
+        assert_eq!(command.program, "aws");
+        assert_eq!(
+            command.args,
+            ["sts", "get-caller-identity", "--output", "json"]
+        );
+        assert_eq!(command.env, claude.environment.resolved().clone());
+    }
+    // A disabled Bedrock switch still uses Claude's native login.
+    let mut native = claude;
+    native
+        .environment
+        .insert("CLAUDE_CODE_USE_BEDROCK".to_owned(), "0".to_owned());
+    assert!(native.auth_scheme().uses_native_login_file());
+    let (program, arguments) = login_command(&native).unwrap();
+    assert_eq!(program, "claude");
+    assert_eq!(arguments, ["auth", "login"]);
+    assert_eq!(profile_quota_source(&native), "Claude subscription quota");
+    for check in &mut checks {
+        check.detail = check.detail.replace(
+            &home.path().to_string_lossy().to_string(),
+            "/profiles/claude-bedrock",
+        );
+    }
 
     let mut rendered = Vec::new();
     render_human(&checks, &mut rendered).expect("render doctor checks");

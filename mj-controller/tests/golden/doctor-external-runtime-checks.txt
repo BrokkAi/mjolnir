@@ -7,3 +7,8 @@ warning Host limits for target missing-ssh: Could not read the kernel keyring qu
 ready Sub-agent policy: Claude and Codex sessions may opt in, up to 3 sub-agents at once per session. A session's sub-agents may use its own profile and: disabled-reviewer.
 warning Sub-agent profile disabled-reviewer: Profile "disabled-reviewer" is listed in [subagents.eligible_profiles] but is disabled, so it is not offered for sub-agent use.
   remediation: Re-enable profile "disabled-reviewer", or remove it from [subagents.eligible_profiles].
+ready Harness profile bedrock: Claude Code; Amazon Bedrock usage billing; only its own sessions' sub-agents may use it. The AWS credential chain is available; model access is checked by the harness.
+fixable Harness profile bedrock: Claude Code; Amazon Bedrock usage billing; only its own sessions' sub-agents may use it. The AWS credential chain failed (exit 1): Unable to locate credentials
+  remediation: Configure AWS credentials for this profile's AWS_PROFILE, renew its SSO login with `aws sso login --profile <AWS_PROFILE>`, or supply an authorized AWS role. Native harness login is not required.
+warning Harness profile bedrock: Claude Code; Amazon Bedrock usage billing; only its own sessions' sub-agents may use it. The profile uses the AWS credential chain, but doctor could not probe it: aws executable is unavailable
+  remediation: Install the AWS CLI to let doctor verify the chain, or verify the profile's AWS credentials through the harness. Native harness login is not required.

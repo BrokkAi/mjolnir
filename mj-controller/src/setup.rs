@@ -221,8 +221,8 @@ pub(crate) fn discover_harness_homes_with_executor(
 }
 
 /// A profile standing in for a home discovery found but the user has not
-/// configured. It carries no environment, which is all the authentication gate
-/// needs: how a profile authenticates is decided by its home, not its key.
+/// configured. It carries no environment, so cloud backends must be configured
+/// explicitly before their authentication can be recognized.
 fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
     HarnessProfile {
         enabled: true,
@@ -257,6 +257,11 @@ fn harness_is_authenticated_with(
 ) -> bool {
     let kind = profile.kind;
     let home = profile.home.as_path();
+    // AWS credentials can come from a role or an external credential process;
+    // there is no harness login file. Doctor probes the chain separately.
+    if profile.auth_scheme() == mj_core::config::AuthScheme::AwsCredentialChain {
+        return true;
+    }
     if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())
     {
