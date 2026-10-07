@@ -32,7 +32,8 @@ function env() {
   return {
     TYPESAFE_API_KEY: "test-key",
     TURN_RATE_LIMITER: { async limit() { throw new Error("separate budget"); } },
-    CONTINUATION_RATE_LIMITER: { async limit() { return { success: true }; } },
+    CONTINUATION_RATE_LIMITER: { async limit() { throw new Error("separate budget"); } },
+    GITHUB_ITEM_RATE_LIMITER: { async limit() { return { success: true }; } },
   };
 }
 

@@ -43,7 +43,7 @@ mj-client = { path = "mj-client", package = "brokk-mj-client", version = "2.34.0
 mj-controller = { path = "mj-controller", package = "brokk-mj-controller", version = "2.34.0" }
 mj-chat = { path = "mj-chat", package = "brokk-mj-chat", version = "2.34.0" }
 mj-tui = { path = "mj-tui", package = "brokk-mj-tui", version = "2.34.0" }
-sessionwiki = { package = "brokk-sessionwiki", version = "0.30.1" }
+sessionwiki = "0.33.1"
 
 # Every external dependency that two or more crates share is declared once
 # here, so a version can only be raised in one place. Each entry carries the

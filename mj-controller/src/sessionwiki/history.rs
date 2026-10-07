@@ -209,10 +209,10 @@ pub(super) fn query_in_with(
         } => {
             let row = resolve(connection, session_id, ownership, cache)?;
             let session = index::session_from_index(connection, &row)?;
-            let found = sessionwiki::grep::grep_session(
+            let found = super::transcript_grep::grep_session(
                 &session,
                 query,
-                &sessionwiki::grep::GrepOpts {
+                &super::transcript_grep::GrepOpts {
                     context_messages: (*context).min(5),
                     chars: 2000,
                     ..Default::default()

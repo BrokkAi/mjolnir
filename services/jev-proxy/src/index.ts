@@ -13,6 +13,7 @@ export interface Env {
   TURN_RATE_LIMITER: RateLimit;
   HELP_RATE_LIMITER?: RateLimit;
   CONTINUATION_RATE_LIMITER?: RateLimit;
+  GITHUB_ITEM_RATE_LIMITER?: RateLimit;
 }
 
 const UPSTREAM = "https://api.typesafe.ai/v1/systemone";
@@ -331,7 +332,7 @@ export default {
     }
     const key = env.TYPESAFE_API_KEY?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
-    const limiter = continuation || githubItem ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
+    const limiter = githubItem ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
     try {
       const { success } = await limiter.limit({ key: ip });
