@@ -18,6 +18,33 @@ pub(crate) fn configured_repository_identity(
     repository.local.as_deref().map(root_identity).transpose()
 }
 
+/// Read an identity while searching configured bundles. A stale local source
+/// makes its bundle ineligible for reuse, but must not prevent unrelated
+/// bundles from being considered.
+pub(crate) fn configured_repository_identity_for_lookup(
+    bundle_id: &str,
+    repository: &ProjectRepository,
+) -> Option<RepositoryIdentity> {
+    match configured_repository_identity(repository) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let path = repository
+                .local
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<not configured>".to_owned());
+            tracing::warn!(
+                bundle_id = %bundle_id,
+                repository_id = %repository.id,
+                path = %path,
+                error = %error,
+                "skipping configured repository whose identity cannot be read"
+            );
+            None
+        }
+    }
+}
+
 /// Reuse an exact configured bundle or synthesize one from all detected roots.
 pub fn resolve_bundle(
     config: &Config,
@@ -42,13 +69,13 @@ pub fn resolve_bundle(
             .get(bundle_id)
             .with_context(|| format!("unknown bundle {bundle_id:?}"))?;
         ensure!(
-            bundle_matches(bundle, &detected, &primary_identity)?,
+            bundle_matches(bundle_id, bundle, &detected, &primary_identity)?,
             "bundle {bundle_id:?} does not exactly match the session's edited Git roots and cwd primary repository"
         );
         return Ok(BundleResolution::Existing(bundle_id.to_owned()));
     }
     for (id, bundle) in &config.bundles {
-        if bundle_matches(bundle, &detected, &primary_identity)? {
+        if bundle_matches(id, bundle, &detected, &primary_identity)? {
             return Ok(BundleResolution::Existing(id.clone()));
         }
     }
@@ -107,27 +134,31 @@ pub fn resolve_bundle(
 }
 
 pub(crate) fn bundle_matches(
+    bundle_id: &str,
     bundle: &ProjectBundle,
     detected: &BTreeSet<RepositoryIdentity>,
     primary: &RepositoryIdentity,
 ) -> Result<bool> {
-    let identities = bundle
+    let identity_results = bundle
         .repositories
         .iter()
-        .map(configured_repository_identity)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<BTreeSet<_>>();
-    Ok(identities.len() == bundle.repositories.len()
-        && &identities == detected
-        && bundle
-            .primary()
-            .map(configured_repository_identity)
-            .transpose()?
-            .flatten()
-            .as_ref()
-            == Some(primary))
+        .map(|repository| configured_repository_identity_for_lookup(bundle_id, repository))
+        .collect::<Vec<_>>();
+    if identity_results.iter().any(Option::is_none) {
+        return Ok(false);
+    }
+    let identities = identity_results.into_iter().flatten().collect::<Vec<_>>();
+    let identity_set = identities.iter().cloned().collect::<BTreeSet<_>>();
+    let Some(primary_index) = bundle
+        .repositories
+        .iter()
+        .position(|repository| repository.id == bundle.primary_repo)
+    else {
+        return Ok(false);
+    };
+    Ok(identity_set.len() == bundle.repositories.len()
+        && &identity_set == detected
+        && identities.get(primary_index) == Some(primary))
 }
 
 /// Return the matching configured bundle for an origin. It accepts setup's
