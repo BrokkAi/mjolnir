@@ -7,8 +7,8 @@
 use crate::config::HarnessKind;
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
-pub const CODEX_ACP_VERSION: &str = "1.13.5";
-pub const CODEX_CLI_VERSION: &str = "0.159.1";
+pub const CODEX_ACP_VERSION: &str = "1.13.6";
+pub const CODEX_CLI_VERSION: &str = "0.160.1";
 pub const CLAUDE_ACP_VERSION: &str = "0.86.0";
 pub const KIMI_VERSION: &str = "2.1.1";
 pub const GROK_VERSION: &str = "1.0.40";
@@ -105,8 +105,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "bin/muse-acp",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.13.5_codex-0.159.1",
-            display_version: "@brokkai/codex-acp 1.13.5 + codex 0.159.1",
+            install_id: "brokkai-codex-acp-1.13.6_codex-0.160.1",
+            display_version: "@brokkai/codex-acp 1.13.6 + codex 0.160.1",
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {

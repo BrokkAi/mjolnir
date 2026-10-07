@@ -1578,6 +1578,7 @@ async fn elicitation_bridge(
     initialized: oneshot::Sender<serde_json::Value>,
     answered: oneshot::Sender<serde_json::Value>,
     mut routed: Option<oneshot::Sender<serde_json::Value>>,
+    finish_before_answer: bool,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -1602,15 +1603,17 @@ async fn elicitation_bridge(
             if let Some(answered) = answered.take() {
                 let _ = answered.send(message);
             }
-            let response = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": prompt_id.take().expect("prompt id recorded"),
-                "result": {"stopReason": "end_turn"},
-            });
-            write
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .expect("finish prompt");
+            if let Some(prompt_id) = prompt_id.take() {
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": prompt_id,
+                    "result": {"stopReason": "end_turn"},
+                });
+                write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .expect("finish prompt");
+            }
             continue;
         }
         let Some(method) = message.get("method").and_then(serde_json::Value::as_str) else {
@@ -1636,7 +1639,7 @@ async fn elicitation_bridge(
                 "id": id,
                 "result": {"sessionId": "scripted", "modes": {
                     "currentModeId": "default",
-                    "availableModes": [{"id": "default", "name": "Default"}, {"id": "auto", "name": "Auto"}]
+                    "availableModes": [{"id": "default", "name": "Default"}, {"id": "auto", "name": "Auto"}, {"id": "agent", "name": "Guardian"}]
                 }},
             }),
             "session/set_mode" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
@@ -1657,12 +1660,24 @@ async fn elicitation_bridge(
         {
             break;
         }
+        if method == "session/prompt" && finish_before_answer {
+            let response = serde_json::json!({
+                "jsonrpc": "2.0", "id": prompt_id.take().unwrap(),
+                "result": {"stopReason": "end_turn"},
+            });
+            write
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        }
     }
 }
 
+// Hard-won: #1265: an async question must remain answerable after its originating turn ends.
 #[tokio::test]
 async fn form_elicitation_is_advertised_rendered_and_answered() {
-    answer_architecture_form(HarnessKind::Claude, None).await;
+    answer_architecture_form(HarnessKind::Claude, None, false).await;
+    answer_architecture_form(HarnessKind::Codex, None, true).await;
 }
 
 /// Drives one prompt whose question the person answers. It fails if any
@@ -1670,6 +1685,7 @@ async fn form_elicitation_is_advertised_rendered_and_answered() {
 async fn answer_architecture_form(
     harness: HarnessKind,
     routed: Option<oneshot::Sender<serde_json::Value>>,
+    finish_before_answer: bool,
 ) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
     let (initialized_tx, initialized_rx) = oneshot::channel();
@@ -1679,6 +1695,7 @@ async fn answer_architecture_form(
         initialized_tx,
         answered_tx,
         routed,
+        finish_before_answer,
     ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
@@ -1738,17 +1755,38 @@ async fn answer_architecture_form(
         })
         .await
         .unwrap();
+    let mut prompt_finished = false;
     let request = loop {
         let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
             .await
             .expect("elicitation arrives")
             .expect("runtime event channel stays open");
+        if let RuntimeEvent::PromptFinished {
+            ref stop_reason, ..
+        } = event
+        {
+            assert_eq!(stop_reason, "EndTurn");
+            prompt_finished = true;
+        }
         if let RuntimeEvent::ElicitationRequested { request } = event {
             break request;
         }
     };
     assert_eq!(request.message, "Choose an architecture");
     assert_eq!(request.fields[0].title, "Architecture");
+    if finish_before_answer && !prompt_finished {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+                .await
+                .expect("async questions must not block the prompt finishing")
+                .unwrap();
+            if let RuntimeEvent::PromptFinished { stop_reason, .. } = event {
+                assert_eq!(stop_reason, "EndTurn");
+                break;
+            }
+            assert!(!matches!(event, RuntimeEvent::ElicitationResolved { .. }));
+        }
+    }
     let (resolved_tx, resolved_rx) = oneshot::channel();
     request_tx
         .send(CommandRequest::ResolveElicitation {
