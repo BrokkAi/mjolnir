@@ -2225,7 +2225,14 @@ pub(super) async fn serve_client_with_memory(
                     .await?;
                 continue;
             }
-            let wakes_dispatch = matches!(&envelope.request, RelayRequest::Submit { .. } | RelayRequest::ReserveIdle { .. });
+            let wakes_dispatch = matches!(
+                &envelope.request,
+                RelayRequest::Submit { .. } | RelayRequest::ReserveIdle { .. }
+            );
+            let mailbox_lease_changed = matches!(
+                &envelope.request,
+                RelayRequest::DrainMailbox { .. } | RelayRequest::AckMailbox { .. }
+            );
             let checkpoint_change = checkpoint_change(&envelope.request);
             let close_request = matches!(
                 &envelope.request,
@@ -2304,7 +2311,7 @@ pub(super) async fn serve_client_with_memory(
                     None => {}
                 }
             }
-            if wakes_dispatch && accepted {
+            if (wakes_dispatch && accepted) || mailbox_lease_changed {
                 wake_dispatch(&relay, &dispatch_wake)?;
             }
             overlay_preparation_state(&mut response, &current_preparation);

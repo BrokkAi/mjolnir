@@ -61,6 +61,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     // A monotonic deadline keeps unrelated events and wall-clock changes from
     // restarting the wait. Only the persisted wall deadline crosses restarts.
     let mut capacity_timer: Option<(i64, tokio::time::Instant)> = None;
+    let mut mailbox_lease_timer: Option<(i64, tokio::time::Instant)> = None;
     // A stop applied to a turn Claude Code started on its own, keyed by that
     // turn's first ordinal, and when to end the turn if nothing answers it.
     let mut stop_timer: Option<(u64, tokio::time::Instant)> = None;
@@ -142,6 +143,23 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             });
         }
         let wake_at = capacity_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
+        let mailbox_lease_deadline = relay
+            .lock()
+            .expect("relay state lock poisoned")
+            .mailbox_hook_lease_deadline();
+        if mailbox_lease_timer.map(|(deadline, _)| deadline) != mailbox_lease_deadline {
+            mailbox_lease_timer = mailbox_lease_deadline.map(|deadline| {
+                let remaining = deadline
+                    .saturating_sub(mj_core::clock::epoch_millis())
+                    .max(0) as u64;
+                (
+                    deadline,
+                    tokio::time::Instant::now() + std::time::Duration::from_millis(remaining),
+                )
+            });
+        }
+        let mailbox_lease_wake_at =
+            mailbox_lease_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
         let unanswered_stop = relay
             .lock()
             .expect("relay state lock poisoned")
@@ -217,6 +235,23 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     session_configured,
                     &mut user_shells,
                 )?;
+            }
+            _ = tokio::time::sleep_until(mailbox_lease_wake_at), if mailbox_lease_deadline.is_some() && !held => {
+                let deadline = mailbox_lease_deadline.expect("guarded mailbox lease timer");
+                let expired = relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .expire_mailbox_hook_lease_and_promote(mj_core::clock::epoch_millis())?;
+                if expired {
+                    dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                } else {
+                    // A wall-clock adjustment can make a monotonic timer fire before
+                    // the persisted deadline. Retry with a bounded delay, not a spin.
+                    mailbox_lease_timer = Some((
+                        deadline,
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                    ));
+                }
             }
             _ = tokio::time::sleep_until(wake_at), if capacity_deadline.is_some() && !held => {
                 let admitted = relay.lock().expect("relay state lock poisoned")

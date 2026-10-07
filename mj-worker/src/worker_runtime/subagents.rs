@@ -165,7 +165,7 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: b
         return Ok(());
     };
     existing["command"] = serde_json::Value::String(command);
-    existing["timeout"] = serde_json::json!(10);
+    existing["timeout"] = serde_json::json!(mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
     let mut resolved = serde_json::to_vec_pretty(&settings)?;
     resolved.push(b'\n');
     if resolved != body {
@@ -394,7 +394,7 @@ fn configure_codex_mailbox_hook(
         }) {
             let handler = &mut handlers[handler_index];
             handler["command"] = serde_json::Value::String(command.clone());
-            handler["timeout"] = serde_json::json!(10);
+            handler["timeout"] = serde_json::json!(mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
             found = Some((group_index, handler_index));
             break;
         }
@@ -406,7 +406,7 @@ fn configure_codex_mailbox_hook(
             "hooks": [{
                 "type": "command",
                 "command": command.clone(),
-                "timeout": 10
+                "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
             }]
         }));
         (groups.len() - 1, 0)
@@ -435,7 +435,7 @@ fn codex_mailbox_hook_hash(command: &str) -> Result<String> {
         "hooks": [{
             "type": "command",
             "command": command,
-            "timeout": 10,
+            "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS,
             "async": false
         }]
     });
@@ -886,6 +886,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(mailbox_hooks.len(), 1);
+        assert_eq!(
+            mailbox_hooks[0]["timeout"],
+            mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
+        );
         let worker = std::env::current_exe().unwrap();
         let expected_command = format!(
             "{CLAUDE_MAILBOX_HOOK_MARKER}{} worker mailbox-hook --socket {} --event PostToolBatch",
@@ -938,7 +942,7 @@ mod tests {
         assert_eq!(groups.len(), 2);
         let hook = &groups[1]["hooks"][0];
         assert_eq!(hook["type"], "command");
-        assert_eq!(hook["timeout"], 10);
+        assert_eq!(hook["timeout"], mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
         let worker = std::env::current_exe().unwrap();
         let socket = worker_root.path().join("control.sock");
         let expected_command = format!(

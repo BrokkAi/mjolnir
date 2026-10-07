@@ -60,6 +60,16 @@ async fn process_pending(
     sessions: SessionManagerControl,
     stop: CancellationToken,
 ) -> Result<()> {
+    let pruned_stopped_children =
+        tokio::task::spawn_blocking(crate::database::prune_pending_messages_for_stopped_children)
+            .await
+            .context("stopped child message cleanup task failed")??;
+    if pruned_stopped_children > 0 {
+        tracing::info!(
+            count = pruned_stopped_children,
+            "removed pending mailbox messages for stopped children"
+        );
+    }
     if !state
         .controller_projection()
         .config

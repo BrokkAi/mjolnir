@@ -4677,6 +4677,10 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
             mj_core::targets::posix_quote(&format!("{remote_root}/control.sock"))
         )
     );
+    assert_eq!(
+        mailbox_hooks[0]["timeout"],
+        mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
+    );
 
     configure_claude_mailbox_hook(stage.path(), "/worker path/session", true).unwrap();
     let restaged: serde_json::Value =

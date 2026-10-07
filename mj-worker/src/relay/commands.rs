@@ -1,7 +1,5 @@
 use super::*;
 
-const MAILBOX_HOOK_LEASE_TIMEOUT_MS: i64 = 30_000;
-
 pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
     if value.len() < 8
         || value.len() > 128
@@ -1862,7 +1860,8 @@ impl DurableRelay {
             lease_id: format!("mailbox-hook-{}", mj_core::hex::lower_hex(random)),
             events: events.clone(),
             hook_event: hook_event.to_owned(),
-            expires_at_ms: epoch_millis().saturating_add(MAILBOX_HOOK_LEASE_TIMEOUT_MS),
+            expires_at_ms: epoch_millis()
+                .saturating_add(mj_core::mailbox::MAILBOX_HOOK_LEASE_TIMEOUT_MS),
         };
         let text = mj_core::mailbox::render_mailbox_events(&events);
         self.append_relay_event(
@@ -1916,6 +1915,26 @@ impl DurableRelay {
             self.return_mailbox_hook_lease(mj_core::relay::MailboxHookLeaseReturnReason::Timeout)?;
         }
         Ok(())
+    }
+
+    pub fn mailbox_hook_lease_deadline(&self) -> Option<i64> {
+        self.snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .map(|lease| lease.expires_at_ms)
+    }
+
+    /// Return an expired hook lease and immediately reconsider the idle wake.
+    pub fn expire_mailbox_hook_lease_and_promote(&mut self, now_ms: i64) -> Result<bool> {
+        if self
+            .mailbox_hook_lease_deadline()
+            .is_none_or(|deadline| deadline > now_ms)
+        {
+            return Ok(false);
+        }
+        self.expire_mailbox_hook_lease_at(now_ms)?;
+        self.promote_next_queued_command()?;
+        Ok(true)
     }
 
     pub(super) fn return_mailbox_hook_lease(

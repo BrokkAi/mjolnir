@@ -88,6 +88,8 @@ To see it working: in an isolated instance, start a Codex session and a Claude s
 
 2026-10-07: Keep the GitHub credential off plaintext transports by permitting HTTP `api_base` only for loopback hosts. Re-query issue comments, review comments, and reviews from five seconds before the durable cursor, then rely on stable per-event keys. Store one in-memory rate-limit deadline per token hash so all repositories share Retry-After and X-RateLimit-Reset backoff across failed polls. External event writes hold handoff admission through database completion and response; same-key retries compare target, text, and wake while retaining the first row's timestamp.
 
+2026-10-07: Accept that a pull request closed and reopened entirely between polls produces no lifecycle notice; current-state polling reports only transitions visible between stored and fetched states.
+
 ## Outcomes & Retrospective
 
 (not yet)

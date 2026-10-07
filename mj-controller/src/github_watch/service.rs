@@ -33,6 +33,43 @@ const MAX_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Result<GithubItemVerdict>> + Send + 'a>>;
 
+#[derive(Clone)]
+struct PollControl(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl PollControl {
+    fn new(enabled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(enabled))
+    }
+
+    #[cfg(test)]
+    fn always_enabled() -> Self {
+        Self::new(|| true)
+    }
+
+    fn check_enabled(&self) -> Result<()> {
+        if (self.0)() {
+            Ok(())
+        } else {
+            Err(anyhow::Error::new(MailboxesDisabled))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MailboxesDisabled;
+
+impl std::fmt::Display for MailboxesDisabled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("agent mailboxes disabled during GitHub poll")
+    }
+}
+
+impl std::error::Error for MailboxesDisabled {}
+
+fn is_mailboxes_disabled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MailboxesDisabled>().is_some()
+}
+
 trait GithubClassifier: Send + Sync {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a>;
 }
@@ -96,9 +133,17 @@ async fn run_with_classifier(
                 let config = config.clone();
                 let classifier = classifier.clone();
                 let stop = stop.clone();
+                let poll_state = state.clone();
                 jobs.spawn(async move {
+                    let control = PollControl::new(move || {
+                        poll_state
+                            .controller_projection()
+                            .config
+                            .agent_mailboxes_enabled()
+                    });
                     let result =
-                        poll_repository(&owner, &repo, sessions, config, classifier, stop).await;
+                        poll_repository(&owner, &repo, sessions, config, classifier, stop, control)
+                            .await;
                     (owner, repo, result)
                 });
             }
@@ -118,6 +163,7 @@ async fn run_with_classifier(
                 result = jobs.join_next() => {
                     match result.context("GitHub watch task disappeared")? {
                         Ok((owner, repo, Ok(()))) => tracing::debug!(%owner, %repo, "GitHub repository poll completed"),
+                        Ok((owner, repo, Err(error))) if is_mailboxes_disabled(&error) => tracing::debug!(%owner, %repo, "GitHub repository poll stopped because agent mailboxes were disabled"),
                         Ok((owner, repo, Err(error))) => tracing::warn!(%owner, %repo, error = %format!("{error:#}"), "GitHub repository poll failed; durable cursors remain available for retry"),
                         Err(error) => tracing::warn!(%error, "GitHub repository poll task panicked"),
                     }
@@ -161,10 +207,12 @@ async fn poll_repository(
     config: GithubWatchConfig,
     classifier: Arc<dyn GithubClassifier>,
     stop: CancellationToken,
+    control: PollControl,
 ) -> Result<()> {
     if stop.is_cancelled() {
         return Ok(());
     }
+    control.check_enabled()?;
     let watches = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
@@ -190,7 +238,7 @@ async fn poll_repository(
         .github_token_for_session(token_session)
         .await
         .context("resolve GitHub watch credential")?;
-    let api = GithubApi::new(&config.api_base, token)?;
+    let api = GithubApi::new_with_control(&config.api_base, token, control)?;
     poll_repository_with_api(owner, repo, sessions, classifier, &api, stop).await
 }
 
@@ -202,6 +250,7 @@ async fn poll_repository_with_api(
     api: &GithubApi,
     stop: CancellationToken,
 ) -> Result<()> {
+    api.control.check_enabled()?;
     let watches = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
@@ -229,6 +278,7 @@ async fn poll_repository_items(
     api: &GithubApi,
     stop: CancellationToken,
 ) -> Result<()> {
+    api.control.check_enabled()?;
     let old_cursor = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
@@ -249,6 +299,7 @@ async fn poll_repository_items(
             cursor.items_etag.as_deref(),
         )
         .await?;
+    api.control.check_enabled()?;
     if first_sight {
         let max = response
             .items
@@ -296,10 +347,18 @@ async fn poll_repository_items(
     items.sort_by(|a, b| compare_watermark(&a.created_at, a.id, &b.created_at, b.id));
     let mut classified_items = 0usize;
     let mut skipped_items = 0usize;
-    let mut last_completed = None;
+    let mut last_completed: Option<&GithubApiItem> = None;
     for (index, item) in items.iter().enumerate() {
         if stop.is_cancelled() {
             return Ok(());
+        }
+        if let Err(error) = api.control.check_enabled() {
+            if is_mailboxes_disabled(&error) {
+                save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false)
+                    .await?;
+                return Ok(());
+            }
+            return Err(error);
         }
         let classified = blocking_db({
             let owner = owner.to_owned();
@@ -321,23 +380,36 @@ async fn poll_repository_items(
             skipped_items = items.len() - index;
             break;
         }
-        let owner = owner.to_owned();
-        let repo = repo.to_owned();
+        let item_owner = owner.to_owned();
+        let item_repo = repo.to_owned();
         let item = item.clone();
         let classifier = classifier.clone();
-        stream::iter(pending)
+        let control = api.control.clone();
+        let classification_results = stream::iter(pending)
             .map(|session| {
-                let owner = owner.clone();
-                let repo = repo.clone();
+                let owner = item_owner.clone();
+                let repo = item_repo.clone();
                 let item = item.clone();
                 let classifier = classifier.clone();
-                async move { classify_for_session(&owner, &repo, item, session, classifier).await }
+                let control = control.clone();
+                async move {
+                    classify_for_session(&owner, &repo, item, session, classifier, control).await
+                }
             })
             .buffer_unordered(CLASSIFICATION_CONCURRENCY)
             .collect::<Vec<Result<()>>>()
-            .await
+            .await;
+        let classification_result = classification_results
             .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>();
+        if let Err(error) = classification_result {
+            if is_mailboxes_disabled(&error) {
+                save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false)
+                    .await?;
+                return Ok(());
+            }
+            return Err(error);
+        }
         classified_items += 1;
         last_completed = Some(&items[index]);
     }
@@ -348,33 +420,25 @@ async fn poll_repository_items(
     let max = items
         .iter()
         .max_by(|a, b| compare_watermark(&a.created_at, a.id, &b.created_at, b.id));
-    let next_cursor = crate::database::GithubRepoCursor {
-        items_watermark_at: if partial {
-            last_completed
-                .map(|item| item.created_at.clone())
-                .or(cursor.items_watermark_at.clone())
+    if let Err(error) = api.control.check_enabled() {
+        if is_mailboxes_disabled(&error) {
+            save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false).await?;
+            return Ok(());
+        }
+        return Err(error);
+    }
+    save_item_progress(
+        owner,
+        repo,
+        &cursor,
+        response.etag,
+        if partial {
+            last_completed.cloned()
         } else {
-            max.map(|item| item.created_at.clone())
-                .or(cursor.items_watermark_at.clone())
+            max.cloned()
         },
-        items_watermark_id: if partial {
-            last_completed
-                .map(|item| item.id.min(i64::MAX as u64) as i64)
-                .or(cursor.items_watermark_id)
-        } else {
-            max.map(|item| item.id.min(i64::MAX as u64) as i64)
-                .or(cursor.items_watermark_id)
-        },
-        // A capped batch cannot reuse its ETag: fetch the remaining items
-        // again after advancing through this fully classified prefix.
-        items_etag: if partial { None } else { response.etag },
-        comments_cursor: cursor.comments_cursor,
-    };
-    blocking_db({
-        let owner = owner.to_owned();
-        let repo = repo.to_owned();
-        move || crate::database::save_github_repo_cursor(&owner, &repo, next_cursor)
-    })
+        !partial,
+    )
     .await?;
     Ok(())
 }
@@ -385,6 +449,7 @@ async fn classify_for_session(
     item: GithubApiItem,
     session: SessionRecord,
     classifier: Arc<dyn GithubClassifier>,
+    control: PollControl,
 ) -> Result<()> {
     let repo_label = format!("{owner}/{repo}");
     let item_label = item.as_str();
@@ -402,7 +467,9 @@ async fn classify_for_session(
         },
         session: SessionContext { recent_turns },
     };
+    control.check_enabled()?;
     let verdict = classifier.classify(&evidence).await?;
+    control.check_enabled()?;
     let event = if verdict.interested && !verdict.created {
         let key = format!(
             "github:{repo_label}#{}:interest:{}",
@@ -441,6 +508,34 @@ async fn classify_for_session(
     .await
 }
 
+async fn save_item_progress(
+    owner: &str,
+    repo: &str,
+    previous: &crate::database::GithubRepoCursor,
+    etag: Option<String>,
+    watermark: Option<GithubApiItem>,
+    completed_all: bool,
+) -> Result<()> {
+    let next_cursor = crate::database::GithubRepoCursor {
+        items_watermark_at: watermark
+            .as_ref()
+            .map(|item| item.created_at.clone())
+            .or_else(|| previous.items_watermark_at.clone()),
+        items_watermark_id: watermark
+            .map(|item| item.id.min(i64::MAX as u64) as i64)
+            .or(previous.items_watermark_id),
+        // Partial progress must fetch again; only a complete feed can reuse its ETag.
+        items_etag: completed_all.then_some(etag).flatten(),
+        comments_cursor: previous.comments_cursor.clone(),
+    };
+    blocking_db({
+        let owner = owner.to_owned();
+        let repo = repo.to_owned();
+        move || crate::database::save_github_repo_cursor(&owner, &repo, next_cursor)
+    })
+    .await
+}
+
 async fn recent_turns(session_id: String) -> Result<String> {
     tokio::task::spawn_blocking(move || {
         let Some(materialized) = crate::database::load_materialized_session(&session_id)? else {
@@ -464,6 +559,7 @@ async fn poll_repository_comments(
     if watches.is_empty() || stop.is_cancelled() {
         return Ok(());
     }
+    api.control.check_enabled()?;
     let cursor = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
@@ -474,6 +570,7 @@ async fn poll_repository_comments(
     let Some(since) = cursor.comments_cursor else {
         let mut initialized = cursor;
         initialized.comments_cursor = Some(now_rfc3339());
+        api.control.check_enabled()?;
         return blocking_db({
             let owner = owner.to_owned();
             let repo = repo.to_owned();
@@ -489,7 +586,7 @@ async fn poll_repository_comments(
         api.comment_pages(owner, repo, "pulls/comments", &overlapping_since)
             .await?,
     );
-    let credential_login = api.credential_login().await;
+    let credential_login = api.credential_login().await?;
     let mut watches_by_number = BTreeMap::<u64, Vec<crate::database::GithubItemWatch>>::new();
     for watch in watches {
         watches_by_number
@@ -501,6 +598,7 @@ async fn poll_repository_comments(
     let mut outbox = Vec::new();
     let mut newest = None::<String>;
     for comment in comments {
+        api.control.check_enabled()?;
         if let Some(timestamp) = comment_timestamp(&comment)
             && newest
                 .as_ref()
@@ -560,6 +658,7 @@ async fn poll_repository_comments(
         if stop.is_cancelled() {
             return Ok(());
         }
+        api.control.check_enabled()?;
         let response = api
             .pull_request(
                 owner,
@@ -568,6 +667,7 @@ async fn poll_repository_comments(
                 watch.pull_request_etag.as_deref(),
             )
             .await?;
+        api.control.check_enabled()?;
         let state = if response.not_modified {
             watch
                 .pull_request_state
@@ -611,6 +711,7 @@ async fn poll_repository_comments(
             )
             .await?
         {
+            api.control.check_enabled()?;
             let Some(timestamp) = review["submitted_at"].as_str() else {
                 continue;
             };
@@ -659,6 +760,7 @@ async fn poll_repository_comments(
     let comments_cursor = newest
         .filter(|newest| timestamp_precedes(&since, newest))
         .unwrap_or(since);
+    api.control.check_enabled()?;
     let owner = owner.to_owned();
     let repo = repo.to_owned();
     blocking_db(move || {
@@ -686,6 +788,7 @@ async fn authored_during_session_turn(
     let Some(created_at_ms) = created_at.and_then(timestamp_millis) else {
         return false;
     };
+    let created_at_ms = floor_to_second(created_at_ms);
     if !turn_windows_by_session.contains_key(session_id) {
         let owned_session_id = session_id.to_owned();
         let loaded = blocking_db(move || {
@@ -710,12 +813,25 @@ async fn authored_during_session_turn(
         .and_then(Option::as_ref)
         .is_some_and(|windows| {
             windows.iter().any(|window| {
-                created_at_ms >= window.started_at_ms
-                    && window
-                        .completed_at_ms
-                        .is_none_or(|completed_at_ms| created_at_ms < completed_at_ms)
+                created_at_ms >= floor_to_second(window.started_at_ms)
+                    && window.completed_at_ms.is_none_or(|completed_at_ms| {
+                        created_at_ms < ceil_to_second(completed_at_ms)
+                    })
             })
         })
+}
+
+fn floor_to_second(timestamp_ms: i64) -> i64 {
+    timestamp_ms.div_euclid(1_000) * 1_000
+}
+
+fn ceil_to_second(timestamp_ms: i64) -> i64 {
+    let floor = floor_to_second(timestamp_ms);
+    if floor == timestamp_ms {
+        timestamp_ms
+    } else {
+        floor + 1_000
+    }
 }
 
 fn pull_request_lifecycle_event(
@@ -936,7 +1052,14 @@ struct GithubPage {
 #[derive(Default)]
 struct GithubCredentialState {
     rate_limit_until: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    login: tokio::sync::OnceCell<Option<String>>,
+    login: tokio::sync::Mutex<GithubLoginCache>,
+}
+
+#[derive(Default)]
+struct GithubLoginCache {
+    success: Option<String>,
+    retry_at: Option<tokio::time::Instant>,
+    consecutive_failures: u8,
 }
 
 fn credential_state(token: Option<&str>) -> Arc<GithubCredentialState> {
@@ -973,10 +1096,16 @@ struct GithubApi {
     base: String,
     client: reqwest::Client,
     credential: Arc<GithubCredentialState>,
+    control: PollControl,
 }
 
 impl GithubApi {
+    #[cfg(test)]
     fn new(base: &str, token: Option<String>) -> Result<Self> {
+        Self::new_with_control(base, token, PollControl::always_enabled())
+    }
+
+    fn new_with_control(base: &str, token: Option<String>, control: PollControl) -> Result<Self> {
         let parsed = url::Url::parse(base).context("parse GitHub API base URL")?;
         let host = parsed
             .host_str()
@@ -1015,6 +1144,7 @@ impl GithubApi {
             base: base.trim_end_matches('/').to_owned(),
             client: builder.build()?,
             credential,
+            control,
         })
     }
 
@@ -1165,27 +1295,55 @@ impl GithubApi {
         self.get(request).await
     }
 
-    async fn credential_login(&self) -> Option<String> {
-        self.credential
-            .login
-            .get_or_init(|| async {
-                match self.get_json("user", &[], None).await {
-                    Ok(user) => user["login"].as_str().map(str::to_owned),
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %format!("{error:#}"),
-                            "GitHub credential login is unknown; comment events retain wake"
-                        );
-                        None
-                    }
-                }
-            })
-            .await
-            .clone()
+    async fn credential_login(&self) -> Result<Option<String>> {
+        self.control.check_enabled()?;
+        let mut cache = self.credential.login.lock().await;
+        if let Some(login) = &cache.success {
+            return Ok(Some(login.clone()));
+        }
+        if cache
+            .retry_at
+            .is_some_and(|retry_at| retry_at > tokio::time::Instant::now())
+        {
+            return Ok(None);
+        }
+        let user = self.get_json("user", &[], None).await;
+        self.control.check_enabled()?;
+        let lookup = user.and_then(|user| {
+            user["login"]
+                .as_str()
+                .filter(|login| !login.is_empty())
+                .map(str::to_owned)
+                .context("GitHub credential response has no login")
+        });
+        match lookup {
+            Ok(login) => {
+                cache.success = Some(login.clone());
+                cache.retry_at = None;
+                cache.consecutive_failures = 0;
+                Ok(Some(login))
+            }
+            Err(error) if is_mailboxes_disabled(&error) => Err(error),
+            Err(error) => {
+                cache.consecutive_failures = cache.consecutive_failures.saturating_add(1);
+                let exponent = u32::from(cache.consecutive_failures.saturating_sub(1).min(8));
+                let retry_delay =
+                    Duration::from_secs(1_u64 << exponent).min(Duration::from_secs(5 * 60));
+                cache.retry_at = Some(tokio::time::Instant::now() + retry_delay);
+                tracing::debug!(
+                    error = %format!("{error:#}"),
+                    retry_seconds = retry_delay.as_secs(),
+                    "GitHub credential login is unknown; lookup will retry after backoff"
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn get(&self, request: reqwest::RequestBuilder) -> Result<GithubResponse> {
+        self.control.check_enabled()?;
         self.wait_for_rate_limit().await?;
+        self.control.check_enabled()?;
         let response = request.send().await.context("request GitHub REST API")?;
         self.record_rate_limit(&response).await;
         let status = response.status();
@@ -1230,11 +1388,15 @@ impl GithubApi {
 
     async fn wait_for_rate_limit(&self) -> Result<()> {
         loop {
+            self.control.check_enabled()?;
             let deadline = *self.credential.rate_limit_until.lock().await;
             let Some(deadline) = deadline else {
                 return Ok(());
             };
-            tokio::time::sleep_until(deadline).await;
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {},
+                _ = tokio::time::sleep(CONFIG_RECHECK_INTERVAL) => continue,
+            }
             let now = tokio::time::Instant::now();
             let mut shared_deadline = self.credential.rate_limit_until.lock().await;
             if shared_deadline.is_some_and(|current| current <= now) {
@@ -1310,13 +1472,135 @@ mod tests {
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const CHILD: &str = "MJ_GITHUB_WATCH_INTEGRATION_CHILD";
 
     #[derive(Clone)]
     struct RateLimitServer {
         accepted: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct LoginRetryServer {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct DisablePollServer {
+        enabled: Arc<AtomicBool>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[tokio::test]
+    async fn github_login_retries_after_a_transient_failure() {
+        let state = LoginRetryServer {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/user", get(retrying_user))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let api = GithubApi::new(&base, Some("watch-login-retry-test-token".into())).unwrap();
+
+        assert_eq!(api.credential_login().await.unwrap(), None);
+        assert_eq!(api.credential_login().await.unwrap(), None);
+        assert_eq!(state.requests.load(Ordering::SeqCst), 1);
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(
+            api.credential_login().await.unwrap().as_deref(),
+            Some("watcher-bot")
+        );
+        assert_eq!(
+            api.credential_login().await.unwrap().as_deref(),
+            Some("watcher-bot")
+        );
+        assert_eq!(state.requests.load(Ordering::SeqCst), 2);
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn watcher_stops_classification_and_requests_when_mailboxes_are_disabled() {
+        if !run_isolated_child(
+            "watcher_stops_classification_and_requests_when_mailboxes_are_disabled",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut session = crate::database::test_session("disable-poll-session", "project");
+        session.state = mj_core::state::SessionState::Running;
+        crate::database::save_session(&session).unwrap();
+        let old = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        crate::database::save_github_repo_cursor(
+            "acme",
+            "repo",
+            crate::database::GithubRepoCursor {
+                items_watermark_at: Some(old.clone()),
+                items_watermark_id: Some(1),
+                items_etag: None,
+                comments_cursor: Some(now_rfc3339()),
+            },
+        )
+        .unwrap();
+
+        let state = DisablePollServer {
+            enabled: Arc::new(AtomicBool::new(true)),
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/repos/{owner}/{repo}/issues", get(disable_after_issues))
+            .route("/ping", get(count_ping))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let classifier: Arc<dyn GithubClassifier> = Arc::new(FakeClassifier {
+            calls: calls.clone(),
+        });
+        let enabled = state.enabled.clone();
+        let api = GithubApi::new_with_control(
+            &base,
+            Some("watch-disable-poll-test-token".into()),
+            PollControl::new(move || enabled.load(Ordering::SeqCst)),
+        )
+        .unwrap();
+        let error = poll_repository_with_api(
+            "acme",
+            "repo",
+            vec![session],
+            classifier,
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(is_mailboxes_disabled(&error));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "Jev is not called after opt-out"
+        );
+        assert_eq!(state.requests.load(Ordering::SeqCst), 1);
+        assert!(is_mailboxes_disabled(
+            &api.get_json("ping", &[], None).await.unwrap_err()
+        ));
+        assert_eq!(
+            state.requests.load(Ordering::SeqCst),
+            1,
+            "no request follows opt-out"
+        );
+        let cursor = crate::database::load_github_repo_cursor("acme", "repo")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.items_watermark_at.as_deref(), Some(old.as_str()));
+
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
@@ -1429,6 +1713,7 @@ mod tests {
         false
     }
 
+    // Hard-won: 193f015e: whole-second GitHub timestamps can miss turn-window suppression.
     #[tokio::test]
     async fn watcher_persists_interest_creator_watch_comments_and_restart_cursor() {
         if !run_isolated_child(
@@ -1630,15 +1915,16 @@ mod tests {
             .comments_cursor
             .unwrap();
         let cursor_at_ms = timestamp_millis(&comments_cursor).unwrap();
+        let cursor_second_ms = floor_to_second(cursor_at_ms);
         crate::database::seed_github_test_turns(
             creator_id,
-            cursor_at_ms - 3_000,
-            cursor_at_ms - 2_000,
-            cursor_at_ms - 1_000,
+            cursor_second_ms - 3_000,
+            cursor_second_ms - 2_000,
+            cursor_second_ms - 500,
         )
         .unwrap();
         let comment_at = |offset_ms: i64| {
-            DateTime::<Utc>::from_timestamp_millis(cursor_at_ms + offset_ms)
+            DateTime::<Utc>::from_timestamp_millis(cursor_second_ms + offset_ms)
                 .unwrap()
                 .to_rfc3339_opts(SecondsFormat::Millis, true)
         };
@@ -1684,6 +1970,22 @@ mod tests {
                     "body": "agent reply exactly when the turn ended",
                     "created_at": comment_at(-2_000),
                     "updated_at": comment_at(-2_000)
+                }),
+                json!({
+                    "id": 9008,
+                    "issue_url": "http://api/repos/acme/repo/issues/52",
+                    "user": {"login": "watcher-bot"},
+                    "body": "agent reply in the first GitHub timestamp second of the turn",
+                    "created_at": DateTime::<Utc>::from_timestamp_millis(
+                        cursor_second_ms - 1_000
+                    )
+                    .unwrap()
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    "updated_at": DateTime::<Utc>::from_timestamp_millis(
+                        cursor_second_ms - 1_000
+                    )
+                    .unwrap()
+                    .to_rfc3339_opts(SecondsFormat::Secs, true)
                 }),
             ];
             data.review_comments = vec![
@@ -1764,6 +2066,7 @@ mod tests {
         assert!(event("github:acme/repo#52:comment:9003").wake);
         assert!(!event("github:acme/repo#52:comment:9004").wake);
         assert!(event("github:acme/repo#52:comment:9007").wake);
+        assert!(!event("github:acme/repo#52:comment:9008").wake);
         assert!(event("github:acme/repo#52:review-comment:9005").wake);
         assert!(!event("github:acme/repo#52:review-comment:9006").wake);
         assert!(event("github:acme/repo#52:review:9101").wake);
@@ -1962,6 +2265,32 @@ mod tests {
             item["html_url"] = json!(format!("https://github.com/acme/repo/pull/{number}"));
         }
         item
+    }
+
+    async fn retrying_user(State(state): State<LoginRetryServer>) -> Response {
+        if state.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        } else {
+            Json(json!({"login": "watcher-bot"})).into_response()
+        }
+    }
+
+    async fn disable_after_issues(State(state): State<DisablePollServer>) -> Json<Vec<Value>> {
+        state.requests.fetch_add(1, Ordering::SeqCst);
+        let item = github_item(
+            2,
+            2,
+            "interesting issue after opt-out",
+            (Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+            false,
+        );
+        state.enabled.store(false, Ordering::SeqCst);
+        Json(vec![item])
+    }
+
+    async fn count_ping(State(state): State<DisablePollServer>) -> Json<Value> {
+        state.requests.fetch_add(1, Ordering::SeqCst);
+        Json(json!({"ok": true}))
     }
 
     async fn fake_issues(

@@ -2,6 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Per-request deadline for a hook's drain and acknowledgement calls.
+pub const MAILBOX_HOOK_REQUEST_TIMEOUT_SECS: u64 = 5;
+/// Harness timeout for the complete hook invocation, including output writes.
+pub const MAILBOX_HOOK_TIMEOUT_SECS: u64 = 20;
+/// Time an unacknowledged hook delivery remains leased before it is retried.
+pub const MAILBOX_HOOK_LEASE_TIMEOUT_MS: i64 = 60_000;
+
+const _: () = {
+    assert!(MAILBOX_HOOK_TIMEOUT_SECS > 2 * MAILBOX_HOOK_REQUEST_TIMEOUT_SECS);
+    assert!(MAILBOX_HOOK_LEASE_TIMEOUT_MS > (MAILBOX_HOOK_TIMEOUT_SECS as i64) * 1_000);
+};
+
 /// An external event addressed to one session.
 ///
 /// `key` is the producer's stable deduplication identity. `text` is untrusted

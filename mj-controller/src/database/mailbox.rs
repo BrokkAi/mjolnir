@@ -175,6 +175,27 @@ pub(crate) fn mark_mailbox_event_accepted(
     })
 }
 
+/// A stopped child cannot receive parent messages and cannot be resumed by
+/// `send_input`. Remove only unaccepted parent-message rows; keep accepted
+/// delivery history and events addressed to stopped primary sessions.
+pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
+    submit_database_write(
+        "prune pending messages for stopped children",
+        |connection| {
+            Ok(connection.execute(
+                "DELETE FROM mailbox_outbox
+             WHERE accepted_at IS NULL
+               AND unpark = 1
+               AND event_key LIKE 'subagent-message-%'
+               AND target_session_id IN (
+                   SELECT session_id FROM sessions WHERE state = 'stopped'
+               )",
+                [],
+            )?)
+        },
+    )
+}
+
 /// A destroyed session may be removed by an older compatible daemon that
 /// knows nothing about this outbox. Prune orphaned rows before delivery.
 pub(crate) fn prune_mailbox_events_for_missing_sessions() -> Result<usize> {

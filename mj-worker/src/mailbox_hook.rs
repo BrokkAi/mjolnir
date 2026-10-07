@@ -72,7 +72,8 @@ fn send_request(
     socket: &Path,
     request: mj_core::relay::RelayRequest,
 ) -> Result<mj_core::relay::RelayResponsePayload> {
-    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    const REQUEST_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(mj_core::mailbox::MAILBOX_HOOK_REQUEST_TIMEOUT_SECS);
     let request_id = mj_core::state::new_session_id()?;
     let mut stream = mj_core::local_sockets::connect_unix_stream(socket)
         .with_context(|| format!("connect to worker control socket {}", socket.display()))?;

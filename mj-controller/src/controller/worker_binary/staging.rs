@@ -252,13 +252,13 @@ pub(super) fn configure_claude_mailbox_hook(
         });
         if let Some(existing) = existing {
             existing["command"] = serde_json::Value::String(command);
-            existing["timeout"] = serde_json::json!(10);
+            existing["timeout"] = serde_json::json!(mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
         } else {
             groups.push(serde_json::json!({
                 "hooks": [{
                     "type": "command",
                     "command": command,
-                    "timeout": 10
+                    "timeout": mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
                 }]
             }));
         }

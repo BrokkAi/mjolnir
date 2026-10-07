@@ -993,6 +993,15 @@ impl ApiBackend {
                 );
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
+                ensure!(
+                    !self.exports.close_is_requested(child_session_id),
+                    "child session is closing; queued message was not delivered"
+                );
+                let record = self
+                    .exports
+                    .session_record(child_session_id)
+                    .context("child session no longer exists")?;
+                subagent_input::ensure_subagent_child_can_receive_work(&record, "message")?;
                 let event_key = format!("subagent-message-{}", request.request_id);
                 let event = mj_core::mailbox::MailboxEvent {
                     key: event_key.clone(),

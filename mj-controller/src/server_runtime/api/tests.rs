@@ -2471,6 +2471,101 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
     remote.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: 193f015e: a stopped child was reported queued although it could never receive the message.
+#[tokio::test]
+async fn send_message_refuses_a_stopped_child_without_queueing() {
+    if !isolated_parked_test("send_message_refuses_a_stopped_child_without_queueing") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Stopped, None);
+    let (backend, _) = parking_backend(exports, &[], Arc::new(|| {}));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "message-to-stopped-child".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "this cannot be delivered".into(),
+        },
+    };
+
+    let answer = backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(answer.is_error, "{}", answer.message);
+    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(result["status"], "failed");
+    assert!(result["error"].as_str().unwrap().contains("Stopped"));
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("queued message was not delivered")
+    );
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Hard-won: 193f015e: pending parent messages for stopped children accumulated forever in the outbox.
+#[tokio::test]
+async fn outbox_prunes_pending_messages_for_stopped_children_only() {
+    if !isolated_parked_test("outbox_prunes_pending_messages_for_stopped_children_only") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut stopped_child = parent_record("child-1", "helper");
+    stopped_child.state = SessionState::Stopped;
+    crate::database::save_session(&stopped_child).unwrap();
+    let mut stopped_parent = parent_record("parent-1", "parent");
+    stopped_parent.state = SessionState::Stopped;
+    crate::database::save_session(&stopped_parent).unwrap();
+
+    let enqueue = |key: &str, target: &str, source: &str, unpark: bool| {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: key.into(),
+            source: source.into(),
+            wake: true,
+            text: format!("event {key}"),
+            created_at_ms: 1,
+        };
+        crate::database::enqueue_mailbox_event(
+            key,
+            target,
+            &serde_json::to_string(&event).unwrap(),
+            true,
+            unpark,
+        )
+        .unwrap();
+    };
+    enqueue("subagent-message-pending", "child-1", "parent", true);
+    enqueue("subagent-message-delivered", "child-1", "parent", true);
+    crate::database::mark_mailbox_event_accepted(
+        "subagent-message-delivered",
+        "mailbox-delivered",
+        1,
+    )
+    .unwrap();
+    enqueue("api:parent-1:keep-for-resume", "parent-1", "api", false);
+
+    assert_eq!(
+        crate::database::prune_pending_messages_for_stopped_children().unwrap(),
+        1
+    );
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].event_key, "api:parent-1:keep-for-resume");
+    let history = crate::database::subagent_mailbox_messages("parent-1").unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].event_key, "subagent-message-delivered");
+    assert!(history[0].accepted);
+}
+
 async fn send_input(
     backend: &Arc<ApiBackend>,
     message: &str,

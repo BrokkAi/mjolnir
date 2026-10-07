@@ -7395,6 +7395,131 @@ async fn a_question_during_a_ready_barrier_is_journaled_at_once() {
 }
 
 #[tokio::test]
+async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+    ));
+    let (event_tx, event_rx) = runtime_event_channel();
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let (command_tx, mut command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        command_tx,
+    ));
+    event_tx
+        .send(RuntimeEvent::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                .unwrap()
+                .iter()
+                .any(|record| {
+                    matches!(
+                        record.observation,
+                        RelayObservation::SessionConfigured { .. }
+                    )
+                })
+        },
+        "the relay coordinator did not configure its session",
+    )
+    .await;
+
+    {
+        let mut durable = relay.lock().unwrap();
+        submit(&mut durable, "lease-timer-active-prompt", prompt("active"));
+    }
+    unix::wake_dispatch(&relay, &wake_tx).unwrap();
+    let active = next_command(&mut command_rx).await;
+    assert_prompt(active, "lease-timer-active-prompt", "active");
+
+    let event = mj_core::mailbox::MailboxEvent {
+        key: "parent:message:lease-timer".into(),
+        source: "parent".into(),
+        wake: true,
+        text: "Wake after the hook lease expires.".into(),
+        created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
+    };
+    {
+        let mut durable = relay.lock().unwrap();
+        submit(
+            &mut durable,
+            "mailbox-lease-timer-event",
+            RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        );
+        durable
+            .record_observation(RelayObservation::MailboxHookLeaseCreated {
+                lease: mj_core::relay::MailboxHookLease {
+                    lease_id: "mailbox-hook-timer-test".into(),
+                    events: vec![event],
+                    hook_event: "PostToolUse".into(),
+                    expires_at_ms: mj_core::clock::epoch_millis().saturating_add(2_000),
+                },
+            })
+            .unwrap();
+    }
+    unix::wake_dispatch(&relay, &wake_tx).unwrap();
+    event_tx
+        .send(RuntimeEvent::PromptFinished {
+            diagnostic: None,
+            request_id: "lease-timer-active-prompt".into(),
+            stop_reason: "end_turn".into(),
+            usage: None,
+        })
+        .unwrap();
+    wait_until(
+        || {
+            relay
+                .lock()
+                .unwrap()
+                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                .unwrap()
+                .iter()
+                .any(|record| {
+                    matches!(
+                        &record.observation,
+                        RelayObservation::CommandCompleted { command_id, .. }
+                            if command_id == "lease-timer-active-prompt"
+                    )
+                })
+        },
+        "the active turn did not finish before the mailbox lease expired",
+    )
+    .await;
+    assert!(
+        relay
+            .lock()
+            .unwrap()
+            .mailbox_hook_lease_deadline()
+            .is_some_and(|deadline| deadline > mj_core::clock::epoch_millis()),
+        "the turn must finish while the hook lease is still live"
+    );
+
+    let wake = tokio::time::timeout(std::time::Duration::from_secs(5), command_rx.recv())
+        .await
+        .expect("the expired lease timer did not start the wake prompt")
+        .expect("the relay coordinator closed the command channel");
+    let CommandRequest::Prompt { request_id, .. } = wake else {
+        panic!("expected the mailbox wake to dispatch as a prompt");
+    };
+    assert!(request_id.starts_with("mailbox-wake-"));
+
+    drop(event_tx);
+    drop(wake_tx);
+    coordinator.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn cpu_usage_answers_from_the_sampler_without_journaling() {
     let temp = tempfile::tempdir().unwrap();
     let relay = Arc::new(Mutex::new(

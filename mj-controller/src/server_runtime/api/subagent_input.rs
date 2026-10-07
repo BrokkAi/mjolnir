@@ -7,6 +7,30 @@ const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
+pub(super) fn ensure_subagent_child_can_receive_work(
+    record: &mj_core::state::SessionRecord,
+    work: &str,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            record.state,
+            SessionState::Provisioning
+                | SessionState::Running
+                | SessionState::Disconnected
+                | SessionState::Checkpointing
+                | SessionState::Parked
+        ),
+        "child session is {:?}; queued {work} was not delivered{}",
+        record.state,
+        record
+            .last_error
+            .as_ref()
+            .map(|error| format!(": {error}"))
+            .unwrap_or_default()
+    );
+    Ok(())
+}
+
 impl ApiBackend {
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
         let snapshot = self
@@ -62,23 +86,7 @@ impl ApiBackend {
             if let Some(StartStatus::Failed { message }) = &start {
                 bail!("child startup failed: {message}");
             }
-            ensure!(
-                matches!(
-                    record.state,
-                    SessionState::Provisioning
-                        | SessionState::Running
-                        | SessionState::Disconnected
-                        | SessionState::Checkpointing
-                        | SessionState::Parked
-                ),
-                "child session is {:?}; queued input was not delivered{}",
-                record.state,
-                record
-                    .last_error
-                    .as_ref()
-                    .map(|e| format!(": {e}"))
-                    .unwrap_or_default()
-            );
+            ensure_subagent_child_can_receive_work(&record, "input")?;
             ensure!(
                 tokio::time::Instant::now() < deadline,
                 "child was not ready for queued input within 30 minutes"
