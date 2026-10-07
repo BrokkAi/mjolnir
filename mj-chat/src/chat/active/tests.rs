@@ -2024,6 +2024,13 @@ fn history_that_no_longer_fits_the_tail_is_rebuilt_and_then_gives_up_with_a_noti
     assert_eq!(chat.unconverted_prefix(), pending);
     assert_eq!(chat.notice(), None);
 
+    // A saved reading position in the unloaded prefix must stop waiting
+    // when conversion gives up, so the reported recent history is readable.
+    let saved = serde_json::from_value(serde_json::json!({
+        "Row": {"entry": 0, "row": 0}
+    }))
+    .unwrap();
+    chat.restore_transcript_position(saved);
     let exhausted = apply_chat_io_update(
         &mut chat,
         ChatIoUpdate::TranscriptPrefix {
@@ -2034,6 +2041,7 @@ fn history_that_no_longer_fits_the_tail_is_rebuilt_and_then_gives_up_with_a_noti
 
     assert_eq!(exhausted, PrefixRebuild::NotNeeded);
     assert_eq!(chat.unconverted_prefix(), pending);
+    assert_eq!(chat.anchor, super::super::TranscriptAnchor::Bottom);
     assert!(
         chat.notice()
             .is_some_and(|notice| notice.contains("Earlier messages")),
@@ -2045,6 +2053,11 @@ fn history_that_no_longer_fits_the_tail_is_rebuilt_and_then_gives_up_with_a_noti
 fn a_failed_history_conversion_is_reported_instead_of_dropped() {
     let session = long_session();
     let mut chat = ChatState::from_materialized_tail(&session, &[], &[]);
+    let saved = serde_json::from_value(serde_json::json!({
+        "Row": {"entry": 0, "row": 0}
+    }))
+    .unwrap();
+    chat.restore_transcript_position(saved);
 
     let rebuild = apply_chat_io_update(
         &mut chat,
@@ -2055,6 +2068,7 @@ fn a_failed_history_conversion_is_reported_instead_of_dropped() {
     );
 
     assert_eq!(rebuild, PrefixRebuild::NotNeeded);
+    assert_eq!(chat.anchor, super::super::TranscriptAnchor::Bottom);
     assert_eq!(
         chat.notice().as_deref(),
         Some("Earlier messages failed to load: worker panicked")

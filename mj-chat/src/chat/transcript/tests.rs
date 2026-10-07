@@ -1888,6 +1888,11 @@ fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
     );
     let position = chat.transcript_position();
 
+    let mut unchanged = ChatState::new(&snapshot(), &[]);
+    unchanged.entries = chat.entries.clone();
+    unchanged.restore_transcript_position(position);
+    assert_eq!(drawn_transcript(&mut unchanged, 31, 12), opened);
+
     let mut reopened = ChatState::new(&snapshot(), &[]);
     reopened.entries = chat.entries.clone();
     reopened
@@ -1918,6 +1923,105 @@ fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
 
     assert!(shows(&rows, "End to follow"), "{rows:?}");
     assert!(!shows(&rows, "late reply"));
+}
+
+// Hard-won: 24c88abc: switching back to a tail repeated the opening reveal.
+#[test]
+fn a_reopened_tail_does_not_repeat_the_opening_reveal() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries.push(ChatEntry::plain(
+        1,
+        ChatRole::Agent,
+        (1..=60)
+            .map(|line| format!("reply line {line}\n"))
+            .collect::<String>(),
+    ));
+    drawn_transcript(&mut chat, 60, 24);
+    chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
+    let expected = drawn_transcript(&mut chat, 60, 24);
+
+    for _ in 0..3 {
+        let position = chat.transcript_position();
+        let mut reopened = ChatState::new(&snapshot(), &[]);
+        reopened.entries = chat.entries.clone();
+        reopened.restore_transcript_position(position);
+        assert_eq!(drawn_transcript(&mut reopened, 60, 24), expected);
+        chat = reopened;
+    }
+}
+
+// Hard-won: 2b229f70: a saved full-history index was restored against the tail.
+#[test]
+fn a_reopened_scroll_survives_tail_first_history_loading_in_either_order() {
+    let session = long_materialized_session(TAIL_SEED_ITEMS as u64 + 120);
+    for entry in [1, 121] {
+        let mut chat = ChatState::from_materialized(&session, &[], &[]);
+        chat.anchor = TranscriptAnchor::Row { entry, row: 3 };
+        let expected = drawn_transcript(&mut chat, 60, 24);
+        let position: TranscriptPosition =
+            serde_json::from_value(serde_json::to_value(chat.transcript_position()).unwrap())
+                .unwrap();
+        // Fixed previous-build handoff shape: legacy indexes refer to the
+        // full transcript, even when the new view has only loaded its tail.
+        let legacy: TranscriptPosition = serde_json::from_value(serde_json::json!({
+            "Row": {"entry": entry, "row": 3}
+        }))
+        .unwrap();
+
+        for saved in [position, legacy] {
+            for draw_before_history in [false, true] {
+                let mut reopened = ChatState::from_materialized_tail(&session, &[], &[]);
+                let prefix = converted_prefix(&session, &reopened);
+                reopened.restore_transcript_position(saved);
+                if draw_before_history {
+                    let rows = drawn_transcript(&mut reopened, 60, 24);
+                    if entry < reopened.unconverted_prefix() {
+                        assert!(shows(&rows, "Loading"));
+                        assert!(
+                            reopened
+                                .frame_surfaces()
+                                .surface(SurfaceId::Transcript)
+                                .is_none()
+                        );
+                        assert!(reopened.transcript_scrollbar.pointer.geometry().is_none());
+                    }
+                    // Switching away again while history loads must keep the
+                    // original position, rather than save a temporary viewport.
+                    let saved = reopened.transcript_position();
+                    reopened.restore_transcript_position(saved);
+                }
+                assert!(reopened.splice_transcript_prefix(prefix));
+                assert_eq!(
+                    drawn_transcript(&mut reopened, 60, 24),
+                    expected,
+                    "entry {entry}, draw before history {draw_before_history}, saved {saved:?}"
+                );
+            }
+        }
+    }
+
+    // Saving from a partial view must use the same entry identity after
+    // arriving messages move the next open's tail-loading boundary.
+    let mut partial = ChatState::from_materialized_tail(&session, &[], &[]);
+    partial.anchor = TranscriptAnchor::Row { entry: 1, row: 3 };
+    drawn_transcript(&mut partial, 60, 24);
+    let saved = partial.transcript_position();
+    let mut newer = session.clone();
+    let next = newer.transcript.len() as u64 + 1;
+    newer
+        .transcript
+        .extend((next..next + 20).map(fixture_user_item));
+    newer.applied_event_ordinal += 20;
+    let mut expected = ChatState::from_materialized(&newer, &[], &[]);
+    expected.anchor = TranscriptAnchor::Row { entry: 121, row: 3 };
+    let expected = drawn_transcript(&mut expected, 60, 24);
+
+    let mut reopened = ChatState::from_materialized_tail(&newer, &[], &[]);
+    let prefix = converted_prefix(&newer, &reopened);
+    reopened.restore_transcript_position(saved);
+    assert!(shows(&drawn_transcript(&mut reopened, 60, 24), "Loading"));
+    assert!(reopened.splice_transcript_prefix(prefix));
+    assert_eq!(drawn_transcript(&mut reopened, 60, 24), expected);
 }
 
 #[test]
@@ -3374,6 +3478,13 @@ fn golden_transcript_navigation() {
     chat.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL));
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 60, 24));
     append_transcript_golden_state(&mut output, "revealed transcript tail", 60, 24, &rows, &[]);
+
+    let saved = chat.transcript_position();
+    let mut reopened = ChatState::new(&snapshot(), &[]);
+    reopened.entries = chat.entries.clone();
+    reopened.restore_transcript_position(saved);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut reopened, 60, 24));
+    append_transcript_golden_state(&mut output, "reopened transcript tail", 60, 24, &rows, &[]);
 
     let mut chat = numbered_chat(2);
     let before = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 40, 24));

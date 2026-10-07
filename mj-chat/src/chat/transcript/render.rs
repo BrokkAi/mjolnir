@@ -56,6 +56,14 @@ pub(crate) fn render_transcript(
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "authoritative submission frame prepared");
     }
+    if matches!(chat.anchor, TranscriptAnchor::Restoring(_)) {
+        chat.transcript_tool_click_targets.clear();
+        chat.transcript_link_frame = None;
+        chat.transcript_selection = None;
+        chat.transcript_selection_invalid = true;
+        chat.transcript_scrollbar.clear_geometry();
+        return;
+    }
     chat.rebuild_transcript_tool_click_targets(inner, top, visible_rows);
     chat.record_transcript_link_frame(inner, top, visible_rows);
     chat.register_transcript_surface(inner, top, visible_rows, at_tail, gesture_active);
@@ -125,6 +133,7 @@ pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line
         spans.push(Span::styled(chat.header_title.clone(), theme::title(false)));
     }
     let suffix = match (chat.anchor, chat.render_mode) {
+        (TranscriptAnchor::Restoring(_), _) => format!("{separator}Loading… "),
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => " ".to_owned(),
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Raw) => {
             format!("{separator}raw source ")

@@ -116,8 +116,8 @@ fn voice_form() -> Form<VoiceControl> {
 pub use active::{ActiveChat, ChatDaemonRequest, ChatInstance, PreparedChat};
 pub use second_opinion::SecondOpinionIntent as SecondOpinionRequest;
 pub use transcript::{
-    TAIL_SEED_ITEMS, ToolDisplay, TranscriptSnapshot, format_event_time, render_agent_message_head,
-    render_agent_message_tail,
+    TAIL_SEED_ITEMS, ToolDisplay, TranscriptPosition, TranscriptSnapshot, format_event_time,
+    render_agent_message_head, render_agent_message_tail,
 };
 pub use turn_review::TurnReviewIntent as TurnReviewRequest;
 
@@ -512,10 +512,6 @@ pub struct ChatSessionContext {
     pub session: SessionRecord,
     pub reviewer_stager: mj_client::session::ReviewerStager,
 }
-
-/// A session-local transcript position, retained when its view is replaced.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub struct TranscriptPosition(TranscriptAnchor);
 
 pub struct ChatState {
     pub(crate) clear_context_supported: bool,
@@ -1795,22 +1791,3 @@ fn turn_started_at_epoch_seconds(execution: MaterializedExecutionState) -> Optio
 
 #[cfg(test)]
 mod tests;
-
-impl ChatState {
-    /// Where the reader is, for a host that reopens this conversation later.
-    ///
-    /// A view still resting on its opening reveal is saved as following the
-    /// tail. The reveal is not the reader's scroll: restored as a position,
-    /// the reopened view would treat it as one and never follow new rows
-    /// again (D-14). Following the tail lets the reopened view make its own
-    /// reveal instead.
-    pub fn transcript_position(&self) -> TranscriptPosition {
-        if self.rests_on_opening_reveal() {
-            return TranscriptPosition(TranscriptAnchor::Bottom);
-        }
-        TranscriptPosition(self.anchor)
-    }
-    pub fn restore_transcript_position(&mut self, position: TranscriptPosition) {
-        self.anchor = position.0;
-    }
-}

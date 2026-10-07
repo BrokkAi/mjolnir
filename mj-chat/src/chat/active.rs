@@ -302,6 +302,7 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
                     return PrefixRebuild::NotNeeded;
                 }
                 if attempt >= MAX_PREFIX_CONVERSION_ATTEMPTS {
+                    chat.cancel_transcript_position_restore();
                     chat.set_notice(
                         "Earlier messages could not be loaded; showing the recent history only.",
                     );
@@ -313,6 +314,7 @@ fn apply_chat_io_update(chat: &mut ChatState, update: ChatIoUpdate) -> PrefixReb
             }
             Err(error) => {
                 tracing::warn!(%error, "earlier chat history could not be converted");
+                chat.cancel_transcript_position_restore();
                 chat.set_notice(format!("Earlier messages failed to load: {error}"));
             }
         },
