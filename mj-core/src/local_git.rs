@@ -245,7 +245,7 @@ pub fn main_worktree_root(root: &Path) -> Result<PathBuf> {
 /// reports common-directory and --git-path results as relative paths.
 pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
     anyhow::ensure!(
-        directory.is_absolute(),
+        crate::target_path::is_absolute_on_host_or_target(directory),
         "Git working directory must be absolute"
     );
     let mut lines = output.lines();
@@ -264,7 +264,10 @@ pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
             component => common.push(component.as_os_str()),
         }
     }
-    anyhow::ensure!(common.is_absolute(), "Git path must be absolute");
+    anyhow::ensure!(
+        crate::target_path::is_absolute_on_host_or_target(&common),
+        "Git path must be absolute"
+    );
     Ok(common)
 }
 

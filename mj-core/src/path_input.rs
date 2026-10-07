@@ -23,10 +23,13 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
     }
     let home = home.context("Cannot expand ~: the home directory is unavailable.")?;
     ensure!(
-        home.is_absolute(),
+        crate::target_path::is_absolute_on_host_or_target(home),
         "Cannot expand ~: the home directory must be absolute."
     );
-    Ok(home.join(path.components().skip(1).collect::<PathBuf>()))
+    Ok(crate::target_path::join(
+        home,
+        &path.components().skip(1).collect::<PathBuf>(),
+    ))
 }
 
 pub fn expand_local(path: &Path) -> Result<PathBuf> {
@@ -36,7 +39,7 @@ pub fn expand_local(path: &Path) -> Result<PathBuf> {
 /// Keep target-specific validation after resolution, but reject unsafe drafts early.
 pub fn validate_absolute_input(path: &Path) -> Result<()> {
     ensure!(
-        path.is_absolute() || needs_home(path)?,
+        crate::target_path::is_absolute_on_host_or_target(path) || needs_home(path)?,
         "Enter an absolute path or a path starting with ~/."
     );
     ensure!(

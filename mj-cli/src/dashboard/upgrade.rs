@@ -69,7 +69,13 @@ impl UpgradeResume {
                     .env(RESUME_ENV, &path)
                     .env("MJ_UPGRADE_DAEMON", &target.generation)
                     .env("MJOLNIR_NO_UPDATE_CHECK", "1"),
-            )?;
+            )
+            .with_context(|| {
+                format!(
+                    "restart upgraded terminal; state preserved at {}",
+                    path.display()
+                )
+            })?;
             anyhow::ensure!(status.success(), "upgraded terminal exited with {status}");
             Ok(())
         }

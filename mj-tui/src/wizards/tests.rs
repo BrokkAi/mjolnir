@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
@@ -3513,11 +3512,7 @@ fn stale_readiness_result_is_treated_as_missing_and_reprobes() {
     dashboard.apply_target_readiness(generation, "podman".into(), Ok(()));
     assert!(dashboard.target_readiness_rejection("podman").is_none());
 
-    dashboard
-        .target_readiness
-        .get_mut("podman")
-        .expect("readiness entry was recorded")
-        .recorded_at = Instant::now() - TARGET_READINESS_TTL;
+    dashboard.readiness_clock_advance = TARGET_READINESS_TTL;
 
     assert_eq!(
         dashboard.target_readiness_rejection("podman"),
@@ -3555,11 +3550,7 @@ fn failed_readiness_result_is_reprobed_after_the_short_failure_ttl() {
         "a fresh failure is not re-probed on its own"
     );
 
-    dashboard
-        .target_readiness
-        .get_mut("podman")
-        .expect("readiness entry was recorded")
-        .recorded_at = Instant::now() - TARGET_READINESS_FAILURE_TTL;
+    dashboard.readiness_clock_advance = TARGET_READINESS_FAILURE_TTL;
 
     assert_eq!(
         dashboard.target_readiness_rejection("podman"),

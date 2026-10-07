@@ -162,6 +162,18 @@ jobs:
       if: runner.os == 'Windows'
       run: cargo test --no-run
 
+    # The controller-side crates whose suites pass on Windows, including the
+    # daemon startup tests that run `mj` against isolated instances. The
+    # worker and checkpoint crates run only on Linux and macOS hosts.
+    # mj-controller joins once #1261 is fixed.
+    - name: Run tests on Windows
+      if: runner.os == 'Windows'
+      run: cargo test -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir
+
+    - name: Test the Windows installer
+      if: runner.os == 'Windows'
+      run: node --test scripts/install-ps1.test.mjs
+
   # Ordinary check-ins run Linux and Windows; macOS runs here only for
   # macOS-sensitive changes (the path list in .github/macos-ci-paths.txt plus
   # any file with a macOS cfg gate), and nightly in macos-nightly.yml.

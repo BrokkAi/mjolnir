@@ -1007,7 +1007,9 @@ impl ManagedWorktree {
             ("source repository", &self.source_repository),
             ("worktree root", &self.worktree_root),
         ] {
-            if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+            if !crate::target_path::is_absolute(path)
+                || path.components().any(|part| part == Component::ParentDir)
+            {
                 bail!("managed worktree {label} must be an absolute safe path");
             }
         }
@@ -1122,7 +1124,7 @@ impl TargetLocator {
     fn validate(&self, session_id: &str) -> Result<()> {
         match self {
             Self::LocalBare { worker_root } => {
-                if !worker_root.is_absolute()
+                if !crate::target_path::is_absolute(worker_root)
                     || worker_root
                         .components()
                         .any(|part| part == Component::ParentDir)
@@ -1914,7 +1916,7 @@ impl SessionRecord {
         validate_id("profile", &self.last_profile)?;
         validate_id("bundle", &self.bundle_id)?;
         if let Some(project_directory) = &self.project_directory
-            && (!project_directory.is_absolute()
+            && (!crate::target_path::is_absolute_on_host_or_target(project_directory)
                 || project_directory
                     .components()
                     .any(|part| part == Component::ParentDir))
@@ -2025,9 +2027,10 @@ impl ProjectSourceIdentity {
     }
 
     /// Build a local-root identity, qualified by host for remote directories.
+    /// The directory is the session target's, so its text is POSIX.
     pub fn path(path: &Path, remote: Option<&str>) -> Self {
         let normalized = path.components().collect::<PathBuf>();
-        let path_text = normalized.to_string_lossy().into_owned();
+        let path_text = crate::target_path::text(&normalized);
         let full = remote.map_or_else(|| path_text.clone(), |host| format!("{host}:{path_text}"));
         let key = remote.map_or_else(
             || format!("path:{path_text}"),
@@ -2323,7 +2326,10 @@ impl State {
             if host.trim().is_empty() {
                 bail!("mount history contains an empty host key");
             }
-            if sources.iter().any(|source| !source.is_absolute()) {
+            if sources
+                .iter()
+                .any(|source| !crate::target_path::is_absolute_on_host_or_target(source))
+            {
                 bail!("mount history for {host:?} contains a non-absolute source path");
             }
         }
