@@ -10,7 +10,7 @@ use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 2;
+pub const TOOL_SUMMARY_VERSION: u8 = 3;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -529,6 +529,9 @@ fn shell_separator_between(
     }
 }
 
+/// One argument of a parsed invocation. `value` is its text without matching
+/// quotes; `literal` is false when the text contains an expansion, so `value`
+/// is not what the program receives.
 #[derive(Debug, Clone)]
 struct InvocationArgument {
     value: String,
@@ -541,12 +544,15 @@ fn summarize_command_node(node: Node<'_>, source: &str) -> Option<String> {
     let mut cursor = node.walk();
     let arguments = node
         .children_by_field_name("argument", &mut cursor)
-        .map(|argument| {
-            let value = shell_argument_value(argument, source);
-            InvocationArgument {
-                value: value.clone().unwrap_or_default(),
-                literal: value.is_some(),
-            }
+        .map(|argument| match shell_argument_value(argument, source) {
+            Some(value) => InvocationArgument {
+                value,
+                literal: true,
+            },
+            None => InvocationArgument {
+                value: strip_matching_quotes(source[argument.byte_range()].trim()).to_owned(),
+                literal: false,
+            },
         })
         .collect::<Vec<_>>();
     summarize_invocation_with_literals(&executable, &arguments)
@@ -608,6 +614,9 @@ fn summarize_invocation_with_literals(
         .next()
         .unwrap_or(&executable)
         .to_owned();
+    if is_shell_interpreter(&basename) {
+        return Some(summarize_shell_invocation(&basename, arguments));
+    }
     let mut words = vec![executable];
     if !is_summary_executable(&basename) {
         return Some(words.remove(0));
@@ -651,6 +660,24 @@ fn summarize_invocation_with_literals(
         }
     }
     Some(words.join(" "))
+}
+
+/// A shell is named without its directory, and the script it runs with `-c`
+/// is summarized in its own right, so `/bin/bash -c "python x.py"` reads
+/// `bash -c python`. The script is parsed even when it contains an expansion,
+/// because only its command names matter here.
+fn summarize_shell_invocation(shell: &str, arguments: &[InvocationArgument]) -> String {
+    let values = arguments
+        .iter()
+        .map(|argument| argument.value.as_str())
+        .collect::<Vec<_>>();
+    let Some(script) = shell_script_argument(&values) else {
+        return shell.to_owned();
+    };
+    match summarize_shell(script) {
+        Some(inner) => format!("{shell} -c {inner}"),
+        None => format!("{shell} -c"),
+    }
 }
 
 fn is_summary_executable(basename: &str) -> bool {
@@ -1404,6 +1431,41 @@ mod tests {
         assert_eq!(
             execute_summary(json!({"command": ["cargo", "--mystery", "test"]})),
             "cargo"
+        );
+    }
+
+    #[test]
+    fn a_nested_shell_is_named_without_its_path_and_shows_its_script() {
+        let cases = [
+            ("bash -c 'python x.py'", "bash -c python"),
+            ("/bin/bash -c \"python x.py\"", "bash -c python"),
+            (
+                "/usr/bin/zsh -lc 'git status && cargo test'",
+                "zsh -c git status && cargo test",
+            ),
+            ("bash -c \"cd $dir && make\"", "bash -c cd && make"),
+            ("bash -c \"$script\"", "bash -c"),
+            ("/bin/bash script.sh", "bash"),
+            (
+                "bash -c 'bash -c \"uv run pytest\"'",
+                "bash -c bash -c uv run",
+            ),
+        ];
+        for (command, summary) in cases {
+            assert_eq!(
+                execute_summary(json!({"command": command})),
+                summary,
+                "{command}"
+            );
+        }
+        // An argv shell call already stands for its script.
+        assert_eq!(
+            execute_summary(json!({"command": ["/bin/bash", "-lc", "python x.py"]})),
+            "python"
+        );
+        assert_eq!(
+            execute_summary(json!({"command": ["/bin/zsh", "script.sh"]})),
+            "zsh"
         );
     }
 
