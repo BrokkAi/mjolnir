@@ -21,12 +21,12 @@ To see it working: in an isolated instance, start a Codex session and a Claude s
 - [x] (2026-10-07) Milestone 4 follow-up: durable merged/closed/reopened PR notices and review fixes 2–7; targeted watcher, API, migration and rate-limit tests plus controller all-targets clippy pass.
 - [x] (2026-10-07) Milestone 6: Replaced `interrupt` with `send_message` on unreleased relay protocol 33; parked-child unpark/retry, MCP tool contract, mailbox delivery, `wait`/`list_agents`, and delegation E2E pass. Workspace Clippy passes. The controller suite had three transient failures (each passes on targeted retry); all other touched-crate suites pass.
 - [ ] Milestone 7: Implementation complete: the mailbox predicate, TUI, launch hook gates, watcher, outbox, event API refusal, and live config behavior are in place. Focused tests and clippy await the concurrent Milestone 6 relay compile fix.
-- [ ] Milestone 5: live validation in an isolated instance with Codex and Claude; full test and clippy run.
+- [x] (2026-10-07) Milestone 5: Built commit `193f015e` and passed scenarios 1–5 with real Codex and Claude profiles; the read-only GitHub watcher set a watermark and completed 105 polls after the primary session was live with no classifications or watcher errors; full workspace tests (4,533 passed) and all-targets Clippy passed on the current worktree. The optional parent-to-child `send_message` check was not run because the disposable Codex profile exposed no `mj-agents` MCP tools.
 - [ ] Merge to master, push, run `scripts/install.sh`.
 
 ## Surprises & Discoveries
 
-(none yet)
+2026-10-07: A disposable Codex parent session configured with native subagents exposed no `mj-agents` MCP tools; its fallback `mj api-info` command could not create its log file, so the optional live parent-to-child `send_message` check remains unverified.
 
 ## Decision Log
 
