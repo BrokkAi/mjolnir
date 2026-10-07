@@ -76,13 +76,23 @@
 
         # A sidecar reads "<hash>  <name>"; only the hash matters.
         $expected = ((Get-Content -LiteralPath $sum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-        $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        # Hash and unzip through .NET rather than Get-FileHash and
+        # Expand-Archive: Windows PowerShell started from PowerShell 7 inherits
+        # a module path from which those script cmdlets do not load.
+        $stream = [IO.File]::OpenRead($zip)
+        try {
+            $digest = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+        $actual = -join ($digest | ForEach-Object { $_.ToString('x2') })
         if ($expected -ne $actual) {
             throw "checksum mismatch for $($archive.name): expected $expected, got $actual"
         }
 
         $extracted = Join-Path $work 'extracted'
-        Expand-Archive -LiteralPath $zip -DestinationPath $extracted
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($zip, $extracted)
         $bundles = @(Get-ChildItem -LiteralPath $extracted -Directory)
         if ($bundles.Count -ne 1) {
             throw "$($archive.name) must contain exactly one top-level directory"
