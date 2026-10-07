@@ -582,12 +582,17 @@ differs from the one the program expects, so two programs at different versions
 re-index everything each time you alternate between them — on a large corpus
 that is tens of minutes per switch.
 
-This build links the `brokk-sessionwiki` crate, version 0.30.1. Install the
-matching tool, which is still named `sessionwiki`, with:
+This build links the `sessionwiki` crate, version 0.33.1. Install the matching
+tool with either:
 
 ```sh
-cargo install --locked brokk-sessionwiki@0.30.1
+cargo install --locked sessionwiki@0.33.1
+npm install --global @youdie006/sessionwiki@0.33.1
 ```
+
+If you installed `brokk-sessionwiki` for an earlier Mjolnir build, run
+`cargo uninstall brokk-sessionwiki` first. Both packages install a command named
+`sessionwiki`.
 
 ## Recover an orphaned worker
 
