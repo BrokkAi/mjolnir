@@ -933,11 +933,9 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
         };
         adapters.push(adapter);
     }
-    adapters.extend(
-        sessionwiki::adapters::all()
-            .into_iter()
-            .filter(|adapter| matches!(adapter.name(), "opencode")),
-    );
+    adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
+        harness_adapters::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
+    }));
     adapters
 }
 
@@ -4154,14 +4152,42 @@ mod tests {
 
     // Hard-won: #1259: the stock Aider adapter walks $HOME at startup looking for history files.
     #[test]
-    fn stock_adapters_cover_only_harnesses_mjolnir_can_start() {
-        let adapters = native_adapters(&Config::default());
-        let mut names: Vec<&str> = adapters.iter().map(|adapter| adapter.name()).collect();
+    fn adapters_cover_every_supported_harness_and_no_unsupported_tool() {
+        use mj_core::config::HarnessProfile;
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+            let home = directory.path().join(format!("home-{index}"));
+            std::fs::create_dir_all(&home).unwrap();
+            config.profiles.insert(
+                format!("profile-{index}"),
+                HarnessProfile {
+                    enabled: true,
+                    kind,
+                    home,
+                    environment: Default::default(),
+                    context_window_bytes: None,
+                    subagents: Default::default(),
+                    guardian_review_model: None,
+                },
+            );
+        }
+        let mut names: Vec<&str> = native_adapters(&config)
+            .iter()
+            .map(|adapter| adapter.name())
+            .collect();
         names.sort_unstable();
         assert_eq!(
             names,
-            ["opencode"],
-            "only stock adapters for supported harnesses may sync"
+            [
+                "claude-code",
+                "codex",
+                "grok-build",
+                "kimi-code",
+                "muse",
+                "opencode"
+            ],
+            "one adapter per supported harness, none for tools Mjolnir cannot run"
         );
     }
 
