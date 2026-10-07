@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::controller::test_support::{
     FIXTURE_FETCH_URL, FixtureRemoteExecutor, IsolatedTest, RefusingExecutor,
-    checkout_with_network_remote, checkpoint_test_session, committed_repository,
+    checkout_with_network_remote, checkpoint_test_session, committed_repository, local_bundle,
     managed_worktree_session, network_remote_for, raw_session_on, resume_compatibility_config,
     write_checkpoint_archive_with_native_state, write_checkpoint_gate_archive,
 };
@@ -164,6 +164,10 @@ async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() 
     let (checkout, _remote_parent, remote) = checkout_with_network_remote();
     std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
     let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+    let mut config = resume_compatibility_config();
+    config
+        .bundles
+        .insert(session.bundle_id.clone(), local_bundle(checkout.path()));
     session.checkpoint = Some(mj_core::state::CheckpointMetadata {
         archive_path: checkout.path().join("unused.hel.zip"),
         sha256: "a".repeat(64),
@@ -172,7 +176,7 @@ async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() 
     });
     let session_id = session.id.clone();
     let controller = Controller {
-        config: resume_compatibility_config(),
+        config,
         state: State {
             sessions: [(session_id.clone(), session)].into_iter().collect(),
             ..State::default()
@@ -1449,9 +1453,17 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
     let source =
         mj_core::remote_git::resolve_local_repository(checkout.path(), &ProcessExecutor).unwrap();
-    let dirname = PathBuf::from(checkout.path().file_name().unwrap());
-    let snapshot =
-        raw_checkout_snapshot(checkout.path(), &source, &dirname, &SystemGit, false).unwrap();
+    let repository_id = "bifrost-source";
+    let destination = PathBuf::from("accepted/layout");
+    let snapshot = raw_checkout_snapshot(
+        checkout.path(),
+        repository_id,
+        &source,
+        &destination,
+        &SystemGit,
+        false,
+    )
+    .unwrap();
 
     let output = directory.path().join("converted.hel.zip");
     let converted = conversion_checkpoint(&previous.archive_path, snapshot, &output).unwrap();
@@ -1463,8 +1475,10 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
     assert_eq!(converted.sha256, verified.archive_sha256);
     assert_eq!(converted.event_frontier, previous.event_frontier);
     let bundle = crate::controller::network_git::bundle_from_manifest(&verified.manifest).unwrap();
-    assert_eq!(bundle.primary, dirname.to_string_lossy());
+    assert_eq!(verified.manifest.bundle.primary_repository, repository_id);
+    assert_eq!(bundle.primary, destination.to_string_lossy());
     assert_eq!(bundle.repositories.len(), 1);
+    assert_eq!(verified.manifest.repositories[0].metadata.id, repository_id);
     assert_eq!(
         bundle.repositories[0].url.as_deref(),
         Some(FIXTURE_FETCH_URL)
@@ -1472,7 +1486,7 @@ fn a_conversion_archive_carries_the_checkouts_remote_and_the_conversation() {
     assert_eq!(bundle.repositories[0].push_urls, [FIXTURE_FETCH_URL]);
     assert_eq!(
         bundle.repositories[0].destination,
-        dirname.to_string_lossy()
+        destination.to_string_lossy()
     );
 
     // Everything the conversation is made of comes across untouched.
@@ -1507,13 +1521,13 @@ fn native_state(archive: &mj_checkpoint::archive::VerifiedArchive) -> Vec<(PathB
 }
 const RAW_CONVERSION_TEST_CHILD: &str = "MJ_RAW_CONVERSION_TEST_CHILD";
 #[test]
-fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
+fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     // MJ_DATA_DIR and MJ_CONFIG_DIR are process-global, so run the half
     // that writes them in an exact child test.
     if std::env::var_os(RAW_CONVERSION_TEST_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
         let test_name = format!(
-            "{}::a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint",
+            "{}::a_failed_raw_conversion_preserves_bundle_context_and_checkpoint",
             module_path!()
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
@@ -1561,6 +1575,19 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
     // checkout that converts has to have one, with its base pushed.
     let (_remote_parent, _remote) = network_remote_for(repository.path());
     let mut session = managed_worktree_session(repository.path(), session_id);
+    let bundle = ProjectBundle {
+        primary_repo: "bifrost-source".into(),
+        repositories: vec![ProjectRepository {
+            id: "bifrost-source".into(),
+            github: None,
+            local: Some(repository.path().canonicalize().unwrap()),
+            destination: PathBuf::from("accepted/layout"),
+            git_ref: None,
+        }],
+    };
+    session.bundle_id = "bifrost".into();
+    session.project =
+        Some(crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap());
     session.checkpoint = Some(checkpoint.clone());
     let worktree = session.managed_worktree.clone().unwrap();
     let previous = session.clone();
@@ -1580,10 +1607,10 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
             guardian_review_model: None,
         },
     );
-    // Production controllers read this configuration from disk; bundle
-    // updates now deliberately reload it under the transaction lock.
     config.save().unwrap();
     let original_config = config.clone();
+    let original_persisted_config =
+        mj_core::config::Config::load_from(&mj_core::config::config_path()).unwrap();
     let mut controller = Controller {
         config,
         state: State {
@@ -1592,6 +1619,29 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
         },
     };
     crate::database::save_state(&controller.state).unwrap();
+    let history_binding = || {
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        let context = connection
+            .query_row(
+                "SELECT bundle_id FROM session_contexts WHERE session_id = ?1",
+                [session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let aliases = connection
+            .prepare(
+                "SELECT bundle_id FROM project_session_aliases WHERE session_id = ?1 ORDER BY bundle_id",
+            )
+            .unwrap()
+            .query_map([session_id], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (context, aliases)
+    };
+    let binding_before = history_binding();
+    assert_eq!(binding_before.0, "bifrost");
+    assert!(binding_before.1.is_empty());
 
     let error = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1609,35 +1659,19 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
             &GitWithoutPodmanExecutor,
         ))
         .unwrap_err();
-    // The conversion ran: it wrote its archive and reshaped the record,
-    // and then the destination could not be provisioned.
+    // The conversion archive was written, then the destination could not be
+    // provisioned and rollback restored the accepted session state.
     assert!(
         format!("{error:#}").contains("podman is temporarily unavailable"),
         "{error:#}"
     );
     assert!(!format!("{error:#}").contains("returned to stopped"));
 
-    // A conversion installs a bundle for the checkout it converts, and
-    // reuses it on a retry. Nothing else about the configuration moves.
-    let mut expected_config = original_config.clone();
-    let saved = mj_core::config::Config::load().unwrap();
-    let (bundle_id, bundle) = saved
-        .bundles
-        .clone()
-        .into_iter()
-        .next()
-        .expect("the conversion installed a bundle for the checkout");
-    expected_config.bundles.insert(bundle_id, bundle);
-    // Saving named the SSH host the configured targets share, which a config
-    // assembled in memory never spelled out.
-    expected_config.machines = saved.machines;
-    assert_eq!(
-        controller.config,
-        expected_config.clone().with_local_targets()
-    );
+    // A checkout transition does not edit shared bundle configuration.
+    assert_eq!(controller.config, original_config);
     assert_eq!(
         mj_core::config::Config::load_from(&mj_core::config::config_path()).unwrap(),
-        expected_config
+        original_persisted_config
     );
 
     let retained = controller.state.sessions.get(session_id).unwrap();
@@ -1646,6 +1680,8 @@ fn a_failed_raw_conversion_keeps_the_checkout_and_its_previous_checkpoint() {
     assert_eq!(retained.project_directory, previous.project_directory);
     assert_eq!(retained.managed_worktree, previous.managed_worktree);
     assert_eq!(retained.bundle_id, previous.bundle_id);
+    assert_eq!(retained.project, previous.project);
+    assert_eq!(history_binding(), binding_before);
     assert!(worktree.worktree_root.is_dir(), "the checkout stays put");
     assert!(
         checkpoint.archive_path.is_file(),

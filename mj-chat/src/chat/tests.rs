@@ -1781,7 +1781,7 @@ mod golden_cases {
                 details(&[
                     &format!(
                         "installer feedback includes image-only explanation: {}",
-                        message.contains("/attach adds image files only")
+                        message.contains("only image files can be attached")
                     ),
                     &format!("installer mentions marker: {}", message.contains("marker")),
                 ])

@@ -2216,7 +2216,7 @@ async fn clipboard_completion_requires_image_support_and_preserves_plain_text() 
     assert_eq!(chat.state.input, "ordinary text[image 1]");
     chat.apply_attachment_result(AttachmentResult {
         sequence,
-        command: None,
+        fallback: AttachmentFallback::FailedMarker,
         result: Ok(image.clone()),
     });
     assert_eq!(chat.state.input_images[0].image, image);
@@ -2225,6 +2225,41 @@ async fn clipboard_completion_requires_image_support_and_preserves_plain_text() 
         ChatAction::Prompt("ordinary text[image 1]".into())
     );
     assert_eq!(chat.state.take_submitting_images()[0].image, image);
+}
+
+#[tokio::test]
+async fn pasted_image_paths_attach_and_a_failed_one_returns_as_pasted_text() {
+    let mut chat = clipboard_test_chat();
+    chat.state.set_prompt_images_supported(true);
+    let pasted = if cfg!(windows) {
+        "\"C:\\shots\\one.png\"\nC:\\shots\\two.jpg"
+    } else {
+        "'/shots/one.png'\n/shots/two.jpg"
+    };
+    chat.handle_event(Event::Paste(pasted.into()));
+    assert_eq!(chat.state.input, "[image 1]\n[image 2]");
+    let (first, _, _) = chat.attachment_queue.pop_front().unwrap();
+    let (second, _, _) = chat.attachment_queue.pop_front().unwrap();
+    // The user keeps typing while both files are read.
+    chat.state.paste_plain(" look");
+
+    let image = super::super::tests::test_image();
+    chat.apply_attachment_result(AttachmentResult {
+        sequence: second,
+        fallback: AttachmentFallback::Text(pasted.split('\n').nth(1).unwrap().into()),
+        result: Ok(image.clone()),
+    });
+    chat.apply_attachment_result(AttachmentResult {
+        sequence: first,
+        fallback: AttachmentFallback::Text(pasted.split('\n').next().unwrap().into()),
+        result: Err("no such file".into()),
+    });
+    let first_line = pasted.split('\n').next().unwrap();
+    assert_eq!(chat.state.input, format!("{first_line}\n[image 2] look"));
+    assert_eq!(chat.state.input_cursor, chat.state.input.len());
+    assert_eq!(chat.state.input_images.len(), 1);
+    assert_eq!(chat.state.input_images[0].image, image);
+    assert!(chat.state.notice().unwrap().contains("no such file"));
 }
 
 #[tokio::test]
@@ -2274,7 +2309,7 @@ async fn capability_loss_during_attachment_processing_keeps_draft_but_blocks_sen
     chat.state.set_prompt_images_supported(false);
     chat.apply_attachment_result(AttachmentResult {
         sequence,
-        command: None,
+        fallback: AttachmentFallback::FailedMarker,
         result: Ok(image.clone()),
     });
     let draft = chat.state.draft_payload();
@@ -2362,7 +2397,7 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
         chat.state.clear_input();
         chat.apply_attachment_result(AttachmentResult {
             sequence: 1,
-            command: None,
+            fallback: AttachmentFallback::FailedMarker,
             result,
         });
         assert!(chat.state.input_images.is_empty());
@@ -2371,7 +2406,7 @@ async fn removed_or_failed_pending_attachments_do_not_reappear() {
     assert!(chat.state.reserve_attachment(2));
     chat.apply_attachment_result(AttachmentResult {
         sequence: 2,
-        command: None,
+        fallback: AttachmentFallback::FailedMarker,
         result: Err("invalid image encoding".into()),
     });
     assert!(

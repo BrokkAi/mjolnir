@@ -116,7 +116,25 @@ impl ActiveChat {
                 );
             }
             ChatAction::Attach { path, command } => {
-                self.queue_attachment(AttachmentSource::Path(path), Some(command));
+                self.queue_attachment(
+                    AttachmentSource::Path(path),
+                    AttachmentFallback::Command(command),
+                );
+            }
+            ChatAction::AttachPaste { text, images } => {
+                let mut cursor = 0;
+                for image in images {
+                    self.state.paste_plain(&text[cursor..image.range.start]);
+                    let pasted = &text[image.range.clone()];
+                    if !self.queue_attachment(
+                        AttachmentSource::Path(image.path),
+                        AttachmentFallback::Text(pasted.to_owned()),
+                    ) {
+                        self.state.paste_plain(pasted);
+                    }
+                    cursor = image.range.end;
+                }
+                self.state.paste_plain(&text[cursor..]);
             }
             ChatAction::RunShell(command) => {
                 let Some(command_id) = self.command_id("shell") else {

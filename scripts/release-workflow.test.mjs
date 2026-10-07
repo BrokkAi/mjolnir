@@ -27,16 +27,20 @@ function fixture(t) {
 }
 
 const release = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
-for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin']) {
+for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin', 'x86_64-pc-windows-msvc']) {
   test(`archive assembly preserves binaries, modes, notices and checksum for ${target}`, t => {
     const dir = fixture(t);
-    const binaries = ['mj', 'mj-desktop', 'mj-voice-worker'];
     const mac = target === 'universal-apple-darwin';
+    const windows = target === 'x86_64-pc-windows-msvc';
+    const binaries = windows ? ['mj.exe', 'mj-desktop.exe'] : ['mj', 'mj-desktop', 'mj-voice-worker'];
     if (mac) binaries.push('mj-worker');
     const native = join(dir, mac ? 'target/universal-apple-darwin/release' : 'native');
     mkdirSync(native, { recursive: true });
     for (const binary of binaries) writeFileSync(join(native, binary), binary);
-    for (const triple of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'universal-apple-darwin']) {
+    // A Windows controller drives Linux containers and SSH hosts only.
+    const workerTriples = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'];
+    if (!windows) workerTriples.push('universal-apple-darwin');
+    for (const triple of workerTriples) {
       const worker = `mj-worker-${triple}`;
       mkdirSync(join(dir, 'workers', worker), { recursive: true });
       writeFileSync(join(dir, 'workers', worker, 'mj-worker'), worker);
@@ -59,13 +63,21 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
     const name = `brokk-mjolnir-v1.2.3-${target}`;
     for (const binary of binaries) {
       assert.equal(readFileSync(join(dir, name, binary), 'utf8'), binary);
-      assert.equal(statSync(join(dir, name, binary)).mode & 0o777, 0o755);
+      if (!windows) assert.equal(statSync(join(dir, name, binary)).mode & 0o777, 0o755);
+    }
+    if (windows) {
+      // The updater and installer expect one top-level directory holding the binaries.
+      const listing = spawnSync('unzip', ['-Z1', `${name}.zip`], { cwd: dir, encoding: 'utf8' });
+      assert.equal(listing.status, 0, listing.stderr);
+      const entries = listing.stdout.split('\n').filter(Boolean);
+      assert.ok(entries.every(entry => entry.startsWith(`${name}/`)), listing.stdout);
+      for (const binary of binaries) assert.ok(entries.includes(`${name}/${binary}`), binary);
     }
     assert.ok(readdirSync(join(dir, name, 'licenses/native')).includes('notice'));
     for (const file of ['THIRD_PARTY_LICENSES.html', 'SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt']) {
       assert.equal(readFileSync(join(dir, name, 'licenses', file), 'utf8'), `generated for this tag: ${file}`);
     }
-    const checksum = spawnSync('shasum', ['-a', '256', '-c', `${name}.tar.gz.sha256`], { cwd: dir, encoding: 'utf8' });
+    const checksum = spawnSync('shasum', ['-a', '256', '-c', `${name}.${windows ? 'zip' : 'tar.gz'}.sha256`], { cwd: dir, encoding: 'utf8' });
     assert.equal(checksum.status, 0, checksum.stderr);
   });
 }
@@ -77,11 +89,12 @@ test('npm downloads assets when the release lookup omits its embedded asset list
   mkdirSync(work);
   mkdirSync(join(dir, 'bin'));
   const assets = [];
-  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin']) {
-    for (const suffix of ['tar.gz', 'tar.gz.sha256']) {
+  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin', 'x86_64-pc-windows-msvc']) {
+    const archive = target.endsWith('-windows-msvc') ? 'zip' : 'tar.gz';
+    for (const suffix of [archive, `${archive}.sha256`]) {
       const name = `brokk-mjolnir-v1.2.3-${target}.${suffix}`;
       const id = assets.length + 1;
-      const data = suffix === 'tar.gz' ? Buffer.alloc(70 * 1024, id) : Buffer.from(`${id}  ${name}\n`);
+      const data = suffix === archive ? Buffer.alloc(70 * 1024, id) : Buffer.from(`${id}  ${name}\n`);
       writeFileSync(join(dir, String(id)), data);
       assets.push({ id, name, size: data.length });
     }
@@ -102,8 +115,10 @@ esac
   });
   const result = run();
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(readdirSync(join(work, 'release-assets')).sort(), assets.map(asset => asset.name).sort());
-  for (const asset of assets) {
+  // npm ships no Windows package, so it leaves the zip behind.
+  const npmAssets = assets.filter(asset => !asset.name.includes('-windows-msvc.'));
+  assert.deepEqual(readdirSync(join(work, 'release-assets')).sort(), npmAssets.map(asset => asset.name).sort());
+  for (const asset of npmAssets) {
     assert.deepEqual(readFileSync(join(work, 'release-assets', asset.name)), readFileSync(join(dir, String(asset.id))));
   }
   rmSync(join(work, 'release-assets'), { recursive: true });

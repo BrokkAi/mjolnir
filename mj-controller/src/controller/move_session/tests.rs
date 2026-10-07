@@ -12,8 +12,9 @@ use anyhow::Result;
 use super::MoveSourceRelay;
 use super::{Controller, MoveMutationGuard, move_owns_session, move_refuses_command};
 use crate::controller::test_support::{
-    IsolatedTest, RefusingExecutor, checkpoint_test_session, committed_repository, local_bundle,
-    managed_raw_session, raw_session_on, resume_compatibility_config, ssh_worktree_target,
+    IsolatedTest, RefusingExecutor, checkout_with_network_remote, checkpoint_test_session,
+    committed_repository, local_bundle, managed_raw_session, raw_session_on,
+    resume_compatibility_config, ssh_worktree_target,
 };
 #[cfg(unix)]
 use mj_checkpoint::archive::{
@@ -21,7 +22,7 @@ use mj_checkpoint::archive::{
     CanonicalQueuedPrompt, CanonicalSessionSnapshot, CanonicalSessionState, SessionManifest,
     TargetManifest, write_archive_atomic,
 };
-use mj_core::config::{Config, HarnessKind, HarnessProfile};
+use mj_core::config::{Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 #[cfg(unix)]
 use mj_core::state::{
     CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
@@ -1315,6 +1316,45 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
     }
 }
 
+#[test]
+fn move_raw_checkout_uses_the_same_accepted_bundle_transition_plan() {
+    let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+    let bundle = ProjectBundle {
+        primary_repo: "bifrost-source".into(),
+        repositories: vec![ProjectRepository {
+            id: "bifrost-source".into(),
+            github: None,
+            local: Some(checkout.path().canonicalize().unwrap()),
+            destination: PathBuf::from("accepted/layout"),
+            git_ref: None,
+        }],
+    };
+    let mut source = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+    source.bundle_id = "bifrost".into();
+    source.project =
+        Some(crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap());
+    let controller = Controller {
+        config: resume_compatibility_config(),
+        state: State {
+            sessions: [(source.id.clone(), source.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+
+    let conversion = controller
+        .validate_move_destination_paths(&source, "podman", &ProcessExecutor)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(conversion.project.bundle, bundle);
+    assert_eq!(conversion.repository_id, "bifrost-source");
+    assert_eq!(conversion.destination, PathBuf::from("accepted/layout"));
+    assert_eq!(
+        conversion.source.fetch_url,
+        crate::controller::test_support::FIXTURE_FETCH_URL
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry() {
@@ -1630,13 +1670,12 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     );
     assert_eq!(preview.branch.as_deref(), Some("master"));
     assert_eq!(preview.default_branch, "master");
-    // The move builds this session its first container, so the checkout lands
-    // in the session's own workspace rather than the shared legacy one.
+    // The accepted bundle's destination determines where the checkout lands.
     assert_eq!(
         preview.destination,
         mj_core::targets::new_container_workspace(session_id)
             .unwrap()
-            .join(repository.path().file_name().unwrap())
+            .join("project")
     );
     assert_eq!(preview.unpushed_commits, 0);
     assert_eq!(preview.untracked_files, 0);

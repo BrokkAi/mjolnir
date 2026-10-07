@@ -150,7 +150,15 @@ for ($attempt = 0; $attempt -lt 3; $attempt++) {
     try {
         $kind = $null
         $payload = $null
-        if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+        if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
+            # Copied files paste as their paths, one per line, quoted when
+            # they hold whitespace, as the native reader writes them.
+            $kind = 'TEXT'
+            $paths = foreach ($path in [System.Windows.Forms.Clipboard]::GetFileDropList()) {
+                if ($path -match '\s') { '"' + $path + '"' } else { $path }
+            }
+            $payload = $paths -join "`n"
+        } elseif ([System.Windows.Forms.Clipboard]::ContainsImage()) {
             $image = [System.Windows.Forms.Clipboard]::GetImage()
             if ($null -eq $image) { throw 'clipboard image disappeared while reading' }
             try {
@@ -186,7 +194,15 @@ Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 for ($attempt = 0; $attempt -lt 3; $attempt++) {
     try {
-        if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+        if ([System.Windows.Forms.Clipboard]::ContainsFileDropList()) {
+            # Copied files paste as their paths, one per line, quoted when
+            # they hold whitespace, as the native reader writes them.
+            $kind = 'TEXT'
+            $paths = foreach ($path in [System.Windows.Forms.Clipboard]::GetFileDropList()) {
+                if ($path -match '\s') { '"' + $path + '"' } else { $path }
+            }
+            $payload = $paths -join "`n"
+        } elseif ([System.Windows.Forms.Clipboard]::ContainsText()) {
             $kind = 'TEXT'
             $payload = [System.Windows.Forms.Clipboard]::GetText()
         } else {
@@ -432,6 +448,7 @@ fn write_wsl_clipboard_with_command(
 trait NativeClipboard {
     fn get_image(&mut self) -> std::result::Result<arboard::ImageData<'static>, arboard::Error>;
     fn get_text(&mut self) -> std::result::Result<String, arboard::Error>;
+    fn get_file_list(&mut self) -> std::result::Result<Vec<std::path::PathBuf>, arboard::Error>;
 }
 
 impl NativeClipboard for arboard::Clipboard {
@@ -441,6 +458,10 @@ impl NativeClipboard for arboard::Clipboard {
 
     fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
         arboard::Clipboard::get_text(self)
+    }
+
+    fn get_file_list(&mut self) -> std::result::Result<Vec<std::path::PathBuf>, arboard::Error> {
+        self.get().file_list()
     }
 }
 
@@ -452,6 +473,12 @@ fn read_native_content(
     clipboard: &mut impl NativeClipboard,
     text_only: bool,
 ) -> Result<ClipboardContent> {
+    // Copied files come first: Finder also offers their icon as an image.
+    if let Ok(paths) = clipboard.get_file_list()
+        && !paths.is_empty()
+    {
+        return Ok(ClipboardContent::Text(file_list_text(&paths)));
+    }
     // arboard returns raw RGBA pixels; the shared optimizer chooses the ACP encoding.
     if !text_only && let Ok(image) = clipboard.get_image() {
         return encode_native_image(image).map(ClipboardContent::Image);
@@ -463,6 +490,23 @@ fn read_native_content(
         bail!("clipboard contains neither an image nor text");
     }
     Ok(ClipboardContent::Text(text))
+}
+
+/// Copied files as pasted text: one path per line, quoted when it holds
+/// whitespace, which the composer reads back as attachable paths.
+fn file_list_text(paths: &[std::path::PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.to_string_lossy();
+            if path.contains(char::is_whitespace) {
+                format!("\"{path}\"")
+            } else {
+                path.into_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> {
@@ -491,7 +535,7 @@ fn encode_native_image(image: arboard::ImageData<'_>) -> Result<ClipboardImage> 
 }
 
 #[cfg(target_os = "linux")]
-fn running_under_wsl() -> bool {
+pub(crate) fn running_under_wsl() -> bool {
     std::env::var_os("WSL_INTEROP").is_some()
         || std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|release| {
             let release = release.to_ascii_lowercase();
@@ -653,6 +697,12 @@ mod tests {
 
         fn get_text(&mut self) -> std::result::Result<String, arboard::Error> {
             self.text.take().ok_or(arboard::Error::ContentNotAvailable)
+        }
+
+        fn get_file_list(
+            &mut self,
+        ) -> std::result::Result<Vec<std::path::PathBuf>, arboard::Error> {
+            Err(arboard::Error::ContentNotAvailable)
         }
     }
 

@@ -902,11 +902,19 @@ pub struct DashboardState {
     /// The daemon storage owner's verdict per target host. The daemon is the
     /// only judge of a full disk; this surface shows what it says.
     pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
+    /// Capacity rows, by deployment capacity target id, whose Disks cell is
+    /// expanded to list every filesystem instead of the one-line verdict.
+    pub(crate) expanded_disks: BTreeSet<String>,
     /// The build stamped on the workspace pane, as `v2.11.0`. Tests render
     /// [`TEST_VERSION_LABEL`] instead.
     pub(crate) version_label: String,
     pub(crate) target_readiness: BTreeMap<String, wizards::TargetReadiness>,
     pub(crate) target_readiness_generation: u64,
+    /// How far tests have moved the readiness clock forward. An `Instant`
+    /// cannot precede boot, and a fresh CI machine has been up for less than
+    /// the readiness TTL, so tests age answers by advancing this instead.
+    #[cfg(test)]
+    pub(crate) readiness_clock_advance: std::time::Duration,
     /// Whether the local directories of configured projects exist, so the
     /// project picker can mark the ones that are gone without touching the
     /// filesystem while it draws.
@@ -1197,6 +1205,7 @@ impl DashboardState {
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             target_storage: Vec::new(),
+            expanded_disks: BTreeSet::new(),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {
@@ -1205,6 +1214,8 @@ impl DashboardState {
             .to_owned(),
             target_readiness: BTreeMap::new(),
             target_readiness_generation: 0,
+            #[cfg(test)]
+            readiness_clock_advance: std::time::Duration::ZERO,
             project_directory_checks: BTreeMap::new(),
             mount_history_refresh_pending: false,
 

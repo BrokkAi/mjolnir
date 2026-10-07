@@ -28,7 +28,7 @@ pending command style: header=Some(Rgb(151, 163, 163)), body=Some(Rgb(151, 163, 
 running command style: header=Some(Rgb(232, 189, 123)), body=None
 failed command style: header=Some(Rgb(244, 154, 165)), body=None
 
-=== only completed command has a click target (80x24) ===
+=== every tool has a click target (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ ● Tool · running                                                            ▐│
 │ │ running command                                                           ▐│
@@ -53,7 +53,7 @@ failed command style: header=Some(Rgb(244, 154, 165)), body=None
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
-tool click targets: [2, 2, 2]
+tool click targets: {1, 2, 3}
 
 === completed command expanded (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
@@ -81,6 +81,33 @@ tool click targets: [2, 2, 2]
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 expanded tools: {2}
+
+=== running command expanded (80x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ running command                                                           ▐│
+│ │ running command --with every argument                                     ▐│
+│                                                                             ▐│
+│ ✓ Tool · done                                                               ▐│
+│ │ completed command                                                         ▐│
+│                                                                             ▐│
+│ × Tool · failed                                                             ▐│
+│ │ failed command                                                            ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+expanded tools: {1, 2}
 
 === thought text does not expand tools (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮

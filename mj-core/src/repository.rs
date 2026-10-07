@@ -222,7 +222,7 @@ pub fn resolve_directory(
             .with_context(|| format!("resolve project directory {}", path.display()))?
     } else {
         anyhow::ensure!(
-            path.is_absolute(),
+            crate::target_path::is_absolute(path),
             "remote project directory must be absolute"
         );
         path.to_owned()
@@ -272,7 +272,7 @@ pub fn resolve_directory(
     let mut roots = text.lines();
     let checkout_root = PathBuf::from(roots.next().context("Git omitted the checkout root")?);
     anyhow::ensure!(
-        checkout_root.is_absolute(),
+        crate::target_path::is_absolute_on_host_or_target(&checkout_root),
         "Git returned a non-absolute checkout root: {}",
         checkout_root.display()
     );

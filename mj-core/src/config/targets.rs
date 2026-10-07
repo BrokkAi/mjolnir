@@ -208,7 +208,7 @@ impl TargetBuildCache {
 
     pub(super) fn validate(&self, template_id: &str) -> Result<()> {
         if let Some(directory) = &self.directory
-            && !directory.is_absolute()
+            && !crate::target_path::is_absolute(directory)
         {
             bail!("target template {template_id:?} build cache directory must be absolute");
         }
@@ -380,7 +380,7 @@ impl PodmanWorkspaceStorage {
         let Self::HostHelper { root, helper } = self else {
             return Ok(());
         };
-        if !root.is_absolute() {
+        if !crate::target_path::is_absolute(root) {
             bail!("target template {template_id:?} workspace storage root must be absolute");
         }
         if helper.is_empty() || helper.iter().any(|argument| argument.is_empty()) {

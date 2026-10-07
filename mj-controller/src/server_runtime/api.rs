@@ -574,6 +574,10 @@ impl ApiBackend {
         self
     }
 
+    pub(crate) fn profile_catalog(&self) -> &Arc<super::profile_catalog::ProfileCatalog> {
+        &self.profile_catalog
+    }
+
     /// Recover the immutable effect selection before doing any external work.
     pub(crate) async fn execute_subagent_tool_durable(
         self: &Arc<Self>,
@@ -2286,10 +2290,17 @@ async fn supervised_checkpoint(
 /// parent is the layout's workspace root. A relative export path resolves
 /// here so it means what it meant to the agent that wrote the file (#1079).
 fn agent_working_directory(layout: &SessionExportLayout) -> Result<String, ExportError> {
-    Ok(target_join(
+    Ok(agent_working_directory_at(
         &layout.workspace_root,
         &primary_repository(layout)?.relative_destination,
     ))
+}
+
+/// Resolve the primary repository's directory on a target. Session indexing
+/// uses the same rule as API file exports so both surfaces name the agent's
+/// actual working directory.
+pub(crate) fn agent_working_directory_at(workspace_root: &str, destination: &Path) -> String {
+    target_join(workspace_root, destination)
 }
 
 fn primary_repository(

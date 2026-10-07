@@ -38,7 +38,7 @@ use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
     apply_workspace_to_raw, cleanup_managed_worktree, create_managed_worktree,
-    managed_worktree_checkout_exists, managed_worktree_target, plan_raw_to_workspace_with_checkout,
+    managed_worktree_checkout_exists, managed_worktree_target, plan_raw_to_workspace_for_session,
     preserve_retained_managed_worktree_branch, raw_checkout_divergence_notice,
     raw_checkout_position_with_checkout, raw_checkout_snapshot,
     raw_conversion_preview_with_checkout, restore_managed_worktree,
@@ -193,10 +193,9 @@ impl Controller {
                 plan,
                 ResumePlan::InPlace | ResumePlan::RawToWorkspace
             ));
-            // A raw session resumes from its live checkout. Its synthetic
-            // bundle is only a grouping identity and may no longer be in the
-            // config; neither an in-place resume nor a raw-to-workspace
-            // conversion restores repository contents from that bundle.
+            // A raw session resumes from its live checkout. Its accepted
+            // snapshot can outlive its configuration entry, so raw preflight
+            // does not require the bundle to remain configured.
             let receipt = ResumeRepositorySourceReceipt {
                 session_id: session_id.to_owned(),
                 bundle_id: session.bundle_id.clone(),
@@ -208,7 +207,8 @@ impl Controller {
             // unreachable remote, a dirty submodule) are this preflight's
             // error, which every surface already reports.
             if describe_conversion && plan == ResumePlan::RawToWorkspace {
-                let preview = raw_conversion_preview_for(session, &checkout, executor)?;
+                let preview =
+                    raw_conversion_preview_for(session, &checkout, &self.config, executor)?;
                 return Ok(ResumeRepositorySourcePreflight::ConvertingRawCheckout {
                     receipt,
                     preview: Box::new(preview),
@@ -1139,10 +1139,11 @@ pub(super) fn verify_resume_checkpoint(
 pub fn raw_conversion_preview_for(
     session: &SessionRecord,
     checkout: &mj_core::state::Checkout<'_>,
+    config: &Config,
     executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::RawConversionPreview> {
-    let conversion = plan_raw_to_workspace_with_checkout(checkout, executor)?;
-    raw_conversion_preview_with_checkout(session, checkout, &conversion, executor)
+    let conversion = plan_raw_to_workspace_for_session(session, checkout, config, executor)?;
+    raw_conversion_preview_with_checkout(session, &conversion, executor)
 }
 
 fn replacement_repository_source(id: &str, replacement: &str) -> Result<ProjectRepository> {
@@ -1604,9 +1605,9 @@ impl Controller {
             let refreshed_checkout = self.state.checkout_for_record(session_id, &previous)?;
             previous_managed_worktree = refreshed_checkout.effective().managed_worktree().cloned();
         }
-        // A converting resume writes its own archive below, from the host
-        // checkout's own network remote, and provisioning reads that one. Every
-        // other isolated resume clones what its stored archive already names.
+        // A converting resume writes its own archive below, from the accepted
+        // repository's selected network source, and provisioning reads that
+        // one. Every other isolated resume clones what its stored archive names.
         if !mj_core::config::is_bare_project_target(&target_template)
             && plan != ResumePlan::RawToWorkspace
             && !transferring_workspace
@@ -1620,12 +1621,12 @@ impl Controller {
             self.validate_project_directory(target_id, project_directory, executor)
                 .context("raw project is unavailable for resume")?;
         }
-        let mut conversion = match plan {
+        let conversion = match plan {
             ResumePlan::InPlace => None,
-            ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(
-                plan_raw_to_workspace_with_checkout(&checkout, executor)
+            ResumePlan::RawToWorkspace => Some(ResumeConversion::RawToWorkspace(Box::new(
+                plan_raw_to_workspace_for_session(&previous, &checkout, &self.config, executor)
                     .context("prepare the raw checkout for its new target")?,
-            )),
+            ))),
             ResumePlan::WorkspaceToRaw => Some(ResumeConversion::WorkspaceToRaw(
                 self.plan_workspace_to_raw(&previous, target_id, executor)
                     .context("prepare a checkout for this session")?,
@@ -1758,21 +1759,6 @@ impl Controller {
         });
         let github_token = self.github_token_for_session(session_id).await?;
 
-        // Choose the bundle id against the latest config and save the bundle
-        // under the same lock before the record starts referring to it.
-        if let Some(conversion) = conversion
-            .as_mut()
-            .and_then(ResumeConversion::raw_to_workspace_mut)
-        {
-            let planned_bundle = conversion.planned_bundle.clone();
-            let (config, bundle_id) = Config::update(|config| {
-                Ok(planned_bundle.save_to(config))
-            })
-            .context("save the bundle for a converted raw session")?;
-            conversion.bundle_id = Some(bundle_id);
-            self.config = config;
-        }
-
         // A session that leaves a non-container target for a container one is
         // built a container it never had, so it starts using the per-session
         // workspace path here if it predates them. A session that already ran
@@ -1788,20 +1774,6 @@ impl Controller {
                 .targets
                 .get(&previous.target_template_id)
                 .is_some_and(mj_core::config::is_container_target);
-        let converted_project = conversion
-            .as_ref()
-            .and_then(ResumeConversion::raw_to_workspace)
-            .map(|conversion| {
-                crate::project_catalog::snapshot(
-                    self.config
-                        .bundles
-                        .get(conversion.resolved_bundle_id()?)
-                        .context("converted project is missing")?,
-                    executor,
-                    true,
-                )
-            })
-            .transpose()?;
         let record = self.state.sessions.get_mut(session_id).unwrap();
         if record.container_workspace.is_none() && moving_into_first_container {
             record.container_workspace = Some(targets::new_container_workspace(session_id)?);
@@ -1827,7 +1799,6 @@ impl Controller {
         match &conversion {
             Some(ResumeConversion::RawToWorkspace(conversion)) => {
                 apply_raw_to_workspace(record, conversion)?;
-                record.project = converted_project;
             }
             Some(ResumeConversion::WorkspaceToRaw(conversion)) => {
                 apply_workspace_to_raw(record, conversion);
@@ -1849,26 +1820,6 @@ impl Controller {
         if let Some(host) = history_host {
             self.state.remember_mount_sources(host, &history_mounts);
             crate::database::remember_mount_sources(host, &history_mounts)?;
-        }
-        // The session's prompt history is filed under its bundle, so a
-        // conversion moves the history with it before the record is persisted.
-        if let Some(conversion) = conversion
-            .as_ref()
-            .and_then(ResumeConversion::raw_to_workspace)
-        {
-            // The catalog may already know the converted bundle as an alias of
-            // an existing project (an imported checkout of a repository another
-            // bundle covers). The context then holds the canonical project, and
-            // the record follows it so publication sees an unchanged context.
-            let bundle_id = crate::database::rebind_session_bundle(
-                session_id,
-                conversion.resolved_bundle_id()?,
-            )?;
-            self.state
-                .sessions
-                .get_mut(session_id)
-                .expect("the resumed session is in state")
-                .bundle_id = bundle_id;
         }
         // Resume changes target resources, while titles and drafts remain
         // owned by their independent writers throughout provisioning.
@@ -1939,24 +1890,18 @@ impl Controller {
             }
             // A local checkout becomes an isolated workspace by being
             // re-snapshotted into a new archive whose provenance is the
-            // checkout's own network remote. Provisioning clones that remote,
-            // and the restore below lays this snapshot over the fresh clone.
+            // accepted repository's network source. Provisioning clones that
+            // source, and the restore below lays this snapshot over the clone.
             if let Some(conversion) = conversion
                 .as_ref()
                 .and_then(ResumeConversion::raw_to_workspace)
                 && !transferring_workspace
             {
-                let destination = PathBuf::from(
-                    previous_project_directory
-                        .as_deref()
-                        .context("a raw session has no project directory")?
-                        .file_name()
-                        .context("a raw project directory cannot be the filesystem root")?,
-                );
                 let snapshot = raw_checkout_snapshot(
                     &conversion.checkout,
+                    &conversion.repository_id,
                     &conversion.source,
-                    &destination,
+                    &conversion.destination,
                     &SystemGit,
                     conversion.retire.as_ref().is_some_and(|checkout| {
                         checkout.kind == mj_core::state::ManagedCheckoutKind::Clone
@@ -2199,12 +2144,6 @@ impl Controller {
             &original,
             (!cleanup_error.is_empty()).then_some(cleanup_error),
         );
-        // A conversion filed the session's prompt history under its new bundle.
-        // The record went back, so the history goes back with it.
-        if record.bundle_id != current.bundle_id {
-            let bundle_id = record.bundle_id.clone();
-            record.bundle_id = crate::database::rebind_session_bundle(session_id, &bundle_id)?;
-        }
         // Rollback restores only resources owned by this attempt, preserving
         // client edits committed while provisioning was in flight.
         crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
@@ -2271,6 +2210,7 @@ fn apply_failed_resume_rollback_with_ownership(
                     .managed_worktree
                     .clone_from(&previous.managed_worktree);
                 current.bundle_id.clone_from(&previous.bundle_id);
+                current.project.clone_from(&previous.project);
             }
             current.state = SessionState::Error;
             current.updated_at = now();

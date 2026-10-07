@@ -1,6 +1,14 @@
 use super::*;
 
 impl DashboardState {
+    /// The instant readiness answers are judged against.
+    fn readiness_now(&self) -> Instant {
+        #[cfg(test)]
+        return Instant::now() + self.readiness_clock_advance;
+        #[cfg(not(test))]
+        Instant::now()
+    }
+
     pub(in crate::wizards) fn target_readiness_rejection(&self, target_id: &str) -> Option<String> {
         let template = self.config.targets.get(target_id)?;
         // A raw local target runs in this controller process's host; there is
@@ -11,7 +19,7 @@ impl DashboardState {
         match self
             .target_readiness
             .get(target_id)
-            .filter(|check| &check.template == template && !check.is_stale(Instant::now()))
+            .filter(|check| &check.template == template && !check.is_stale(self.readiness_now()))
             .and_then(|check| check.result.as_ref())
         {
             Some(Ok(())) => None,
@@ -26,7 +34,7 @@ impl DashboardState {
         &mut self,
         target_ids: Vec<String>,
     ) -> Option<DashboardAction> {
-        let now = Instant::now();
+        let now = self.readiness_now();
         let target_ids: Vec<_> = target_ids
             .into_iter()
             .filter(|id| {
@@ -250,6 +258,7 @@ impl DashboardState {
         target_id: String,
         result: Result<(), String>,
     ) {
+        let now = self.readiness_now();
         let Some(check) = self.target_readiness.get_mut(&target_id) else {
             return;
         };
@@ -260,7 +269,7 @@ impl DashboardState {
         }
         check.result = Some(result);
         check.runtime_missing = false;
-        check.recorded_at = Instant::now();
+        check.recorded_at = now;
     }
 
     /// The profiles the resume wizard offers. A record's resume is limited to

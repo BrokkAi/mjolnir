@@ -38,6 +38,7 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 unicode-segmentation = "1"
+url.workspace = true
 # Measures display width without the temporary `Line` that `Line::width()`
 # needs; transcript wrapping calls this once per grapheme.
 unicode-width = "0.2"

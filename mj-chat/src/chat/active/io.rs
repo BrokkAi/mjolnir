@@ -263,7 +263,18 @@ impl ActiveChat {
                 }
                 match result {
                     Ok(ClipboardContent::Image(image)) => {
-                        self.queue_attachment(AttachmentSource::Clipboard(image), None);
+                        self.queue_attachment(
+                            AttachmentSource::Clipboard(image),
+                            AttachmentFallback::FailedMarker,
+                        );
+                    }
+                    // Copied files arrive as their paths, which attach the
+                    // way a pasted path does.
+                    Ok(ClipboardContent::Text(text))
+                        if target == super::super::input_state::ClipboardTarget::Composer =>
+                    {
+                        let action = self.state.paste_or_attach(&text);
+                        self.dispatch(action);
                     }
                     Ok(content) => self.state.handle_clipboard_content(content),
                     Err(error) => {
@@ -300,19 +311,27 @@ impl ActiveChat {
         );
     }
 
-    pub(super) fn queue_attachment(&mut self, source: AttachmentSource, command: Option<String>) {
+    /// Reserve a marker at the cursor and read the attachment behind it.
+    /// `false` when no marker could be reserved; the notice says why.
+    pub(super) fn queue_attachment(
+        &mut self,
+        source: AttachmentSource,
+        fallback: AttachmentFallback,
+    ) -> bool {
         let sequence = self.next_attachment_sequence;
         if !self.state.reserve_attachment(sequence) {
-            return;
+            return false;
         }
         self.next_attachment_sequence = self.next_attachment_sequence.wrapping_add(1);
-        self.attachment_queue.push_back((sequence, source, command));
+        self.attachment_queue
+            .push_back((sequence, source, fallback));
         self.pump_attachment_queue();
+        true
     }
 
     pub(crate) fn pump_attachment_queue(&mut self) {
         while self.attachment_tasks_in_flight < MAX_ATTACHMENT_TASKS {
-            let Some((sequence, source, command)) = self.attachment_queue.pop_front() else {
+            let Some((sequence, source, fallback)) = self.attachment_queue.pop_front() else {
                 break;
             };
             self.attachment_tasks_in_flight += 1;
@@ -323,7 +342,9 @@ impl ActiveChat {
                     AttachmentSource::Clipboard(image) => {
                         attachments::install_clipboard_image(&session_id, image)
                     }
-                    AttachmentSource::Path(path) => attachments::install_path(&session_id, &path),
+                    AttachmentSource::Path(path) => path
+                        .resolve()
+                        .and_then(|path| attachments::install_path(&session_id, &path)),
                 })
                 .await
                 {
@@ -333,7 +354,7 @@ impl ActiveChat {
                 if let Err(error) =
                     updates.send(ChatIoUpdate::AttachmentFinished(AttachmentResult {
                         sequence,
-                        command,
+                        fallback,
                         result,
                     }))
                 {
@@ -346,7 +367,7 @@ impl ActiveChat {
     pub(super) fn apply_attachment_result(&mut self, result: AttachmentResult) {
         self.attachment_tasks_in_flight = self.attachment_tasks_in_flight.saturating_sub(1);
         self.state
-            .finish_attachment(result.sequence, result.result, result.command);
+            .finish_attachment(result.sequence, result.result, result.fallback);
     }
 
     /// Restarts the history conversion against the session's current snapshot,

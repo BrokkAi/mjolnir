@@ -17,6 +17,7 @@ pub mod profile_config;
 mod provisioning;
 pub(crate) mod publication;
 mod readiness;
+pub(crate) use network_git::workspace_root;
 pub(crate) use readiness::HarnessPreparationFailure;
 pub(crate) use readiness::NATIVE_SESSION_STARTUP_TIMEOUT;
 mod recovery_scan;
@@ -46,7 +47,7 @@ use mj_core::config::{
     data_dir, is_bare_project_target, mount_history_host,
 };
 
-use crate::import::{RepositoryIdentity, bundle_matches, setup_style_id};
+use crate::import::{RepositoryIdentity, setup_style_id};
 use crate::setup::github_repository_from_origin;
 
 const CONFIG_RENAME_JOURNAL: &str = "config-rename.json";
@@ -371,8 +372,11 @@ pub fn create_bundle_from_sources_in_config(
         // Local selection carries its own fetch/push settings. Keep the saved
         // repository IDs and layout; earlier sessions hold accepted snapshots.
         for repository in &mut bundle.repositories {
-            let identity = crate::import::configured_repository_identity(repository)?
-                .context("configured identity is missing")?;
+            let Some(identity) =
+                crate::import::configured_repository_identity_for_lookup(&existing, repository)
+            else {
+                continue;
+            };
             if let Some(source) = sources.iter().find(|source| {
                 source.identity == identity && matches!(source.kind, RepositorySourceKind::Local(_))
             }) && let RepositorySourceKind::Local(root) = &source.kind
@@ -498,10 +502,6 @@ fn exact_configured_bundle(
     config: &Config,
     requested: &[InterpretedRepositorySource],
 ) -> Result<Option<String>> {
-    let requested_identities = requested
-        .iter()
-        .map(InterpretedRepositorySource::identity)
-        .collect::<BTreeSet<_>>();
     let primary = requested
         .first()
         .context("no repository sources")?
@@ -524,18 +524,29 @@ fn exact_configured_bundle(
         {
             continue;
         }
+        let identity_results = bundle
+            .repositories
+            .iter()
+            .map(|repo| crate::import::configured_repository_identity_for_lookup(id, repo))
+            .collect::<Vec<_>>();
+        if identity_results.iter().any(Option::is_none) {
+            continue;
+        }
+        let identities = identity_results.into_iter().flatten().collect::<Vec<_>>();
         let layout = bundle
             .repositories
             .iter()
-            .map(|repo| {
-                Ok((
-                    crate::import::configured_repository_identity(repo)?
-                        .context("configured identity is missing")?,
-                    repo.destination.clone(),
-                ))
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
-        if layout == requested_layout && bundle_matches(bundle, &requested_identities, &primary)? {
+            .zip(&identities)
+            .map(|(repository, identity)| (identity.clone(), repository.destination.clone()))
+            .collect::<BTreeSet<_>>();
+        let Some(primary_index) = bundle
+            .repositories
+            .iter()
+            .position(|repository| repository.id == bundle.primary_repo)
+        else {
+            continue;
+        };
+        if layout == requested_layout && identities.get(primary_index) == Some(&primary) {
             return Ok(Some(id.clone()));
         }
     }

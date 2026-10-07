@@ -250,6 +250,53 @@ impl ProfileCatalog {
         }
     }
 
+    /// Read a live profile's failed entries again, after a session's worker
+    /// put choices in the profile cache that discovery reads first. A
+    /// replaced entry ends its old supervisor, which no longer owns it.
+    pub(crate) fn reread_failed(self: &Arc<Self>, profile_id: &str) {
+        let mut started = Vec::new();
+        {
+            let mut inner = self.lock();
+            let Some(identity) = inner
+                .live
+                .as_ref()
+                .and_then(|config| config.enabled_profile(profile_id))
+                .map(|profile| profile.capabilities_key(profile_id))
+            else {
+                return;
+            };
+            let Some(definition) = inner
+                .definitions
+                .get(&identity)
+                .filter(|definition| !definition.cancellation.is_cancelled())
+                .cloned()
+            else {
+                return;
+            };
+            let failed = inner
+                .entries
+                .iter()
+                .filter(|((entry_identity, _), entry)| {
+                    *entry_identity == identity && matches!(entry, Entry::Failed { .. })
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in failed {
+                let attempt = self.attempt(&definition, key.1.clone());
+                inner
+                    .entries
+                    .insert(key.clone(), Entry::Pending(attempt.clone()));
+                started.push((key, attempt));
+            }
+        }
+        if !started.is_empty() {
+            self.publish();
+        }
+        for (key, attempt) in started {
+            self.spawn(key, attempt);
+        }
+    }
+
     fn attempt(&self, definition: &Definition, model: Option<String>) -> Attempt {
         #[cfg(test)]
         if let Some((probe, model_probe)) = &self.probe {
@@ -925,12 +972,23 @@ mod tests {
 
     // Hard-won: #1232: Windows has no local worker, so every probe failed and the owner retried forever.
     #[tokio::test(start_paused = true)]
-    async fn a_discovery_no_retry_can_fix_is_reported_once_and_never_retried() {
+    async fn a_discovery_no_retry_can_fix_waits_for_a_session_to_report_choices() {
         let calls = calls();
         let probe_calls = calls.clone();
-        let catalog = ProfileCatalog::with_probe(Arc::new(move |_| {
+        // Discovery reads the profile cache first; this flag stands for a
+        // session's worker having put its choices there.
+        let observed = Arc::new(AtomicBool::new(false));
+        let cached = observed.clone();
+        let catalog = ProfileCatalog::with_probe(Arc::new(move |profile| {
             probe_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Err(crate::controller::profile_config::DiscoveryUnsupported.into()) })
+            let cached = cached.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if cached {
+                    Ok(test_choices(&profile))
+                } else {
+                    Err(crate::controller::profile_config::DiscoveryUnsupported.into())
+                }
+            })
         }));
         let config = test_config(&[("parent", HarnessKind::Codex)], &[]);
         catalog.sync_now(&config).await;
@@ -944,6 +1002,16 @@ mod tests {
             options.unavailable[0].contains("runs no local Mjolnir worker"),
             "{options:?}"
         );
+
+        observed.store(true, Ordering::SeqCst);
+        catalog.reread_failed("parent");
+        assert_eq!(
+            catalog.fetch(&config, "parent", None).await.unwrap(),
+            test_choices("parent")
+        );
+        let options = catalog.snapshot().options(&config, "parent", None).unwrap();
+        assert!(options.unavailable.is_empty(), "{options:?}");
+        assert_eq!(options.models, test_choices("parent").models);
     }
 
     #[tokio::test]

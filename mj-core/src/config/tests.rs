@@ -817,7 +817,8 @@ fn bundle_accepts_one_absolute_local_source() {
     {
         let repository = &mut config.bundles.get_mut("hel").unwrap().repositories[0];
         repository.github = None;
-        repository.local = Some(PathBuf::from("/home/test/src/app"));
+        // A local source is a directory on this controller.
+        repository.local = Some(std::env::temp_dir().join("app"));
     }
     config.validate().unwrap();
 

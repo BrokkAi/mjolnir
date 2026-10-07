@@ -427,9 +427,90 @@ jobs:
             brokk-mjolnir-*.tar.gz.sha256
           if-no-files-found: error
 
+  # One x64 Windows controller serves x64 machines natively and Windows on ARM
+  # through its x64 emulation. A Windows controller runs container and SSH
+  # targets only, so the Linux workers are its only worker payload.
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    needs: verify-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build controller and desktop
+        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target x86_64-pc-windows-msvc
+
+      - name: Stage native binaries
+        shell: bash
+        run: |
+          mkdir native
+          cp target/x86_64-pc-windows-msvc/release/mj.exe target/x86_64-pc-windows-msvc/release/mj-desktop.exe native/
+          native/mj.exe --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-x86_64-pc-windows-msvc
+          path: native/
+          if-no-files-found: error
+
+  package-x86_64-pc-windows-msvc:
+    name: Package x86_64-pc-windows-msvc
+    needs: [build-windows, build-worker-x64, build-worker-arm64, release-notices]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-x86_64-pc-windows-msvc
+          path: native
+
+      - name: Download session workers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mj-worker-*-unknown-linux-musl
+          path: workers
+
+      - name: Download generated notices
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notices
+          path: release-notices
+
+      # Windows has no execute bit; the controller marks a worker executable
+      # when it stages it on the Linux target.
+      - name: Package archive
+        shell: bash
+        run: |
+          name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
+          mkdir "$name"
+          cp "native/mj.exe" "$name/"
+          cp "native/mj-desktop.exe" "$name/"
+          cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
+          cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
+          cp README.md LICENSE "$name/"
+          mkdir "$name/licenses"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp -R licenses/native "$name/licenses/"
+          zip -q -r -X "$name.zip" "$name"
+          shasum -a 256 "$name.zip" > "$name.zip.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: archive-x86_64-pc-windows-msvc
+          path: |
+            brokk-mjolnir-*.zip
+            brokk-mjolnir-*.zip.sha256
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
-    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos]
+    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos, package-x86_64-pc-windows-msvc]
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -455,6 +536,8 @@ jobs:
           files: |
             artifacts/brokk-mjolnir-*.tar.gz
             artifacts/brokk-mjolnir-*.tar.gz.sha256
+            artifacts/brokk-mjolnir-*.zip
+            artifacts/brokk-mjolnir-*.zip.sha256
 
       - name: Publish release
         env:

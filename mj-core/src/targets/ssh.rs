@@ -555,7 +555,7 @@ pub fn validate_bare_project_directory(
 }
 
 pub fn validate_bare_project_path(path: &Path) -> Result<()> {
-    if !path.is_absolute()
+    if !crate::target_path::is_absolute(path)
         || path
             .components()
             .any(|part| part == std::path::Component::ParentDir)
@@ -599,7 +599,7 @@ pub fn verify_locator(locator: &TargetLocator, session_id: &str) -> Result<()> {
     match locator {
         TargetLocator::LocalBare { worker_root } => {
             let path = Path::new(worker_root);
-            if !path.is_absolute()
+            if !crate::target_path::is_absolute(path)
                 || path
                     .components()
                     .any(|part| part == std::path::Component::ParentDir)

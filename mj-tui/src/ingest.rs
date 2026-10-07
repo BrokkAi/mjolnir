@@ -1040,6 +1040,22 @@ impl DashboardState {
         mj_core::targets::storage::views_for(&self.target_storage, &hosts)
     }
 
+    /// Expands the selected Targets row to list every filesystem, or
+    /// collapses it back to the one-line verdict.
+    pub(crate) fn toggle_selected_disks(&mut self) {
+        let Some(id) = self
+            .capacity_details
+            .values()
+            .nth(self.capacity_index)
+            .map(|detail| detail.target.id.clone())
+        else {
+            return;
+        };
+        if !self.expanded_disks.remove(&id) {
+            self.expanded_disks.insert(id);
+        }
+    }
+
     pub fn set_deployment_capacity_targets(&mut self, targets: Vec<DeploymentCapacityTarget>) {
         let mut previous = std::mem::take(&mut self.capacity_details);
         self.capacity_details = targets

@@ -880,7 +880,8 @@ pub fn restart_collapse_window_start_seq(
 /// thought following a completed tool use the summary layout. A singleton tool
 /// uses its parser-derived summary in place, including while it is pending,
 /// running, or failed. Every other entry, including an active or failed tool,
-/// breaks the streak.
+/// breaks the streak. A tool the reader opened renders expanded whatever its
+/// status, so a running call's full invocation can be read before it ends.
 /// A `raw_only` entry renders nothing at all and is transparent to a streak
 /// rather than breaking it, since nothing of it is on screen to separate the
 /// surrounding entries. Raw mode does not tool-collapse or omit entries, but
@@ -898,7 +899,8 @@ pub fn entry_collapse_states(
         for (index, entry) in entries.iter().enumerate() {
             if entry.raw_only {
                 states[index] = EntryCollapse::Omitted;
-            } else if is_completed_tool(entry) && expanded_tool_calls.contains(&entry.start_seq) {
+            } else if entry.role == ChatRole::Tool && expanded_tool_calls.contains(&entry.start_seq)
+            {
                 states[index] = EntryCollapse::Expanded;
             }
         }

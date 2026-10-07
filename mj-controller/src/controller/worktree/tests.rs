@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Barrier};
 
 use anyhow::Result;
 
@@ -15,6 +14,7 @@ use crate::controller::test_support::{
 };
 use mj_checkpoint::archive::RepositoryMetadata;
 use mj_core::config::{Config, ProjectBundle, ProjectRepository, TargetTemplate};
+use mj_core::repository::{ProjectBundleSnapshot, RepositoryIdentity};
 use mj_core::state::{ManagedWorktree, ManagedWorktreeTarget, SessionState, State};
 
 use crate::targets::{
@@ -852,7 +852,7 @@ fn a_checkout_without_a_network_remote_cannot_be_planned_for_a_target() {
     let error = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap_err();
 
     let detail = format!("{error:#}");
-    assert!(detail.contains("has no network Git remote"), "{detail}");
+    assert!(detail.contains("has no network source"), "{detail}");
     assert!(detail.contains("git remote add origin"), "{detail}");
     assert!(detail.contains("bare target"), "{detail}");
 }
@@ -891,6 +891,7 @@ fn a_raw_checkout_snapshot_restores_into_a_fresh_clone_of_its_remote() {
 
     let snapshot = raw_checkout_snapshot(
         checkout.path(),
+        "project",
         &source,
         Path::new("project"),
         &mj_checkpoint::archive::SystemGit,
@@ -1351,167 +1352,87 @@ fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() 
     let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
     assert_eq!(conversion.checkout, worktree.worktree_root);
-    assert_eq!(conversion.repository, repository.path());
+    assert_eq!(conversion.repository_id, "project");
     assert_eq!(conversion.retire, Some(worktree));
-    assert_eq!(conversion.bundle_id, None);
-    assert_eq!(conversion.planned_bundle.repository, repository.path());
     // The archive names the session directory as the repository, and the
-    // restored harness session points inside the target at that name.
-    assert_eq!(
-        conversion.planned_bundle.destination,
-        PathBuf::from(session_id)
-    );
+    // test bundle's accepted destination is the session directory.
+    assert_eq!(conversion.destination, PathBuf::from(session_id));
 }
 
 #[test]
-fn planned_raw_conversions_resolve_ids_inside_the_config_update() {
-    const CHILD: &str = "MJ_RAW_CONVERSION_BUNDLE_RACE_TEST_CHILD";
-    let name = test_name(
-        module_path!(),
-        "planned_raw_conversions_resolve_ids_inside_the_config_update",
-    );
-    if std::env::var_os(CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(name)
-            .env(CHILD, "1")
-            .isolated_store(directory.path())
-            .run();
-        return;
-    }
-
-    let _writer = crate::database::install_isolated_test_writer();
+fn raw_to_workspace_keeps_the_accepted_bundle_and_adds_its_source() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
-    let raw_session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
-    let identical_a = plan_raw_to_workspace(&raw_session, &ProcessExecutor).unwrap();
-    let identical_b = plan_raw_to_workspace(&raw_session, &ProcessExecutor).unwrap();
-    let managed_session =
-        managed_worktree_session(checkout.path(), "20000000000000000000000000000001");
-    let different = plan_raw_to_workspace(&managed_session, &ProcessExecutor).unwrap();
-
-    // The plans exist before either config transaction begins. The old
-    // planner would have embedded the same speculative id in all three.
-    let base_id = identical_a.planned_bundle.base_id.clone();
-    assert_eq!(identical_a.planned_bundle, identical_b.planned_bundle);
-    assert_eq!(
-        identical_a.planned_bundle.base_id,
-        different.planned_bundle.base_id
-    );
-    assert_ne!(identical_a.planned_bundle, different.planned_bundle);
-    let conflicting_bundle = ProjectBundle {
-        primary_repo: "other".into(),
+    let bundle = ProjectBundle {
+        primary_repo: "bifrost-source".into(),
         repositories: vec![ProjectRepository {
-            id: "other".into(),
+            id: "bifrost-source".into(),
             github: None,
-            local: Some(PathBuf::from("/other/repository")),
-            destination: PathBuf::from("other"),
+            local: Some(checkout.path().canonicalize().unwrap()),
+            destination: PathBuf::from("accepted/layout"),
             git_ref: None,
         }],
     };
-    let mut initial_config = Config::default();
-    initial_config
-        .bundles
-        .insert(base_id.clone(), conflicting_bundle);
-    initial_config.save().unwrap();
+    let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
+    let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+    session.bundle_id = "bifrost".into();
+    session.project = Some(project.clone());
+    let checkout_state = session.checkout();
 
-    let planned = identical_a.planned_bundle.clone();
-    let (_, identical_id_a) = Config::update(|config| Ok(planned.save_to(config))).unwrap();
-    let planned = identical_b.planned_bundle.clone();
-    let (_, identical_id_b) = Config::update(|config| Ok(planned.save_to(config))).unwrap();
-    assert_eq!(identical_id_a, identical_id_b);
-    let planned = different.planned_bundle.clone();
-    let (_, sequential_different_id) =
-        Config::update(|config| Ok(planned.save_to(config))).unwrap();
-    assert_ne!(identical_id_a, sequential_different_id);
-    let after_sequential_saves = Config::load().unwrap();
-    assert_eq!(
-        after_sequential_saves.bundles[&identical_id_a].repositories[0]
-            .local
-            .as_deref(),
-        Some(checkout.path())
-    );
-    assert_eq!(
-        after_sequential_saves.bundles[&sequential_different_id].repositories[0].destination,
-        different.planned_bundle.destination
-    );
+    // A snapshot-only imported session must not need its bundle in config.
+    let conversion = plan_raw_to_workspace_for_session(
+        &session,
+        &checkout_state,
+        &Config::default(),
+        &ProcessExecutor,
+    )
+    .unwrap();
+    let mut resumed = session.clone();
+    apply_raw_to_workspace(&mut resumed, &conversion).unwrap();
 
-    // Reset to the same starting snapshot and race two different layouts
-    // through Config::update. Each update must choose from the config protected
-    // by the lock, so both definitions get a distinct saved id.
-    initial_config.save().unwrap();
-    let gate = Arc::new(Barrier::new(3));
-    let handles = [
-        identical_a.planned_bundle.clone(),
-        different.planned_bundle.clone(),
-    ]
-    .into_iter()
-    .map(|planned| {
-        let gate = Arc::clone(&gate);
-        std::thread::spawn(move || {
-            gate.wait();
-            Config::update(|config| Ok(planned.save_to(config))).map(|(_, id)| id)
-        })
-    })
-    .collect::<Vec<_>>();
-    gate.wait();
-    let concurrent_id_a = handles
-        .into_iter()
-        .map(|handle| handle.join().unwrap().unwrap())
-        .collect::<Vec<_>>();
-    assert_ne!(concurrent_id_a[0], concurrent_id_a[1]);
-    let after_concurrent_saves = Config::load().unwrap();
+    assert_eq!(conversion.repository_id, "bifrost-source");
+    assert_eq!(conversion.destination, PathBuf::from("accepted/layout"));
+    assert_eq!(resumed.bundle_id, "bifrost");
+    let resumed_project = resumed.project.unwrap();
+    assert_eq!(resumed_project.bundle, project.bundle);
+    assert_eq!(resumed_project.identities, project.identities);
     assert_eq!(
-        after_concurrent_saves.bundles[&concurrent_id_a[0]].repositories[0].destination,
-        identical_a.planned_bundle.destination
+        resumed_project.network_sources["bifrost-source"].fetch_url,
+        FIXTURE_FETCH_URL
     );
     assert_eq!(
-        after_concurrent_saves.bundles[&concurrent_id_a[1]].repositories[0].destination,
-        different.planned_bundle.destination
+        resumed_project.network_sources["bifrost-source"].push_urls,
+        [FIXTURE_FETCH_URL]
     );
+    assert_eq!(resumed.project_directory, None);
+    assert_eq!(resumed.managed_worktree, None);
+}
 
-    fn save_resumed_reference(
-        source: &SessionRecord,
-        mut conversion: RawToWorkspaceConversion,
-        bundle_id: &str,
-        session_id: &str,
-    ) {
-        conversion.bundle_id = Some(bundle_id.to_owned());
-        let mut record = source.clone();
-        record.id = session_id.to_owned();
-        apply_raw_to_workspace(&mut record, &conversion).unwrap();
-        crate::database::save_session(&record).unwrap();
-        assert_eq!(
-            crate::database::load_session_record(session_id)
-                .unwrap()
-                .unwrap()
-                .bundle_id,
-            bundle_id
-        );
-    }
+#[test]
+fn raw_to_workspace_uses_the_configured_github_source() {
+    let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
+    let bundle = ProjectBundle {
+        primary_repo: "bifrost-source".into(),
+        repositories: vec![ProjectRepository {
+            id: "bifrost-source".into(),
+            github: Some("acme/bifrost".into()),
+            local: None,
+            destination: PathBuf::from("accepted/layout"),
+            git_ref: None,
+        }],
+    };
+    let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
+    let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+    session.bundle_id = "bifrost".into();
+    session.project = Some(project);
 
-    save_resumed_reference(
-        &raw_session,
-        identical_a.clone(),
-        &identical_id_a,
-        "30000000000000000000000000000001",
+    let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
+
+    assert_eq!(
+        conversion.source.fetch_url,
+        "https://github.com/acme/bifrost.git"
     );
-    save_resumed_reference(
-        &raw_session,
-        identical_b,
-        &identical_id_b,
-        "30000000000000000000000000000002",
-    );
-    save_resumed_reference(
-        &raw_session,
-        identical_a,
-        &concurrent_id_a[0],
-        "30000000000000000000000000000003",
-    );
-    save_resumed_reference(
-        &managed_session,
-        different,
-        &concurrent_id_a[1],
-        "30000000000000000000000000000004",
-    );
+    assert_eq!(conversion.repository_id, "bifrost-source");
+    assert_eq!(conversion.destination, PathBuf::from("accepted/layout"));
 }
 
 #[test]
@@ -1530,7 +1451,10 @@ fn an_unmanaged_conversion_serves_the_main_repository_behind_a_linked_worktree()
 
     assert_eq!(conversion.checkout, checkout.canonicalize().unwrap());
     assert_eq!(
-        conversion.repository,
+        conversion.project.bundle.repositories[0]
+            .local
+            .as_deref()
+            .unwrap(),
         repository.path().canonicalize().unwrap()
     );
     assert_eq!(conversion.retire, None);
@@ -1559,7 +1483,10 @@ fn an_unmanaged_conversion_accepts_a_checkout_reached_through_a_symlink() {
 
     assert_eq!(conversion.checkout, checkout.canonicalize().unwrap());
     assert_eq!(
-        conversion.repository,
+        conversion.project.bundle.repositories[0]
+            .local
+            .as_deref()
+            .unwrap(),
         repository.path().canonicalize().unwrap()
     );
     assert_eq!(conversion.retire, None);
@@ -1792,13 +1719,19 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
         &mut converted,
         &RawToWorkspaceConversion {
             checkout: previous.project_directory.clone().unwrap(),
-            repository: PathBuf::from("/home/dev/project"),
+            repository_id: "project".into(),
+            destination: PathBuf::from("project"),
+            project: ProjectBundleSnapshot {
+                bundle: local_bundle(Path::new("/home/dev/project")),
+                identities: [(
+                    "project".into(),
+                    RepositoryIdentity::Local(PathBuf::from("/home/dev/project")),
+                )]
+                .into_iter()
+                .collect(),
+                network_sources: Default::default(),
+            },
             source: fixture_network_source(),
-            bundle_id: Some("project".into()),
-            planned_bundle: PlannedRawWorkspaceBundle::new(
-                Path::new("/home/dev/project"),
-                Path::new("project"),
-            ),
             retire: previous.managed_worktree.clone(),
         },
     )
@@ -1809,6 +1742,7 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
     assert_eq!(cleaned.project_directory, previous.project_directory);
     assert_eq!(cleaned.managed_worktree, previous.managed_worktree);
     assert_eq!(cleaned.bundle_id, previous.bundle_id);
+    assert_eq!(cleaned.project, previous.project);
 
     // Even when the leftover target could not be removed, the record must
     // describe the checkout it still owns.
@@ -1823,6 +1757,7 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
     assert_eq!(stranded.project_directory, previous.project_directory);
     assert_eq!(stranded.managed_worktree, previous.managed_worktree);
     assert_eq!(stranded.bundle_id, previous.bundle_id);
+    assert_eq!(stranded.project, previous.project);
 }
 #[test]
 fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
