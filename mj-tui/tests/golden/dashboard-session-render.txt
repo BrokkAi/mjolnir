@@ -20,7 +20,7 @@
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -61,7 +61,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -102,7 +102,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -143,7 +143,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                              ││Press Tab for Sessions, then Enter on the one to open.                                                                                                        │
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                              ││  Host / fleet  Targets  CPU  RAM  Disks                                                                                                                      │
+│                                                                              ││  Host / fleet  Targets  CPU  RAM                                                                                                                             │
 │                                                                              │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                              │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                                                              ││            Harness      Weekly      Resets  5H Resets                                                                                                        │
@@ -184,7 +184,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -226,7 +226,7 @@ Unicode title markers: ('×', '·')
 |                                      ||Press Tab for Sessions, then Enter on the one to open.                        |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Targets v ------------------------------------------------------------ -   = +
-|                                      ||  Host / fleet  Targets  CPU  RAM  Disks                                      |
+|                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||            Harness      Weekly       Resets  5H Resets                       |
@@ -267,7 +267,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||Press Tab for Sessions, then Enter on the one to open.                        |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Targets v ------------------------------------------------------------ -   = +
-|                                      ||  Host / fleet  Targets  CPU  RAM  Disks                                      |
+|                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||            Harness      Weekly       Resets  5H Resets                       |
@@ -308,7 +308,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                                                              ||Press Tab for Sessions, then Enter on the one to open.                                                                                                        |
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Targets v -------------------------------------------------------------------------------------------------------------------------------------------- -   = +
-|                                                                              ||  Host / fleet  Targets  CPU  RAM  Disks                                                                                                                      |
+|                                                                              ||  Host / fleet  Targets  CPU  RAM                                                                                                                             |
 |                                                                              |+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 |                                                                              |+ Profiles v (not refreshed)---------------------------------------------------------------------------------------------------------------------------- -   = +
 |                                                                              ||            Harness      Weekly       Resets  5H Resets                                                                                                       |
@@ -349,7 +349,7 @@ Enter open - / search (filter a/b/w/i/d) - Tab pane - . actions | ctrl+b then c 
 |                                      ||Press Tab for Sessions, then Enter on the one to open.                        |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Targets v ------------------------------------------------------------ -   = +
-|                                      ||  Host / fleet  Targets  CPU  RAM  Disks                                      |
+|                                      ||  Host / fleet  Targets  CPU  RAM                                             |
 |                                      |+------------------------------------------------------------------------------+
 |                                      |+ Profiles v (not refreshed)-------------------------------------------- -   = +
 |                                      ||            Harness      Weekly       Resets  5H Resets                       |
@@ -391,7 +391,7 @@ ASCII title markers: ('x', '-')
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │            Harness      Weekly      Resets  5H Resets                        │
@@ -432,7 +432,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on ││                                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │            Harness      Weekly      Resets  5H Resets                        │
@@ -473,7 +473,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -514,7 +514,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │Press Tab for Sessions, then Enter on the one to open.                        ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮│                                      │
-│  Host / fleet  Targets  CPU  RAM  Disks                                      ││                                      │
+│  Host / fleet  Targets  CPU  RAM                                             ││                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯│                                      │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮│                                      │
 │            Harness      Weekly      Resets  5H Resets                        ││                                      │
@@ -555,7 +555,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                          ││Press Tab for Sessions, then Enter on the one to open.                                                                │
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                          ││  Host / fleet  Targets  CPU  RAM  Disks                                                                              │
+│                                                          ││  Host / fleet  Targets  CPU  RAM                                                                                     │
 │                                                          │╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                          │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                                          ││            Harness      Weekly      Resets  5H Resets                                                                │
@@ -596,7 +596,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │Press Tab for Sessions, then Enter on the one to open.                                                                ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Targets ▾ ──────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮│                                                          │
-│  Host / fleet  Targets  CPU  RAM  Disks                                                                              ││                                                          │
+│  Host / fleet  Targets  CPU  RAM                                                                                     ││                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯│                                                          │
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮│                                                          │
 │            Harness      Weekly      Resets  5H Resets                                                                ││                                                          │
@@ -637,7 +637,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                  ││Press Tab for Sessions, then Enter on the one to open.    │
 │                  │╰──────────────────────────────────────────────────────────╯
 │                  │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
-│                  ││  Host / fleet  Targets  CPU  RAM  Disks                  │
+│                  ││  Host / fleet  Targets  CPU  RAM                         │
 │                  │╰──────────────────────────────────────────────────────────╯
 │                  │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
 │                  ││            Harness      Weekly      Resets  5H Resets    │
@@ -682,7 +682,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │

@@ -246,7 +246,9 @@ pub(crate) fn capacity_table_lines(dashboard: &DashboardState) -> usize {
         .sum()
 }
 
-const CAPACITY_HEADERS: [&str; 5] = ["Host / fleet", "Targets", "CPU", "RAM", "Disks"];
+/// The Disks column has no heading: its cell already says `Disks ▾`, or
+/// names the filesystem it is about.
+const CAPACITY_HEADERS: [&str; 5] = ["Host / fleet", "Targets", "CPU", "RAM", ""];
 
 /// Column widths of the Targets table. A sixth, untitled column says why a
 /// reading is stale, and exists only while some row's reading is.

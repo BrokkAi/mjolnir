@@ -157,7 +157,7 @@ palette popup action: None
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                  │
+│                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
@@ -199,7 +199,7 @@ select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "o
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -283,7 +283,7 @@ second Escape action: None
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │

@@ -771,7 +771,7 @@ rendered colors: text fg=Rgb(239, 237, 232) bg=Rgb(32, 39, 43); accent fg=Rgb(15
 │                                      ││Press Tab for Sessions, then Enter on the one to open.    │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                  │
+│                                      ││  Host / fleet  Targets  CPU  RAM                         │
 │                                      │╰──────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
