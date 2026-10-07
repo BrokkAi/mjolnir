@@ -171,6 +171,22 @@ fn known_reasoning_levels(
     }
 }
 
+/// Context window and automatic-compaction threshold, in tokens, for known
+/// model families whose providers list only ids.
+///
+/// DeepSeek V4 serves a 1,000,000-token window. DeepSeek's own harness
+/// (`deepseek-harness`, `compaction-basic`) compacts at 80% of the window, so
+/// Codex sessions on these models compact at the same 800,000 tokens rather
+/// than at Codex's default of 90%. Codex clamps the threshold to 90% of the
+/// window, so a `models.json` override that shrinks the window still works.
+fn known_context_limits(slug: &str) -> Option<(u64, u64)> {
+    if slug.starts_with("deepseek-v4") {
+        Some((1_000_000, 800_000))
+    } else {
+        None
+    }
+}
+
 /// Parse a Codex-shape catalog only, for the user's optional `models.json`
 /// override file. The override file refines fetched entries, so it must speak
 /// the same language as the catalog it refines.
@@ -195,8 +211,8 @@ pub fn parse_codex_shape(bytes: &[u8]) -> Result<CodexCatalog> {
 /// Build a Codex catalog entry from one id in an OpenAI-format model list.
 ///
 /// The list carries no capabilities, so the defaults are deliberately
-/// conservative: no reasoning levels here, a 128k context window, and the plain
-/// shell tool. `parse` then runs [`backfill_reasoning_levels`], which supplies
+/// conservative: no reasoning levels here, a 128k context window unless
+/// [`known_context_limits`] knows the family, and the plain shell tool. `parse` then runs [`backfill_reasoning_levels`], which supplies
 /// levels for a known model family (DeepSeek and GLM), and a session on an
 /// unknown model still shows no effort choice rather than one the provider
 /// rejects. A user refines any entry with a `models.json` override file in the
@@ -234,8 +250,13 @@ fn entry_from_openai_model(
         "truncation_policy".to_owned(),
         serde_json::json!({"mode": "bytes", "limit": 10000}),
     );
-    entry.insert("context_window".to_owned(), Value::from(128000));
-    entry.insert("max_context_window".to_owned(), Value::from(128000));
+    let (context_window, auto_compact_token_limit) =
+        known_context_limits(id).map_or((128000, None), |(window, limit)| (window, Some(limit)));
+    entry.insert("context_window".to_owned(), Value::from(context_window));
+    entry.insert("max_context_window".to_owned(), Value::from(context_window));
+    if let Some(limit) = auto_compact_token_limit {
+        entry.insert("auto_compact_token_limit".to_owned(), Value::from(limit));
+    }
     entry.insert(
         "effective_context_window_percent".to_owned(),
         Value::from(95),
@@ -415,6 +436,18 @@ mod tests {
             "the backfilled family default is supplied"
         );
         assert_eq!(flash["context_window"], Value::from(128000));
+        assert!(
+            !flash.contains_key("auto_compact_token_limit"),
+            "an unknown family keeps Codex's default threshold"
+        );
+        let pro = &catalog.models[1];
+        assert_eq!(pro["context_window"], Value::from(1_000_000));
+        assert_eq!(pro["max_context_window"], Value::from(1_000_000));
+        assert_eq!(
+            pro["auto_compact_token_limit"],
+            Value::from(800_000),
+            "DeepSeek V4 compacts where deepseek-harness does"
+        );
         assert_eq!(flash["priority"], Value::from(0));
         assert_eq!(catalog.models[1]["priority"], Value::from(1));
         assert_eq!(flash["truncation_policy"]["limit"], Value::from(10000));
