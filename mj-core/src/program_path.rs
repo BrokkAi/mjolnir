@@ -78,7 +78,12 @@ mod tests {
         let exe = directory.path().join("docker.exe");
         std::fs::write(&exe, b"").unwrap();
         let path = std::env::join_paths([directory.path()]).unwrap();
-        assert_eq!(find_program_on_path("docker", Some(&path)), Some(exe));
+        // NTFS names are case-insensitive; PATHEXT supplies `.EXE`.
+        let found = find_program_on_path("docker", Some(&path)).unwrap();
+        assert!(
+            found.as_os_str().eq_ignore_ascii_case(exe.as_os_str()),
+            "{found:?}"
+        );
         assert_eq!(find_program_on_path("podman", Some(&path)), None);
     }
 }

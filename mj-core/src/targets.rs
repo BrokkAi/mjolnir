@@ -503,7 +503,7 @@ pub fn overlay_unsupported_filesystem(filesystem: &str) -> Option<&'static str> 
 /// Container destinations cannot use the controller or login user's home.
 pub fn validate_mount_destination(path: &Path) -> Result<()> {
     ensure!(
-        path.is_absolute()
+        crate::target_path::is_absolute(path)
             && !path
                 .components()
                 .any(|part| part == std::path::Component::ParentDir),
@@ -515,7 +515,9 @@ pub fn validate_mount_destination(path: &Path) -> Result<()> {
 pub fn validate_additional_mounts(mounts: &[AdditionalMount]) -> Result<()> {
     let mut destinations = BTreeSet::new();
     for mount in mounts {
-        if !mount.source.is_absolute() || mount.source.as_os_str().is_empty() {
+        if !crate::target_path::is_absolute_on_host_or_target(&mount.source)
+            || mount.source.as_os_str().is_empty()
+        {
             bail!("additional mount source must be an absolute directory path");
         }
         validate_mount_destination(&mount.destination)?;
@@ -2075,7 +2077,7 @@ pub fn podman_workspace_locator_named(
         PodmanWorkspaceStorage::HostHelper { root, helper } => {
             let root = Path::new(root);
             ensure!(
-                root.is_absolute(),
+                crate::target_path::is_absolute(root),
                 "Podman workspace storage root must be absolute"
             );
             ensure!(

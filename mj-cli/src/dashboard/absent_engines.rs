@@ -123,7 +123,13 @@ mod tests {
         // So is a target whose engine has been installed since.
         assert!(absent.record("docker", &template, NOT_INSTALLED.into()));
         let installed = tempfile::tempdir().unwrap();
-        std::fs::write(installed.path().join("docker"), "").unwrap();
+        std::fs::write(
+            installed
+                .path()
+                .join(format!("docker{}", std::env::consts::EXE_SUFFIX)),
+            "",
+        )
+        .unwrap();
         assert_eq!(
             absent.answer(
                 "docker",
@@ -157,7 +163,13 @@ mod tests {
         assert!(engine_absent(&template, Some(empty.path().as_os_str())));
         assert!(engine_absent(&template, None));
         let installed = tempfile::tempdir().unwrap();
-        std::fs::write(installed.path().join("docker"), "").unwrap();
+        std::fs::write(
+            installed
+                .path()
+                .join(format!("docker{}", std::env::consts::EXE_SUFFIX)),
+            "",
+        )
+        .unwrap();
         assert!(!engine_absent(
             &template,
             Some(installed.path().as_os_str())

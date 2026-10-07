@@ -20,7 +20,7 @@ use crate::targets;
 
 /// The single place path text crosses into an execution plan.
 fn path_text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    crate::target_path::text(path)
 }
 
 /// Why a stored locator and its target template cannot describe one target.
