@@ -505,8 +505,19 @@ pub(super) async fn run_daemon_runtime(
         state.clone(),
         cancellation.clone(),
     ));
+    let mut mailbox_task = tokio::spawn(crate::mailbox_outbox::run(
+        state.clone(),
+        manager_control.clone(),
+        cancellation.clone(),
+    ));
+    let mut github_watch_task = tokio::spawn(crate::github_watch::service::run(
+        state.clone(),
+        cancellation.clone(),
+    ));
 
     let mut cache_outcome = None;
+    let mut mailbox_outcome = None;
+    let mut github_watch_outcome = None;
 
     // Everything a client can use is initialized before this atomic
     // publication. From here on every exit, including an error from the test
@@ -531,6 +542,14 @@ pub(super) async fn run_daemon_runtime(
                 result = &mut cache_task => {
                     cache_outcome = Some(result.context("machine cache service failed").and_then(|result| result));
                     anyhow::bail!("machine build cache service stopped unexpectedly");
+                }
+                result = &mut mailbox_task => {
+                    mailbox_outcome = Some(result.context("mailbox outbox service failed").and_then(|result| result));
+                    anyhow::bail!("mailbox outbox service stopped unexpectedly");
+                }
+                result = &mut github_watch_task => {
+                    github_watch_outcome = Some(result.context("GitHub watch service failed").and_then(|result| result));
+                    anyhow::bail!("GitHub watch service stopped unexpectedly");
                 }
                 result = &mut delegation_task => {
                     delegation_outcome = Some(result.map_err(anyhow::Error::from).and_then(|result| result));
@@ -668,6 +687,9 @@ pub(super) async fn run_daemon_runtime(
                     // see: the turn that just finished.
                     // The continuation completion gate has already notified review.
                     state.publish_session(update.session_id, update.view).await?;
+                    // State is published before waking the delivery owner, so
+                    // its readiness check observes the same session update.
+                    crate::mailbox_outbox::notify_mailbox_outbox_changed();
                 }
             }
         }
@@ -690,6 +712,28 @@ pub(super) async fn run_daemon_runtime(
             None => cache_task
                 .await
                 .context("machine cache service failed")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join mailbox outbox service",
+        match mailbox_outcome {
+            Some(result) => result,
+            None => mailbox_task
+                .await
+                .context("mailbox outbox service failed")
+                .and_then(|result| result),
+        },
+    );
+    epilogue.record(
+        &mut outcome,
+        "join GitHub watch service",
+        match github_watch_outcome {
+            Some(result) => result,
+            None => github_watch_task
+                .await
+                .context("GitHub watch service failed")
                 .and_then(|result| result),
         },
     );

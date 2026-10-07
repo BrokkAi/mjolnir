@@ -7,12 +7,14 @@ on:
       - 'services/jev-proxy/**'
       - 'mj-core/src/activity/verdict_questions.json'
       - 'mj-core/src/activity/verdict_questions_v3.json'
+      - 'mj-core/src/github_item/questions.json'
       - '.github/workflows/jev-proxy.yml'
   pull_request:
     paths:
       - 'services/jev-proxy/**'
       - 'mj-core/src/activity/verdict_questions.json'
       - 'mj-core/src/activity/verdict_questions_v3.json'
+      - 'mj-core/src/github_item/questions.json'
       - '.github/workflows/jev-proxy.yml'
 
 permissions:

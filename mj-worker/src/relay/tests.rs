@@ -1113,6 +1113,40 @@ fn legacy_snapshot_keeps_its_live_turn_when_activity_clocks_are_upgraded() {
 }
 
 #[test]
+fn revision_15_snapshot_reads_its_existing_journal_when_upgraded_to_16() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let mut revision_15 = serde_json::to_value(&relay.snapshot).unwrap();
+    revision_15["format_version"] = serde_json::json!(15);
+    let state = revision_15.as_object_mut().unwrap();
+    state.remove("pending_mailbox_events");
+    state.remove("mailbox_event_keys");
+    state.remove("delivered_mailbox_event_keys");
+    state.remove("mailbox_prompt_contexts");
+
+    relay
+        .record_observation(RelayObservation::Warning {
+            message: "journal event from the older snapshot".into(),
+        })
+        .unwrap();
+    let journal_ordinal = relay.latest_ordinal();
+    let journal_digest = relay.latest_digest().to_owned();
+    drop(relay);
+
+    fs::write(
+        temp.path().join(RELAY_STATE_FILE),
+        serde_json::to_vec(&revision_15).unwrap(),
+    )
+    .unwrap();
+    let upgraded = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(upgraded.snapshot.format_version, RELAY_STATE_VERSION);
+    assert_eq!(upgraded.latest_ordinal(), journal_ordinal);
+    assert_eq!(upgraded.latest_digest(), journal_digest);
+    assert!(upgraded.snapshot.pending_mailbox_events.is_empty());
+    assert!(upgraded.snapshot.delivered_mailbox_event_keys.is_empty());
+}
+
+#[test]
 fn idle_clock_starts_at_settlement_survives_reopen_and_ignores_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = claude_relay(temp.path());
@@ -5414,5 +5448,376 @@ fn a_codex_session_is_replaceable_again_once_the_restarted_adapter_reports() {
         relay
             .operational_state()
             .safe_to_replace(HarnessKind::Codex)
+    );
+}
+
+fn mailbox_fixture_event(key: &str, wake: bool) -> mj_core::mailbox::MailboxEvent {
+    mj_core::mailbox::MailboxEvent {
+        key: key.into(),
+        source: "parent".into(),
+        wake,
+        text: format!("message for {key}"),
+        created_at_ms: 1,
+    }
+}
+
+fn drain_mailbox_for_test(relay: &mut DurableRelay, request_id: &str) -> (Option<String>, usize) {
+    let response = relay.handle(relay_request(
+        request_id,
+        RelayRequest::DrainMailbox {
+            hook_event: "PostToolUse".into(),
+        },
+    ));
+    let RelayResponseBody::Ok {
+        payload: RelayResponsePayload::MailboxDrained { text, count },
+    } = response.body
+    else {
+        panic!("mailbox drain failed: {:?}", response.body);
+    };
+    (text, count)
+}
+
+#[test]
+fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
+    let hook_root = tempfile::tempdir().unwrap();
+    let mut hook_relay = DurableRelay::open(hook_root.path(), SESSION, "test").unwrap();
+    let hook_event = mailbox_fixture_event("hook-event", false);
+    submit_relay(
+        &mut hook_relay,
+        "hook-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: hook_event.clone(),
+        },
+    );
+    let (hook_text, hook_count) = drain_mailbox_for_test(&mut hook_relay, "hook-drain");
+    assert_eq!(hook_count, 1);
+    assert_eq!(
+        hook_text.as_deref(),
+        Some(mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&hook_event)).as_str())
+    );
+    assert!(
+        hook_relay
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&hook_event.key)
+    );
+    assert_eq!(
+        drain_mailbox_for_test(&mut hook_relay, "hook-drain-again").1,
+        0
+    );
+    assert!(hook_relay.snapshot.pending_mailbox_events.is_empty());
+
+    let prompt_root = tempfile::tempdir().unwrap();
+    let mut prompt_relay = DurableRelay::open(prompt_root.path(), SESSION, "test").unwrap();
+    let prompt_event = mailbox_fixture_event("prompt-event", false);
+    submit_relay(
+        &mut prompt_relay,
+        "prompt-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: prompt_event.clone(),
+        },
+    );
+    submit_relay(&mut prompt_relay, "next-user-prompt", prompt("continue"));
+    let claimed = prompt_relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "next-user-prompt");
+    assert_eq!(
+        claimed[0].hidden_prompt_context.as_deref(),
+        Some(mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&prompt_event)).as_str())
+    );
+    assert!(prompt_relay.snapshot.pending_mailbox_events.is_empty());
+    assert!(
+        prompt_relay
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&prompt_event.key)
+    );
+    assert_eq!(
+        drain_mailbox_for_test(&mut prompt_relay, "prompt-hook-after-claim").1,
+        0
+    );
+
+    let wake_root = tempfile::tempdir().unwrap();
+    let mut wake_relay = DurableRelay::open(wake_root.path(), SESSION, "test").unwrap();
+    let wake_event = mailbox_fixture_event("wake-event", true);
+    submit_relay(
+        &mut wake_relay,
+        "wake-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: wake_event.clone(),
+        },
+    );
+    let claimed = wake_relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(matches!(
+        &claimed[0].command,
+        RelayCommand::MailboxWake { events } if events == std::slice::from_ref(&wake_event)
+    ));
+    assert!(claimed[0].hidden_prompt_context.is_none());
+    assert!(wake_relay.snapshot.pending_mailbox_events.is_empty());
+    assert!(
+        wake_relay
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&wake_event.key)
+    );
+    assert_eq!(
+        drain_mailbox_for_test(&mut wake_relay, "wake-hook-after-claim").1,
+        0
+    );
+}
+
+#[test]
+fn pending_mailbox_events_and_dedup_keys_survive_journal_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let event = mailbox_fixture_event("restart-event", false);
+    {
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        submit_relay(
+            &mut relay,
+            "restart-event-command",
+            RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        );
+    }
+
+    std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+    let mut replayed = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        replayed.snapshot.pending_mailbox_events.as_slice(),
+        std::slice::from_ref(&event)
+    );
+    assert!(replayed.snapshot.delivered_mailbox_event_keys.is_empty());
+
+    assert_eq!(drain_mailbox_for_test(&mut replayed, "restart-drain").1, 1);
+    assert!(
+        replayed
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&event.key)
+    );
+    drop(replayed);
+    std::fs::remove_file(temp.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap();
+    let mut replayed = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(replayed.snapshot.pending_mailbox_events.is_empty());
+    let frontier = replayed.latest_ordinal();
+    assert_eq!(
+        submit_relay(
+            &mut replayed,
+            "same-key-new-command",
+            RelayCommand::DeliverMailboxEvent { event },
+        ),
+        frontier,
+        "same-key resubmission after delivery is an accepted no-op"
+    );
+    assert_eq!(replayed.latest_ordinal(), frontier);
+}
+
+#[test]
+fn delivered_mailbox_keys_are_bounded_and_pruned_deterministically_on_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    for index in 0..=mj_core::relay::RELAY_RETRY_ID_RETENTION {
+        let event = mailbox_fixture_event(&format!("retained-event-{index:04}"), false);
+        submit_relay(
+            &mut relay,
+            &format!("retained-command-{index:04}"),
+            RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        );
+        if index == 0 {
+            assert_eq!(
+                drain_mailbox_for_test(&mut relay, "retained-drain-first").1,
+                1
+            );
+        }
+    }
+    assert_eq!(
+        relay.snapshot.pending_mailbox_events.len(),
+        mj_core::relay::RELAY_RETRY_ID_RETENTION
+    );
+    assert_eq!(
+        drain_mailbox_for_test(&mut relay, "retained-drain-batch").1,
+        mj_core::relay::RELAY_RETRY_ID_RETENTION
+    );
+
+    let pending = mailbox_fixture_event("pending-beyond-retention", false);
+    submit_relay(
+        &mut relay,
+        "pending-beyond-retention-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: pending.clone(),
+        },
+    );
+    let frontier = relay.latest_ordinal();
+    assert_eq!(
+        submit_relay(
+            &mut relay,
+            "duplicate-pending-event-command",
+            RelayCommand::DeliverMailboxEvent {
+                event: pending.clone(),
+            },
+        ),
+        frontier,
+        "pending event keys remain deduplicated regardless of delivered-key pruning"
+    );
+
+    let delivered_keys = relay.snapshot.delivered_mailbox_event_keys.clone();
+    assert_eq!(
+        delivered_keys.len(),
+        mj_core::relay::RELAY_RETRY_ID_RETENTION
+    );
+    assert!(!delivered_keys.contains_key("retained-event-0000"));
+    assert!(delivered_keys.contains_key("retained-event-0001"));
+    assert!(delivered_keys.contains_key("retained-event-0512"));
+    assert_eq!(
+        relay.snapshot.pending_mailbox_events.as_slice(),
+        std::slice::from_ref(&pending)
+    );
+    drop(relay);
+
+    fs::remove_file(temp.path().join(RELAY_STATE_FILE)).unwrap();
+    let replayed = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        replayed.snapshot.delivered_mailbox_event_keys,
+        delivered_keys
+    );
+    assert_eq!(replayed.snapshot.pending_mailbox_events, [pending]);
+}
+
+#[test]
+fn mailbox_context_stays_pending_across_compaction_and_slash_prompts() {
+    for (index, prompt_text) in ["/compact", "/review"].into_iter().enumerate() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+        let event = mailbox_fixture_event(&format!("context-event-{index}"), false);
+        submit_relay(
+            &mut relay,
+            "context-event-command",
+            RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        );
+        submit_relay(&mut relay, "context-command", prompt(prompt_text));
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].hidden_prompt_context, None, "{prompt_text}");
+        assert_eq!(
+            relay.snapshot.pending_mailbox_events.as_slice(),
+            std::slice::from_ref(&event)
+        );
+
+        relay
+            .record_command_completed(
+                "context-command",
+                RelayCommandOutcome::Prompt {
+                    diagnostic: None,
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                },
+            )
+            .unwrap();
+        submit_relay(&mut relay, "eligible-user-prompt", prompt("continue"));
+        let claimed = relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            claimed[0].hidden_prompt_context.as_deref(),
+            Some(mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event)).as_str())
+        );
+    }
+}
+
+#[test]
+fn mailbox_wake_waits_for_checkpoint_close_and_cancellation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(
+        &mut relay,
+        "wake-checkpoint",
+        RelayCommand::BeginCheckpoint { reason: None },
+    );
+    let event = mailbox_fixture_event("barrier-wake-event", true);
+    submit_relay(
+        &mut relay,
+        "barrier-wake-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: event.clone(),
+        },
+    );
+    assert!(relay.snapshot.pending_mailbox_events.contains(&event));
+    assert!(
+        !relay
+            .snapshot
+            .dispatches
+            .values()
+            .any(|dispatch| matches!(&dispatch.command, RelayCommand::MailboxWake { .. }))
+    );
+
+    let cut = crate::relay::test_support::ready_checkpoint(&mut relay, "wake-checkpoint");
+    submit_relay(
+        &mut relay,
+        "wake-close",
+        RelayCommand::Close {
+            barrier_command_id: "wake-checkpoint".into(),
+            expected: cut,
+        },
+    );
+    submit_relay(
+        &mut relay,
+        "wake-checkpoint-complete",
+        RelayCommand::CompleteCheckpoint {
+            barrier_command_id: "wake-checkpoint".into(),
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "wake-close");
+    assert!(matches!(&claimed[0].command, RelayCommand::Close { .. }));
+    assert!(
+        !relay
+            .snapshot
+            .dispatches
+            .values()
+            .any(|dispatch| matches!(&dispatch.command, RelayCommand::MailboxWake { .. }))
+    );
+
+    let cancel_root = tempfile::tempdir().unwrap();
+    let mut cancel_relay = DurableRelay::open(cancel_root.path(), SESSION, "test").unwrap();
+    submit_relay(&mut cancel_relay, "running-prompt", prompt("work"));
+    cancel_relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut cancel_relay,
+        "cancel-running-prompt",
+        RelayCommand::CancelTurnFor {
+            active_prompt_id: "running-prompt".into(),
+        },
+    );
+    cancel_relay.claim_pending_commands(true).unwrap();
+    assert_eq!(
+        cancel_relay.snapshot.cancelling_prompt_id.as_deref(),
+        Some("running-prompt")
+    );
+    let cancel_event = mailbox_fixture_event("cancel-wake-event", true);
+    submit_relay(
+        &mut cancel_relay,
+        "cancel-wake-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: cancel_event.clone(),
+        },
+    );
+    assert!(
+        cancel_relay
+            .snapshot
+            .pending_mailbox_events
+            .contains(&cancel_event)
+    );
+    assert!(
+        !cancel_relay
+            .snapshot
+            .dispatches
+            .values()
+            .any(|dispatch| matches!(&dispatch.command, RelayCommand::MailboxWake { .. }))
     );
 }

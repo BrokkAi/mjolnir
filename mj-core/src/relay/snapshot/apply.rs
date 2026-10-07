@@ -26,6 +26,7 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::RetryAssessmentResolved { .. }
         | RelayObservation::CommandRejected { .. }
         | RelayObservation::CommandInterrupted { .. }
+        | RelayObservation::MailboxEventsDelivered { .. }
         | RelayObservation::ConfigurationUpdated { .. }
         | RelayObservation::CheckpointReady { .. }
         // A restart ends any turn the harness started on its own, so it now
@@ -54,6 +55,60 @@ pub fn observation_changes_state(observation: &RelayObservation) -> bool {
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => false,
+    }
+}
+
+fn claim_wake_mailbox_events(
+    snapshot: &mut RelaySnapshot,
+    events: &[crate::mailbox::MailboxEvent],
+    ordinal: u64,
+) -> Result<()> {
+    if events.is_empty() || !events.iter().any(|event| event.wake) {
+        bail!("mailbox wake must carry at least one waking event");
+    }
+    let unique_keys: std::collections::BTreeSet<_> =
+        events.iter().map(|event| event.key.clone()).collect();
+    if unique_keys.len() != events.len() {
+        bail!("mailbox wake repeats an event key");
+    }
+    for event in events {
+        if !snapshot
+            .pending_mailbox_events
+            .iter()
+            .any(|pending| pending == event)
+        {
+            bail!("mailbox wake carries an event that is not pending");
+        }
+    }
+    snapshot
+        .pending_mailbox_events
+        .retain(|event| !unique_keys.contains(&event.key));
+    retain_delivered_mailbox_event_keys(snapshot, unique_keys, ordinal);
+    Ok(())
+}
+
+fn retain_delivered_mailbox_event_keys(
+    snapshot: &mut RelaySnapshot,
+    event_keys: impl IntoIterator<Item = String>,
+    ordinal: u64,
+) {
+    for key in event_keys {
+        snapshot.delivered_mailbox_event_keys.insert(key, ordinal);
+    }
+    while snapshot.delivered_mailbox_event_keys.len() > crate::relay::RELAY_RETRY_ID_RETENTION {
+        let Some(oldest_key) = snapshot
+            .delivered_mailbox_event_keys
+            .iter()
+            .min_by(|(left_key, left_ordinal), (right_key, right_ordinal)| {
+                left_ordinal
+                    .cmp(right_ordinal)
+                    .then_with(|| left_key.cmp(right_key))
+            })
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        snapshot.delivered_mailbox_event_keys.remove(&oldest_key);
     }
 }
 
@@ -168,6 +223,28 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.latest_prompt_accepted_ordinal = Some(event.ordinal);
             }
             match command {
+                RelayCommand::DeliverMailboxEvent { event } => {
+                    if event.key.trim().is_empty()
+                        || event.source.trim().is_empty()
+                        || event.text.trim().is_empty()
+                    {
+                        bail!("mailbox event key, source, and text are required");
+                    }
+                    if snapshot
+                        .pending_mailbox_events
+                        .iter()
+                        .any(|pending| pending.key == event.key)
+                        || snapshot
+                            .delivered_mailbox_event_keys
+                            .contains_key(&event.key)
+                    {
+                        bail!("mailbox event key was queued more than once");
+                    }
+                    snapshot.pending_mailbox_events.push(event.clone());
+                }
+                RelayCommand::MailboxWake { events } => {
+                    claim_wake_mailbox_events(snapshot, events, event.ordinal)?;
+                }
                 RelayCommand::Steer {
                     active_prompt_id,
                     queued_prompt_id,
@@ -389,6 +466,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             match &dispatch.command {
                 RelayCommand::Prompt { .. }
                 | RelayCommand::HandbackReminder { .. }
+                | RelayCommand::MailboxWake { .. }
                 | RelayCommand::ContinueAuthorizedWork { .. }
                 | RelayCommand::ResumeAfterQuota { .. } => {
                     let index = snapshot
@@ -511,6 +589,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (
                     RelayCommand::Prompt { .. }
                     | RelayCommand::HandbackReminder { .. }
+                    | RelayCommand::MailboxWake { .. }
                     | RelayCommand::ContinueAuthorizedWork { .. }
                     | RelayCommand::ResumeAfterQuota { .. },
                     RelayCommandOutcome::Prompt { .. },
@@ -546,6 +625,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.pending_user_shell_contexts.retain(|context| {
                         context.attached_command_id.as_deref() != Some(command_id.as_str())
                     });
+                    snapshot.mailbox_prompt_contexts.remove(command_id);
                 }
                 (RelayCommand::RunUserShell { .. }, RelayCommandOutcome::UserShell { result }) => {
                     snapshot.active_user_shells.remove(command_id);
@@ -790,6 +870,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     RelayCommand::RecordNotice { .. } | RelayCommand::SetQuotaRecovery { .. },
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
+                (RelayCommand::DeliverMailboxEvent { .. }, RelayCommandOutcome::NoticeRecorded) => {
+                }
                 (RelayCommand::BeginCheckpoint { .. }, _) => {
                     bail!("checkpoint barriers complete through checkpoint-ready")
                 }
@@ -813,6 +895,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 handled.command,
                 RelayCommand::Prompt { .. }
                     | RelayCommand::HandbackReminder { .. }
+                    | RelayCommand::MailboxWake { .. }
                     | RelayCommand::ContinueAuthorizedWork { .. }
                     | RelayCommand::ResumeAfterQuota { .. }
             ) {
@@ -921,6 +1004,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             snapshot
                 .queued_prompts
                 .retain(|queued| queued.command_id != *command_id);
+            snapshot.mailbox_prompt_contexts.remove(command_id);
             snapshot.active_user_shells.remove(command_id);
             if let RelayCommand::RunUserShell { command } = &command {
                 let accepted_ordinal = snapshot
@@ -1219,6 +1303,75 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
         | RelayObservation::UserShellOutput { .. }
         | RelayObservation::TerminalOutput { .. }
         | RelayObservation::Notice { .. } => {}
+        RelayObservation::MailboxEventsDelivered {
+            event_keys,
+            path,
+            prompt_command_id,
+            hook_event,
+        } => {
+            if event_keys.is_empty() {
+                bail!("mailbox delivery claim has no event keys");
+            }
+            let unique_keys: std::collections::BTreeSet<_> = event_keys.iter().cloned().collect();
+            if unique_keys.len() != event_keys.len() {
+                bail!("mailbox delivery claim repeats an event key");
+            }
+            let mut claimed = Vec::with_capacity(event_keys.len());
+            for key in event_keys {
+                let Some(mailbox_event) = snapshot
+                    .pending_mailbox_events
+                    .iter()
+                    .find(|mailbox_event| mailbox_event.key == *key)
+                else {
+                    bail!("mailbox delivery claim names an event that is not pending");
+                };
+                claimed.push(mailbox_event.clone());
+            }
+            match (path, prompt_command_id, hook_event.as_deref()) {
+                (MailboxDeliveryPath::Prompt, Some(command_id), None) => {
+                    let Some(dispatch) = snapshot.dispatches.get(command_id) else {
+                        bail!("prompt mailbox claim names an unknown command");
+                    };
+                    if dispatch.state != RelayDispatchState::Pending {
+                        bail!("prompt mailbox claim names a command that is not pending");
+                    }
+                    let Some(prompt) = dispatch.command.prompt_blocks() else {
+                        bail!("prompt mailbox claim names a non-prompt command");
+                    };
+                    if crate::acp::prompt_requests_compaction(&prompt)
+                        || crate::acp::prompt_is_slash_command(&prompt)
+                        || crate::acp::context_command(&prompt).is_some()
+                    {
+                        bail!("prompt mailbox claim names a context command");
+                    }
+                    if snapshot.mailbox_prompt_contexts.contains_key(command_id) {
+                        bail!("prompt already owns a mailbox delivery claim");
+                    }
+                    snapshot.mailbox_prompt_contexts.insert(
+                        command_id.clone(),
+                        crate::mailbox::render_mailbox_events(&claimed),
+                    );
+                }
+                (MailboxDeliveryPath::Prompt, _, _) => {
+                    bail!("prompt mailbox claim has no command ID");
+                }
+                (MailboxDeliveryPath::ToolHook, None, Some("PostToolUse" | "PostToolBatch")) => {}
+                (MailboxDeliveryPath::ToolHook, _, _) => {
+                    bail!("tool-hook mailbox claim has invalid hook metadata");
+                }
+                (MailboxDeliveryPath::Wake, _, _) => {
+                    bail!("wake mailbox claims are recorded by MailboxWake commands");
+                }
+            }
+            snapshot
+                .pending_mailbox_events
+                .retain(|mailbox_event| !unique_keys.contains(&mailbox_event.key));
+            retain_delivered_mailbox_event_keys(
+                snapshot,
+                event_keys.iter().cloned(),
+                event.ordinal,
+            );
+        }
     }
     if let Some(steering) = snapshot.steering.as_mut()
         && (steering.holds_queue() || steering.status == SteeringStatus::Failed)
@@ -1426,8 +1579,10 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             command,
             ..
         } => {
-            let automatic = matches!(command, RelayCommand::HandbackReminder { .. })
-                || crate::continuation::is_generated_prompt(command_id)
+            let automatic = matches!(
+                command,
+                RelayCommand::HandbackReminder { .. } | RelayCommand::MailboxWake { .. }
+            ) || crate::continuation::is_generated_prompt(command_id)
                 || crate::continuation::is_quota_goal_resume(command_id);
             if let Some(a) = &mut snapshot.assessment {
                 if let RelayCommand::SetQuotaRecovery { recovery, .. } = command {

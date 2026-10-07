@@ -897,12 +897,16 @@ fn github_app_configuration_is_optional_and_round_trips() {
             GithubPermissionLevel::Read,
         )])),
     });
+    configured.github.watch.enabled = false;
+    configured.github.watch.interval_seconds = 30;
+    configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
     assert!(body.contains("[github.app.installations]"), "{body}");
     assert!(body.contains("[github.app.session_permissions]"), "{body}");
     assert!(body.contains("[github.app.token_permissions]"), "{body}");
+    assert!(body.contains("[github.watch]"), "{body}");
     assert_eq!(Config::load_from(&path).unwrap(), configured);
 
     fs::write(

@@ -104,6 +104,7 @@ mod subagent_backend;
 pub use subagent_backend::*;
 mod github;
 use github::github_token;
+mod mailbox;
 mod wait_policy;
 pub use wait_policy::*;
 mod routes;

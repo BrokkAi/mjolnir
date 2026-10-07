@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::HarnessKind;
 use crate::elicitation::ElicitationRequest;
+use crate::mailbox::{MailboxDeliveryPath, MailboxEvent};
 
 use super::capacity::{CapacityRetry, RetryAssessment};
 
@@ -63,6 +64,16 @@ pub enum RelayCommand {
     HandbackReminder {
         completed_command_id: String,
         completed_ordinal: u64,
+    },
+    /// Add one event to the durable mailbox. Pending keys and recently
+    /// delivered keys are deduplicated by the relay.
+    DeliverMailboxEvent {
+        event: MailboxEvent,
+    },
+    /// A worker-created prompt that carries mailbox events selected at an
+    /// idle turn boundary. Queueing this command is the durable wake claim.
+    MailboxWake {
+        events: Vec<MailboxEvent>,
     },
     /// A fixed prompt admitted only against the exact classified state.
     ContinueAuthorizedWork {
@@ -161,6 +172,11 @@ impl RelayCommand {
                     crate::subagent::HANDBACK_REMINDER_TEXT.to_owned(),
                 )]))
             }
+            Self::MailboxWake { events } => {
+                Some(std::borrow::Cow::Owned(vec![ContentBlock::from(
+                    crate::mailbox::render_mailbox_events(events),
+                )]))
+            }
             Self::ContinueAuthorizedWork { .. } | Self::ResumeAfterQuota { .. } => {
                 Some(std::borrow::Cow::Owned(crate::continuation::prompt_blocks()))
             }
@@ -170,6 +186,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::DeliverMailboxEvent { .. } | Self::MailboxWake { .. } => 33,
             Self::RestoreExecutionMode => 28,
             Self::HandbackReminder { .. } | Self::InstallPromptContext { .. } => 26,
             Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,
@@ -199,6 +216,7 @@ impl RelayCommand {
             self,
             Self::Prompt { .. }
                 | Self::HandbackReminder { .. }
+                | Self::MailboxWake { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
@@ -218,6 +236,7 @@ impl RelayCommand {
                 | Self::SetQuotaRecovery { .. }
                 | Self::SeedAssessmentContext { .. }
                 | Self::InstallPromptContext { .. }
+                | Self::DeliverMailboxEvent { .. }
         )
     }
 
@@ -227,6 +246,7 @@ impl RelayCommand {
             Self::ClearContext
                 | Self::Prompt { .. }
                 | Self::HandbackReminder { .. }
+                | Self::MailboxWake { .. }
                 | Self::ContinueAuthorizedWork { .. }
                 | Self::ResumeAfterQuota { .. }
                 | Self::SetConfig { .. }
@@ -253,6 +273,7 @@ impl RelayCommand {
             Self::ClearContext => RelayCommandKind::ClearContext,
             Self::Prompt { .. }
             | Self::HandbackReminder { .. }
+            | Self::MailboxWake { .. }
             | Self::ContinueAuthorizedWork { .. }
             | Self::ResumeAfterQuota { .. } => RelayCommandKind::Prompt,
             Self::RunUserShell { .. } => RelayCommandKind::RunUserShell,
@@ -276,7 +297,8 @@ impl RelayCommand {
             Self::RecordNotice { .. }
             | Self::SetQuotaRecovery { .. }
             | Self::SeedAssessmentContext { .. }
-            | Self::InstallPromptContext { .. } => RelayCommandKind::RecordNotice,
+            | Self::InstallPromptContext { .. }
+            | Self::DeliverMailboxEvent { .. } => RelayCommandKind::RecordNotice,
         }
     }
 }
@@ -1093,6 +1115,16 @@ pub enum RelayObservation {
     Notice {
         message: String,
     },
+    /// Events were claimed by a tool hook or attached to one queued prompt.
+    /// MailboxWake's CommandQueued event records the wake path itself.
+    MailboxEventsDelivered {
+        event_keys: Vec<String>,
+        path: MailboxDeliveryPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_command_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_event: Option<String>,
+    },
     /// The harness began working. Claude records this when output arrives
     /// without a prompt in flight; Codex records native execution starts,
     /// including ordinary replies. Only starts outside a user turn add an
@@ -1331,6 +1363,17 @@ pub struct RelaySnapshot {
     pub pending_prompt_context: Option<PendingPromptContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_user_shell_contexts: Vec<PendingUserShellContext>,
+    /// Events waiting for a hook, prompt, or idle wake to claim them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_mailbox_events: Vec<MailboxEvent>,
+    /// Recently delivered event keys and their journal ordinals. Pending keys
+    /// remain represented by `pending_mailbox_events` until delivery.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub delivered_mailbox_event_keys: BTreeMap<String, u64>,
+    /// Mailbox context already claimed for a prompt that has not yet reached
+    /// a terminal dispatch state. This closes the journal/snapshot crash gap.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mailbox_prompt_contexts: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub active_user_shells: BTreeMap<String, ActiveUserShell>,
     /// Ignored. Protocol 26 workers persisted a Move seal here; the field
@@ -1401,6 +1444,9 @@ impl RelaySnapshot {
             queued_prompts: Vec::new(),
             pending_prompt_context: None,
             pending_user_shell_contexts: Vec::new(),
+            pending_mailbox_events: Vec::new(),
+            delivered_mailbox_event_keys: BTreeMap::new(),
+            mailbox_prompt_contexts: BTreeMap::new(),
             active_user_shells: BTreeMap::new(),
             command_ledger_seal: None,
             checkpoint_barrier: None,

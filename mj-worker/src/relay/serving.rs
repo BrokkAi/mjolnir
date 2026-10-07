@@ -82,6 +82,28 @@ mod tests {
         assert_eq!(stop_background.minimum_protocol(), 9);
         assert!(!stop_background.supported_at(8));
         assert!(stop_background.supported_at(RELAY_PROTOCOL_VERSION));
+
+        let drain_mailbox = RelayRequest::DrainMailbox {
+            hook_event: "PostToolUse".into(),
+        };
+        assert_eq!(drain_mailbox.minimum_protocol(), 33);
+        assert!(!drain_mailbox.supported_at(32));
+        assert!(drain_mailbox.supported_at(33));
+        let mailbox_event = RelayRequest::Submit {
+            command_id: "event".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: mj_core::mailbox::MailboxEvent {
+                    key: "parent:message:1".into(),
+                    source: "parent".into(),
+                    wake: true,
+                    text: "message".into(),
+                    created_at_ms: 1,
+                },
+            },
+        };
+        assert_eq!(mailbox_event.minimum_protocol(), 33);
+        assert!(!mailbox_event.supported_at(32));
+        assert!(mailbox_event.supported_at(33));
     }
 
     #[test]

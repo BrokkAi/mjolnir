@@ -93,11 +93,26 @@ pub(super) fn project_observation(
                         format!("Continuing requested work automatically · {attempt} of 3"),
                     );
                 }
-                let content = prompt
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<serde_json::Result<Vec<_>>>()?;
-                if current.session_title.is_none() {
+                if let RelayCommand::MailboxWake { events } = command {
+                    push_system(
+                        mutation,
+                        event,
+                        format!(
+                            "Delivered {} in a wake prompt",
+                            mailbox_event_count(events.len())
+                        ),
+                    );
+                }
+                let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
+                let content = if mailbox_wake {
+                    Vec::new()
+                } else {
+                    prompt
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<serde_json::Result<Vec<_>>>()?
+                };
+                if current.session_title.is_none() && !mailbox_wake {
                     let prompt_text = crate::transcript::materialized_content_text(&content);
                     if let Some(title) = current
                         .resolved_title()
@@ -148,6 +163,13 @@ pub(super) fn project_observation(
                         text: user_shell_text(command, "queued", "", "", false, false),
                     },
                 },
+            ),
+            RelayCommand::DeliverMailboxEvent {
+                event: mailbox_event,
+            } => push_system(
+                mutation,
+                event,
+                format!("Mailbox event queued from {}", mailbox_event.source),
             ),
             RelayCommand::RemoveQueuedPrompt { .. } | RelayCommand::ClearQueuedPrompts => {}
             RelayCommand::Close { .. } => {
@@ -728,6 +750,23 @@ pub(super) fn project_observation(
                 push_system_with_id(mutation, event, stable_id, message.clone());
             }
         }
+        RelayObservation::MailboxEventsDelivered {
+            event_keys,
+            path,
+            hook_event,
+            ..
+        } => {
+            let count = mailbox_event_count(event_keys.len());
+            let how = match path {
+                mj_core::mailbox::MailboxDeliveryPath::ToolHook => hook_event.as_ref().map_or_else(
+                    || "by tool hook".to_owned(),
+                    |event| format!("by tool hook ({event})"),
+                ),
+                mj_core::mailbox::MailboxDeliveryPath::Prompt => "with prompt".to_owned(),
+                mj_core::mailbox::MailboxDeliveryPath::Wake => "in a wake prompt".to_owned(),
+            };
+            push_system(mutation, event, format!("Delivered {count} {how}"));
+        }
         RelayObservation::Closing => {
             close_streams(index, mutation, event.recorded_at_ms);
             mutation.execution = Some(MaterializedExecutionState::Closing);
@@ -741,6 +780,10 @@ pub(super) fn project_observation(
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }
     Ok(())
+}
+
+fn mailbox_event_count(count: usize) -> String {
+    format!("{count} mailbox event{}", if count == 1 { "" } else { "s" })
 }
 
 /// A stop applied while the harness runs a turn of its own (a goal

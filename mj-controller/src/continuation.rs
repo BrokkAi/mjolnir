@@ -1,5 +1,5 @@
 //! Bounded classifier transport and verbatim authorization evidence.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use mj_core::continuation::{ContinuationEvidence, ContinuationVerdict, MAX_BODY_BYTES};
 #[cfg(test)]
 use mj_core::{continuation::ASSISTANT_BYTES, state::MaterializedSession};
@@ -31,11 +31,6 @@ async fn ask_logged(
     diagnostic: Option<&mj_core::jev::Attempt>,
 ) -> Result<ContinuationVerdict> {
     evidence.validate()?;
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
     let body = if key.is_some() {
         evidence.upstream_body()
     } else {
@@ -44,31 +39,16 @@ async fn ask_logged(
     if let Some(diagnostic) = diagnostic {
         diagnostic.update(None, serde_json::json!({"request":body, "source":if key.is_some() { "direct" } else { "hosted" }, "contract":"continuation-verdict-v2", "questions":serde_json::from_str::<serde_json::Value>(mj_core::continuation::QUESTIONS)?, "model":"jev-latest", "unfinished_threshold":mj_core::continuation::CONFIDENCE, "no_input_needed_threshold":mj_core::continuation::CONFIDENCE, "maximum_continuations":mj_core::continuation::MAX_NUDGES}));
     }
-    let request = if let Some(key) = key {
-        client.post(direct).bearer_auth(key).json(&body)
-    } else {
-        client.post(hosted).json(&body)
-    };
-    let mut response = request
-        .send()
-        .await
-        .context("request continuation verdict")?
-        .error_for_status()?;
-    ensure!(
-        response
-            .content_length()
-            .is_none_or(|n| n <= MAX_BODY_BYTES as u64),
-        "oversized continuation response"
-    );
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        ensure!(
-            body.len() + chunk.len() <= MAX_BODY_BYTES,
-            "oversized continuation response"
-        );
-        body.extend_from_slice(&chunk);
-    }
-    let mut verdict = ContinuationVerdict::parse(&serde_json::from_slice(&body)?)?;
+    let request_body = serde_json::to_vec(&body)?;
+    let response = crate::jev_transport::post_bounded_json(
+        if key.is_some() { direct } else { hosted },
+        key,
+        request_body,
+        MAX_BODY_BYTES,
+        "request continuation verdict",
+    )
+    .await?;
+    let mut verdict = ContinuationVerdict::parse(&response)?;
     if evidence.messages.is_empty() {
         verdict.unfinished = 0.0;
         verdict.no_input_needed = 0.0;

@@ -16,6 +16,7 @@ pub mod diagnostic;
 pub mod diff;
 pub mod elicitation;
 pub mod event_outcome;
+pub mod github_item;
 pub mod go;
 pub mod goal;
 #[cfg(feature = "golden")]
@@ -28,6 +29,7 @@ pub mod jev;
 pub mod local_git;
 pub mod local_sockets;
 pub mod login_environment;
+pub mod mailbox;
 pub mod move_workspace;
 pub mod native_agent;
 pub mod path_completion;

@@ -4621,6 +4621,75 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
     );
 }
 
+#[test]
+fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
+    let stage = tempfile::tempdir().unwrap();
+    let path = stage.path().join("settings.json");
+    let user_hook = serde_json::json!({
+        "hooks": [{"type": "command", "command": "user-hook"}]
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({
+            "model": "opus",
+            "permissions": {"deny": ["WebFetch"]},
+            "hooks": {
+                "PostToolBatch": [user_hook.clone()],
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "before-tool"}]}]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let remote_root = ".local/share/hel/workers/session";
+    configure_claude_mailbox_hook(stage.path(), remote_root).unwrap();
+    let first = std::fs::read(&path).unwrap();
+    configure_claude_mailbox_hook(stage.path(), remote_root).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), first);
+
+    let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(settings["model"], "opus");
+    assert_eq!(
+        settings["permissions"]["deny"],
+        serde_json::json!(["WebFetch"])
+    );
+    let groups = settings["hooks"]["PostToolBatch"].as_array().unwrap();
+    assert_eq!(groups[0], user_hook);
+    let mailbox_hooks = groups
+        .iter()
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .filter(|hook| {
+            hook["command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with("MJOLNIR_MAILBOX_HOOK=1 "))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(mailbox_hooks.len(), 1);
+    assert_eq!(
+        mailbox_hooks[0]["command"],
+        format!(
+            "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
+            mj_core::targets::posix_quote(&format!("{remote_root}/hel")),
+            mj_core::targets::posix_quote(&format!("{remote_root}/control.sock"))
+        )
+    );
+
+    configure_claude_mailbox_hook(stage.path(), "/worker path/session").unwrap();
+    let restaged: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let updated_commands = restaged["hooks"]["PostToolBatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .filter_map(|hook| hook["command"].as_str())
+        .filter(|command| command.starts_with("MJOLNIR_MAILBOX_HOOK=1 "))
+        .collect::<Vec<_>>();
+    assert_eq!(updated_commands.len(), 1);
+    assert!(updated_commands[0].contains("'/worker path/session/control.sock'"));
+}
+
 #[cfg(unix)]
 mod container_runtime {
     use super::*;

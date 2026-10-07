@@ -149,6 +149,7 @@ impl Controller {
         )?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         if profile.kind == mj_core::config::HarnessKind::Claude {
+            configure_claude_mailbox_hook(&profile_stage, worker_root)?;
             if let Some(role) = launch.subagents.parent_role() {
                 configure_claude_subagent_mcp(&profile_stage, worker_root, role)?;
             } else if launch.handback_tool {

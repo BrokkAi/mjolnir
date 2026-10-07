@@ -14,10 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use mj_controller::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
-    ExportRequest, GithubTokenResponse, PromptRequest, PromptResponse, PushedBranch,
-    ResumeSessionRequest, ResumeSessionResponse, SessionListResponse, StartSessionRequest,
-    StartSessionResponse, SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse,
-    WorkspaceListResponse,
+    ExportRequest, GithubTokenResponse, MailboxEventRequest, MailboxEventResponse, PromptRequest,
+    PromptResponse, PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
+    StartSessionRequest, StartSessionResponse, SuspendSessionResponse, TranscriptResponse,
+    WaitRequest, WaitResponse, WorkspaceListResponse,
 };
 use mj_controller::server::api_token_path;
 use serde::Serialize;
@@ -450,6 +450,19 @@ impl ApiClient {
         self.post_json(
             &format!("/sessions/{session_id}/prompt"),
             &PromptRequest { text },
+            REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn enqueue_event(
+        &self,
+        session_id: &str,
+        request: &MailboxEventRequest,
+    ) -> Result<MailboxEventResponse> {
+        self.post_json(
+            &format!("/sessions/{session_id}/events"),
+            request,
             REQUEST_TIMEOUT,
         )
         .await

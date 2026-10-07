@@ -115,6 +115,13 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
                     ids.insert(format!("system:notice:{id}"));
                 }
             }
+            RelayObservation::CommandQueued {
+                command: RelayCommand::DeliverMailboxEvent { .. } | RelayCommand::MailboxWake { .. },
+                ..
+            }
+            | RelayObservation::MailboxEventsDelivered { .. } => {
+                ids.insert(format!("system:{}", event.ordinal));
+            }
             _ => {}
         }
     }

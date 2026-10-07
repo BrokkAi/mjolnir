@@ -178,6 +178,25 @@ impl DurableRelay {
                 ordinal: accepted_ordinal,
             }));
         }
+        if let RelayCommand::DeliverMailboxEvent { event } = &command
+            && (self
+                .snapshot
+                .pending_mailbox_events
+                .iter()
+                .any(|pending| pending.key == event.key)
+                || self
+                    .snapshot
+                    .delivered_mailbox_event_keys
+                    .contains_key(&event.key))
+        {
+            // A producer may retry after losing the ACK, or independently
+            // submit the same event under a fresh command ID. Pending events
+            // are always deduplicated; delivered keys cover the retry window.
+            return Ok(Ok(RelayResponsePayload::Accepted {
+                command_id: command_id.to_owned(),
+                ordinal: self.snapshot.latest_ordinal,
+            }));
+        }
         if self.clear_context_in_progress() {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidState,
@@ -331,6 +350,49 @@ impl DurableRelay {
             return Ok(Err(relay_protocol_error(
                 RelayErrorCode::InvalidRequest,
                 "notice text is required",
+                false,
+                None,
+            )));
+        }
+        if let RelayCommand::DeliverMailboxEvent { event } = &command
+            && (event.key.trim().is_empty()
+                || event.key.len() > 1024
+                || event.source.trim().is_empty()
+                || event.text.trim().is_empty())
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidRequest,
+                "mailbox event key, source, and text are required",
+                false,
+                None,
+            )));
+        }
+        if let RelayCommand::DeliverMailboxEvent { event } = &command {
+            let mut pending = self.snapshot.pending_mailbox_events.clone();
+            pending.push(event.clone());
+            if ensure_serialized_budget(
+                &pending,
+                RELAY_MAILBOX_BYTE_BUDGET,
+                "pending mailbox events",
+            )
+            .is_err()
+            {
+                return Ok(Err(relay_protocol_error(
+                    RelayErrorCode::InvalidRequest,
+                    "session mailbox is full; deliver pending events before adding another",
+                    false,
+                    None,
+                )));
+            }
+        }
+        if let RelayCommand::MailboxWake { events } = &command
+            && (events.is_empty()
+                || !events.iter().any(|event| event.wake)
+                || events != &self.snapshot.pending_mailbox_events)
+        {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "mailbox wake must carry all currently pending events, including a waking event",
                 false,
                 None,
             )));
@@ -767,6 +829,7 @@ impl DurableRelay {
             | RelayCommand::SetQuotaRecovery { .. }
             | RelayCommand::SeedAssessmentContext { .. }
             | RelayCommand::InstallPromptContext { .. }
+            | RelayCommand::DeliverMailboxEvent { .. }
             | RelayCommand::ResolveSteering { .. } => RelayCommandOutcome::NoticeRecorded,
             _ => RelayCommandOutcome::QueueChanged {
                 removed_command_ids,
@@ -917,6 +980,29 @@ impl DurableRelay {
             .collect();
         claimable.sort_by_key(|(accepted_ordinal, _)| *accepted_ordinal);
         claimable.truncate(maximum);
+        if let Some((_, command_id)) = claimable.iter().find(|(_, command_id)| {
+            self.snapshot
+                .dispatches
+                .get(command_id)
+                .is_some_and(|dispatch| mailbox_prompt_eligible(&dispatch.command))
+        }) && !self.snapshot.pending_mailbox_events.is_empty()
+        {
+            let event_keys = self
+                .snapshot
+                .pending_mailbox_events
+                .iter()
+                .map(|event| event.key.clone())
+                .collect();
+            self.append_relay_event(
+                None,
+                RelayObservation::MailboxEventsDelivered {
+                    event_keys,
+                    path: mj_core::mailbox::MailboxDeliveryPath::Prompt,
+                    prompt_command_id: Some(command_id.clone()),
+                    hook_event: None,
+                },
+            )?;
+        }
         let mut claimed = Vec::with_capacity(claimable.len());
         let mut next_snapshot = self.snapshot.clone();
         for (accepted_ordinal, command_id) in claimable {
@@ -939,12 +1025,12 @@ impl DurableRelay {
                 .get_mut(&command_id)
                 .expect("claimable command disappeared");
             dispatch.state = RelayDispatchState::InFlight;
-            let hidden_prompt_context = dispatch
-                .command
-                .prompt_blocks()
-                .is_some_and(|prompt| !mj_core::acp::prompt_requests_compaction(&prompt))
+            let hidden_prompt_context = mailbox_prompt_eligible(&dispatch.command)
                 .then(|| {
                     let mut contexts = Vec::new();
+                    if let Some(context) = next_snapshot.mailbox_prompt_contexts.get(&command_id) {
+                        contexts.push(context.clone());
+                    }
                     if let Some(context) = next_snapshot.pending_prompt_context.as_mut() {
                         if context.attached_command_id.is_none() {
                             context.attached_command_id = Some(command_id.clone());
@@ -1661,6 +1747,10 @@ impl DurableRelay {
             return Ok(None);
         }
         let Some(queued) = self.snapshot.queued_prompts.first().cloned() else {
+            if self.mailbox_wake_is_allowed() {
+                self.enqueue_mailbox_wake()?;
+                return self.promote_next_queued_command();
+            }
             return Ok(None);
         };
         let queued_ordinal = self
@@ -1684,6 +1774,79 @@ impl DurableRelay {
             },
         )?;
         Ok(Some(ordinal))
+    }
+
+    fn mailbox_wake_is_allowed(&self) -> bool {
+        self.snapshot
+            .pending_mailbox_events
+            .iter()
+            .any(|event| event.wake)
+            && self.activity_is_idle()
+            && self.snapshot.cancelling_prompt_id.is_none()
+            && !self.snapshot.dispatches.values().any(|dispatch| {
+                matches!(
+                    dispatch.command,
+                    RelayCommand::Cancel
+                        | RelayCommand::CancelTurn
+                        | RelayCommand::CancelTurnFor { .. }
+                ) && matches!(
+                    dispatch.state,
+                    RelayDispatchState::Queued
+                        | RelayDispatchState::Pending
+                        | RelayDispatchState::InFlight
+                )
+            })
+    }
+
+    fn enqueue_mailbox_wake(&mut self) -> Result<()> {
+        let events = self.snapshot.pending_mailbox_events.clone();
+        anyhow::ensure!(
+            !events.is_empty() && events.iter().any(|event| event.wake),
+            "mailbox wake lost its waking event"
+        );
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow!("generate mailbox wake ID: {error}"))?;
+        let command_id = format!("mailbox-wake-{}", mj_core::hex::lower_hex(random));
+        self.append_relay_event(
+            Some(&command_id),
+            RelayObservation::CommandQueued {
+                command_id: command_id.clone(),
+                command: RelayCommand::MailboxWake { events },
+                created_at_ms: epoch_millis(),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Atomically claim pending events for one harness hook.
+    pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
+        anyhow::ensure!(
+            matches!(hook_event, "PostToolUse" | "PostToolBatch"),
+            "unsupported mailbox hook event"
+        );
+        let events = self.snapshot.pending_mailbox_events.clone();
+        if events.is_empty() {
+            return Ok(RelayResponsePayload::MailboxDrained {
+                text: None,
+                count: 0,
+            });
+        }
+        let event_keys = events.iter().map(|event| event.key.clone()).collect();
+        let text = mj_core::mailbox::render_mailbox_events(&events);
+        self.append_relay_event(
+            None,
+            RelayObservation::MailboxEventsDelivered {
+                event_keys,
+                path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+                prompt_command_id: None,
+                hook_event: Some(hook_event.to_owned()),
+            },
+        )?;
+        Ok(RelayResponsePayload::MailboxDrained {
+            text: Some(text),
+            count: events.len(),
+        })
     }
 
     /// A promoted configuration change leaves execution idle while it reaches
@@ -1739,4 +1902,13 @@ impl DurableRelay {
                 )
         })
     }
+}
+
+fn mailbox_prompt_eligible(command: &RelayCommand) -> bool {
+    let Some(prompt) = command.prompt_blocks() else {
+        return false;
+    };
+    !mj_core::acp::prompt_requests_compaction(&prompt)
+        && !mj_core::acp::prompt_is_slash_command(&prompt)
+        && mj_core::acp::context_command(&prompt).is_none()
 }

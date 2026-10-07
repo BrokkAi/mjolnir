@@ -138,6 +138,24 @@ fn exchanges(turns: &[(&str, &str)]) -> CanonicalSessionSnapshot {
     )
 }
 
+#[test]
+fn recent_turns_use_compaction_grouping_and_markup_before_selecting_the_tail() {
+    let snapshot = exchanges(&[
+        ("older user request", "older assistant reply"),
+        ("recent request one", "recent reply one"),
+        ("recent request two", "recent reply two"),
+        ("recent request three", "recent reply three"),
+    ]);
+    let grouped = turns_from_snapshot(&snapshot).unwrap();
+    let expected = render_turns(&grouped[grouped.len() - 3..], 0);
+
+    let rendered = render_recent_turns(&snapshot, 3);
+    assert_eq!(rendered, expected);
+    assert!(!rendered.contains("older user request"));
+    assert!(rendered.contains("recent request one"));
+    assert!(rendered.contains("recent request three"));
+}
+
 /// With no utility model the handoff is built without a model at all:
 /// newest turns first until the budget is spent, emitted in order.
 #[test]

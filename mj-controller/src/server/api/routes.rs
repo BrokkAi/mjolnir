@@ -26,6 +26,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             get(list_subagents).post(spawn_subagent),
         )
         .route("/sessions/{session_id}/prompt", post(prompt))
+        .route(
+            "/sessions/{session_id}/events",
+            post(mailbox::enqueue_event),
+        )
         .route("/sessions/{session_id}/transcript", get(transcript))
         .route("/sessions/{session_id}/history", get(transcript_history))
         .route("/sessions/{session_id}/usage", get(usage))

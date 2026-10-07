@@ -92,6 +92,7 @@ fn is_served_relay_method(method: &str) -> bool {
             | "acknowledge"
             | "submit"
             | "status"
+            | "drain_mailbox"
             | "credential_state"
             | "read_credentials"
             | "install_credentials"
@@ -231,6 +232,7 @@ mod tests {
         for frame in [
             br#"{"request_id":"r1","protocol_version":2,"request":{"method":"compact","params":{}}}"#.as_slice(),
             br#"{"request_id":"r2","protocol_version":2,"request":{"method":"respond_elicitation","params":{}}}"#.as_slice(),
+            br#"{"request_id":"r3","protocol_version":33,"request":{"method":"drain_mailbox","params":{}}}"#.as_slice(),
         ] {
             match decode_relay_request(frame) {
                 DecodedRelayRequest::Invalid { .. } => {}

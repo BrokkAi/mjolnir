@@ -154,6 +154,7 @@ impl NativeHistoryEvidence {
             | RelayObservation::RetryAssessmentStarted { .. }
             | RelayObservation::RetryAssessmentResolved { .. }
             | RelayObservation::HarnessTurnSettled { .. }
+            | RelayObservation::MailboxEventsDelivered { .. }
             | RelayObservation::Closing
             | RelayObservation::TurnAssessmentUpdated { .. }
             | RelayObservation::Closed => {}

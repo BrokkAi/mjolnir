@@ -1522,21 +1522,32 @@ async fn prepare_and_start_harness(
                 .home
                 .clone();
             let root = root.to_owned();
+            let mut environment = config.environment.clone();
             let role = subagent_role;
             let policy = config.execution_policy;
-            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-                if step_cancel.is_cancelled() {
-                    bail!("preparation cancelled before configuring the sub-agent profile");
-                }
-                super::subagents::configure_codex_mcp(&root, &home, role, policy)
-            })
-            .await?
+            let (registered, environment) =
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!("preparation cancelled before configuring the Codex profile");
+                    }
+                    let registered = super::subagents::configure_codex_profile(
+                        &root,
+                        &home,
+                        &mut environment,
+                        role,
+                        policy,
+                    )?;
+                    Ok((registered, environment))
+                })
+                .await?;
+            config.environment = environment;
+            registered
         }
-        HarnessKind::Claude if subagent_role.is_some() => {
+        HarnessKind::Claude => {
             let budget = preparation_step(
                 root,
                 status,
-                "subagent-profile",
+                "harness-profile",
                 LOCAL_PREPARATION_STEP_TIMEOUT,
                 cancel,
             )
@@ -1547,16 +1558,19 @@ async fn prepare_and_start_harness(
                 .home
                 .clone();
             let root = root.to_owned();
+            let configure_subagents = subagent_role.is_some();
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
-                    bail!("preparation cancelled before resolving the Claude profile");
+                    bail!("preparation cancelled before configuring the Claude profile");
                 }
-                super::subagents::resolve_claude_mcp_paths(&root, &home)?;
+                if configure_subagents {
+                    super::subagents::resolve_claude_mcp_paths(&root, &home)?;
+                }
+                super::subagents::configure_claude_mailbox_hook(&root, &home)?;
                 Ok(true)
             })
             .await?
         }
-        HarnessKind::Claude => true,
         _ => false,
     };
     if config.project_memory.is_some()

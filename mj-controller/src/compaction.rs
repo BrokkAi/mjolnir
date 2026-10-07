@@ -414,6 +414,24 @@ fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>>
     Ok(turns)
 }
 
+/// Render the most recent user turns with the exact turn grouping and markup
+/// used by compaction. Selection happens after transcript events are grouped.
+pub fn render_recent_turns(snapshot: &CanonicalSessionSnapshot, count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    match turns_from_snapshot(snapshot) {
+        Ok(turns) => {
+            let start = turns.len().saturating_sub(count);
+            render_turns(&turns[start..], 0)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not render recent turns for GitHub item classification");
+            String::new()
+        }
+    }
+}
+
 fn retained_snapshot(snapshot: &CanonicalSessionSnapshot, budget: usize) -> String {
     TranscriptSummary::from_snapshot(snapshot)
         .retained()

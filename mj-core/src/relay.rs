@@ -26,6 +26,9 @@ pub const RELAY_REPLAY_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 /// state, so admitting a frame-sized command would make later attaches
 /// impossible to encode.
 pub const RELAY_COMMAND_BYTE_BUDGET: usize = 1024 * 1024;
+/// Pending mailbox contents must fit in one relay frame after rendering and
+/// JSON framing, so a single hook can claim the full mailbox atomically.
+pub const RELAY_MAILBOX_BYTE_BUDGET: usize = RELAY_COMMAND_BYTE_BUDGET;
 /// Every event must fit by itself in a replay page.
 pub const RELAY_EVENT_BYTE_BUDGET: usize = 2 * 1024 * 1024;
 /// The public operational state shares an attach frame with a replay page.
@@ -43,6 +46,8 @@ pub const RELAY_TRUNCATION_FLOOR: usize = 4 * 1024;
 /// The private snapshot also has a hard ceiling so repeated accepted commands
 /// cannot grow the durable state file without bound between checkpoints.
 pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
+/// Completed command IDs and delivered mailbox keys retained for lost-ACK retries.
+pub const RELAY_RETRY_ID_RETENTION: usize = 512;
 /// Current durable ACP relay protocol. A worker serves only this version.
 ///
 /// A controller still connects to a worker that speaks an older version in
@@ -55,9 +60,10 @@ pub const RELAY_SNAPSHOT_BYTE_BUDGET: usize = 16 * 1024 * 1024;
 /// counts to a review capture. 31 added delivery status to sub-agent results
 /// (older completion responses mean delivered) and compare-and-replace for
 /// project memory trees. 32 added worker-owned sub-agent mutation admission.
-/// An older controller's requests are refused whole by a newer worker, rather
-/// than half-decoded.
-pub const RELAY_PROTOCOL_VERSION: u32 = 32;
+/// 33 adds durable mailbox events and their hook drain request. An older
+/// controller's requests are refused whole by a newer worker, rather than
+/// half-decoded.
+pub const RELAY_PROTOCOL_VERSION: u32 = 33;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -83,7 +89,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 /// frontier digests stay valid, since each is recomputed with the formula that
 /// matches the record's format).
 // Revision 15 is breaking: unified assessment state and events must not be lost by an older writer.
-pub const RELAY_STATE_VERSION: u32 = 15;
+// Revision 16 is breaking: mailbox state and journal events must not be lost by an older writer.
+pub const RELAY_STATE_VERSION: u32 = 16;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

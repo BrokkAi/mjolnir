@@ -14,11 +14,42 @@ pub struct GithubConfig {
     /// existing `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token` lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<GithubAppConfig>,
+    /// Daemon polling for repositories in live sessions.
+    #[serde(default, skip_serializing_if = "GithubWatchConfig::is_default")]
+    pub watch: GithubWatchConfig,
 }
 
 impl GithubConfig {
     pub fn is_default(&self) -> bool {
-        self.app.is_none()
+        self.app.is_none() && self.watch.is_default()
+    }
+}
+
+/// Configuration for the durable GitHub mailbox producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubWatchConfig {
+    /// Poll repository activity while at least one matching session is live.
+    pub enabled: bool,
+    /// Delay between polls, bounded to avoid a tight retry loop.
+    pub interval_seconds: u64,
+    /// GitHub REST API base URL; configurable for isolated fake-server tests.
+    pub api_base: String,
+}
+
+impl GithubWatchConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Default for GithubWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_seconds: 60,
+            api_base: "https://api.github.com".into(),
+        }
     }
 }
 

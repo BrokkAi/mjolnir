@@ -1285,6 +1285,66 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         migrate_opencode_harness_kind(connection)?;
     }
 
+    // Compatible: adds only mailbox/GitHub tables. Older daemons do not read
+    // or rewrite them, and these tables deliberately have no session foreign
+    // keys so older session-table maintenance cannot cascade away queued data.
+    // The current daemon prunes rows after it observes a destroyed session.
+    if version < 75 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS github_watch_cursors (
+                 owner TEXT NOT NULL,
+                 repo TEXT NOT NULL,
+                 items_watermark_at TEXT,
+                 items_watermark_id INTEGER,
+                 items_etag TEXT,
+                 comments_cursor TEXT,
+                 PRIMARY KEY(owner, repo)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS github_watch_classifications (
+                 owner TEXT NOT NULL,
+                 repo TEXT NOT NULL,
+                 number INTEGER NOT NULL,
+                 session_id TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('issue', 'pull_request')),
+                 title TEXT NOT NULL,
+                 url TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 interested INTEGER NOT NULL CHECK(interested IN (0, 1)),
+                 created INTEGER NOT NULL CHECK(created IN (0, 1)),
+                 PRIMARY KEY(owner, repo, number, session_id)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS github_watch_items (
+                 owner TEXT NOT NULL,
+                 repo TEXT NOT NULL,
+                 number INTEGER NOT NULL,
+                 creator_session_id TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('issue', 'pull_request')),
+                 title TEXT NOT NULL,
+                 url TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 PRIMARY KEY(owner, repo, number)
+             ) STRICT;
+             CREATE TABLE IF NOT EXISTS mailbox_outbox (
+                 event_key TEXT PRIMARY KEY,
+                 target_session_id TEXT NOT NULL,
+                 event_json TEXT NOT NULL,
+                 wake INTEGER NOT NULL CHECK(wake IN (0, 1)),
+                 unpark INTEGER NOT NULL DEFAULT 0 CHECK(unpark IN (0, 1)),
+                 created_at TEXT NOT NULL,
+                 accepted_at TEXT,
+                 accepted_command_id TEXT,
+                 accepted_ordinal INTEGER
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS mailbox_outbox_pending
+                 ON mailbox_outbox(accepted_at, created_at);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (75, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 75;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

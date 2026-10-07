@@ -273,6 +273,98 @@ fn golden_session_title_projection() {
     );
 }
 
+#[test]
+fn golden_mailbox_delivery_transcript() {
+    let mut session = MaterializedSession::empty("session-mailbox");
+    let github_event = mj_core::mailbox::MailboxEvent {
+        key: "github:owner/repo#12:comment:345".into(),
+        source: "github".into(),
+        wake: false,
+        text: "A review comment arrived.".into(),
+        created_at_ms: 100,
+    };
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "github-event".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: github_event,
+            },
+            created_at_ms: 100,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys: vec!["github:owner/repo#12:comment:345".into()],
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            prompt_command_id: None,
+            hook_event: Some("PostToolUse".into()),
+        },
+    );
+
+    let parent_event = mj_core::mailbox::MailboxEvent {
+        key: "parent:message:1".into(),
+        source: "parent".into(),
+        wake: false,
+        text: "Please check this detail.".into(),
+        created_at_ms: 300,
+    };
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "parent-event".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: parent_event.clone(),
+            },
+            created_at_ms: 300,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys: vec![parent_event.key.clone()],
+            path: mj_core::mailbox::MailboxDeliveryPath::Prompt,
+            prompt_command_id: Some("user-prompt".into()),
+            hook_event: None,
+        },
+    );
+
+    let api_event = mj_core::mailbox::MailboxEvent {
+        key: "api:urgent-1".into(),
+        source: "api".into(),
+        wake: true,
+        text: "A new task is ready.".into(),
+        created_at_ms: 500,
+    };
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "api-event".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: api_event.clone(),
+            },
+            created_at_ms: 500,
+        },
+    );
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandQueued {
+            command_id: "api-wake".into(),
+            command: RelayCommand::MailboxWake {
+                events: vec![api_event],
+            },
+            created_at_ms: 600,
+        },
+    );
+
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "mailbox-delivery-transcript",
+        &rendered_materialized_transcript(&session),
+    );
+}
+
 // Hard-won: 60145fdb: leaving Claude Plan mode selected default Manual permissions instead of the saved policy.
 #[test]
 fn execution_mode_restoration_reports_durable_success_and_failure_to_clients() {

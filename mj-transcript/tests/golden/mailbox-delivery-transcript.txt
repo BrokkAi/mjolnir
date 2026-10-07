@@ -1,0 +1,7 @@
+Session: session-mailbox
+1: Mailbox event queued from github
+2: Delivered 1 mailbox event by tool hook (PostToolUse)
+3: Mailbox event queued from parent
+4: Delivered 1 mailbox event with prompt
+5: Mailbox event queued from api
+6: Delivered 1 mailbox event in a wake prompt

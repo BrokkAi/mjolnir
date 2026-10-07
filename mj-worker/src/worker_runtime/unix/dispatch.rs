@@ -1019,6 +1019,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         RelayCommand::ClearContext => Some(CommandRequest::ClearContext { request_id }),
         command @ (RelayCommand::Prompt { .. }
         | RelayCommand::HandbackReminder { .. }
+        | RelayCommand::MailboxWake { .. }
         | RelayCommand::ContinueAuthorizedWork { .. }
         | RelayCommand::ResumeAfterQuota { .. }) => {
             let mut prompt = command
@@ -1082,7 +1083,8 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::RecordNotice { .. }
         | RelayCommand::SeedAssessmentContext { .. }
         | RelayCommand::SetQuotaRecovery { .. }
-        | RelayCommand::ResolveSteering { .. } => None,
+        | RelayCommand::ResolveSteering { .. }
+        | RelayCommand::DeliverMailboxEvent { .. } => None,
     }
 }
 

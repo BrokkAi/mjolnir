@@ -192,6 +192,70 @@ pub(super) fn configure_claude_subagent_mcp(
     })
 }
 
+/// Add the worker-owned mailbox drain to Claude's session-private settings.
+/// The command is finalized on the worker because remote worker roots are
+/// home-relative while staging runs on the controller.
+pub(super) fn configure_claude_mailbox_hook(profile_stage: &Path, worker_root: &str) -> Result<()> {
+    let path = profile_stage.join("settings.json");
+    let worker = Path::new(worker_root).join("hel");
+    let socket = Path::new(worker_root).join("control.sock");
+    let command = format!(
+        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
+        mj_core::targets::posix_quote(&worker.to_string_lossy()),
+        mj_core::targets::posix_quote(&socket.to_string_lossy())
+    );
+    edit_staged_json_object(&path, "staged Claude settings", |root| {
+        let groups = root
+            .entry("hooks")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| {
+                format!(
+                    "hooks in staged Claude settings {} must be a JSON object",
+                    path.display()
+                )
+            })?
+            .entry("PostToolBatch")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| {
+                format!(
+                    "hooks.PostToolBatch in staged Claude settings {} must be a JSON array",
+                    path.display()
+                )
+            })?;
+        let existing = groups.iter_mut().find_map(|group| {
+            group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+                .and_then(|hooks| {
+                    hooks.iter_mut().find(|hook| {
+                        hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+                            && hook
+                                .get("command")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|existing| {
+                                    existing.starts_with("MJOLNIR_MAILBOX_HOOK=1 ")
+                                })
+                    })
+                })
+        });
+        if let Some(existing) = existing {
+            existing["command"] = serde_json::Value::String(command);
+            existing["timeout"] = serde_json::json!(10);
+        } else {
+            groups.push(serde_json::json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10
+                }]
+            }));
+        }
+        Ok(())
+    })
+}
+
 /// Write Mjolnir's managed skills into a staged profile home.
 ///
 /// Reserve the same directory and honor the same target scope as

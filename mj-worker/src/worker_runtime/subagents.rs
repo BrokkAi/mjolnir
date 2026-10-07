@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -19,6 +20,10 @@ use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
 use crate::subagent_mcp::DaemonContact;
 
 pub const SUBAGENT_SOCKET: &str = "subagents.sock";
+
+const CODEX_CONFIG_ENV: &str = "CODEX_CONFIG";
+const CODEX_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
+const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 
 /// Finalize the controller's staged registration on the target, where the
 /// worker root is absolute. Claude launches MCP servers from the checkout,
@@ -60,6 +65,76 @@ pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path) -> Result<()> {
     if resolved != body {
         mj_core::config::atomic_write(&path, &resolved)
             .with_context(|| format!("write staged Claude configuration {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Install the mailbox command hook in the session-private Claude settings and
+/// resolve staged remote paths on the worker target before Claude reads them.
+pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path) -> Result<()> {
+    anyhow::ensure!(root.is_absolute(), "Claude worker root must be absolute");
+    let worker = std::env::current_exe().context("locate worker for Claude mailbox hook")?;
+    let socket = root.join("control.sock");
+    let command = format!(
+        "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
+        mj_core::targets::posix_quote(&worker.to_string_lossy()),
+        mj_core::targets::posix_quote(&socket.to_string_lossy())
+    );
+    let path = home.join("settings.json");
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let mut settings: serde_json::Value = serde_json::from_slice(&body)
+        .with_context(|| format!("parse staged Claude settings {}", path.display()))?;
+    let root_object = settings.as_object_mut().with_context(|| {
+        format!(
+            "staged Claude settings {} must be a JSON object",
+            path.display()
+        )
+    })?;
+    let groups = root_object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .with_context(|| format!("hooks in {} must be a JSON object", path.display()))?
+        .entry("PostToolBatch")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .with_context(|| {
+            format!(
+                "hooks.PostToolBatch in {} must be a JSON array",
+                path.display()
+            )
+        })?;
+    let Some(existing) = groups.iter_mut().find_map(|group| {
+        group
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|hooks| {
+                hooks.iter_mut().find(|hook| {
+                    hook.get("type").and_then(serde_json::Value::as_str) == Some("command")
+                        && hook
+                            .get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|existing| {
+                                existing.starts_with(CLAUDE_MAILBOX_HOOK_MARKER)
+                            })
+                })
+            })
+    }) else {
+        // A missing marker means this home was not staged with the worker hook.
+        // Do not create or edit a profile file that might belong to the user.
+        return Ok(());
+    };
+    existing["command"] = serde_json::Value::String(command);
+    existing["timeout"] = serde_json::json!(10);
+    let mut resolved = serde_json::to_vec_pretty(&settings)?;
+    resolved.push(b'\n');
+    if resolved != body {
+        mj_core::config::atomic_write(&path, &resolved)
+            .with_context(|| format!("write staged Claude settings {}", path.display()))?;
     }
     Ok(())
 }
@@ -127,6 +202,147 @@ pub(super) fn configure_codex_mcp(
     mj_core::config::atomic_write(&path, toml::to_string(&config)?.as_bytes())
         .with_context(|| format!("write staged Codex configuration {}", path.display()))?;
     Ok(true)
+}
+
+pub(super) fn configure_codex_profile(
+    root: &Path,
+    home: &Path,
+    environment: &mut BTreeMap<String, String>,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
+    policy: mj_core::config::ExecutionPolicy,
+) -> Result<bool> {
+    configure_codex_mailbox_hook(root, environment)?;
+    configure_codex_mcp(root, home, role, policy)
+}
+
+/// Put the mailbox hook in codex-acp's per-thread config override. Its state
+/// trusts only this generated handler; using Codex's global trust bypass would
+/// also enable untrusted handlers from the user's and project's config layers.
+fn configure_codex_mailbox_hook(
+    root: &Path,
+    environment: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    anyhow::ensure!(root.is_absolute(), "Codex worker root must be absolute");
+    let worker = std::env::current_exe().context("locate worker for Codex mailbox hook")?;
+    let socket = root.join("control.sock");
+    let command = format!(
+        "{CODEX_MAILBOX_HOOK_MARKER}{} worker mailbox-hook --socket {} --event PostToolUse",
+        mj_core::targets::posix_quote(&worker.to_string_lossy()),
+        mj_core::targets::posix_quote(&socket.to_string_lossy())
+    );
+    let mut config = match environment.get(CODEX_CONFIG_ENV) {
+        None => serde_json::Map::new(),
+        Some(existing) => serde_json::from_str::<serde_json::Value>(existing)
+            .ok()
+            .and_then(|value| match value {
+                serde_json::Value::Object(map) => Some(map),
+                _ => None,
+            })
+            .with_context(|| {
+                format!("{CODEX_CONFIG_ENV} must be a JSON object for mailbox hooks")
+            })?,
+    };
+    let hooks = config
+        .entry("hooks")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .context("hooks in CODEX_CONFIG must be a JSON object")?;
+    let groups = hooks
+        .entry("PostToolUse")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("hooks.PostToolUse in CODEX_CONFIG must be a JSON array")?;
+    let mut found = None;
+    for (group_index, group) in groups.iter_mut().enumerate() {
+        let Some(handlers) = group
+            .get_mut("hooks")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        if let Some(handler_index) = handlers.iter_mut().position(|handler| {
+            handler.get("type").and_then(serde_json::Value::as_str) == Some("command")
+                && handler
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|existing| existing.starts_with(CODEX_MAILBOX_HOOK_MARKER))
+        }) {
+            let handler = &mut handlers[handler_index];
+            handler["command"] = serde_json::Value::String(command.clone());
+            handler["timeout"] = serde_json::json!(10);
+            found = Some((group_index, handler_index));
+            break;
+        }
+    }
+    let (group_index, handler_index) = if let Some(found) = found {
+        found
+    } else {
+        groups.push(serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": command.clone(),
+                "timeout": 10
+            }]
+        }));
+        (groups.len() - 1, 0)
+    };
+    let hash = codex_mailbox_hook_hash(&command)?;
+    let state = hooks
+        .entry("state")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .context("hooks.state in CODEX_CONFIG must be a JSON object")?;
+    state.insert(
+        format!("/<session-flags>/config.toml:post_tool_use:{group_index}:{handler_index}"),
+        serde_json::json!({"enabled": true, "trusted_hash": hash}),
+    );
+    environment.insert(
+        CODEX_CONFIG_ENV.to_owned(),
+        serde_json::Value::Object(config).to_string(),
+    );
+    Ok(())
+}
+
+/// Match Codex 0.159.1's hook identity hash for the generated command hook.
+fn codex_mailbox_hook_hash(command: &str) -> Result<String> {
+    let identity = serde_json::json!({
+        "event_name": "post_tool_use",
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "timeout": 10,
+            "async": false
+        }]
+    });
+    let identity: toml::Value =
+        toml::Value::try_from(identity).context("serialize Codex mailbox hook identity")?;
+    let identity = canonicalize_json(serde_json::to_value(identity)?);
+    let serialized = serde_json::to_vec(&identity)?;
+    let hash = Sha256::digest(serialized);
+    Ok(format!(
+        "sha256:{}",
+        hash.iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn canonicalize_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries = map.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key, canonicalize_json(value));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
 }
 
 const SUBAGENT_QUEUE: &str = "subagents.json";
@@ -491,6 +707,128 @@ impl Drop for LiveWaiter {
 mod tests {
     use super::*;
     use mj_core::subagent::SubagentToolAction;
+
+    #[test]
+    fn claude_mailbox_hook_resolves_the_worker_socket_and_preserves_profile_settings() {
+        let worker_root = tempfile::tempdir().unwrap();
+        let staged_home = worker_root.path().join("profile/.claude");
+        std::fs::create_dir_all(&staged_home).unwrap();
+        let remote_root = ".local/share/hel/workers/session";
+        let path = staged_home.join("settings.json");
+        let user_hook = serde_json::json!({
+            "hooks": [{"type": "command", "command": "user-hook"}]
+        });
+        let relative_command = format!(
+            "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
+            mj_core::targets::posix_quote(&format!("{remote_root}/hel")),
+            mj_core::targets::posix_quote(&format!("{remote_root}/control.sock"))
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "model": "opus",
+                "hooks": {
+                    "PostToolBatch": [
+                        user_hook.clone(),
+                        {"hooks": [{
+                            "type": "command",
+                            "command": relative_command,
+                            "timeout": 10
+                        }]}
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        configure_claude_mailbox_hook(worker_root.path(), &staged_home).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+
+        let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(settings["model"], "opus");
+        let groups = settings["hooks"]["PostToolBatch"].as_array().unwrap();
+        assert_eq!(groups[0], user_hook);
+        let mailbox_hooks = groups
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+            .filter(|hook| {
+                hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.starts_with(CLAUDE_MAILBOX_HOOK_MARKER))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mailbox_hooks.len(), 1);
+        let worker = std::env::current_exe().unwrap();
+        let expected_command = format!(
+            "{CLAUDE_MAILBOX_HOOK_MARKER}{} worker mailbox-hook --socket {} --event PostToolBatch",
+            mj_core::targets::posix_quote(&worker.to_string_lossy()),
+            mj_core::targets::posix_quote(
+                &worker_root.path().join("control.sock").to_string_lossy()
+            )
+        );
+        assert_eq!(mailbox_hooks[0]["command"], expected_command);
+
+        let source_profile = tempfile::tempdir().unwrap();
+        let source_home = source_profile.path().join(".claude");
+        std::fs::create_dir(&source_home).unwrap();
+        let source_settings = source_home.join("settings.json");
+        std::fs::write(&source_settings, br#"{"user":"source"}"#).unwrap();
+        let legacy_root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(source_profile.path(), legacy_root.path().join("profile"))
+            .unwrap();
+        configure_claude_mailbox_hook(legacy_root.path(), &source_home).unwrap();
+        assert_eq!(
+            std::fs::read(source_settings).unwrap(),
+            br#"{"user":"source"}"#
+        );
+    }
+
+    #[test]
+    fn codex_thread_mailbox_hook_preserves_overrides_and_trusts_only_its_handler() {
+        let worker_root = tempfile::tempdir().unwrap();
+        let user_hook = serde_json::json!({
+            "hooks": [{"type": "command", "command": "user-hook"}]
+        });
+        let mut environment = BTreeMap::from([(
+            CODEX_CONFIG_ENV.to_owned(),
+            serde_json::json!({
+                "model": "session-model",
+                "hooks": {"PostToolUse": [user_hook.clone()]}
+            })
+            .to_string(),
+        )]);
+
+        configure_codex_mailbox_hook(worker_root.path(), &mut environment).unwrap();
+        let first = environment[CODEX_CONFIG_ENV].clone();
+        configure_codex_mailbox_hook(worker_root.path(), &mut environment).unwrap();
+        assert_eq!(environment[CODEX_CONFIG_ENV], first);
+
+        let config: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(config["model"], "session-model");
+        let groups = config["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(groups[0], user_hook);
+        assert_eq!(groups.len(), 2);
+        let hook = &groups[1]["hooks"][0];
+        assert_eq!(hook["type"], "command");
+        assert_eq!(hook["timeout"], 10);
+        let worker = std::env::current_exe().unwrap();
+        let socket = worker_root.path().join("control.sock");
+        let expected_command = format!(
+            "{CODEX_MAILBOX_HOOK_MARKER}{} worker mailbox-hook --socket {} --event PostToolUse",
+            mj_core::targets::posix_quote(&worker.to_string_lossy()),
+            mj_core::targets::posix_quote(&socket.to_string_lossy())
+        );
+        assert_eq!(hook["command"], expected_command);
+        let expected_hash = codex_mailbox_hook_hash(&expected_command).unwrap();
+        let state = &config["hooks"]["state"]["/<session-flags>/config.toml:post_tool_use:1:0"];
+        assert_eq!(state["enabled"], true);
+        assert_eq!(state["trusted_hash"], expected_hash);
+        assert_eq!(config["hooks"]["state"].as_object().unwrap().len(), 1);
+        assert!(config.get("bypass_hook_trust").is_none());
+    }
 
     #[tokio::test]
     async fn claude_delegation_launches_from_a_checkout_after_remote_profile_repair() {

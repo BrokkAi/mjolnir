@@ -31,12 +31,16 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 74;
+const SCHEMA_VERSION: i64 = 75;
 
 mod session_move;
 pub use session_move::*;
 mod session_restart;
 pub(crate) use session_restart::*;
+mod github_watch;
+pub(crate) use github_watch::*;
+mod mailbox;
+pub(crate) use mailbox::*;
 
 mod legacy_schema;
 mod schema;

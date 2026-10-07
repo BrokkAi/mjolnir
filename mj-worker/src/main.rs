@@ -104,6 +104,13 @@ enum WorkerCommand {
         #[arg(long)]
         history_socket: Option<PathBuf>,
     },
+    /// Drain mailbox events for one harness tool hook.
+    MailboxHook {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long, value_parser = ["PostToolUse", "PostToolBatch"])]
+        event: String,
+    },
     /// Serve Mjolnir-owned delegation tools over MCP stdio.
     SubagentMcp {
         #[arg(long)]
@@ -480,6 +487,9 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             _root: _,
             history_socket,
         } => mj_worker::memory_mcp::run_mcp_stdio(history_socket),
+        WorkerCommand::MailboxHook { socket, event } => {
+            mj_worker::mailbox_hook::run(&socket, &event)
+        }
 
         WorkerCommand::SubagentMcp {
             socket,

@@ -784,12 +784,44 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         "ALTER TABLE sessions DROP COLUMN checkout_json;
         DELETE FROM schema_migrations WHERE version >= 54;
         UPDATE schema_compatibility SET minimum_compatible_version = 53;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 53;",
+        DROP TABLE IF EXISTS subagent_accounting;
+        DROP TABLE IF EXISTS session_turn_selections;
+        DROP TABLE IF EXISTS github_watch_cursors;
+        DROP TABLE IF EXISTS github_watch_classifications;
+        DROP TABLE IF EXISTS github_watch_items;
+        DROP TABLE IF EXISTS mailbox_outbox;
+        PRAGMA writable_schema=ON;
+        UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions';
+        PRAGMA writable_schema=RESET;
+        PRAGMA user_version = 53;",
         )
         .unwrap();
     drop(connection);
     forget_verified_schema(&path);
     let connection = open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        75
+    );
+    for table in [
+        "github_watch_cursors",
+        "github_watch_classifications",
+        "github_watch_items",
+        "mailbox_outbox",
+    ] {
+        assert!(
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0)
+                )
+                .unwrap(),
+            "migration 75 creates {table}"
+        );
+    }
     assert_eq!(
         connection
             .query_row(

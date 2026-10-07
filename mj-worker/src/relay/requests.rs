@@ -117,6 +117,7 @@ impl DurableRelay {
                 )?;
                 RelayResponsePayload::Status(state)
             }
+            RelayRequest::DrainMailbox { hook_event } => self.drain_mailbox(hook_event)?,
             RelayRequest::ReserveIdle { command_id } => {
                 let already_accepted = self.snapshot.handled_commands.contains_key(command_id);
                 let idle = self

@@ -5,7 +5,7 @@
 
 /// Terminal command ids kept past journal acknowledgement so a retried
 /// submit with a known id is answered from the ledger instead of re-run.
-pub(crate) const RETAINED_TERMINAL_COMMANDS: usize = 512;
+pub(crate) const RETAINED_TERMINAL_COMMANDS: usize = mj_core::relay::RELAY_RETRY_ID_RETENTION;
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};

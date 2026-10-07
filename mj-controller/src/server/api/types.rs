@@ -1,5 +1,25 @@
 use super::*;
 
+/// An externally produced item waiting in a session's durable mailbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxEventRequest {
+    /// Idempotency key chosen by the producer.
+    pub key: String,
+    /// Untrusted event text shown to the session.
+    pub text: String,
+    #[serde(default)]
+    pub wake: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxEventResponse {
+    pub key: String,
+    /// False when this exact event was already accepted into the outbox.
+    pub inserted: bool,
+}
+
 /// Query selecting the GitHub App installation whose token should be returned.
 #[derive(Debug, Default)]
 pub struct GithubTokenQuery {

@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, ValueEnum};
 use mj_controller::server::api::{
-    ApiSession, ExportKind, ExportRequest, RelayState, ResumeSessionRequest, StartSessionRequest,
-    WaitOutcome, WaitRequest, WaitResponse,
+    ApiSession, ExportKind, ExportRequest, MailboxEventRequest, RelayState, ResumeSessionRequest,
+    StartSessionRequest, WaitOutcome, WaitRequest, WaitResponse,
 };
 
 use mj_client::daemon::WikiSessionStatus;
@@ -205,6 +205,50 @@ pub(crate) struct PromptArgs {
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct EventArgs {
+    /// Session id, as `mj sessions` lists it.
+    #[arg(long)]
+    session: String,
+    /// Producer idempotency key. Omit it to generate a unique key.
+    #[arg(long)]
+    key: Option<String>,
+    /// Start a turn if the session is idle when the worker receives the event.
+    #[arg(long)]
+    wake: bool,
+    /// Event text shown to the session as untrusted external content.
+    text: String,
+}
+
+pub(crate) async fn event(args: EventArgs) -> Result<()> {
+    let key = match args.key {
+        Some(key) => key,
+        None => format!("cli:{}", mj_core::state::new_session_id()?),
+    };
+    let client = ApiClient::connect().await?;
+    let response = client
+        .enqueue_event(
+            &args.session,
+            &MailboxEventRequest {
+                key: key.clone(),
+                text: args.text,
+                wake: args.wake,
+            },
+        )
+        .await?;
+    println!(
+        "{} event {} for session {}",
+        if response.inserted {
+            "queued"
+        } else {
+            "already queued"
+        },
+        response.key,
+        args.session
+    );
+    Ok(())
 }
 
 #[derive(Debug, Args)]

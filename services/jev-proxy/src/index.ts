@@ -6,6 +6,7 @@ import questionsV4 from "../../../mj-core/src/activity/verdict_questions_v4.json
 import questionsV5 from "../../../mj-core/src/activity/verdict_questions_v5.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
+import { githubItemRequest, githubItemAnswers, githubItemQuestions, type GithubItemEvidence } from "./github-item.ts";
 
 export interface Env {
   TYPESAFE_API_KEY: string;
@@ -262,7 +263,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 = 1, continuationV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 = 1, continuationV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -275,19 +276,35 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
     return await Promise.race([
       deadline,
       (async () => {
+        const questionsForState = "item" in state ? githubItemQuestions
+          : "entries" in state ? helpQuestions(state)
+            : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions)
+              : version === 6 ? questions
+                : version === 5 ? questionsV5
+                  : version === 4 ? questionsV4
+                    : version === 3 ? questionsV3
+                      : "transcript_summary" in state ? questionsV2 : questionsV1;
+        const upstreamBody = JSON.stringify({ model: "jev-latest", state, questions: questionsForState });
+        if ("item" in state && encoder.encode(upstreamBody).byteLength > MAX_BODY_BYTES) return error("body_too_large", 413);
         const upstream = await fetch(UPSTREAM, {
           method: "POST",
           redirect: "manual",
           signal: abort.signal,
           headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: "jev-latest", state, questions: "entries" in state ? helpQuestions(state) : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions) : version === 6 ? questions : version === 5 ? questionsV5 : version === 4 ? questionsV4 : version === 3 ? questionsV3 : "transcript_summary" in state ? questionsV2 : questionsV1 }),
+          body: upstreamBody,
         });
         if (!upstream.ok) {
           await upstream.body?.cancel();
           return error("upstream_unavailable", 502);
         }
         const body = await readBounded(upstream);
-        const result = "entries" in state ? helpAnswers(body, state) : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body)) : version === 6 ? answersV6(body) : version === 5 ? answersV5(body) : version === 4 ? answersV4(body) : version === 3 ? answersV3(body) : answers(body);
+        const result = "item" in state ? githubItemAnswers(body)
+          : "entries" in state ? helpAnswers(body, state)
+            : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body))
+              : version === 6 ? answersV6(body)
+                : version === 5 ? answersV5(body)
+                  : version === 4 ? answersV4(body)
+                    : version === 3 ? answersV3(body) : answers(body);
         return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
@@ -304,16 +321,17 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const search = url.pathname === "/v1/help-search";
+    const githubItem = url.pathname === "/v1/github-item-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && !githubItem && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
     const key = env.TYPESAFE_API_KEY?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
-    const limiter = continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
+    const limiter = continuation || githubItem ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
     try {
       const { success } = await limiter.limit({ key: ip });
@@ -327,6 +345,7 @@ export default {
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
+    if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
     if (continuationV2) return continuationRequestV2(state) ? classify(state, key, 1, true) : error("invalid_continuation_request", 400);
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
     if (search) {

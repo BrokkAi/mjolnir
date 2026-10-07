@@ -65,6 +65,10 @@ pub enum RelayRequest {
         command: RelayCommand,
     },
     Status,
+    /// Atomically claim pending mailbox events for a harness tool hook.
+    DrainMailbox {
+        hook_event: String,
+    },
     /// Atomically admit a checkpoint barrier only when no work would be lost.
     /// Uses the existing barrier journal and connection-disconnect cleanup.
     ReserveIdle {
@@ -304,6 +308,7 @@ impl RelayRequest {
             Self::Acknowledge { .. } => "acknowledge",
             Self::Submit { .. } => "submit",
             Self::Status => "status",
+            Self::DrainMailbox { .. } => "drain_mailbox",
             Self::ReserveIdle { .. } => "reserve_idle",
             Self::InstallPromptContext { .. } => "install_prompt_context",
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
@@ -341,6 +346,7 @@ impl RelayRequest {
     pub fn minimum_protocol(&self) -> u32 {
         match self {
             Self::CpuUsage => super::RELAY_CPU_USAGE_PROTOCOL,
+            Self::DrainMailbox { .. } => 33,
             Self::ReserveIdle { .. } => 21,
             Self::HistoryQuery { .. }
             | Self::HistoryRequests
@@ -454,6 +460,10 @@ pub enum RelayResponsePayload {
         ordinal: u64,
     },
     Status(RelayOperationalState),
+    MailboxDrained {
+        text: Option<String>,
+        count: usize,
+    },
     AttachmentPresent {
         present: bool,
     },
