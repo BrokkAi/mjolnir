@@ -64,8 +64,9 @@ fn adapted_tool_name(kind: HarnessKind) -> Option<&'static str> {
     match kind {
         HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Muse => Some(tool_name(kind)),
         HarnessKind::Codex | HarnessKind::Claude => None,
-        // SessionWiki has no OpenCode adapter, and its sessions are SQLite
-        // rows rather than transcripts this adapter could index.
+        // SessionWiki ships its own OpenCode adapter over the SQLite store,
+        // so Mjolnir relies on the stock one: its sessions are SQLite rows
+        // rather than transcripts this adapter could index.
         HarnessKind::OpenCode => None,
     }
 }
