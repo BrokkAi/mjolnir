@@ -1686,40 +1686,94 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
     let rendered = draw(&mut dashboard);
     assert!(rendered.contains("Disk full"), "{rendered}");
     assert!(
-        rendered.contains("/home/jonathan/Projects 0B free full"),
+        rendered.contains("/home/jonathan/Projects full ▾"),
         "the Targets row: {rendered}"
     );
 }
 
-/// A capacity sample the poller keeps refreshing carries no clock column
-/// and no staleness marker: the number on screen is the current one.
-/// `symbols = "ascii"` must reach the Targets pane's own summary text: the
-/// "% CPU · % RAM" join was a literal Unicode dot, so it survived the ASCII
-/// set while every other glyph in the row correctly swapped. The symbol set
-/// is read from the dashboard's own configuration, the way a running session
-/// selects it, rather than through the thread-local override the render
-/// pipeline itself already scopes to that configuration.
+/// `symbols = "ascii"` must reach the Targets pane's own row text, such as
+/// the Disks cell's expand mark. The symbol set is read from the dashboard's
+/// own configuration, the way a running session selects it, rather than
+/// through the thread-local override the render pipeline itself already
+/// scopes to that configuration.
 #[test]
-fn ascii_symbols_reach_the_capacity_panes_cpu_and_ram_join() {
+fn ascii_symbols_reach_the_capacity_row() {
     let mut ascii_config = config();
     ascii_config.advanced.symbols = Some(mj_core::config::SymbolSet::Ascii);
     let mut dashboard = DashboardState::new(ascii_config, State::default(), BTreeMap::new());
-    dashboard.set_deployment_capacity_targets(vec![test_capacity_target()]);
+    dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
     dashboard.apply_deployment_capacity(
-        "local",
+        "ssh:precision-3260",
         Ok(Some(host_capacity_usage())),
         now_epoch_seconds(),
     );
+    dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
     let rendered = drawn_dashboard(&mut dashboard, 200);
-    let cpu_ram_line = rendered
+    let row = rendered
         .lines()
-        .find(|line| line.contains("% CPU"))
+        .find(|line| line.contains("precision-3260"))
         .expect("capacity row");
-    assert!(cpu_ram_line.is_ascii(), "{cpu_ram_line:?}");
+    assert!(row.is_ascii(), "{row:?}");
+    assert!(row.contains("37%"), "{row:?}");
+    assert!(row.contains("75%"), "{row:?}");
+    assert!(row.contains("Disks v"), "{row:?}");
+}
+
+fn precision_capacity_target() -> mj_core::targets::DeploymentCapacityTarget {
+    mj_core::targets::DeploymentCapacityTarget {
+        id: "ssh:precision-3260".into(),
+        host: "precision-3260".into(),
+        target_ids: vec!["precision".into()],
+        kind: mj_core::targets::DeploymentCapacityKind::Host,
+        local: false,
+        probes: Vec::new(),
+        local_storage_paths: Vec::new(),
+        probe_error: None,
+    }
+}
+
+/// The Disks cell names a filesystem only when it is low or full; free space
+/// on filesystems that are fine answers no question. Clicking the cell, or
+/// `d` on the selected row, expands it to list every filesystem.
+#[test]
+fn capacity_disks_cell_names_only_a_filesystem_in_trouble_and_expands_on_click() {
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
+    dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    assert!(rendered.contains("Disks ▾"), "{rendered}");
+    assert!(!rendered.contains("free"), "{rendered}");
+
+    // ~/Projects drops below the low-space line, and `/` is fine.
+    dashboard.set_target_storage(vec![precision_storage(40 << 30, 3 << 30)]);
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    let summary = "/home/jonathan/Projects low ▾";
+    let (row, line) = rendered
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(summary))
+        .expect("the low filesystem is named");
+    let column = line[..line.find(summary).unwrap()].chars().count();
+    let point = (u16::try_from(column).unwrap(), u16::try_from(row).unwrap());
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), point));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), point));
+    assert_eq!(dashboard.focus, Focus::Targets);
+
+    let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(
-        cpu_ram_line.contains("37% CPU - 75% RAM"),
-        "{cpu_ram_line:?}"
+        rendered.contains("/home/jonathan/Projects low ▴"),
+        "{rendered}"
     );
+    assert!(rendered.contains("/ 40.0G free of 500.0G"), "{rendered}");
+    assert!(
+        rendered.contains("/home/jonathan/Projects 3.0G free of 1000.0G low"),
+        "{rendered}"
+    );
+
+    dashboard.handle_key(key(KeyCode::Char('d')));
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    assert!(rendered.contains(summary), "{rendered}");
+    assert!(!rendered.contains("free of"), "{rendered}");
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -1758,12 +1812,12 @@ fn capacity_pane_never_presents_missing_readings_as_zero_resource_use() {
     );
 
     let rendered = drawn_dashboard(&mut dashboard, 200);
-    assert!(
-        rendered.contains("CPU unavailable · RAM unavailable"),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("0% CPU"), "{rendered}");
-    assert!(!rendered.contains("0% RAM"), "{rendered}");
+    let row = rendered
+        .lines()
+        .find(|line| line.contains("podman"))
+        .expect("capacity row");
+    assert_eq!(row.matches("unavailable").count(), 2, "{row:?}");
+    assert!(!row.contains("0%"), "{row:?}");
 }
 
 fn drawn_dashboard(dashboard: &mut DashboardState, width: u16) -> String {
@@ -1788,7 +1842,8 @@ fn capacity_rows_mark_a_failed_probe_and_a_sample_that_stopped_refreshing() {
     );
     failed.apply_deployment_capacity("local", Err("probe timed out".into()), now_epoch_seconds());
     let rendered = drawn_dashboard(&mut failed, 200);
-    assert!(rendered.contains("37% CPU · 75% RAM"), "{rendered}");
+    assert!(rendered.contains("37%"), "{rendered}");
+    assert!(rendered.contains("75%"), "{rendered}");
     assert!(rendered.contains("stale: probe timed out"), "{rendered}");
 
     let mut aged = DashboardState::new(config(), State::default(), BTreeMap::new());
@@ -3253,4 +3308,37 @@ fn golden_dashboard_resource_panels() {
         "dashboard-resource-panels",
         &output,
     );
+}
+
+/// An expanded row with more filesystems than the Targets pane has lines is
+/// cut to the pane's height. A row taller than its table is otherwise not
+/// drawn at all, so expanding it made the row disappear.
+#[test]
+fn an_expanded_disks_row_taller_than_the_pane_is_cut_not_hidden() {
+    use mj_core::targets::storage::{FilesystemSpace, TargetStorageView};
+    let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
+    dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
+    let filesystems = (0..30)
+        .map(|index| FilesystemSpace {
+            mount: format!("/srv/volume-{index:02}"),
+            available_bytes: 40 << 30,
+            total_bytes: 100 << 30,
+            reserved_bytes: 0,
+            paths: vec![format!("/srv/volume-{index:02}")],
+        })
+        .collect::<Vec<_>>();
+    dashboard.set_target_storage(vec![TargetStorageView::evaluate(
+        "precision-3260",
+        Some("/home/jonathan".into()),
+        &filesystems,
+        Some(1),
+        |_| None,
+        None,
+    )]);
+    dashboard.expanded_disks.insert("ssh:precision-3260".into());
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    assert!(rendered.contains("precision-3260"), "{rendered}");
+    assert!(rendered.contains("Disks ▴"), "{rendered}");
+    assert!(rendered.contains("/srv/volume-00 40.0G free"), "{rendered}");
+    assert!(!rendered.contains("/srv/volume-29"), "{rendered}");
 }

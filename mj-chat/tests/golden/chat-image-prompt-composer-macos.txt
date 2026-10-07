@@ -556,7 +556,7 @@ picker active: true
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
-action: Attach { path: "/workspace/second.png", command: "/attach /workspace/second.png" }
+action: Attach { path: Local("/workspace/second.png"), command: "/attach /workspace/second.png" }
 markers before reservation: 1
 draft after command: "[image 1]"
 

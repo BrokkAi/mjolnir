@@ -451,10 +451,20 @@ advertises image support, Mjolnir prefers an image over text and inserts an
 editable `[image N]` marker. Delete the marker to remove the attachment. `/attach <path>` adds an image from that machine's filesystem under the same capability
 rule.
 
+A paste made only of absolute paths to PNG, JPEG, or WebP files attaches those
+files instead of sending the paths as text, since a container or remote session
+cannot open a path on your machine. This covers dropping files onto the
+terminal, Explorer's "Copy as path", quoted or backslash-escaped paths,
+`file://` URLs, and Windows drive or UNC paths, which WSL translates with
+`wslpath`. `/attach` accepts the same forms. Copying files in a file manager and
+pressing `Ctrl+V` pastes their paths, which attach the same way. If a file
+cannot be read as an image, its path returns to the draft as text and a notice
+says why.
+
 Agents that have not advertised image support, question answer fields, and
 history search receive only the clipboard's text representation. If none is
-available, the notice includes the clipboard error. Text pasted by your terminal
-always stays text. If image support disappears, existing image drafts are kept;
+available, the notice includes the clipboard error. Other text pasted by your
+terminal stays text. If image support disappears, existing image drafts are kept;
 remove their markers or wait for support to return before sending. `prefix+m`
 remains the dictation shortcut.
 

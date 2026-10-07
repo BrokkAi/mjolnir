@@ -34,7 +34,7 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                                   ││Press ctrl+b c to create a session or ctrl+b g to find one.                                              │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                   ││  Host / fleet  Targets                                   In Use                                         │
+│                                                   ││  Host / fleet  Targets                                   CPU          RAM                               │
 │                                                   ││  local         localhost, podman, sandbox (unavailable)  unavailable                                    │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -72,8 +72,8 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets                In Use                                 │
-│                                      ││  local         podman, mac-container  37% CPU · 75% RAM                      │
+│                                      ││  Host / fleet  Targets                CPU  RAM                               │
+│                                      ││  local         podman, mac-container  37%  75%                               │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -102,7 +102,7 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -131,7 +131,7 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly        Resets  5H Resets                      │
@@ -160,7 +160,7 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly       Resets  5H Resets                       │
@@ -189,7 +189,7 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (refreshed unknown)────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly          Resets  5H              Resets                     │
@@ -218,7 +218,7 @@ checked target ids: ["docker", "podman", "sandbox"]
 │                                      ││Press ctrl+b c to create a session or │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                               │
+│  Host / fleet  Targets  CPU  RAM                                             │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (refreshed unknown)──────────────────────────────────────── ▁   ▪ ╮
 │            Harness      Weekly          Resets     5H              Resets    │

@@ -41,6 +41,11 @@ const UNSUPPORTED_HOST: &str = "Mjolnir's shared mbx cache requires a Linux host
 
 /// Ask the cache host, not the controller or a container running on that host.
 fn host_supports_cache(host: &CacheHost, executor: &impl CommandExecutor) -> Result<bool> {
+    // Windows is no Linux host and has no `uname` to ask; its container
+    // engine runs in a VM this machine's paths do not reach.
+    if host.ssh().is_none() && !cfg!(unix) {
+        return Ok(false);
+    }
     let command = host.command(
         vec!["uname".into(), "-sm".into()],
         "detect build cache host platform",

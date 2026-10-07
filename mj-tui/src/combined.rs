@@ -19,10 +19,10 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::render::{
     MINIMUM_TERMINAL_WIDTH, NARROW_TERMINAL_WIDTH, SESSION_ACTIONS_HEIGHT, SessionsLayout,
-    TerminalSizeRequirement, capacity_table_width, minimized_pane_size_controls,
-    minimized_quota_line, minimized_targets_line, pane_size_control_areas,
-    pane_title_content_width, quota_table_width, render_capacity, render_footer, render_modal,
-    render_quotas, render_sessions, render_terminal_too_small,
+    TerminalSizeRequirement, capacity_table_lines, capacity_table_width,
+    minimized_pane_size_controls, minimized_quota_line, minimized_targets_line,
+    pane_size_control_areas, pane_title_content_width, quota_table_width, render_capacity,
+    render_footer, render_modal, render_quotas, render_sessions, render_terminal_too_small,
 };
 use crate::resume::resume_sessions_pane;
 use crate::tile_layout::PaneId;
@@ -644,7 +644,7 @@ fn render_combined_themed(
             SupportPane::Targets,
             PaneDimensions {
                 minimized: SUMMARY_ROW,
-                full: table_height(dashboard.capacity_details.len()),
+                full: table_height(capacity_table_lines(dashboard)),
                 standard_cap: area.height / 4,
             },
         ),

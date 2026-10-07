@@ -63,8 +63,32 @@ impl ChatState {
             }
             return self.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
         }
+        self.paste_or_attach(pasted)
+    }
+
+    /// Paste into the composer, or, when the paste is only image paths and
+    /// the agent takes images, ask for those files to be attached.
+    pub(super) fn paste_or_attach(&mut self, pasted: &str) -> ChatAction {
+        if self.elicitation.is_none()
+            && self.history_search.is_none()
+            && self.prompt_images_supported
+            && self.clipboard_target() == super::input_state::ClipboardTarget::Composer
+        {
+            let text = sanitize_terminal_text(pasted);
+            if let Some(images) = super::pasted_paths::image_paths(&text) {
+                return ChatAction::AttachPaste { text, images };
+            }
+        }
         self.handle_paste(pasted);
         ChatAction::None
+    }
+
+    /// Insert already sanitized text at the cursor, without looking for paths.
+    pub(super) fn paste_plain(&mut self, text: &str) {
+        self.replace_input_range(
+            self.input_cursor..self.input_cursor,
+            &PromptPayload::text(text),
+        );
     }
 
     /// Host-facing paste: bracketed-paste text lands in the composer draft.

@@ -211,7 +211,9 @@ wire_api = "responses"
 Mjolnir accepts both shapes. For a plain list it builds a catalog entry per id
 with conservative defaults: a 128,000-token context window, the plain shell tool,
 and no reasoning levels, so a session on such a model offers no effort choice
-rather than offering one the provider would reject.
+rather than offering one the provider would reject. DeepSeek V4 models
+(`deepseek-v4-*`) instead get their 1,000,000-token window and compact
+automatically at 800,000 tokens, the same point DeepSeek's own harness uses.
 
 Quota reporting is separate from the catalog and covers Z.ai (`api.z.ai`) and
 Zhipu (`open.bigmodel.cn`) hosts only. A profile on any other provider, such as

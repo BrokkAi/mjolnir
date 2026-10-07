@@ -13,6 +13,17 @@ fn slash_command_name(text: &str) -> Option<&str> {
     .then_some(name)
 }
 
+/// What replaces an attachment's marker when its file cannot be read.
+#[derive(Debug)]
+pub(crate) enum AttachmentFallback {
+    /// Keep the marker, shown as failed: a clipboard image has no text.
+    FailedMarker,
+    /// Remove the marker, restoring the `/attach` command if it was alone.
+    Command(String),
+    /// Put back the text that was pasted in its place.
+    Text(String),
+}
+
 pub(super) const ATTACH_UNSUPPORTED_NOTICE: &str =
     "/attach adds image files only, and this agent does not accept images";
 pub(super) const IMAGE_PASTE_UNSUPPORTED_NOTICE: &str =
@@ -223,7 +234,7 @@ impl ChatState {
         &mut self,
         sequence: u64,
         result: Result<ClipboardImage, String>,
-        command: Option<String>,
+        fallback: AttachmentFallback,
     ) {
         let Some(number) = self.pending_attachment_markers.remove(&sequence) else {
             // The marker was deleted or the draft was replaced while the
@@ -244,19 +255,35 @@ impl ChatState {
                 self.feedback.clear();
             }
             Err(error) => {
-                if let Some(command) = command {
-                    let range = self.input_images[index].range.clone();
-                    let only_placeholder = self.input_images.len() == 1
-                        && range.start == 0
-                        && range.end == self.input.len();
-                    self.replace_input_range(range, &PromptPayload::text(""));
-                    if only_placeholder {
-                        self.set_input(command);
+                match fallback {
+                    AttachmentFallback::FailedMarker => {
+                        self.input_images[index].image = ClipboardImage::failed();
+                        self.input_generation = self.input_generation.wrapping_add(1);
+                        self.feedback.clear();
                     }
-                } else {
-                    self.input_images[index].image = ClipboardImage::failed();
-                    self.input_generation = self.input_generation.wrapping_add(1);
-                    self.feedback.clear();
+                    AttachmentFallback::Command(command) => {
+                        let range = self.input_images[index].range.clone();
+                        let only_placeholder = self.input_images.len() == 1
+                            && range.start == 0
+                            && range.end == self.input.len();
+                        self.replace_input_range(range, &PromptPayload::text(""));
+                        if only_placeholder {
+                            self.set_input(command);
+                        }
+                    }
+                    AttachmentFallback::Text(text) => {
+                        // Put the pasted text where the marker was, leaving
+                        // the cursor where the user has since moved it.
+                        let range = self.input_images[index].range.clone();
+                        let cursor = self.input_cursor;
+                        self.replace_input_range(range.clone(), &PromptPayload::text(&*text));
+                        self.input_cursor = if cursor >= range.end {
+                            cursor - range.len() + text.len()
+                        } else {
+                            cursor
+                        };
+                        self.update_autocomplete();
+                    }
                 }
                 self.set_notice(format!("Attachment failed: {error}"));
             }
@@ -805,7 +832,7 @@ impl ChatState {
                         ));
                         return ChatAction::None;
                     }
-                    let path = PathBuf::from(args);
+                    let path = super::pasted_paths::path_argument(args);
                     let command = command_input.clone();
                     self.record_prompt_history(&command);
                     if self.input_images.is_empty() {

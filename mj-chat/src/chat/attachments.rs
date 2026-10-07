@@ -290,7 +290,7 @@ pub(super) fn install_clipboard_image(
     install_image_bytes(session_id, &bytes)
 }
 
-/// Read, optimize, and install an image selected by `/attach`.
+/// Read, optimize, and install an image named by `/attach` or a pasted path.
 pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardImage> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspect attachment {}", path.display()))?;
@@ -307,7 +307,7 @@ pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardIma
     }
     install_image_bytes(session_id, &bytes).with_context(|| {
         format!(
-            "{} could not be read as an image; /attach adds image files only",
+            "{} could not be read as an image; only image files can be attached",
             path.display()
         )
     })

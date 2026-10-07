@@ -28,7 +28,7 @@ use mj_client::daemon::{
     SessionTextMatch, SessionTextMatchKind, WikiHitBlock, WikiHitTranscript, WikiIndexState,
     WikiRow, WikiSessionInfo, WikiSessionStatus, WikiStatus,
 };
-use mj_core::config::HarnessKind;
+use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{SessionRecord, State};
 use sessionwiki::adapters::{Adapter, Discovered, Store};
 use sessionwiki::model::{Message, Role, Session};
@@ -41,6 +41,21 @@ use harness_adapters::HarnessAdapter;
 /// search partition; reconciliation is scoped per instance instead (see
 /// [`Adapter::reconcile_scope`]).
 const TOOL: &str = "mjolnir";
+
+/// The low token slot identifies the `Session` projection format. Raising it
+/// makes rows indexed by older parse rules stale exactly once.
+const SESSION_PARSE_FORMAT_VERSION: i64 = 1;
+const CHANGE_TOKEN_SLOT_BITS: u32 = 10;
+
+fn session_change_token(token: i64) -> i64 {
+    token
+        .saturating_mul(1_i64 << (CHANGE_TOKEN_SLOT_BITS * 2))
+        .saturating_add(
+            i64::from(mj_transcript::summary::SUMMARY_VERSION)
+                .saturating_mul(1_i64 << CHANGE_TOKEN_SLOT_BITS),
+        )
+        .saturating_add(SESSION_PARSE_FORMAT_VERSION)
+}
 
 /// One checkpoint archive on disk, reduced to what indexing needs.
 struct ArchiveFile {
@@ -57,16 +72,94 @@ struct ArchiveFile {
 struct Sessions {
     records: mj_core::snapshot_map::SnapshotMap<String, SessionRecord>,
     ownership: top_level::Snapshot,
+    /// Effective agent working directory derived through `State::checkout`.
+    /// Errors are retained so a malformed bundle cannot silently index with
+    /// an empty project.
+    project_directories: BTreeMap<String, std::result::Result<Option<PathBuf>, String>>,
     /// Session id to change token, for sessions indexed from the projection.
     live: BTreeMap<String, i64>,
 }
 
 impl Sessions {
-    fn of(state: &State) -> Self {
+    fn of(state: &State, config: Option<&Config>) -> Self {
         Self {
             records: state.sessions.clone(),
             ownership: top_level::Snapshot::from_state(state),
+            project_directories: project_directories_of(state, config),
             live: live_tokens(state),
+        }
+    }
+}
+
+fn project_directories_of(
+    state: &State,
+    config: Option<&Config>,
+) -> BTreeMap<String, std::result::Result<Option<PathBuf>, String>> {
+    state
+        .sessions
+        .iter()
+        .map(|(session_id, record)| {
+            (
+                session_id.clone(),
+                indexed_project_directory(state, config, session_id, record)
+                    .map_err(|error| format!("{error:#}")),
+            )
+        })
+        .collect()
+}
+
+/// The project path SessionWiki should search for this session: the attached
+/// or managed raw checkout, or the primary repository in a managed workspace.
+fn indexed_project_directory(
+    state: &State,
+    config: Option<&Config>,
+    session_id: &str,
+    record: &SessionRecord,
+) -> Result<Option<PathBuf>> {
+    match state.checkout(session_id)?.effective() {
+        mj_core::state::Checkout::Attached { path } => Ok(Some(path.to_path_buf())),
+        mj_core::state::Checkout::ManagedWorktree {
+            project_directory, ..
+        } => Ok(project_directory.map(Path::to_path_buf)),
+        mj_core::state::Checkout::ManagedWorkspace => {
+            let Some(config) = config else {
+                return Ok(None);
+            };
+            let Some(bundle) = record.project_bundle(config) else {
+                return Ok(None);
+            };
+            let primary = bundle
+                .repositories
+                .iter()
+                .find(|repository| repository.id == bundle.primary_repo)
+                .with_context(|| {
+                    format!(
+                        "session bundle has no primary repository {:?}",
+                        bundle.primary_repo
+                    )
+                })?;
+            let workspace_root = match record.target.as_ref() {
+                Some(locator) => {
+                    let backend = crate::controller::backend_locator(locator, record, config)
+                        .context("resolve the session target for SessionWiki")?;
+                    crate::controller::workspace_root(
+                        &backend,
+                        record.container_workspace.as_deref(),
+                    )
+                }
+                None => mj_core::targets::container_workspace_root(
+                    record.container_workspace.as_deref(),
+                ),
+            };
+            Ok(Some(PathBuf::from(
+                crate::server_runtime::api::agent_working_directory_at(
+                    &workspace_root,
+                    &primary.destination,
+                ),
+            )))
+        }
+        mj_core::state::Checkout::Borrowed { .. } => {
+            unreachable!("State::checkout resolves borrowed sessions")
         }
     }
 }
@@ -110,7 +203,17 @@ impl MjolnirAdapter {
     pub fn from_state(state: &State) -> Self {
         Self {
             sessions_dir: mj_core::config::sessions_dir(),
-            sessions: std::sync::Mutex::new(Sessions::of(state)),
+            sessions: std::sync::Mutex::new(Sessions::of(state, None)),
+            reload: false,
+        }
+    }
+
+    /// A fixed view that can resolve bundle-backed session directories from
+    /// the configuration snapshot paired with the state.
+    pub(crate) fn from_state_with_config(state: &State, config: &Config) -> Self {
+        Self {
+            sessions_dir: mj_core::config::sessions_dir(),
+            sessions: std::sync::Mutex::new(Sessions::of(state, Some(config))),
             reload: false,
         }
     }
@@ -170,7 +273,7 @@ impl MjolnirAdapter {
                     .sessions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Sessions::of(&controller.state)
+                    Sessions::of(&controller.state, Some(&controller.config))
             }
             Err(error) => {
                 tracing::warn!(%error, "could not refresh session records for SessionWiki")
@@ -410,14 +513,7 @@ impl Adapter for MjolnirAdapter {
         }
         let keys = tokens
             .into_iter()
-            .map(|(session_id, token)| {
-                (
-                    self.key_for(&session_id),
-                    token
-                        .saturating_mul(1024)
-                        .saturating_add(i64::from(mj_transcript::summary::SUMMARY_VERSION)),
-                )
-            })
+            .map(|(session_id, token)| (self.key_for(&session_id), session_change_token(token)))
             .collect();
         Some(Store {
             keys,
@@ -454,6 +550,17 @@ impl Adapter for MjolnirAdapter {
             self.checkpointed_transcript(session_id)?
         };
         let record = sessions.records.get(session_id);
+        let project = match sessions.project_directories.get(session_id) {
+            Some(Ok(Some(directory))) => directory.display().to_string(),
+            Some(Ok(None)) => String::new(),
+            Some(Err(error)) => {
+                anyhow::bail!("resolve the session project directory: {error}")
+            }
+            None => record
+                .and_then(|record| record.checkout().project_directory())
+                .map(|directory| directory.display().to_string())
+                .unwrap_or_default(),
+        };
 
         let title = record
             .and_then(|record| record.session_title_override.clone())
@@ -471,10 +578,7 @@ impl Adapter for MjolnirAdapter {
             id: session_id.to_owned(),
             tool: TOOL,
             path: PathBuf::from(key),
-            project: record
-                .and_then(|record| record.checkout().project_directory())
-                .map(|directory| directory.display().to_string())
-                .unwrap_or_default(),
+            project,
             started: record.and_then(|record| parse_time(&record.created_at)),
             ended: record.and_then(|record| parse_time(&record.updated_at)),
             title,
@@ -723,7 +827,10 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
     // store for many minutes, and a just-closed session should not wait on it.
     // Cleanup and enumeration use one ownership snapshot. Native discovery
     // happens afterwards, so it cannot make this snapshot stale before use.
-    let mjolnir = Arc::new(MjolnirAdapter::from_state(&controller.state));
+    let mjolnir = Arc::new(MjolnirAdapter::from_state_with_config(
+        &controller.state,
+        &controller.config,
+    ));
     let owned: Vec<Box<dyn Adapter>> = vec![Box::new(SharedMjolnirAdapter(Arc::clone(&mjolnir)))];
     let ownership = mjolnir
         .sessions
@@ -790,7 +897,10 @@ fn write_session_tags(
 /// runs several profile homes expects every session Mjolnir can start to be
 /// searchable, and a home no profile names is not Mjolnir's to walk. So the
 /// stock Codex and Claude adapters are dropped and one adapter per enabled
-/// profile home takes their place; every other built-in adapter is kept as is.
+/// profile home takes their place; of the rest, only OpenCode is kept, the
+/// only other harness Mjolnir can start. Every other built-in adapter (aider,
+/// gemini, cline, ...) is dropped, so a tool Mjolnir cannot run can neither
+/// trigger a home-directory walk nor add rows Resume cannot act on.
 ///
 /// Kimi Code, Grok Build and Muse have no SessionWiki adapter at all, so
 /// Mjolnir supplies one per enabled profile home of its own (see
@@ -823,11 +933,9 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
         };
         adapters.push(adapter);
     }
-    adapters.extend(
-        sessionwiki::adapters::all()
-            .into_iter()
-            .filter(|adapter| !matches!(adapter.name(), "codex" | "claude-code")),
-    );
+    adapters.extend(sessionwiki::adapters::all().into_iter().filter(|adapter| {
+        harness_adapters::harness_for_tool(adapter.name()) == Some(HarnessKind::OpenCode)
+    }));
     adapters
 }
 
@@ -1107,7 +1215,7 @@ fn unindexed_session(root: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     unindexed(
-        &MjolnirAdapter::from_state(&controller.state),
+        &MjolnirAdapter::from_state_with_config(&controller.state, &controller.config),
         &[root.to_owned()],
     )
 }
@@ -1166,7 +1274,10 @@ struct CapturedSession {
 fn capture_sessions(session_ids: &[String]) -> Result<Vec<CapturedSession>> {
     let controller =
         Controller::load().context("load controller state to index a destroyed session")?;
-    capture_sessions_from(&MjolnirAdapter::from_state(&controller.state), session_ids)
+    capture_sessions_from(
+        &MjolnirAdapter::from_state_with_config(&controller.state, &controller.config),
+        session_ids,
+    )
 }
 
 /// The rows a sync pass would write for these sessions, built by the same
@@ -2597,10 +2708,93 @@ mod tests {
             sessions: std::sync::Mutex::new(Sessions {
                 records: [(session_id.to_owned(), record)].into_iter().collect(),
                 ownership: top_level::Snapshot::default(),
+                project_directories: [(
+                    session_id.to_owned(),
+                    Ok(Some(PathBuf::from("/home/dev/project"))),
+                )]
+                .into_iter()
+                .collect(),
                 live,
             }),
             reload: false,
         }
+    }
+
+    fn adapter_for_state(directory: &Path, state: &State, config: &Config) -> MjolnirAdapter {
+        let sessions = Sessions {
+            records: state.sessions.clone(),
+            ownership: top_level::Snapshot::from_state(state),
+            project_directories: project_directories_of(state, Some(config)),
+            live: BTreeMap::new(),
+        };
+        MjolnirAdapter {
+            sessions_dir: directory.to_path_buf(),
+            sessions: std::sync::Mutex::new(sessions),
+            reload: false,
+        }
+    }
+
+    fn sync_adapter(connection: &mut rusqlite::Connection, source: &Arc<MjolnirAdapter>) {
+        let adapter: Box<dyn Adapter> = Box::new(SharedMjolnirAdapter(Arc::clone(source)));
+        sessionwiki::index::sync_with(connection, &[adapter], None).unwrap();
+    }
+
+    fn indexed_project(connection: &rusqlite::Connection, session_id: &str) -> String {
+        connection
+            .query_row(
+                "SELECT project FROM files WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn indexed_mtime(connection: &rusqlite::Connection, session_id: &str) -> i64 {
+        connection
+            .query_row(
+                "SELECT mtime FROM files WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn bundle_config() -> Config {
+        let mut config = Config::default();
+        config.bundles.insert(
+            "project".into(),
+            mj_core::config::ProjectBundle {
+                primary_repo: "bifrost".into(),
+                repositories: vec![mj_core::config::ProjectRepository {
+                    id: "bifrost".into(),
+                    github: Some("BrokkAi/bifrost".into()),
+                    local: None,
+                    destination: PathBuf::from("bifrost"),
+                    git_ref: None,
+                }],
+            },
+        );
+        config
+    }
+
+    fn bundle_record(session_id: &str) -> SessionRecord {
+        SessionRecord {
+            id: session_id.into(),
+            project_directory: None,
+            container_workspace: Some(PathBuf::from(format!("/workspace/{session_id}"))),
+            target: Some(mj_core::state::TargetLocator::LocalPodman {
+                container_id: "test-container".into(),
+                workspace_storage: Default::default(),
+                borrowed_from: None,
+            }),
+            ..record_template()
+        }
+    }
+
+    fn state_with_record(session_id: &str, record: SessionRecord) -> State {
+        let mut state = State::default();
+        state.sessions.insert(session_id.to_owned(), record);
+        state
     }
 
     fn record_template() -> SessionRecord {
@@ -2752,6 +2946,127 @@ mod tests {
     }
 
     #[test]
+    fn a_bundle_session_is_indexed_and_searchable_by_its_primary_repository() {
+        let _held = tags::testing::lock();
+        let (_index_dir, mut connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        write_archive(directory.path(), session_id, 1);
+        let state = state_with_record(session_id, bundle_record(session_id));
+        let source = Arc::new(adapter_for_state(
+            directory.path(),
+            &state,
+            &bundle_config(),
+        ));
+
+        sync_adapter(&mut connection, &source);
+
+        assert_eq!(
+            indexed_project(&connection, session_id),
+            format!("/workspace/{session_id}/bifrost")
+        );
+        assert!(
+            query_rows_for_test("bifrost", 10, false)
+                .unwrap()
+                .iter()
+                .any(|row| row.id == session_id),
+            "the indexed bundle session is found by its repository name"
+        );
+    }
+
+    #[test]
+    fn a_raw_local_session_keeps_its_directory_when_indexed() {
+        let _held = tags::testing::lock();
+        let (_index_dir, mut connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "fedcba9876543210fedcba9876543210";
+        let project_directory = PathBuf::from("/home/jonathan/Projects/bifrost");
+        write_archive(directory.path(), session_id, 1);
+        let record = SessionRecord {
+            id: session_id.into(),
+            project_directory: Some(project_directory.clone()),
+            ..record_template()
+        };
+        let state = state_with_record(session_id, record);
+        let source = Arc::new(adapter_for_state(
+            directory.path(),
+            &state,
+            &Config::default(),
+        ));
+
+        sync_adapter(&mut connection, &source);
+
+        assert_eq!(
+            indexed_project(&connection, session_id),
+            project_directory.display().to_string()
+        );
+    }
+
+    #[test]
+    fn a_row_from_the_previous_parse_format_is_reparsed_once() {
+        let _held = tags::testing::lock();
+        let (_index_dir, mut connection) = tags::testing::isolated_index();
+        let directory = tempfile::tempdir().unwrap();
+        let session_id = "0123456789abcdef0123456789abcdef";
+        write_archive(directory.path(), session_id, 1);
+        let mut record = bundle_record(session_id);
+        record.updated_at = "2099-01-01T00:00:00Z".into();
+        let previous_token = parse_time(&record.updated_at)
+            .unwrap()
+            .timestamp()
+            .saturating_mul(1024)
+            .saturating_add(i64::from(mj_transcript::summary::SUMMARY_VERSION));
+        let state = state_with_record(session_id, record);
+        let source = Arc::new(adapter_for_state(
+            directory.path(),
+            &state,
+            &bundle_config(),
+        ));
+        let key = source.key_for(session_id);
+        tags::testing::index_row(&connection, session_id, TOOL);
+        connection
+            .execute(
+                "UPDATE files SET path = ?1, project = '', mtime = ?2 WHERE session_id = ?3",
+                rusqlite::params![key, previous_token, session_id],
+            )
+            .unwrap();
+
+        sync_adapter(&mut connection, &source);
+
+        let parsed_token = indexed_mtime(&connection, session_id);
+        assert_eq!(
+            indexed_project(&connection, session_id),
+            format!("/workspace/{session_id}/bifrost")
+        );
+        assert_eq!(
+            parsed_token,
+            source
+                .store()
+                .unwrap()
+                .keys
+                .into_iter()
+                .find(|(path, _)| path == &key)
+                .unwrap()
+                .1
+        );
+
+        // If the unchanged second sync calls parse_key again, it will fail.
+        source
+            .sessions
+            .lock()
+            .unwrap()
+            .project_directories
+            .insert(session_id.into(), Err("unexpected second parse".into()));
+        sync_adapter(&mut connection, &source);
+
+        assert_eq!(indexed_mtime(&connection, session_id), parsed_token);
+        assert_eq!(
+            indexed_project(&connection, session_id),
+            format!("/workspace/{session_id}/bifrost")
+        );
+    }
+
+    #[test]
     fn provenance_backfill_repairs_an_unchanged_checkpoint_without_rebuilding_the_index() {
         let _held = tags::testing::lock();
         let (_index_dir, mut connection) = tags::testing::isolated_index();
@@ -2804,13 +3119,10 @@ mod tests {
         assert_eq!(
             store.keys,
             vec![
-                (
-                    key_of(running),
-                    1_900_000_000 * 1024 + i64::from(mj_transcript::summary::SUMMARY_VERSION)
-                ),
+                (key_of(running), session_change_token(1_900_000_000)),
                 (
                     key_of(never_checkpointed),
-                    1_900_000_001 * 1024 + i64::from(mj_transcript::summary::SUMMARY_VERSION)
+                    session_change_token(1_900_000_001)
                 ),
             ],
             "a live session's own token replaces the checkpoint's"
@@ -3836,6 +4148,47 @@ mod tests {
             .unwrap()
             .updated_at = "2099-01-01T00:00:00Z".into();
         assert_eq!(unindexed(&source, &ids).unwrap(), [session_id]);
+    }
+
+    // Hard-won: #1259: the stock Aider adapter walks $HOME at startup looking for history files.
+    #[test]
+    fn adapters_cover_every_supported_harness_and_no_unsupported_tool() {
+        use mj_core::config::HarnessProfile;
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        for (index, kind) in HarnessKind::ALL.into_iter().enumerate() {
+            let home = directory.path().join(format!("home-{index}"));
+            std::fs::create_dir_all(&home).unwrap();
+            config.profiles.insert(
+                format!("profile-{index}"),
+                HarnessProfile {
+                    enabled: true,
+                    kind,
+                    home,
+                    environment: Default::default(),
+                    context_window_bytes: None,
+                    subagents: Default::default(),
+                    guardian_review_model: None,
+                },
+            );
+        }
+        let mut names: Vec<&str> = native_adapters(&config)
+            .iter()
+            .map(|adapter| adapter.name())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "claude-code",
+                "codex",
+                "grok-build",
+                "kimi-code",
+                "muse",
+                "opencode"
+            ],
+            "one adapter per supported harness, none for tools Mjolnir cannot run"
+        );
     }
 
     /// The text search over an in-memory index shaped like SessionWiki's.
