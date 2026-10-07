@@ -6,7 +6,6 @@ mod render;
 pub(crate) use render::*;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +37,7 @@ use super::autocomplete::render_autocomplete;
 use super::elicitation::render_elicitation_in;
 use super::history::{highlighted_input_lines, history_scope_name, history_search_footer};
 use super::input::{input_cursor_visual_position, set_input_cursor};
+use super::input_state::AttachmentFallback;
 use super::remote::{
     ChatRemoteOperation, ChatRemoteResult, ChatRemoteSupervisor, apply_chat_remote_result,
     queue_chat_remote_operation, restore_unsent_input, restore_unsent_prompt,
@@ -158,14 +158,14 @@ const MAX_ATTACHMENT_TASKS: usize = 2;
 #[derive(Debug)]
 struct AttachmentResult {
     sequence: u64,
-    command: Option<String>,
+    fallback: AttachmentFallback,
     result: std::result::Result<ClipboardImage, String>,
 }
 
 #[derive(Debug)]
 enum AttachmentSource {
     Clipboard(ClipboardImage),
-    Path(PathBuf),
+    Path(super::pasted_paths::PastedPath),
 }
 
 /// How many times a refused prefix is rebuilt before the view settles for its
@@ -523,7 +523,7 @@ pub struct ActiveChat {
     /// Image codecs and session-store writes run in supervised blocking tasks.
     /// Each result carries its marker sequence, so completion order cannot
     /// reorder images already laid out in the composer.
-    attachment_queue: VecDeque<(u64, AttachmentSource, Option<String>)>,
+    attachment_queue: VecDeque<(u64, AttachmentSource, AttachmentFallback)>,
     attachment_tasks_in_flight: usize,
     next_attachment_sequence: u64,
     earlier_task: Option<tokio::task::JoinHandle<()>>,

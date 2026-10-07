@@ -16,6 +16,7 @@ mod elicitation;
 mod feedback;
 mod history;
 mod input;
+mod pasted_paths;
 mod remote;
 mod rendering;
 mod second_opinion;
@@ -29,7 +30,6 @@ mod test_support;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
@@ -318,8 +318,14 @@ pub enum ChatAction {
     /// Copy a clicked transcript link that does not open in a browser.
     CopyLink(String),
     Attach {
-        path: PathBuf,
+        path: pasted_paths::PastedPath,
         command: String,
+    },
+    /// A paste made only of image paths: attach each path in `images` and
+    /// keep the rest of `text`, the whitespace between them, as typed.
+    AttachPaste {
+        text: String,
+        images: Vec<pasted_paths::PastedImagePath>,
     },
     ToggleVoice,
     /// Tab or Shift-Tab with no completion popup open.
