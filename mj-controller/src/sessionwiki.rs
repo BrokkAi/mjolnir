@@ -897,7 +897,10 @@ fn write_session_tags(
 /// runs several profile homes expects every session Mjolnir can start to be
 /// searchable, and a home no profile names is not Mjolnir's to walk. So the
 /// stock Codex and Claude adapters are dropped and one adapter per enabled
-/// profile home takes their place; every other built-in adapter is kept as is.
+/// profile home takes their place; of the rest, only OpenCode is kept, the
+/// only other harness Mjolnir can start. Every other built-in adapter (aider,
+/// gemini, cline, ...) is dropped, so a tool Mjolnir cannot run can neither
+/// trigger a home-directory walk nor add rows Resume cannot act on.
 ///
 /// Kimi Code, Grok Build and Muse have no SessionWiki adapter at all, so
 /// Mjolnir supplies one per enabled profile home of its own (see
@@ -933,7 +936,7 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
     adapters.extend(
         sessionwiki::adapters::all()
             .into_iter()
-            .filter(|adapter| !matches!(adapter.name(), "codex" | "claude-code")),
+            .filter(|adapter| matches!(adapter.name(), "opencode")),
     );
     adapters
 }
@@ -4147,6 +4150,19 @@ mod tests {
             .unwrap()
             .updated_at = "2099-01-01T00:00:00Z".into();
         assert_eq!(unindexed(&source, &ids).unwrap(), [session_id]);
+    }
+
+    // Hard-won: #1259: the stock Aider adapter walks $HOME at startup looking for history files.
+    #[test]
+    fn stock_adapters_cover_only_harnesses_mjolnir_can_start() {
+        let adapters = native_adapters(&Config::default());
+        let mut names: Vec<&str> = adapters.iter().map(|adapter| adapter.name()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["opencode"],
+            "only stock adapters for supported harnesses may sync"
+        );
     }
 
     /// The text search over an in-memory index shaped like SessionWiki's.
