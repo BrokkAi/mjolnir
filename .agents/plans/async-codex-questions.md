@@ -20,8 +20,8 @@ When Codex accepts `request_user_input_async`, Mjolnir must show the questions, 
 - [x] (2026-10-07) Publish bridge 1.13.6 (3789fde); npm release workflow 37685534371 succeeded and the registry serves the release. Update runtime/package/container pins to bridge 1.13.6 and Codex 0.160.1, regenerating the npm lockfile.
 - [x] (2026-10-07) Full core/worker/chat suites passed: 470 core, 411 chat, and 662 worker module tests, plus all integration binaries.
 - [x] (2026-10-07) Workspace `cargo clippy --all-targets -- -D warnings` passed on the dev profile; formatting and diff checks also passed.
-- [ ] Commit and push Mjolnir, and confirm agent-dev image publication.
-- [ ] Install the pushed checkout locally with `scripts/install.sh`, as requested on 2026-10-07, and verify the installed version and daemon readiness.
+- [x] (2026-10-07) Commit and push Mjolnir as 9c4ce4f8. Agent-dev workflow 37687503999 succeeded for amd64, arm64, and the published manifest; remove #1265's coordination label.
+- [x] (2026-10-07) `scripts/install.sh` installed mj 2.34.0 from 9c4ce4f8 plus native/static workers and the voice helper. Ordinary `mj api-info --json` upgraded the live daemon; `mj daemon status` confirms this build and a ready web API.
 
 ## Surprises & Discoveries
 
@@ -39,7 +39,7 @@ Decision: use ordinary ACP `elicitation/create` and the existing worker-owned pe
 
 ## Outcomes & Retrospective
 
-The #1266 doctor fix was committed as 5355fc2c and pushed after merging concurrent upstream documentation. Core/controller suites and workspace clippy passed. For #1265, upstream merge 184224f and bridge implementation 3789fde are pushed to brokkai/main, and version 1.13.6 is published. Exact-tarball Guardian/yolo checks passed. The Mjolnir protocol regression and TUI golden pass; matching pins are updated and full core/worker/chat validation passed. Workspace clippy, formatting and diff checks also passed. The final Mjolnir push/image publication and requested local installation remain. No ACP schema, stored data, or production UI code changes are required because the bridge now uses the existing form mechanism.
+The #1266 doctor fix was committed as 5355fc2c and pushed after merging concurrent upstream documentation. Core/controller suites and workspace clippy passed. For #1265, upstream merge 184224f and bridge implementation 3789fde are pushed to brokkai/main, and version 1.13.6 is published. Exact-tarball Guardian/yolo checks passed. The Mjolnir protocol regression and TUI golden pass; matching pins are updated and full core/worker/chat validation passed. Workspace clippy, formatting and diff checks also passed. Mjolnir commit 9c4ce4f8 is pushed, both image architectures and their manifest are published, and the requested local installation is complete. Ordinary startup replaced the daemon while retaining worker turns; idle workers began adopting the new build. The web API subsequently became ready. No requested work remains. No ACP schema, stored data, or production UI code changes are required because the bridge now uses the existing form mechanism.
 
 ## Context and Orientation
 
@@ -92,3 +92,5 @@ Updated after all touched-crate suites passed to retain the validation counts an
 Updated for the user's request to install locally after pushing. Use the repository installation script, which builds native and portable workers plus the controller and voice helper through the existing mbx setup and replaces installed binaries by rename.
 
 Updated after workspace clippy passed to mark implementation validation complete and retain the remaining push, image publication, and local installation steps.
+
+Final update: Mjolnir fix 9c4ce4f8 is pushed, agent-dev publication 37687503999 succeeded, and the normal local installation and daemon/API readiness checks succeeded. The installed code is the issue-fix commit; this final record changes only the plan.
