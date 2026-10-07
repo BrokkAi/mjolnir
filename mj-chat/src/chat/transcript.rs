@@ -155,7 +155,7 @@ pub(super) struct TranscriptRenderCache {
     collapse_input_fingerprint: u64,
 }
 
-/// A frame-local target for toggling one completed tool's presentation. The
+/// A frame-local target for toggling one tool's presentation. The
 /// target is rebuilt with the rows so a click can never address a call that
 /// moved after scrolling or wrapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1235,7 +1235,7 @@ impl ChatState {
                         entries[index].start_seq,
                     );
                 }
-                EntryCollapse::None if is_completed_tool(&entries[index]) => {
+                EntryCollapse::None if entries[index].role == ChatRole::Tool => {
                     add_whole_tool_rows(
                         targets,
                         inner,
@@ -1322,7 +1322,7 @@ impl ChatState {
         None
     }
 
-    /// Toggle an expanded completed tool at a frame-local screen coordinate.
+    /// Toggle an expanded tool at a frame-local screen coordinate.
     /// The selection router calls this only for a synthetic click, so ordinary
     /// mouse-down events remain owned by drag selection.
     pub(super) fn toggle_tool_at(&mut self, column: u16, row: u16) -> bool {

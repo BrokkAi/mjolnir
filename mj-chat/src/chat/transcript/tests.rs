@@ -3630,8 +3630,10 @@ fn golden_rich_transcript_tool_presentation() {
     );
 
     let mut chat = ChatState::new(&snapshot(), &[]);
+    let mut running = ChatEntry::tool(1, "running command", None, ToolStatus::Running);
+    running.tool_content = vec!["running command --with every argument".into()];
     chat.entries.extend([
-        ChatEntry::tool(1, "running command", None, ToolStatus::Running),
+        running,
         completed_tool(2, "completed command"),
         ChatEntry::tool(3, "failed command", None, ToolStatus::Failed),
     ]);
@@ -3642,14 +3644,21 @@ fn golden_rich_transcript_tool_presentation() {
         .find(|target| target.start_seq == 2)
         .copied()
         .expect("completed tool is clickable");
+    let running_target = chat
+        .transcript_tool_click_targets
+        .iter()
+        .find(|target| target.start_seq == 1)
+        .copied()
+        .expect("running tool is clickable");
     let targets = chat
         .transcript_tool_click_targets
         .iter()
         .map(|target| target.start_seq)
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    assert_eq!(targets, BTreeSet::from([1, 2, 3]));
     append_transcript_golden_state(
         &mut output,
-        "only completed command has a click target",
+        "every tool has a click target",
         80,
         24,
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
@@ -3664,6 +3673,20 @@ fn golden_rich_transcript_tool_presentation() {
     append_transcript_golden_state(
         &mut output,
         "completed command expanded",
+        80,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
+        &[format!("expanded tools: {:?}", chat.expanded_tool_calls)],
+    );
+    chat.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: running_target.rect.x,
+        row: running_target.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "running command expanded",
         80,
         24,
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 24)),
