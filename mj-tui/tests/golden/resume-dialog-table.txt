@@ -309,7 +309,7 @@ Destroy button action: None
 │                ╰────────────────────────────────────────────────────────────────────────────────────╯                │
 │                                                                                                        ──────────────╯
 │                                                                                                        ─────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -533,7 +533,7 @@ mode after selecting Hel row: "Resume wizard"
 │                                                                                                                      │
 │                                                                                                     ─────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -604,7 +604,7 @@ native import action: ImportSession { profile_id: "codex-1", native_session_id: 
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │

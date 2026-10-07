@@ -25,7 +25,7 @@ action: SelectWorkspace { workspace_id: "alpha" }
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
 │                                      │╰────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                     │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                            │
 │                                      │╰────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets              │
@@ -60,7 +60,7 @@ action: SelectWorkspace { workspace_id: "beta" }
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.         │
 │                                      │╰────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                     │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                            │
 │                                      │╰────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets              │

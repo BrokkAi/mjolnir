@@ -4,7 +4,7 @@
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │Essentials                                                                                                                                                                        │         │
 │  Idle   │  n / N / ctrl+b c         Create session                                                                                                                                         │         │
 │  │ No   │    Choose the profile, project, target, and mounts in the full wizard.                                                                                                           │         │
@@ -56,7 +56,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │    List every key this surface answers.                                                                                                                                          │         │
 │  Idle   │                                                                                                                                                                                  │         │
 │  │ No   │Workspaces                                                                                                                                                                        │         │
@@ -108,7 +108,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │    Put the keyboard on the workspace tabs.                                                                                                                                       │         │
 │  Idle   │  ctrl+b p                 Previous workspace                                                                                                                                     │         │
 │  │ No   │    Select the previous workspace tab.                                                                                                                                            │         │
@@ -160,7 +160,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │    Show the selected session's conversation and type in it.                                                                                                                      │         │
 │  Idle   │  ctrl+b shift+x           Suspend session…                                                                                                                                       │         │
 │  │ No   │    Save a recovery copy and release the environment. Resume this session later.                                                                                                  │         │
@@ -212,7 +212,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  ctrl+b o                 Next session needing you                                                                                                                               │         │
 │  Idle   │    Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.                                                       │         │
 │  │ No   │  ctrl+b shift+o           Previous session needing you                                                                                                                           │         │
@@ -264,7 +264,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  ctrl+b d                 Changed files                                                                                                                                          │         │
 │  Idle   │    List the files the selected session's checkout has changed, with the branch and its distance from upstream. — The session's target is not running.                            │         │
 │  │ No   │  ctrl+b i                 Interrupt turn                                                                                                                                         │         │
@@ -316,7 +316,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  —                        Container settings                                                                                                                                     │         │
 │  Idle   │    Edit CPU, memory, and mounts for the next time the container is created.                                                                                                      │         │
 │  │ No   │  —                        Change workspace…                                                                                                                                      │         │
@@ -368,7 +368,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │                                                                                                                                                                                  │         │
 │  Idle   │Panes                                                                                                                                                                             │         │
 │  │ No   │  —                        Pin session…                                                                                                                                           │         │
@@ -420,7 +420,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  ctrl+b x                 Close pane                                                                                                                                             │         │
 │  Idle   │    Remove the conversation pane you are in; the last one is emptied instead. The Browse pane cannot be closed; move it with Swap pane.                                           │         │
 │  │ No   │  ctrl+b h                 Focus pane left                                                                                                                                        │         │
@@ -472,7 +472,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  ctrl+b ;                 Focus last pane                                                                                                                                        │         │
 │  Idle   │    Move the keyboard back to the conversation pane it was in before.                                                                                                             │         │
 │  │ No   │  ctrl+b z                 Zoom pane                                                                                                                                              │         │
@@ -524,7 +524,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  ctrl+b shift+k           Swap pane up                                                                                                                                           │         │
 │  Idle   │    Move the focused conversation pane up, exchanging places with its neighbor.                                                                                                   │         │
 │  │ No   │  ctrl+b shift+l           Swap pane right                                                                                                                                        │         │
@@ -576,7 +576,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  —                        Resize pane right                                                                                                                                      │         │
 │  Idle   │    Move the border of the conversation pane you are in right one step.                                                                                                           │         │
 │  │ No   │  Tab / ctrl+b tab         Next pane                                                                                                                                              │         │
@@ -628,7 +628,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  .                        Profiles pane menu                                                                                                                                     │         │
 │  Idle   │    Open the menu under the Profiles title: refresh targets and quotas, or open the profile settings. Clicking the title opens it too.                                            │         │
 │  │ No   │  ctrl+b b                 Pane preset                                                                                                                                            │         │
@@ -665,11 +665,11 @@ Enter op
 │         │    Choose and remember a new account, target, or isolation for this project. — Not available here.                                                                               │  ───────╯
 │         │  Enter / e                Target actions                                                                                                                                         │   ▁   ▪ ╮
 │         │    Test or rename the selected target.                                                                                                                                           │         │
-│         │  Enter / e                Rename profile                                                                                                                                         │  ───────╯
-│         │    Rename the selected profile's configuration id.                                                                                                                               │   ▁   ▪ ╮
+│         │  d                        Show disks                                                                                                                                             │  ───────╯
+│         │    Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.                                                     │   ▁   ▪ ╮
+│         │  Enter / e                Rename profile                                                                                                                                         │         │
+│         │    Rename the selected profile's configuration id.                                                                                                                               │         │
 │         │  —                        Manage agent profiles                                                                                                                                  │         │
-│         │    Add or edit agent accounts, harnesses, and environment settings.                                                                                                              │         │
-│         │  —                        Manage machines                                                                                                                                        │         │
 │         ╰ ↑↓ scroll · Type to filter · Esc / Enter closes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 ╰───────                                                                                                                                                                                        ───────╯
 Enter op
@@ -680,7 +680,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  Enter                    send the prompt, or queue it while a turn is running                                                                                                   │         │
 │  Idle   │  Shift-Enter / Alt-Enter  start a new line                                                                                                                                       │         │
 │  │ No   │  Tab                      accept a completion, or move to the next pane                                                                                                          │         │
@@ -707,21 +707,21 @@ Enter op
 │         │    Choose and remember a new account, target, or isolation for this project. — Not available here.                                                                               │         │
 │         │  Enter / e                Target actions                                                                                                                                         │         │
 │         │    Test or rename the selected target.                                                                                                                                           │         │
+│         │  d                        Show disks                                                                                                                                             │         │
+│         │    Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.                                                     │         │
 │         │  Enter / e                Rename profile                                                                                                                                         │         │
-│         │    Rename the selected profile's configuration id.                                                                                                                               │         │
-│         │  —                        Manage agent profiles                                                                                                                                  │         │
-│         │    Add or edit agent accounts, harnesses, and environment settings.                                                                                                              │  ───────╯
-│         │  —                        Manage machines                                                                                                                                        │  ───────╮
-│         │    Add SSH hosts or EC2 launch templates and edit their shared settings.                                                                                                         │         │
-│         │  —                        Manage runtimes                                                                                                                                        │         │
-│         │    Add a runtime (the engine or directory a target runs in) and choose the machine it runs on.                                                                                   │  ───────╯
-│         │  ctrl+b s                 Open settings                                                                                                                                          │   ▁   ▪ ╮
-│         │    Edit all configuration in the Settings modal.                                                                                                                                 │         │
-│         │  ctrl+b u                 Web viewer                                                                                                                                             │  ───────╯
-│         │    Show the address and code for the browser and phone viewer.                                                                                                                   │   ▁   ▪ ╮
+│         │    Rename the selected profile's configuration id.                                                                                                                               │  ───────╯
+│         │  —                        Manage agent profiles                                                                                                                                  │  ───────╮
+│         │    Add or edit agent accounts, harnesses, and environment settings.                                                                                                              │         │
+│         │  —                        Manage machines                                                                                                                                        │         │
+│         │    Add SSH hosts or EC2 launch templates and edit their shared settings.                                                                                                         │  ───────╯
+│         │  —                        Manage runtimes                                                                                                                                        │   ▁   ▪ ╮
+│         │    Add a runtime (the engine or directory a target runs in) and choose the machine it runs on.                                                                                   │         │
+│         │  ctrl+b s                 Open settings                                                                                                                                          │  ───────╯
+│         │    Edit all configuration in the Settings modal.                                                                                                                                 │   ▁   ▪ ╮
+│         │  ctrl+b u                 Web viewer                                                                                                                                             │         │
+│         │    Show the address and code for the browser and phone viewer.                                                                                                                   │         │
 │         │  —                        Restart the Mjolnir daemon                                                                                                                             │         │
-│         │    Stop the background daemon and start one from this build, then report which build came up.                                                                                    │         │
-│         │  ctrl+b shift+r           Refresh targets and quotas                                                                                                                             │         │
 │         ╰ ↑↓ scroll · Type to filter · Esc / Enter closes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯         │
 ╰───────                                                                                                                                                                                        ───────╯
 Enter op
@@ -732,13 +732,11 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
-│› · ACP  │  Ctrl-R                   search prompt history                                                                                                                                  │         │
-│  Idle   │  Ctrl-V                   paste from the system clipboard                                                                                                                        │         │
-│  │ No   │  Ctrl-A / Ctrl-E          start or end of the line                                                                                                                               │         │
-│  │      │  Ctrl-B / Ctrl-F          back or forward one character                                                                                                                          │         │
-│         │  Alt-B / Alt-F            back or forward one word                                                                                                                               │         │
-│         │  Ctrl-H / Ctrl-D          delete before or after the cursor                                                                                                                      │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│› · ACP  │  Ctrl-A / Ctrl-E          start or end of the line                                                                                                                               │         │
+│  Idle   │  Ctrl-B / Ctrl-F          back or forward one character                                                                                                                          │         │
+│  │ No   │  Alt-B / Alt-F            back or forward one word                                                                                                                               │         │
+│  │      │  Ctrl-H / Ctrl-D          delete before or after the cursor                                                                                                                      │         │
 │         │  Alt-D                    delete the word after the cursor                                                                                                                       │         │
 │         │  Ctrl-W                   delete the word before the cursor                                                                                                                      │         │
 │         │  Ctrl-U / Ctrl-K          kill to the start or end of the line                                                                                                                   │         │
@@ -752,6 +750,8 @@ Enter op
 │         │    Choose and remember a new account, target, or isolation for this project. — Not available here.                                                                               │         │
 │         │  Enter / e                Target actions                                                                                                                                         │         │
 │         │    Test or rename the selected target.                                                                                                                                           │         │
+│         │  d                        Show disks                                                                                                                                             │         │
+│         │    Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.                                                     │         │
 │         │  Enter / e                Rename profile                                                                                                                                         │         │
 │         │    Rename the selected profile's configuration id.                                                                                                                               │         │
 │         │  —                        Manage agent profiles                                                                                                                                  │         │
@@ -1039,7 +1039,7 @@ palette entries: 65
 ╰───  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────╮     │
 ╭ Se  │prefix: ctrl+b   (change it in Setup → Interface)                                                         │     │
 │ Cr  │filter:                                                                                                   │     │
-│hel  │93 shortcuts · Type to search by key, name, or intent                                                     │     │
+│hel  │94 shortcuts · Type to search by key, name, or intent                                                     │     │
 │› ·  │Essentials                                                                                                │     │
 │  I  │  n / N / ctrl+b c         Create session                                                                 │     │
 │  │  │    Choose the profile, project, target, and mounts in the full wizard.                                   │     │
@@ -1107,7 +1107,7 @@ Ente                                                                            
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -1227,7 +1227,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │Essentials                                                                                                                                                                        │         │
 │  Idle   │  n / N / ctrl+b c         Create session                                                                                                                                         │         │
 │  │ No   │    Choose the profile, project, target, and mounts in the full wizard.                                                                                                           │         │
@@ -1305,7 +1305,7 @@ Enter op
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -1400,7 +1400,7 @@ help filter state: query=TextInput { value: "np", cursor: 2, kill_buffer: "", ch
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -1448,7 +1448,7 @@ Enter op
 ╰───────  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮         │
 ╭ Sessio  │prefix: ctrl+b   (change it in Setup → Interface)                                                                                                                                 │         │
 │ Create  │filter:                                                                                                                                                                           │         │
-│hel ───  │93 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
+│hel ───  │94 shortcuts · Type to search by key, name, or intent                                                                                                                             │         │
 │› · ACP  │  n / N / ctrl+b c         Create session                                                                                                                                         │  ───────╯
 │  Idle   │    Choose the profile, project, target, and mounts in the full wizard.                                                                                                           │  ───────╮
 │  │ No   │  ctrl+b g                 Sessions                                                                                                                                               │         │
@@ -1496,7 +1496,7 @@ Enter op
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -1623,7 +1623,7 @@ Ente
 ╰───  ╭ × Keyboard shortcuts ────────────────────────────────────────────────────────────────────────────────────╮     │
 ╭ Se  │prefix: ctrl+b   (change it in Setup → Interface)                                                         │     │
 │ Cr  │filter:                                                                                                   │     │
-│hel  │93 shortcuts · Type to search by key, name, or intent                                                     │     │
+│hel  │94 shortcuts · Type to search by key, name, or intent                                                     │     │
 │› ·  │Essentials                                                                                                │     │
 │  I  │  n / N / ctrl+b c         Create session                                                                 │     │
 │  │  │    Choose the profile, project, target, and mounts in the full wizard.                                   │     │
@@ -1757,7 +1757,7 @@ help search focus after row click: true
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -1794,7 +1794,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │

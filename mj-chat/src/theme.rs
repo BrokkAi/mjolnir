@@ -458,6 +458,8 @@ pub struct Glyphs {
     pub running: &'static str,
     pub pending: &'static str,
     pub dropdown: &'static str,
+    /// Closes what a `dropdown` mark opened.
+    pub dropup: &'static str,
     /// Opens another view rather than a choice menu.
     pub navigate: &'static str,
     pub scroll_track: &'static str,
@@ -517,6 +519,7 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     running: "●",
     pending: "○",
     dropdown: "▾",
+    dropup: "▴",
     navigate: "›",
     scroll_track: "│",
     scroll_thumb: "▐",
@@ -572,6 +575,7 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     running: "*",
     pending: "o",
     dropdown: "v",
+    dropup: "^",
     navigate: ">",
     scroll_track: "|",
     scroll_thumb: "#",

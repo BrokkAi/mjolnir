@@ -30,7 +30,7 @@
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -73,7 +73,7 @@ attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -117,7 +117,7 @@ rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -161,7 +161,7 @@ workspace badge cells: !1; marker fg=Rgb(240, 205, 145); failure color=false
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -205,7 +205,7 @@ workspace badge cells: ?1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -249,7 +249,7 @@ workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -292,7 +292,7 @@ workspace summary: None; badge: absent
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -335,7 +335,7 @@ action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: tru
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -378,7 +378,7 @@ action: SelectWorkspace { workspace_id: "other" }
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -421,7 +421,7 @@ selected: Some("remote")
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -464,7 +464,7 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -507,7 +507,7 @@ selected: Some("asks")
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -550,7 +550,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -592,7 +592,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -634,7 +634,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -677,7 +677,7 @@ action: Open { session_id: "asks" }; folded projects: {}
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -720,7 +720,7 @@ action: None; notice: Some("Nothing is waiting for you.")
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                ││  Host / fleet  Targets  In Use                                                                                                     │
+│                                                                ││  Host / fleet  Targets  CPU  RAM  Disks                                                                                            │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
@@ -763,7 +763,7 @@ footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g se
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                ││  Host / fleet  Targets  In Use                                                                                                     │
+│                                                                ││  Host / fleet  Targets  CPU  RAM  Disks                                                                                            │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                                                ││            Harness      Weekly      Resets  5H Resets                                                                              │
@@ -806,7 +806,7 @@ footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ c
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -849,7 +849,7 @@ workspace tabs: │ Default !1  Other !1               ☰ ││               
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -892,7 +892,7 @@ folded heading: │[2] done ✓1 ───────────────�
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -935,7 +935,7 @@ priority session ids: ["asks", "done", "quiet"]; project headings: false
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
@@ -978,7 +978,7 @@ notice: Some("Projects are not grouped in priority order; see Settings → Advan
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││  Host / fleet  Targets  In Use                                                             │
+│                                            ││  Host / fleet  Targets  CPU  RAM  Disks                                                    │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │

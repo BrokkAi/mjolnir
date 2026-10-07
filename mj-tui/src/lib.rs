@@ -902,6 +902,9 @@ pub struct DashboardState {
     /// The daemon storage owner's verdict per target host. The daemon is the
     /// only judge of a full disk; this surface shows what it says.
     pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
+    /// Capacity rows, by deployment capacity target id, whose Disks cell is
+    /// expanded to list every filesystem instead of the one-line verdict.
+    pub(crate) expanded_disks: BTreeSet<String>,
     /// The build stamped on the workspace pane, as `v2.11.0`. Tests render
     /// [`TEST_VERSION_LABEL`] instead.
     pub(crate) version_label: String,
@@ -1197,6 +1200,7 @@ impl DashboardState {
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             target_storage: Vec::new(),
+            expanded_disks: BTreeSet::new(),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {

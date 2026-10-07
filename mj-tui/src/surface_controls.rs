@@ -32,6 +32,9 @@ pub(crate) enum SurfaceControl {
     PinHere(PaneId),
     SessionPin(usize),
     WorkspaceMenu,
+    /// The Disks summary on one Targets row, by row index; a click expands
+    /// or collapses that row's filesystem list.
+    CapacityDisks(usize),
 }
 
 pub(crate) const SESSION_ACTIONS: [(CommandId, &str); 2] = [
@@ -200,6 +203,15 @@ impl DashboardState {
                     self.workspace_control_focus = crate::workspaces::WorkspaceControlFocus::Menu;
                     self.set_session_action_focus(None);
                     self.run_available_command(CommandId::Workspaces)
+                }
+                SurfaceControl::CapacityDisks(index) => {
+                    if index < self.capacity_details.len() {
+                        self.focus = Focus::Targets;
+                        self.set_session_action_focus(None);
+                        self.capacity_index = index;
+                        self.toggle_selected_disks();
+                    }
+                    DashboardAction::None
                 }
             });
         }

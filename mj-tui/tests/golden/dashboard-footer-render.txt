@@ -14,7 +14,7 @@
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -39,7 +39,7 @@ Transient dashboard message
 │                                      ││Press ctrl+b c to create a session or ctrl+b g to find one.                   │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -63,7 +63,7 @@ Transient dashboard message
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                ││  Host / fleet  Targets  In Use                                                                                                     │
+│                                                                ││  Host / fleet  Targets  CPU          RAM  Disks                                                                                    │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -88,7 +88,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                ││  Host / fleet  Targets  In Use                                                                                                     │
+│                                                                ││  Host / fleet  Targets  CPU          RAM  Disks                                                                                    │
 │                                                                ││› local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -113,7 +113,7 @@ Enter actions · . menu · Tab pane │ ctrl+b then g sessions · b panes · q d
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                ││  Host / fleet  Targets  In Use                                                                                                     │
+│                                                                ││  Host / fleet  Targets  CPU          RAM  Disks                                                                                    │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -138,7 +138,7 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                                                ││Press Tab for Sessions, then Enter on the one to open.                                                                              │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                                                ││  Host / fleet  Targets  In Use                                                                                                     │
+│                                                                ││  Host / fleet  Targets  CPU          RAM  Disks                                                                                    │
 │                                                                ││  local         podman   unavailable                                                                                                │
 │                                                                │╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                                │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
@@ -2029,7 +2029,7 @@ Need at least 60 columns.
 │Press Tab for Sessions, then Enter on the one to open.    │
 ╰──────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                           │
+│  Host / fleet  Targets  CPU          RAM  Disks          │
 │  local         podman   unavailable                      │
 ╰──────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
@@ -2060,7 +2060,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.     │
 ╰───────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ───────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                            │
+│  Host / fleet  Targets  CPU          RAM  Disks           │
 │  local         podman   unavailable                       │
 ╰───────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────── ▁   ▪ ╮
@@ -2091,7 +2091,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.      │
 ╰────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                             │
+│  Host / fleet  Targets  CPU          RAM  Disks            │
 │  local         podman   unavailable                        │
 ╰────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────── ▁   ▪ ╮
@@ -2122,7 +2122,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.       │
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ─────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                              │
+│  Host / fleet  Targets  CPU          RAM  Disks             │
 │  local         podman   unavailable                         │
 ╰─────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────── ▁   ▪ ╮
@@ -2153,7 +2153,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.        │
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                               │
+│  Host / fleet  Targets  CPU          RAM  Disks              │
 │  local         podman   unavailable                          │
 ╰──────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────── ▁   ▪ ╮
@@ -2184,7 +2184,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.         │
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ───────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                │
+│  Host / fleet  Targets  CPU          RAM  Disks               │
 │  local         podman   unavailable                           │
 ╰───────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────── ▁   ▪ ╮
@@ -2215,7 +2215,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.          │
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                 │
+│  Host / fleet  Targets  CPU          RAM  Disks                │
 │  local         podman   unavailable                            │
 ╰────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────── ▁   ▪ ╮
@@ -2246,7 +2246,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.           │
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ─────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                  │
+│  Host / fleet  Targets  CPU          RAM  Disks                 │
 │  local         podman   unavailable                             │
 ╰─────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────── ▁   ▪ ╮
@@ -2277,7 +2277,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.            │
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                   │
+│  Host / fleet  Targets  CPU          RAM  Disks                  │
 │  local         podman   unavailable                              │
 ╰──────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────── ▁   ▪ ╮
@@ -2308,7 +2308,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.             │
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ───────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                    │
+│  Host / fleet  Targets  CPU          RAM  Disks                   │
 │  local         podman   unavailable                               │
 ╰───────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────── ▁   ▪ ╮
@@ -2339,7 +2339,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.              │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                     │
+│  Host / fleet  Targets  CPU          RAM  Disks                    │
 │  local         podman   unavailable                                │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
@@ -2370,7 +2370,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.               │
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ─────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                      │
+│  Host / fleet  Targets  CPU          RAM  Disks                     │
 │  local         podman   unavailable                                 │
 ╰─────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────── ▁   ▪ ╮
@@ -2401,7 +2401,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                │
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                       │
+│  Host / fleet  Targets  CPU          RAM  Disks                      │
 │  local         podman   unavailable                                  │
 ╰──────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────── ▁   ▪ ╮
@@ -2432,7 +2432,7 @@ Enter open │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                 │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ───────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                        │
+│  Host / fleet  Targets  CPU          RAM  Disks                       │
 │  local         podman   unavailable                                   │
 ╰───────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────────── ▁   ▪ ╮
@@ -2463,7 +2463,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                  │
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                         │
+│  Host / fleet  Targets  CPU          RAM  Disks                        │
 │  local         podman   unavailable                                    │
 ╰────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────── ▁   ▪ ╮
@@ -2494,7 +2494,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                   │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ─────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                          │
+│  Host / fleet  Targets  CPU          RAM  Disks                         │
 │  local         podman   unavailable                                     │
 ╰─────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────────── ▁   ▪ ╮
@@ -2525,7 +2525,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                    │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                           │
+│  Host / fleet  Targets  CPU          RAM  Disks                          │
 │  local         podman   unavailable                                      │
 ╰──────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────── ▁   ▪ ╮
@@ -2556,7 +2556,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                     │
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ───────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                            │
+│  Host / fleet  Targets  CPU          RAM  Disks                           │
 │  local         podman   unavailable                                       │
 ╰───────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)───────────────────────────────────────── ▁   ▪ ╮
@@ -2587,7 +2587,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                      │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                             │
+│  Host / fleet  Targets  CPU          RAM  Disks                            │
 │  local         podman   unavailable                                        │
 ╰────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────────────── ▁   ▪ ╮
@@ -2618,7 +2618,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │Press Tab for Sessions, then Enter on the one to open.                       │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ─────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                              │
+│  Host / fleet  Targets  CPU          RAM  Disks                             │
 │  local         podman   unavailable                                         │
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)─────────────────────────────────────────── ▁   ▪ ╮
@@ -2649,7 +2649,7 @@ Enter open · / search (filter a/b/w/i/d) │ ctrl+b then : palette · ? keys
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                               │
+│  Host / fleet  Targets  CPU          RAM  Disks                              │
 │  local         podman   unavailable                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
@@ -2692,7 +2692,7 @@ Sessions prefix action: Consumed
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -2733,7 +2733,7 @@ Sessions prefix action: Consumed
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -2775,7 +2775,7 @@ Prompt prefix action: Consumed
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -2816,7 +2816,7 @@ Prompt prefix action: Consumed
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │

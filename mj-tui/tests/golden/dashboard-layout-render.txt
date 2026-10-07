@@ -21,7 +21,7 @@ open Rename action: None
 │                       ╰──────────────────────────────────────────────────────────────────────╯                       │
 │                                                                                                 ─────────────────────╯
 │                                                                                                 ────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  In Use                                               │
+│                                      ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -54,7 +54,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │                                   ▐│Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │  · ACP pretty name               ◇ ⋯ ▐╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Idle  podman [2]  codex-1           ▐│  Host / fleet  Targets  In Use                                               │
+│  Idle  podman [2]  codex-1           ▐│  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │  │ No messages yet                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -124,7 +124,7 @@ restore pane preset action: None
 │  │                                   ▐│Press Tab for Sessions, then Enter on the one to open.                        │
 │                                      ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │  · ACP pretty name               ◇ ⋯ ▐╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Idle  podman [2]  codex-1           ▐│  Host / fleet  Targets  In Use                                               │
+│  Idle  podman [2]  codex-1           ▐│  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │  │ No messages yet                   ▐╰──────────────────────────────────────────────────────────────────────────────╯
 │  │                                   │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -170,7 +170,7 @@ restored transcript area at height 32: Rect { x: 40, y: 0, width: 80, height: 18
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │  · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
 │  Idle  podman [2]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  │ No messages yet                   ││  Host / fleet  Targets  In Use                                               │
+│  │ No messages yet                   ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -264,7 +264,7 @@ restore pane preset action: None
 │                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
 │  · ACP pretty name               ◇ ⋯ │╰──────────────────────────────────────────────────────────────────────────────╯
 │  Idle  podman [2]  codex-1           │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  │ No messages yet                   ││  Host / fleet  Targets  In Use                                               │
+│  │ No messages yet                   ││  Host / fleet  Targets  CPU  RAM  Disks                                      │
 │  │                                   │╰──────────────────────────────────────────────────────────────────────────────╯
 │                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
@@ -327,7 +327,7 @@ dashboard geometry at 59 columns: (None, None, false)
 │Press Tab for Sessions, then Enter on the one to open.              │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Targets ▾ ────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                     │
+│  Host / fleet  Targets  CPU          RAM  Disks                    │
 │  local         podman   unavailable                                │
 ╰────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)────────────────────────────────── ▁   ▪ ╮
@@ -359,7 +359,7 @@ dashboard geometry at 70 columns: (Some([Rect { x: 0, y: 3, width: 70, height: 6
 │                                      ││Press Tab for Sessions, then Enter on │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────╯
 ╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│  Host / fleet  Targets  In Use                                               │
+│  Host / fleet  Targets  CPU          RAM  Disks                              │
 │  local         podman   unavailable                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮

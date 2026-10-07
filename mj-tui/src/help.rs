@@ -106,9 +106,9 @@ fn group(id: CommandId) -> &'static str {
         | TargetsMenu
         | ProfilesMenu => GROUPS[3],
         ToggleTranscriptRendering | ToggleDictation => GROUPS[4],
-        ChangeGoSetup | TargetActions | EditProfile | Refresh | OpenConfig | ManageProfiles
-        | ManageMachines | ManageTargets | WebViewer | RestartDaemon | NoticeLog
-        | SessionCpuReport | CycleSpinner => GROUPS[5],
+        ChangeGoSetup | TargetActions | TargetDisks | EditProfile | Refresh | OpenConfig
+        | ManageProfiles | ManageMachines | ManageTargets | WebViewer | RestartDaemon
+        | NoticeLog | SessionCpuReport | CycleSpinner => GROUPS[5],
     }
 }
 
