@@ -665,7 +665,8 @@ impl HarnessKind {
         match self {
             Self::Muse => Some("bin/muse"),
             Self::Grok => Some("bin/agent"),
-            Self::Codex | Self::Claude | Self::Kimi | Self::OpenCode => None,
+            Self::Claude => Some("node_modules/.bin/claude"),
+            Self::Codex | Self::Kimi | Self::OpenCode => None,
         }
     }
 

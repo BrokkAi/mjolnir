@@ -188,6 +188,13 @@ async fn resolve_at_async(
                 .into_owned(),
         );
     }
+    // The bridge's SDK bundles an older CLI; select our separately pinned Code.
+    if let (HarnessKind::Claude, Some(entry)) = (harness, harness.extra_managed_entrypoint()) {
+        launch_environment.insert(
+            "CLAUDE_CODE_EXECUTABLE".into(),
+            install.join(entry).to_string_lossy().into_owned(),
+        );
+    }
     // The pinned installation is not the release channel, so its downloader
     // must never fetch a replacement under a running session.
     if harness == HarnessKind::OpenCode {
@@ -1200,17 +1207,22 @@ INSTALLER
 
     #[test]
     fn a_complete_cache_hit_does_not_execute_the_entrypoint() {
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            check_complete_cache_hit(harness);
+        }
+    }
+
+    fn check_complete_cache_hit(harness: HarnessKind) {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
-        let selected = pin(HarnessKind::Codex);
-        let root = cache.join(HarnessKind::Codex.id());
+        let selected = pin(harness);
+        let root = cache.join(harness.id());
         std::fs::create_dir_all(&root).unwrap();
-        complete_fake(
-            &root,
-            HarnessKind::Codex,
-            selected.install_id,
-            selected.entrypoint,
-        );
+        complete_fake(&root, harness, selected.install_id, selected.entrypoint);
+        let install = root.join(selected.install_id);
+        if let Some(entry) = harness.extra_managed_entrypoint() {
+            executable(&install.join(entry), "#!/bin/sh\nexit 0\n");
+        }
         let marker = temp.path().join("executed");
         executable(
             &root.join(selected.install_id).join(selected.entrypoint),
@@ -1219,18 +1231,32 @@ INSTALLER
 
         let managed = resolve_at(
             &cache,
-            HarnessKind::Codex,
+            harness,
             ExecutionPolicy::ConfiguredApprovals,
             &BTreeMap::new(),
         )
         .unwrap();
 
         assert!(!marker.exists());
-        let expected_codex = root
-            .join(selected.install_id)
-            .join("node_modules/@openai/codex/bin/codex.js")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(managed.environment.get("CODEX_PATH"), Some(&expected_codex));
+        let (provider_env, entry) = match harness {
+            HarnessKind::Codex => ("CODEX_PATH", "node_modules/@openai/codex/bin/codex.js"),
+            HarnessKind::Claude => (
+                "CLAUDE_CODE_EXECUTABLE",
+                harness.extra_managed_entrypoint().unwrap(),
+            ),
+            _ => unreachable!(),
+        };
+        let expected_provider = install.join(entry).to_string_lossy().into_owned();
+        assert_eq!(
+            managed.environment.get(provider_env),
+            Some(&expected_provider)
+        );
+        if harness == HarnessKind::Claude {
+            std::fs::remove_file(install.join(entry)).unwrap();
+            assert!(
+                !complete_install(&install, harness, selected).unwrap(),
+                "a cache without the pinned Claude Code must not launch the SDK's bundled CLI"
+            );
+        }
     }
 }
