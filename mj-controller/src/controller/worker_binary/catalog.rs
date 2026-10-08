@@ -80,10 +80,12 @@ pub(in crate::controller) fn stage_codex_catalog(
         return Ok(());
     };
     let Some(api_key) = profile.codex_provider_api_key() else {
-        // Only an `env_key` provider reaches this: its variable has no value,
-        // which `ensure_ready` names before staging runs.
-        let env_key = custom.env_key.as_deref().unwrap_or("its provider key");
-        bail!("profile {profile_id:?} has no {env_key} entry to read its model catalog with");
+        // Only an `env_key` provider whose variable is unset reaches this;
+        // `ensure_ready` names that variable before anything stages the profile.
+        bail!(
+            "profile {profile_id:?} has no {} value to read its model catalog with",
+            custom.env_key.as_deref().unwrap_or("provider key")
+        );
     };
     let url = format!("{}/models", custom.base_url.trim_end_matches('/'));
     let key = catalog_cache_key(&custom.base_url);

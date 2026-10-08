@@ -139,13 +139,11 @@ impl CustomCodexProvider {
     /// wins, matching the documented preference for the form that keeps the key
     /// out of the staged configuration.
     pub fn key(&self) -> Option<CodexProviderKey<'_>> {
-        Some(
-            match (self.env_key.as_deref(), self.bearer_token.as_deref()) {
-                (Some(env_key), _) => CodexProviderKey::EnvKey(env_key),
-                (None, Some(token)) => CodexProviderKey::Inline(token),
-                (None, None) => return None,
-            },
-        )
+        match (self.env_key.as_deref(), self.bearer_token.as_deref()) {
+            (Some(env_key), _) => Some(CodexProviderKey::EnvKey(env_key)),
+            (None, Some(token)) => Some(CodexProviderKey::Inline(token)),
+            (None, None) => None,
+        }
     }
 }
 
