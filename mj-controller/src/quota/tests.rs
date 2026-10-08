@@ -32,7 +32,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
 }
 
 #[test]
-fn inline_custom_provider_credentials_do_not_enable_openai_banked_resets() {
+fn an_inline_token_provider_credential_does_not_become_native_openai() {
     let home = tempfile::tempdir().unwrap();
     let mut profile = zai_profile(home.path(), "https://example.invalid/v1");
     let path = home.path().join("config.toml");
@@ -43,8 +43,18 @@ fn inline_custom_provider_credentials_do_not_enable_openai_banked_resets() {
     std::fs::write(path, config).unwrap();
     profile.environment.clear();
     let request = QuotaRefreshRequest::for_profile("custom", &profile, home.path().to_owned());
-    assert_eq!(request.provider, None);
-    assert!(!request.native_openai);
+    assert_eq!(
+        request
+            .provider
+            .as_ref()
+            .map(|provider| provider.api_key.as_str()),
+        Some("inline-key"),
+        "the inline token authorizes the provider's own quota work"
+    );
+    assert!(
+        !request.native_openai,
+        "an inline-token custom provider is not Codex's own OpenAI login"
+    );
 }
 
 // Hard-won: 6f73fe58: usage-billed custom providers were incorrectly shown as unavailable

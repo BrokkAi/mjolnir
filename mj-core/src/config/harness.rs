@@ -796,8 +796,9 @@ impl HarnessProfile {
     /// variable from the profile's `environment` map, so there is no
     /// interactive login and no credential file to sync or expire. Bedrock
     /// uses the AWS credential chain; local built-in providers need no login.
-    /// A custom provider that inlines its key as `experimental_bearer_token`
-    /// retains the existing `NativeLogin` behavior.
+    /// `InlineApiKey` is a custom provider that writes its key into its own
+    /// `config.toml`; that file is copied into the staged home, so the profile
+    /// is just as set up as an `env_key` one and needs no interactive login.
     pub fn auth_scheme(&self) -> AuthScheme {
         if self.kind == HarnessKind::Claude
             && self
@@ -812,9 +813,23 @@ impl HarnessProfile {
             Ok(Some(provider)) if provider.needs_no_authentication() => {
                 AuthScheme::NoAuthentication
             }
-            Ok(Some(provider)) => match provider.custom().and_then(|custom| custom.env_key.clone())
-            {
-                Some(env_key) => AuthScheme::ApiKey { env_key },
+            Ok(Some(provider)) => match provider.custom() {
+                // A custom provider names its key either in an environment
+                // variable (`env_key`) or inline in its own `config.toml`
+                // (`experimental_bearer_token`); either way there is no
+                // interactive login and no credential file to sync or expire.
+                Some(custom) => match custom.key() {
+                    Some(crate::codex_provider::CodexProviderKey::EnvKey(env_key)) => {
+                        AuthScheme::ApiKey {
+                            env_key: env_key.to_owned(),
+                        }
+                    }
+                    Some(crate::codex_provider::CodexProviderKey::Inline(_)) => {
+                        AuthScheme::InlineApiKey
+                    }
+                    None => AuthScheme::NativeLogin,
+                },
+                // The built-in OpenAI provider uses Codex's own login.
                 None => AuthScheme::NativeLogin,
             },
             // An unreadable or malformed home is reported where it is read
@@ -823,12 +838,30 @@ impl HarnessProfile {
         }
     }
 
+    /// The API key this Codex profile's custom provider authenticates with,
+    /// from the environment variable it names (`env_key`) or the token it
+    /// writes into its own `config.toml` (`experimental_bearer_token`).
+    ///
+    /// `None` when the profile is not a Codex custom-provider profile, or when
+    /// it names an `env_key` whose variable has no value. [`Self::ensure_ready`]
+    /// reports the missing variable before anything stages the profile.
+    pub fn codex_provider_api_key(&self) -> Option<String> {
+        let provider = self.codex_provider().ok().flatten()?;
+        match provider.custom()?.key()? {
+            crate::codex_provider::CodexProviderKey::EnvKey(env_key) => {
+                self.environment.get(env_key).cloned()
+            }
+            crate::codex_provider::CodexProviderKey::Inline(token) => Some(token.to_owned()),
+        }
+    }
+
     /// The file inside this profile's home that proves it is authenticated.
-    /// An API-key profile is proven by its Codex `config.toml`, because the key
-    /// itself lives in the profile environment rather than in a file.
+    /// An API-key profile is proven by its Codex `config.toml`, whether the key
+    /// lives in the profile environment or inline in that file.
     pub fn authentication_marker(&self) -> PathBuf {
         match self.auth_scheme() {
             AuthScheme::ApiKey { .. }
+            | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
             | AuthScheme::NoAuthentication => self.home.join("config.toml"),
             AuthScheme::NativeLogin => harness_authentication_marker(self.kind, &self.home),
@@ -840,6 +873,7 @@ impl HarnessProfile {
     pub fn credential_freshness(&self, bytes: &[u8]) -> Option<i64> {
         match self.auth_scheme() {
             AuthScheme::ApiKey { .. }
+            | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
             | AuthScheme::NoAuthentication => None,
             AuthScheme::NativeLogin => crate::credentials::credential_freshness(self.kind, bytes),
@@ -850,6 +884,7 @@ impl HarnessProfile {
     pub fn credential_expiry(&self, bytes: &[u8]) -> Option<i64> {
         match self.auth_scheme() {
             AuthScheme::ApiKey { .. }
+            | AuthScheme::InlineApiKey
             | AuthScheme::AwsCredentialChain
             | AuthScheme::NoAuthentication => None,
             AuthScheme::NativeLogin => crate::credentials::credential_expiry(self.kind, bytes),
@@ -998,6 +1033,9 @@ pub enum AuthScheme {
     NativeLogin,
     /// A long-lived API key supplied through this environment variable.
     ApiKey { env_key: String },
+    /// A long-lived API key written into the profile's own harness
+    /// configuration file, so the staged home carries it.
+    InlineApiKey,
     /// The harness obtains AWS credentials from its configured AWS provider chain.
     AwsCredentialChain,
     /// A built-in local provider does not require credentials.
@@ -1006,7 +1044,7 @@ pub enum AuthScheme {
 
 impl AuthScheme {
     pub const fn is_api_key(&self) -> bool {
-        matches!(self, Self::ApiKey { .. })
+        matches!(self, Self::ApiKey { .. } | Self::InlineApiKey)
     }
 
     /// Whether this profile uses the harness's own login file.

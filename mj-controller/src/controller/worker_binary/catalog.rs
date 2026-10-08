@@ -79,18 +79,17 @@ pub(in crate::controller) fn stage_codex_catalog(
         // Bedrock's bundled catalog. Do not try to fetch `/models` from them.
         return Ok(());
     };
-    let Some(env_key) = custom.env_key.as_deref() else {
-        // An inline `experimental_bearer_token` provider carries its key in the
-        // staged file itself; Mjolnir has no key of its own to authorize a
-        // catalog fetch with.
-        return Ok(());
+    let Some(api_key) = profile.codex_provider_api_key() else {
+        // Only an `env_key` provider whose variable is unset reaches this;
+        // `ensure_ready` names that variable before anything stages the profile.
+        bail!(
+            "profile {profile_id:?} has no {} value to read its model catalog with",
+            custom.env_key.as_deref().unwrap_or("provider key")
+        );
     };
-    let api_key = profile.environment.get(env_key).with_context(|| {
-        format!("profile {profile_id:?} has no {env_key} entry to read its model catalog with")
-    })?;
     let url = format!("{}/models", custom.base_url.trim_end_matches('/'));
     let key = catalog_cache_key(&custom.base_url);
-    let body = match fetch(&url, api_key) {
+    let body = match fetch(&url, &api_key) {
         Ok(body) => {
             if let Ok(text) = std::str::from_utf8(&body) {
                 cache.store(profile_id, &key, text);

@@ -168,9 +168,13 @@ refused with an error naming the profile, the variable and how to supply it,
 and `mj doctor` reports the same. The rest of the configuration, the daemon and
 every other profile keep working.
 
-A provider may instead inline its key as `experimental_bearer_token`; prefer
-`env_key`, because the inline form writes the key into a file that is copied to
-every target.
+A provider may instead inline its key as `experimental_bearer_token`. Mjolnir
+reads that key the same way it reads `env_key`: the profile is authenticated,
+the provider's catalog is fetched with the inline key and staged, the Guardian
+reviewer is stamped, and the provider can serve quota and utility work. Prefer
+`env_key`, because the inline form writes the key into the profile's
+`config.toml`, which is copied into every staged home and travels with the
+configuration.
 
 What changes for such a profile:
 
@@ -196,8 +200,9 @@ What changes for such a profile:
   runs from a staged copy of the profile home, so the generated catalog never
   lands in your own Codex directory.
 - **Quota** is reported for Z.ai (`api.z.ai`) and Zhipu (`open.bigmodel.cn`)
-  hosts, which publish the Coding Plan windows. Any other provider reports that
-  quota is unavailable for it; the profile still runs sessions.
+  hosts, which publish the Coding Plan windows. A provider on any other host,
+  such as DeepSeek, is usage-priced, so its profile shows `API` in the quota
+  column and counts as fully available when ranking sub-agent profiles.
 - **Utility inference depends on the provider.** Z.ai profiles cannot supply
   Mjolnir's own transcript compaction. DeepSeek profiles can, using their
   chat-completions endpoint; see [Durability and recovery](/durability/).
