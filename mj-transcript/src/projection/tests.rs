@@ -273,6 +273,7 @@ fn golden_session_title_projection() {
     );
 }
 
+// Hard-won: #4625: one queued notice must omit the by-clause when a merge actor is unavailable.
 #[test]
 fn golden_mailbox_delivery_transcript() {
     let mut session = MaterializedSession::empty("session-mailbox");
@@ -370,18 +371,6 @@ fn golden_mailbox_delivery_transcript() {
             },
         ),
         mailbox_event(
-            "github:repo#4624:interest:session",
-            "github",
-            false,
-            501,
-            MailboxEventBody::NewGithubItem {
-                kind: GithubItemKind::Issue,
-                number: 4624,
-                title: "Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)".into(),
-                repo: None,
-            },
-        ),
-        mailbox_event(
             "github:repo#4623:comment:1",
             "github",
             true,
@@ -391,7 +380,19 @@ fn golden_mailbox_delivery_transcript() {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 author: "alice".into(),
-                body: "Please check the macro edge case.\nMore detail.".into(),
+                body: "Please check the <macro> case.\nMore detail.".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4624:interest:session",
+            "github",
+            false,
+            501,
+            MailboxEventBody::NewGithubItem {
+                kind: GithubItemKind::Issue,
+                number: 4624,
+                title: "Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)".into(),
                 repo: None,
             },
         ),
@@ -447,6 +448,19 @@ fn golden_mailbox_delivery_transcript() {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 actor: "erin".into(),
+                repo: None,
+            },
+        ),
+        mailbox_event(
+            "github:repo#4624:merged-unknown",
+            "github",
+            true,
+            506,
+            MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: 4624,
+                title: "PR without a known merger".into(),
+                actor: String::new(),
                 repo: None,
             },
         ),

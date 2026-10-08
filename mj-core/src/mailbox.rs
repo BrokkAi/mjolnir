@@ -20,7 +20,7 @@ const _: () = {
 };
 
 /// An event addressed to one session. `ParentMessage` is trusted content and
-/// is created only by the daemon's `send_message` path; all other bodies are
+/// is created only by the daemon's parent-input path; all other bodies are
 /// rendered as untrusted external information.
 ///
 /// `key` is the producer's stable deduplication identity. The event body is
@@ -345,10 +345,15 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             let reference = item_reference(repo.as_deref(), *number);
             let title = escape_untrusted(title);
             let actor = escape_untrusted(actor);
+            let by_clause = if actor.is_empty() || actor == "unknown" {
+                String::new()
+            } else {
+                format!(" by {actor}")
+            };
             let (line, transcript_line) = match change {
                 MailboxPullRequestChange::Merged => (
-                    format!("Your PR {reference} \"{title}\" was merged by {actor}."),
-                    format!("Your PR {reference} was merged by {actor}."),
+                    format!("Your PR {reference} \"{title}\" was merged{by_clause}."),
+                    format!("Your PR {reference} was merged{by_clause}."),
                 ),
                 MailboxPullRequestChange::ClosedWithoutMerging => (
                     format!("Your PR {reference} \"{title}\" was closed without merging."),
@@ -467,6 +472,7 @@ mod tests {
         }
     }
 
+    // Hard-won: #4625: actorless and legacy-unknown merges must not render a by-clause.
     #[test]
     fn golden_mailbox_agent_context() {
         let events = vec![
@@ -512,6 +518,20 @@ mod tests {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 actor: "dave".into(),
+                repo: None,
+            }),
+            event(MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: 4624,
+                title: "PR without a known merger".into(),
+                actor: String::new(),
+                repo: None,
+            }),
+            event(MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: 4625,
+                title: "Legacy PR without a known merger".into(),
+                actor: "unknown".into(),
                 repo: None,
             }),
             MailboxEvent {

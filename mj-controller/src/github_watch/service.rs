@@ -808,20 +808,58 @@ async fn poll_repository_comments(
                 state == "open" || state == "closed",
                 "GitHub pull request response has invalid state {state:?}"
             );
-            let reopened_actor =
-                if watch.pull_request_state.as_deref() == Some("closed") && state == "open" {
-                    api.latest_reopened_actor(owner, repo, watch.number as u64)
+            let lifecycle_actor = if let Some(merged_at) = response.value["merged_at"].as_str() {
+                match response.value["merged_by"]["login"]
+                    .as_str()
+                    .filter(|login| !login.is_empty())
+                {
+                    Some(login) => Some(login.to_owned()),
+                    None => {
+                        api.lifecycle_actor_from_events(
+                            owner,
+                            repo,
+                            watch.number as u64,
+                            "merged",
+                            Some("closed"),
+                            Some(merged_at),
+                        )
                         .await?
-                } else {
-                    None
-                };
+                    }
+                }
+            } else if state == "closed" {
+                let closed_at = response.value["closed_at"]
+                    .as_str()
+                    .context("closed GitHub pull request response has no closing timestamp")?;
+                match response.value["closed_by"]["login"]
+                    .as_str()
+                    .filter(|login| !login.is_empty())
+                {
+                    Some(login) => Some(login.to_owned()),
+                    None => {
+                        api.lifecycle_actor_from_events(
+                            owner,
+                            repo,
+                            watch.number as u64,
+                            "closed",
+                            None,
+                            Some(closed_at),
+                        )
+                        .await?
+                    }
+                }
+            } else if watch.pull_request_state.as_deref() == Some("closed") && state == "open" {
+                api.latest_reopened_actor(owner, repo, watch.number as u64)
+                    .await?
+            } else {
+                None
+            };
             let event = pull_request_lifecycle_event(
                 owner,
                 repo,
                 &watch,
                 &response.value,
                 watch.pull_request_state.as_deref(),
-                reopened_actor.as_deref(),
+                lifecycle_actor.as_deref(),
                 display_repo_for_watch(&watch, display_repos_by_session, multi_repo_sessions),
             )?;
             blocking_db({
@@ -976,13 +1014,17 @@ fn pull_request_lifecycle_event(
     watch: &crate::database::GithubItemWatch,
     pull: &Value,
     previous_state: Option<&str>,
-    reopened_actor: Option<&str>,
+    actor_from_events: Option<&str>,
     display_repo: Option<String>,
 ) -> Result<Option<(String, String)>> {
     let repo_label = format!("{owner}/{repo}");
     let number = watch.number;
     let (key, change, actor, timestamp) = if let Some(merged_at) = pull["merged_at"].as_str() {
-        let login = pull["merged_by"]["login"].as_str().unwrap_or("unknown");
+        let login = pull["merged_by"]["login"]
+            .as_str()
+            .filter(|login| !login.is_empty())
+            .or(actor_from_events)
+            .unwrap_or_default();
         (
             format!("github:{repo_label}#{number}:merged"),
             MailboxPullRequestChange::Merged,
@@ -993,7 +1035,11 @@ fn pull_request_lifecycle_event(
         let closed_at = pull["closed_at"]
             .as_str()
             .context("closed GitHub pull request response has no closing timestamp")?;
-        let login = pull["closed_by"]["login"].as_str().unwrap_or("unknown");
+        let login = pull["closed_by"]["login"]
+            .as_str()
+            .filter(|login| !login.is_empty())
+            .or(actor_from_events)
+            .unwrap_or_default();
         (
             format!("github:{repo_label}#{number}:closed:{closed_at}"),
             MailboxPullRequestChange::ClosedWithoutMerging,
@@ -1004,7 +1050,7 @@ fn pull_request_lifecycle_event(
         let reopened_at = pull["updated_at"]
             .as_str()
             .context("reopened GitHub pull request response has no update timestamp")?;
-        let login = reopened_actor.unwrap_or("unknown");
+        let login = actor_from_events.unwrap_or_default();
         (
             format!("github:{repo_label}#{number}:reopened:{reopened_at}"),
             MailboxPullRequestChange::Reopened,
@@ -1181,6 +1227,44 @@ fn timestamp_millis(timestamp: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn actor_for_issue_event(
+    events: &[Value],
+    event_type: &str,
+    target_timestamp: Option<&str>,
+) -> Option<String> {
+    let candidates = events
+        .iter()
+        .filter(|event| event["event"] == event_type)
+        .filter_map(|event| {
+            event["actor"]["login"]
+                .as_str()
+                .filter(|login| !login.is_empty())
+                .map(|login| (event, login.to_owned()))
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(target_millis) = target_timestamp.and_then(timestamp_millis)
+        && let Some((_, login)) = candidates
+            .iter()
+            .filter_map(|(event, login)| {
+                timestamp_millis(event["created_at"].as_str()?)
+                    .map(|created_at| (created_at.abs_diff(target_millis), login))
+            })
+            .min_by_key(|(distance, _)| *distance)
+    {
+        return Some(login.clone());
+    }
+
+    candidates
+        .into_iter()
+        .max_by(|(left, _), (right, _)| {
+            left["created_at"]
+                .as_str()
+                .cmp(&right["created_at"].as_str())
+        })
+        .map(|(_, login)| login)
 }
 
 fn timestamp_precedes(timestamp: &str, boundary: &str) -> bool {
@@ -1492,15 +1576,27 @@ impl GithubApi {
         repo: &str,
         number: u64,
     ) -> Result<Option<String>> {
+        self.lifecycle_actor_from_events(owner, repo, number, "reopened", None, None)
+            .await
+    }
+
+    async fn lifecycle_actor_from_events(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        preferred_event: &str,
+        fallback_event: Option<&str>,
+        timestamp: Option<&str>,
+    ) -> Result<Option<String>> {
         let events = self
             .array_pages(&format!("repos/{owner}/{repo}/issues/{number}/events"), &[])
             .await?;
-        Ok(events
-            .iter()
-            .filter(|event| event["event"] == "reopened")
-            .max_by_key(|event| event["created_at"].as_str())
-            .and_then(|event| event["actor"]["login"].as_str())
-            .map(str::to_owned))
+        Ok(
+            actor_for_issue_event(&events, preferred_event, timestamp).or_else(|| {
+                fallback_event.and_then(|event| actor_for_issue_event(&events, event, timestamp))
+            }),
+        )
     }
 
     async fn credential_login(&self) -> Result<Option<String>> {
@@ -1923,6 +2019,7 @@ mod tests {
     }
 
     // Hard-won: 193f015e: whole-second GitHub timestamps can miss turn-window suppression.
+    // Hard-won: #4625: bot merges can omit merged_by and rely on issue-event actors.
     #[tokio::test]
     async fn watcher_persists_interest_creator_watch_comments_and_restart_cursor() {
         if !run_isolated_child(
@@ -2346,7 +2443,7 @@ mod tests {
                         "state": "closed",
                         "closed_at": closed_at,
                         "updated_at": closed_at,
-                        "closed_by": {"login": "closer"}
+                        "closed_by": null
                     }),
                     etag: "\"pull-51-v2\"".into(),
                 },
@@ -2359,10 +2456,26 @@ mod tests {
                         "closed_at": merged_at,
                         "merged_at": merged_at,
                         "updated_at": merged_at,
-                        "merged_by": {"login": "merger"}
+                        "merged_by": null
                     }),
                     etag: "\"pull-52-v2\"".into(),
                 },
+            );
+            data.issue_events.insert(
+                51,
+                vec![json!({
+                    "event": "closed",
+                    "actor": {"login": "closer"},
+                    "created_at": closed_at
+                })],
+            );
+            data.issue_events.insert(
+                52,
+                vec![json!({
+                    "event": "closed",
+                    "actor": {"login": "mergemarshall[bot]"},
+                    "created_at": merged_at
+                })],
             );
             data.comments.push(json!({
                 "id": 9010,
@@ -2426,7 +2539,7 @@ mod tests {
                 actor,
                 repo: Some(repo),
                 ..
-            } if actor == "merger" && repo == "Acme/Repo"
+            } if actor == "mergemarshall[bot]" && repo == "Acme/Repo"
         ));
         assert!(
             pending
@@ -2505,10 +2618,10 @@ mod tests {
         poll_repository_with_api(
             "acme",
             "repo",
-            vec![session],
-            classifier,
+            vec![session.clone()],
+            classifier.clone(),
             &restarted_api,
-            stop,
+            stop.clone(),
         )
         .await
         .unwrap();
@@ -2532,6 +2645,57 @@ mod tests {
                 ..
             } if actor == "reopener"
         ));
+
+        let actorless_merged_at = comment_at(6_000);
+        {
+            let mut data = fake.data.lock().await;
+            data.pulls.insert(
+                51,
+                FakePull {
+                    value: json!({
+                        "state": "closed",
+                        "closed_at": actorless_merged_at,
+                        "merged_at": actorless_merged_at,
+                        "updated_at": actorless_merged_at,
+                        "merged_by": null
+                    }),
+                    etag: "\"pull-51-v4\"".into(),
+                },
+            );
+            data.issue_events.remove(&51);
+        }
+        poll_repository_with_api(
+            "acme",
+            "repo",
+            vec![session],
+            classifier,
+            &restarted_api,
+            stop,
+        )
+        .await
+        .unwrap();
+        let actorless_key = "github:acme/repo#51:merged";
+        let pending = crate::database::pending_mailbox_events(100).unwrap();
+        let actorless_event = serde_json::from_str::<MailboxEvent>(
+            &pending
+                .iter()
+                .find(|entry| entry.event_key == actorless_key)
+                .expect("an actorless merge creates a lifecycle event")
+                .event_json,
+        )
+        .unwrap();
+        assert!(matches!(
+            &actorless_event.body,
+            MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                actor,
+                ..
+            } if actor.is_empty()
+        ));
+        assert_eq!(
+            mj_core::mailbox::describe_mailbox_event(&actorless_event).transcript_line,
+            "Your PR Acme/Repo#51 was merged."
+        );
         writer.shutdown().unwrap();
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());

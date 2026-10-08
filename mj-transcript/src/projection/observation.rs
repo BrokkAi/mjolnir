@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const MAILBOX_EVENTS_NOTICE_ID: &str = "system:mailbox:external-events";
+
 pub(super) fn project_observation(
     current: &MaterializedSession,
     index: &ProjectionIndex,
@@ -93,13 +95,6 @@ pub(super) fn project_observation(
                         format!("Continuing requested work automatically · {attempt} of 3"),
                     );
                 }
-                if let RelayCommand::MailboxWake { events } = command {
-                    push_system(
-                        mutation,
-                        event,
-                        mailbox_delivery_notice(events.len(), "in a new turn", events),
-                    );
-                }
                 let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
                 let content = if mailbox_wake {
                     Vec::new()
@@ -163,7 +158,7 @@ pub(super) fn project_observation(
             ),
             RelayCommand::DeliverMailboxEvent {
                 event: mailbox_event,
-            } => push_system(mutation, event, mailbox_queued_notice(mailbox_event)),
+            } => mailbox_queued_notice(index, event, mailbox_event, mutation),
             RelayCommand::RemoveQueuedPrompt { .. } | RelayCommand::ClearQueuedPrompts => {}
             RelayCommand::Close { .. } => {
                 close_streams(index, mutation, event.recorded_at_ms);
@@ -743,24 +738,7 @@ pub(super) fn project_observation(
                 push_system_with_id(mutation, event, stable_id, message.clone());
             }
         }
-        RelayObservation::MailboxEventsDelivered {
-            event_keys,
-            path,
-            hook_event: _,
-            events,
-            ..
-        } => {
-            let how = match path {
-                mj_core::mailbox::MailboxDeliveryPath::ToolHook => "at a tool boundary".to_owned(),
-                mj_core::mailbox::MailboxDeliveryPath::Prompt => "with your prompt".to_owned(),
-                mj_core::mailbox::MailboxDeliveryPath::Wake => "in a new turn".to_owned(),
-            };
-            push_system(
-                mutation,
-                event,
-                mailbox_delivery_notice(event_keys.len(), &how, events),
-            );
-        }
+        RelayObservation::MailboxEventsDelivered { .. } => {}
         RelayObservation::MailboxHookLeaseCreated { .. }
         | RelayObservation::MailboxHookLeaseReturned { .. } => {}
         RelayObservation::Closing => {
@@ -778,27 +756,29 @@ pub(super) fn project_observation(
     Ok(())
 }
 
-fn mailbox_event_count(count: usize) -> String {
-    format!("{count} event{}", if count == 1 { "" } else { "s" })
-}
-
-fn mailbox_queued_notice(event: &mj_core::mailbox::MailboxEvent) -> String {
-    let description = mj_core::mailbox::describe_mailbox_event(event);
-    format!("Queued 1 event:\n  {}", description.transcript_line)
-}
-
-fn mailbox_delivery_notice(
-    count: usize,
-    how: &str,
-    events: &[mj_core::mailbox::MailboxEvent],
-) -> String {
-    let mut notice = format!("Sent {} {how}:", mailbox_event_count(count));
-    for event in events {
-        let description = mj_core::mailbox::describe_mailbox_event(event);
-        notice.push_str("\n  ");
-        notice.push_str(&description.transcript_line);
+fn mailbox_queued_notice(
+    index: &ProjectionIndex,
+    event: &RelayEvent,
+    mailbox_event: &mj_core::mailbox::MailboxEvent,
+    mutation: &mut MaterializedSessionMutation,
+) {
+    let description = mj_core::mailbox::describe_mailbox_event(mailbox_event);
+    if let Some(existing) = index.get(MAILBOX_EVENTS_NOTICE_ID) {
+        let mut item = existing.as_ref().clone();
+        if let TranscriptBody::System { text } = &mut item.body {
+            text.push_str("\n  - ");
+            text.push_str(&description.transcript_line);
+            item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
+            upsert(mutation, item);
+        }
+    } else {
+        push_system_with_id(
+            mutation,
+            event,
+            MAILBOX_EVENTS_NOTICE_ID.to_owned(),
+            format!("External events:\n  - {}", description.transcript_line),
+        );
     }
-    notice
 }
 
 /// A stop applied while the harness runs a turn of its own (a goal

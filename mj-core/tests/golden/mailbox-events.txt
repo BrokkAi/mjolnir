@@ -21,6 +21,10 @@ Review comment on your PR #4623 "Model Rust built-in macro values for CQ07" by c
 
 Your PR #4623 "Model Rust built-in macro values for CQ07" was merged by dave.
 
+Your PR #4624 "PR without a known merger" was merged.
+
+Your PR #4625 "Legacy PR without a known merger" was merged.
+
 External event:
   > A plain event.
 </untrusted-mailbox-events>

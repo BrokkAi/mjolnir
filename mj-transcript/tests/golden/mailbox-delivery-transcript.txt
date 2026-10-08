@@ -1,40 +1,15 @@
 Session: session-mailbox
-1: Queued 1 event:
-  Comment on your PR #12 by alice: The first comment line.
-2: Sent 1 event at a tool boundary:
-  Comment on your PR #12 by alice: The first comment line.
-3: Queued 1 event:
-  Message from your parent agent: Please check this detail.
-4: Sent 1 event with your prompt:
-  Message from your parent agent: Please check this detail.
-5: Queued 1 event:
-  New PR #4623 Model Rust built-in macro values for CQ07
-6: Queued 1 event:
-  New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
-7: Queued 1 event:
-  Comment on your PR #4623 by alice: Please check the macro edge case.
-8: Queued 1 event:
-  Review on your PR #4623 by bob (changes requested): Could you revise the error path?
-9: Queued 1 event:
-  Review comment on your PR #4623 by carol: This assertion needs a case.
-10: Queued 1 event:
-  Your PR #4623 was merged by dana.
-11: Queued 1 event:
-  Your PR #4623 was closed without merging.
-12: Queued 1 event:
-  Your PR #4623 was reopened.
-13: Queued 1 event:
-  Message from your parent agent: Please verify the edge case.
-14: Queued 1 event:
-  External event: A plain event from the CLI.
-15: Sent 10 events in a new turn:
-  New PR #4623 Model Rust built-in macro values for CQ07
-  New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
-  Comment on your PR #4623 by alice: Please check the macro edge case.
-  Review on your PR #4623 by bob (changes requested): Could you revise the error path?
-  Review comment on your PR #4623 by carol: This assertion needs a case.
-  Your PR #4623 was merged by dana.
-  Your PR #4623 was closed without merging.
-  Your PR #4623 was reopened.
-  Message from your parent agent: Please verify the edge case.
-  External event: A plain event from the CLI.
+1: External events:
+  - Comment on your PR #12 by alice: The first comment line.
+  - Message from your parent agent: Please check this detail.
+  - New PR #4623 Model Rust built-in macro values for CQ07
+  - Comment on your PR #4623 by alice: Please check the ‹macro› case.
+  - New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
+  - Review on your PR #4623 by bob (changes requested): Could you revise the error path?
+  - Review comment on your PR #4623 by carol: This assertion needs a case.
+  - Your PR #4623 was merged by dana.
+  - Your PR #4623 was closed without merging.
+  - Your PR #4624 was merged.
+  - Your PR #4623 was reopened.
+  - Message from your parent agent: Please verify the edge case.
+  - External event: A plain event from the CLI.
