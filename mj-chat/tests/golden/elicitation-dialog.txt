@@ -1,3 +1,47 @@
+=== Codex async question with a suggested answer (100x20) ===
+╭ × Question 1/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which AWS billing account? (required)                                                             │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│● Use the main-account role                                                                       │
+│○ Keep Bedrock billing in the CI account                                                          │
+│○ Additional answer or note                                                                       │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+=== Codex async question with a custom answer (100x20) ===
+╭ × Question 1/3 · 3 unanswered ───────────────────────────────────────────────────────────────────╮
+│Which AWS billing account? (required)                                                             │
+│                                                                                                  │
+│Codex has questions for you. Work can continue while you answer.                                  │
+│○ Use the main-account role                                                                       │
+│○ Keep Bedrock billing in the CI account                                                          │
+│● Additional answer or note                                                                       │
+│> Use a third AWS billing account                                                                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│  Answer and next     Previous     Next     Skip     Cancel                                       │
+│                                                                                                  │
+│Tab controls · ↑/↓ choose · Space toggle · Enter answer · Alt+←/→ questions                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
 === small question pane keeps the focused custom answer and actions (60x6) ===
 ╭ × Question 1/1 · 1 unanswered ───────────────────────────╮
 │Question 1                                                │

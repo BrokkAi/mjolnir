@@ -1,0 +1,109 @@
+{
+  "sessionId": "test-session-id",
+  "toolCallId": "billing-question",
+  "mode": "form",
+  "message": "Codex has questions for you. Work can continue while you answer.",
+  "requestedSchema": {
+    "type": "object",
+    "properties": {
+      "question_01": {
+        "title": "Which AWS billing account?",
+        "_meta": {
+          "codex": {
+            "isOther": true,
+            "isSecret": false
+          }
+        },
+        "type": "string",
+        "oneOf": [
+          {
+            "const": "Use the main-account role",
+            "title": "Use the main-account role"
+          },
+          {
+            "const": "Keep Bedrock billing in the CI account",
+            "title": "Keep Bedrock billing in the CI account"
+          }
+        ],
+        "default": "Use the main-account role"
+      },
+      "question_01_note": {
+        "type": "string",
+        "title": "Additional answer or note",
+        "_meta": {
+          "codex": {
+            "questionId": "question_01",
+            "role": "user_note",
+            "isSecret": false
+          },
+          "_askUserQuestionCustomAnswer": true,
+          "jetbrains": {
+            "air": {
+              "version": 1,
+              "customAnswer": true
+            }
+          }
+        }
+      },
+      "question_02": {
+        "title": "Which fallback account?",
+        "_meta": {
+          "codex": {
+            "isOther": true,
+            "isSecret": false
+          }
+        },
+        "type": "string",
+        "oneOf": [
+          {
+            "const": "Main",
+            "title": "Main"
+          },
+          {
+            "const": "CI",
+            "title": "CI"
+          }
+        ],
+        "default": "Main"
+      },
+      "question_02_note": {
+        "type": "string",
+        "title": "Additional answer or note",
+        "_meta": {
+          "codex": {
+            "questionId": "question_02",
+            "role": "user_note",
+            "isSecret": false
+          },
+          "_askUserQuestionCustomAnswer": true,
+          "jetbrains": {
+            "air": {
+              "version": 1,
+              "customAnswer": true
+            }
+          }
+        }
+      },
+      "question_03": {
+        "title": "Which role name?",
+        "_meta": {
+          "codex": {
+            "isOther": true,
+            "isSecret": false
+          }
+        },
+        "type": "string"
+      }
+    },
+    "required": [
+      "question_01",
+      "question_02",
+      "question_03"
+    ]
+  },
+  "_meta": {
+    "codex": {
+      "autoResolutionMs": null
+    }
+  }
+}

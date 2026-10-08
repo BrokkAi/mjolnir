@@ -1748,6 +1748,8 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
+    use mj_core::harness_runtime::CLAUDE_CLI_VERSION;
+
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
 
     let codex = format!("codex-acp@{CODEX_ACP_VERSION}");
@@ -1765,6 +1767,33 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
              session and an npx session run different adapter versions."
     );
+
+    let claude_code = format!("@anthropic-ai/claude-code@{CLAUDE_CLI_VERSION}");
+    assert!(
+        CONTAINERFILE.contains(&claude_code),
+        "containers/Containerfile.agent-dev must install {claude_code}"
+    );
+    assert!(CONTAINERFILE.contains("ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude"));
+
+    let package: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-worker/assets/harnesses/claude/package.json"
+    ))
+    .unwrap();
+    let lock: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-worker/assets/harnesses/claude/package-lock.json"
+    ))
+    .unwrap();
+    for (name, version) in [
+        ("@agentclientprotocol/claude-agent-acp", CLAUDE_ACP_VERSION),
+        ("@anthropic-ai/claude-code", CLAUDE_CLI_VERSION),
+    ] {
+        assert_eq!(package["dependencies"][name], version);
+        assert_eq!(lock["packages"][""]["dependencies"][name], version);
+        assert_eq!(
+            lock["packages"][format!("node_modules/{name}")]["version"],
+            version
+        );
+    }
 }
 
 /// Runs a default bridge script with no harness installed, a fake `curl`

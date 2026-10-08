@@ -1,6 +1,7 @@
 //! Exact, target-local harness installations, including container fallbacks.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -9,14 +10,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
-use mj_core::harness_runtime::{GROK_VERSION, HarnessPin, KIMI_VERSION, pin};
+use mj_core::harness_runtime::{
+    GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
+    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches, pin,
+};
 use mj_core::worker_launch::HarnessRuntimePolicy;
-use serde::{Deserialize, Serialize};
 
-const MANIFEST_FILE: &str = "mj-harness.json";
-const LEASE_FILE: &str = ".lease";
 const INSTALL_LOCK_FILE: &str = ".install.lock";
-const CACHE_DIR: &str = "mjolnir/harnesses";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -67,14 +67,6 @@ pub(crate) fn spawn_gc_on(
     })
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct InstallManifest {
-    schema: u32,
-    harness: HarnessKind,
-    install_id: String,
-}
-
 pub(crate) async fn resolve(
     runtime: HarnessRuntimePolicy,
     harness: HarnessKind,
@@ -85,30 +77,13 @@ pub(crate) async fn resolve(
         return Ok(None);
     }
     let environment = mj_core::login_environment::with_overrides(environment).await?;
-    let root = cache_root(&environment)?;
+    let root = managed_harness_cache_root(
+        environment.get("XDG_CACHE_HOME").map(OsStr::new),
+        environment.get("HOME").map(OsStr::new),
+    )?;
     resolve_at_async(&root, harness, execution_policy, &environment)
         .await
         .map(Some)
-}
-
-fn cache_root(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
-    let base = match environment.get("XDG_CACHE_HOME") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => PathBuf::from(
-            environment
-                .get("HOME")
-                .filter(|path| !path.is_empty())
-                .context("managed harness installation needs HOME or XDG_CACHE_HOME")?,
-        )
-        .join(".cache"),
-    };
-    if !base.is_absolute() {
-        bail!(
-            "managed harness cache root must be absolute: {}",
-            base.display()
-        );
-    }
-    Ok(base.join(CACHE_DIR))
 }
 
 #[cfg(test)]
@@ -144,7 +119,7 @@ async fn resolve_at_async(
     lock_file(&install_lock, false, "managed harness installer").await?;
     remove_abandoned_staging(&harness_root)?;
 
-    let install = harness_root.join(selected.install_id);
+    let install = managed_harness_install_dir(root, harness);
     if !complete_install(&install, harness, selected)? {
         if install.exists() {
             let lease = open_lock(&install.join(LEASE_FILE))?;
@@ -186,6 +161,13 @@ async fn resolve_at_async(
                 .join("node_modules/@openai/codex/bin/codex.js")
                 .to_string_lossy()
                 .into_owned(),
+        );
+    }
+    // The bridge's SDK bundles an older CLI; select our separately pinned Code.
+    if let (HarnessKind::Claude, Some(entry)) = (harness, harness.extra_managed_entrypoint()) {
+        launch_environment.insert(
+            "CLAUDE_CODE_EXECUTABLE".into(),
+            install.join(entry).to_string_lossy().into_owned(),
         );
     }
     // The pinned installation is not the release channel, so its downloader
@@ -291,11 +273,7 @@ async fn install_into(
     relativize_internal_links(staging.path(), staging.path())?;
     validate_entrypoint(staging.path(), selected, harness)?;
     open_lock(&staging.path().join(LEASE_FILE))?;
-    let manifest = InstallManifest {
-        schema: 1,
-        harness,
-        install_id: selected.install_id.to_owned(),
-    };
+    let manifest = ManagedHarnessManifest::for_install(harness, selected.install_id);
     let body = serde_json::to_vec_pretty(&manifest)?;
     let staging_path = staging.keep();
     match std::fs::rename(&staging_path, final_path) {
@@ -695,25 +673,7 @@ fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
 }
 
 fn complete_install(path: &Path, harness: HarnessKind, selected: HarnessPin) -> Result<bool> {
-    let body = match std::fs::read(path.join(MANIFEST_FILE)) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read managed harness manifest in {}", path.display()));
-        }
-    };
-    let manifest: InstallManifest = match serde_json::from_slice(&body) {
-        Ok(manifest) => manifest,
-        Err(_) => return Ok(false),
-    };
-    if manifest
-        != (InstallManifest {
-            schema: 1,
-            harness,
-            install_id: selected.install_id.to_owned(),
-        })
-    {
+    if !managed_harness_manifest_matches(path, harness, selected.install_id)? {
         return Ok(false);
     }
     Ok(validate_entrypoint(path, selected, harness).is_ok())
@@ -1020,12 +980,9 @@ INSTALLER
         std::fs::create_dir_all(&install).unwrap();
         executable(&install.join(entrypoint), "#!/bin/sh\nexit 0\n");
         open_lock(&install.join(LEASE_FILE)).unwrap();
-        let body = serde_json::to_vec_pretty(&InstallManifest {
-            schema: 1,
-            harness,
-            install_id: install_id.to_owned(),
-        })
-        .unwrap();
+        let body =
+            serde_json::to_vec_pretty(&ManagedHarnessManifest::for_install(harness, install_id))
+                .unwrap();
         mj_core::config::atomic_write(&install.join(MANIFEST_FILE), &body).unwrap();
     }
 
@@ -1200,17 +1157,22 @@ INSTALLER
 
     #[test]
     fn a_complete_cache_hit_does_not_execute_the_entrypoint() {
+        for harness in [HarnessKind::Codex, HarnessKind::Claude] {
+            check_complete_cache_hit(harness);
+        }
+    }
+
+    fn check_complete_cache_hit(harness: HarnessKind) {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
-        let selected = pin(HarnessKind::Codex);
-        let root = cache.join(HarnessKind::Codex.id());
+        let selected = pin(harness);
+        let root = cache.join(harness.id());
         std::fs::create_dir_all(&root).unwrap();
-        complete_fake(
-            &root,
-            HarnessKind::Codex,
-            selected.install_id,
-            selected.entrypoint,
-        );
+        complete_fake(&root, harness, selected.install_id, selected.entrypoint);
+        let install = root.join(selected.install_id);
+        if let Some(entry) = harness.extra_managed_entrypoint() {
+            executable(&install.join(entry), "#!/bin/sh\nexit 0\n");
+        }
         let marker = temp.path().join("executed");
         executable(
             &root.join(selected.install_id).join(selected.entrypoint),
@@ -1219,18 +1181,32 @@ INSTALLER
 
         let managed = resolve_at(
             &cache,
-            HarnessKind::Codex,
+            harness,
             ExecutionPolicy::ConfiguredApprovals,
             &BTreeMap::new(),
         )
         .unwrap();
 
         assert!(!marker.exists());
-        let expected_codex = root
-            .join(selected.install_id)
-            .join("node_modules/@openai/codex/bin/codex.js")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(managed.environment.get("CODEX_PATH"), Some(&expected_codex));
+        let (provider_env, entry) = match harness {
+            HarnessKind::Codex => ("CODEX_PATH", "node_modules/@openai/codex/bin/codex.js"),
+            HarnessKind::Claude => (
+                "CLAUDE_CODE_EXECUTABLE",
+                harness.extra_managed_entrypoint().unwrap(),
+            ),
+            _ => unreachable!(),
+        };
+        let expected_provider = install.join(entry).to_string_lossy().into_owned();
+        assert_eq!(
+            managed.environment.get(provider_env),
+            Some(&expected_provider)
+        );
+        if harness == HarnessKind::Claude {
+            std::fs::remove_file(install.join(entry)).unwrap();
+            assert!(
+                !complete_install(&install, harness, selected).unwrap(),
+                "a cache without the pinned Claude Code must not launch the SDK's bundled CLI"
+            );
+        }
     }
 }

@@ -480,9 +480,35 @@ fn append_elicitation_golden_state(
     }
 }
 
+// Hard-won: #1265: async Codex questions must expose both suggested and custom answers.
 #[test]
 fn golden_elicitation_dialog() {
     let mut output = String::new();
+
+    // Recorded ACP form from the Codex bridge's async-user-input regression.
+    let billing_request = ElicitationRequest::from_acp_params(
+        "async-billing-question",
+        serde_json::from_str(include_str!("testdata/codex-async-user-input.json")).unwrap(),
+    )
+    .unwrap();
+    let mut billing = ElicitationDialog::new(billing_request);
+    let buffer = rendered_in_pane(&billing, 100, 20);
+    append_elicitation_golden_state(
+        &mut output,
+        "Codex async question with a suggested answer",
+        &buffer,
+        &[],
+    );
+    billing.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    billing.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    billing.paste("Use a third AWS billing account");
+    let buffer = rendered_in_pane(&billing, 100, 20);
+    append_elicitation_golden_state(
+        &mut output,
+        "Codex async question with a custom answer",
+        &buffer,
+        &[],
+    );
 
     let mut smallest = ElicitationDialog::new(paired_request(1, true));
     smallest.handle_key(KeyCode::End, KeyModifiers::NONE);

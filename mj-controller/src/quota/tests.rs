@@ -4,8 +4,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-#[cfg(unix)]
-use mj_core::test_hooks::install_fake_command;
 use std::sync::{Arc, Mutex};
 
 fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
@@ -58,7 +56,7 @@ async fn a_provider_without_a_quota_endpoint_reports_usage_pricing() {
         &zai_profile(home.path(), "https://example.invalid/v1"),
         home.path().to_path_buf(),
     );
-    let (outcome, _) = refresh_profile(request, None).await;
+    let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
     assert_eq!(outcome.report.error, None);
     assert!(outcome.report.windows.is_empty());
     assert!(outcome.report.is_usage_priced());
@@ -225,14 +223,19 @@ fn golden_quota_compact_row() {
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "quota-compact-row", &out);
 }
 
-/// A `codex app-server` stand-in on `PATH` that logs every request line it
-/// reads, so a test can assert the exact protocol exchange.
+/// A managed-install `codex app-server` stand-in that logs each request line,
+/// so a test can assert the exact protocol exchange.
+#[cfg(unix)]
+fn managed_codex_cache_root(directory: &Path) -> std::path::PathBuf {
+    directory.join("managed-cache")
+}
+
 #[cfg(unix)]
 fn fake_codex_app_server(
     directory: &Path,
     script: &str,
 ) -> (BTreeMap<String, String>, std::path::PathBuf) {
-    install_fake_command(directory, "codex", script);
+    crate::codex_usage::install_fake_managed_codex(&managed_codex_cache_root(directory), script);
     let log = directory.join("requests.jsonl");
     let environment = BTreeMap::from([
         ("PATH".to_owned(), directory.to_string_lossy().into_owned()),
@@ -319,8 +322,12 @@ async fn poll_codex_profile(
     directory: &Path,
     environment: BTreeMap<String, String>,
 ) -> QuotaRefreshOutcome {
-    let (outcome, client) =
-        refresh_profile(codex_quota_request(directory, environment), None).await;
+    let (outcome, client) = refresh_profile_with_cache_root(
+        codex_quota_request(directory, environment),
+        None,
+        Some(managed_codex_cache_root(directory)),
+    )
+    .await;
     if let Some(client) = client {
         client.shutdown().await;
     }
@@ -530,9 +537,10 @@ IFS= read -r line
 "#,
     );
 
-    let (first, client) = refresh_profile(
+    let (first, client) = refresh_profile_with_cache_root(
         codex_quota_request(directory.path(), environment.clone()),
         None,
+        Some(managed_codex_cache_root(directory.path())),
     )
     .await;
     assert_eq!(first.report.error, None);
@@ -543,8 +551,12 @@ IFS= read -r line
         Duration::from_secs(600),
         Duration::from_secs(3_000),
     );
-    let (second, client) =
-        refresh_profile(codex_quota_request(directory.path(), environment), client).await;
+    let (second, client) = refresh_profile_with_cache_root(
+        codex_quota_request(directory.path(), environment),
+        client,
+        Some(managed_codex_cache_root(directory.path())),
+    )
+    .await;
     if let Some(client) = client {
         client.shutdown().await;
     }
@@ -589,7 +601,7 @@ fn a_codex_refresh_margin_is_an_hour_or_a_tenth_of_the_token_life() {
 async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
     let directory = tempfile::tempdir().unwrap();
 
-    let (outcome, _) = refresh_profile(
+    let (outcome, _) = refresh_profile_with_cache_root(
         QuotaRefreshRequest {
             native_openai: true,
             profile_id: "grok".into(),
@@ -602,6 +614,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             cwd: directory.path().to_path_buf(),
             provider: None,
         },
+        None,
         None,
     )
     .await;
@@ -924,7 +937,7 @@ async fn expired_claude_credentials_report_login_expired() {
     )
     .unwrap();
 
-    let (outcome, _) = refresh_profile(
+    let (outcome, _) = refresh_profile_with_cache_root(
         QuotaRefreshRequest {
             native_openai: true,
             profile_id: "claude2".into(),
@@ -934,6 +947,7 @@ async fn expired_claude_credentials_report_login_expired() {
             cwd: directory.path().to_path_buf(),
             provider: None,
         },
+        None,
         None,
     )
     .await;
@@ -1145,11 +1159,10 @@ async fn dropping_a_profile_from_the_configuration_stops_its_codex_quota_client(
     let directory = tempfile::tempdir().unwrap();
     let pid_file = directory.path().join("codex.pid");
     // A `codex app-server` stand-in: answer one quota refresh, then stay
-    // alive on stdin the way the real one does between refreshes. The
-    // dispatcher `exec`s this script, so `$$` is the spawned process.
-    install_fake_command(
-        directory.path(),
-        "codex",
+    // alive on stdin the way the real one does between refreshes. The managed
+    // launcher runs the script directly, so `$$` is the spawned process.
+    crate::codex_usage::install_fake_managed_codex(
+        &managed_codex_cache_root(directory.path()),
         r#"#!/bin/sh
 printf '%s\n' "$$" > "$CODEX_QUOTA_TEST_PID"
 IFS= read -r line || exit 0
@@ -1181,7 +1194,10 @@ while IFS= read -r line; do :; done
         provider: None,
     };
 
-    let mut quotas = QuotaManager::default();
+    let mut quotas = QuotaManager {
+        cache_root: Some(managed_codex_cache_root(directory.path())),
+        ..QuotaManager::default()
+    };
     quotas.refresh_profiles(vec![request], |_| async {}).await;
 
     assert_eq!(
@@ -1316,7 +1332,9 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     let log = crate::test_log::CapturedLog::default();
     let outcome = {
         let _default = tracing::subscriber::set_default(log.clone());
-        runtime.block_on(refresh_profile(request.clone(), None)).0
+        runtime
+            .block_on(refresh_profile_with_cache_root(request.clone(), None, None))
+            .0
     };
     assert_eq!(outcome.report.error, None);
     let warnings = log.at_or_above(tracing::Level::WARN);
@@ -1332,7 +1350,9 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
     // The daemon: it holds the writer, and its refresh keeps the reset times.
     let _writer = crate::database::install_isolated_test_writer();
     assert_eq!(crate::database::load_quota_cache(&identity).unwrap(), None);
-    let outcome = runtime.block_on(refresh_profile(request, None)).0;
+    let outcome = runtime
+        .block_on(refresh_profile_with_cache_root(request, None, None))
+        .0;
     assert_eq!(outcome.report.error, None);
     assert_eq!(
         crate::database::load_quota_cache(&identity).unwrap(),

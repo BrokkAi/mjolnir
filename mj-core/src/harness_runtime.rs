@@ -1,15 +1,105 @@
 //! Exact harness versions used by Mjolnir-managed installations.
 //!
 //! Installation and process ownership live in `brokk-mj-worker`; this module
-//! contains only shared, inert metadata so the controller, worker, container
-//! parity tests, and diagnostics cannot silently disagree about a pin.
+//! holds shared pin metadata and managed-install paths/manifests so the
+//! controller and worker cannot silently disagree about an installation.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::config::HarnessKind;
 
+pub const MANIFEST_FILE: &str = "mj-harness.json";
+pub const LEASE_FILE: &str = ".lease";
+pub const CODEX_CLI_ENTRYPOINT: &str = "node_modules/.bin/codex";
+const MANAGED_HARNESSES_DIR: &str = "mjolnir/harnesses";
+
+/// The install receipt written by the worker and checked by managed clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedHarnessManifest {
+    schema: u32,
+    harness: HarnessKind,
+    install_id: String,
+}
+
+impl ManagedHarnessManifest {
+    pub fn for_harness(harness: HarnessKind) -> Self {
+        Self::for_install(harness, pin(harness).install_id)
+    }
+
+    pub fn for_install(harness: HarnessKind, install_id: &str) -> Self {
+        Self {
+            schema: 1,
+            harness,
+            install_id: install_id.to_owned(),
+        }
+    }
+}
+
+/// Resolve the shared managed-harness cache root from the target environment.
+///
+/// A non-empty `XDG_CACHE_HOME` takes precedence over `HOME/.cache`; the
+/// resulting base must be absolute on every target.
+pub fn managed_harness_cache_root(
+    xdg_cache_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf> {
+    let base = match xdg_cache_home.filter(|path| !path.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(
+            home.filter(|path| !path.is_empty())
+                .context("managed harness installation needs HOME or XDG_CACHE_HOME")?,
+        )
+        .join(".cache"),
+    };
+    if !base.is_absolute() {
+        bail!(
+            "managed harness cache root must be absolute: {}",
+            base.display()
+        );
+    }
+    Ok(base.join(MANAGED_HARNESSES_DIR))
+}
+
+/// Resolve the pinned install directory under a managed-harness cache root.
+pub fn managed_harness_install_dir(cache_root: &Path, harness: HarnessKind) -> PathBuf {
+    cache_root.join(harness.id()).join(pin(harness).install_id)
+}
+
+/// Check that an installation carries the receipt for the current harness pin.
+/// Missing and malformed receipts are incomplete installs; other read failures
+/// are returned with their path for diagnostics.
+pub fn managed_harness_manifest_matches(
+    path: &Path,
+    harness: HarnessKind,
+    install_id: &str,
+) -> Result<bool> {
+    let manifest_path = path.join(MANIFEST_FILE);
+    let body = match std::fs::read(&manifest_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("read managed harness manifest {}", manifest_path.display())
+            });
+        }
+    };
+    let manifest: ManagedHarnessManifest = match serde_json::from_slice(&body) {
+        Ok(manifest) => manifest,
+        Err(_) => return Ok(false),
+    };
+    Ok(manifest == ManagedHarnessManifest::for_install(harness, install_id))
+}
+
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
-pub const CODEX_ACP_VERSION: &str = "1.13.5";
-pub const CODEX_CLI_VERSION: &str = "0.159.1";
-pub const CLAUDE_ACP_VERSION: &str = "0.86.0";
+pub const CODEX_ACP_VERSION: &str = "1.13.6";
+pub const CODEX_CLI_VERSION: &str = "0.160.1";
+pub const CLAUDE_ACP_VERSION: &str = "0.87.0";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.293";
 pub const KIMI_VERSION: &str = "2.1.1";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_VERSION: &str = "0.10.0";
@@ -105,13 +195,13 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "bin/muse-acp",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.13.5_codex-0.159.1",
-            display_version: "@brokkai/codex-acp 1.13.5 + codex 0.159.1",
+            install_id: "brokkai-codex-acp-1.13.6_codex-0.160.1",
+            display_version: "@brokkai/codex-acp 1.13.6 + codex 0.160.1",
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {
-            install_id: "claude-agent-acp-0.86.0",
-            display_version: "claude-agent-acp 0.86.0",
+            install_id: "claude-agent-acp-0.87.0_claude-2.1.293",
+            display_version: "claude-agent-acp 0.87.0 + Claude Code 2.1.293",
             entrypoint: "node_modules/.bin/claude-agent-acp",
         },
         HarnessKind::Kimi => HarnessPin {
@@ -131,8 +221,6 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
         },
     }
 }
-use serde::{Deserialize, Serialize};
-
 /// Legacy receipt shapes retained to decode journals and events from shipped releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -166,4 +254,61 @@ pub struct RuntimeReceipt {
     pub identity: RuntimeIdentity,
     pub event_ordinal: u64,
     pub observed_at_ms: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_cache_root_prefers_xdg_and_falls_back_when_it_is_empty() {
+        let xdg_root = managed_harness_cache_root(
+            Some(OsStr::new("/custom-cache")),
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("absolute XDG cache root");
+        assert_eq!(xdg_root, PathBuf::from("/custom-cache/mjolnir/harnesses"));
+
+        let home_root =
+            managed_harness_cache_root(Some(OsStr::new("")), Some(OsStr::new("/home/user")))
+                .expect("HOME fallback");
+        assert_eq!(
+            home_root,
+            PathBuf::from("/home/user/.cache/mjolnir/harnesses")
+        );
+    }
+
+    #[test]
+    fn managed_manifest_rejects_a_different_install_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let install = managed_harness_install_dir(temp.path(), HarnessKind::Codex);
+        std::fs::create_dir_all(&install).expect("create install");
+        assert!(
+            !managed_harness_manifest_matches(
+                &install,
+                HarnessKind::Codex,
+                pin(HarnessKind::Codex).install_id
+            )
+            .expect("missing manifest")
+        );
+
+        let manifest = ManagedHarnessManifest::for_harness(HarnessKind::Codex);
+        std::fs::write(
+            install.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        assert!(
+            managed_harness_manifest_matches(
+                &install,
+                HarnessKind::Codex,
+                pin(HarnessKind::Codex).install_id
+            )
+            .expect("matching manifest")
+        );
+        assert!(
+            !managed_harness_manifest_matches(&install, HarnessKind::Codex, "other-install")
+                .expect("different install id")
+        );
+    }
 }
