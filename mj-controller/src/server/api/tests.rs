@@ -1996,11 +1996,15 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
 
     let selection = crate::server::api::resolve_subagent_selection(
         &backend,
-        "parent-session",
         "codex-1",
         None,
         Some("luna"),
         None,
+        crate::server::api::AdaptiveEffortContext {
+            parent_session_id: "parent-session",
+            task_name: "test task",
+            instructions: "test assignment",
+        },
     )
     .await
     .unwrap();

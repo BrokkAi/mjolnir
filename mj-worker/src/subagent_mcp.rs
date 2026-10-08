@@ -626,12 +626,12 @@ fn tool_definitions_with_mailboxes(
         ),
         tool(
             "spawn",
-            "Start a child in your target and filesystem. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect the report or startup error with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and starting pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Choose a model from list_profiles; Mjolnir selects an eligible profile with the most quota unless profile_id pins one. An unavailable model, effort or login is an error, never replaced by another selection. A login the provider has refused stays unavailable until repaired with `mj login`. Only children holding processes count against the live children limit; Mjolnir parks it when a child hands back. A refused spawn names the live children. Close children you no longer need; failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted.",
+            "Start a child in your target and filesystem. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect the report or startup error with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and starting pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Choose a model from list_profiles; Mjolnir selects an eligible profile with the most quota unless profile_id pins one. In all-models mode, effort may be `adaptive`; Jev chooses from the model's advertised efforts using the task brief. If Jev is unavailable, Mjolnir uses the effort mapped from `high`. An unavailable model, effort or login is an error, never replaced by another selection. A login the provider has refused stays unavailable until repaired with `mj login`. Only children holding processes count against the live children limit; Mjolnir parks it when a child hands back. A refused spawn names the live children. Close children you no longer need; failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted.",
             json!({
                 "type":"object",
                 "properties":{
                     "task_name":{"type":"string"},"instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
-                    "profile_id":{"type":"string","description":"Only to pin one profile; normally omit it and let the model choose the profile."},"model":{"type":"string","description":model},"effort":{"type":"string","description":"An effort the chosen profile offers. Omitted, the child uses this session's effort when the chosen profile offers it, otherwise the harness default."},
+                    "profile_id":{"type":"string","description":"Only to pin one profile; normally omit it and let the model choose the profile."},"model":{"type":"string","description":model},"effort":{"type":"string","description":"An effort the chosen profile offers, or `adaptive` for Jev to choose from its offered efforts using the task brief. Omitted, the child uses this session's effort when the chosen profile offers it, otherwise the harness default."},
                     "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."}
                 },
                 "required":["task_name","instructions","model"],"additionalProperties":false
@@ -639,7 +639,7 @@ fn tool_definitions_with_mailboxes(
         ),
         tool(
             "list_agents",
-            "List this parent's Mjolnir child sessions and status, including pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing.",
+            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing.",
             json!({"type":"object","additionalProperties":false}),
         ),
         tool(
@@ -799,6 +799,20 @@ mod tests {
                         props.get("model").is_some(),
                         role == SubagentMcpRole::Parent
                     );
+                    if role == SubagentMcpRole::Parent {
+                        assert!(
+                            props["effort"]["description"]
+                                .as_str()
+                                .unwrap()
+                                .contains("adaptive")
+                        );
+                        assert!(
+                            spawn["description"]
+                                .as_str()
+                                .unwrap()
+                                .contains("all-models")
+                        );
+                    }
                     assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
                     assert_eq!(
                         tools

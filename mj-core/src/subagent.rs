@@ -4,6 +4,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// The effort value that asks Jev to choose each child's effort from the
+/// spawn brief. The daemon resolves it to one of the model's advertised
+/// efforts before the child starts; it is never sent to a harness.
+pub const ADAPTIVE_EFFORT: &str = "adaptive";
+
+/// Human-readable label for [`ADAPTIVE_EFFORT`] in pickers and summaries.
+pub const ADAPTIVE_EFFORT_LABEL: &str = "Adaptive (Jev chooses per task)";
+
 /// A session's delegation policy. Single-model selectors belong to the user,
 /// never to the agent calling spawn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +141,16 @@ impl SubagentOptions {
                 "Selected subagent model {model:?} is unavailable.{} {ELIGIBILITY_NOTE}",
                 choice_list(" Available models", &self.models)
             ));
+        }
+        if effort.as_deref() == Some(ADAPTIVE_EFFORT) {
+            if self.efforts.iter().all(|choice| {
+                choice.value.eq_ignore_ascii_case("default") || choice.value == ADAPTIVE_EFFORT
+            }) {
+                return Err(format!(
+                    "Subagent model {model:?} offers no configurable effort choice; adaptive effort needs at least one."
+                ));
+            }
+            return Ok(());
         }
         if self.efforts.is_empty() && effort.is_none() {
             return Ok(());

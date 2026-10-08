@@ -717,6 +717,20 @@ mod tests {
             efforts: vec![choice("high")],
             unavailable: Vec::new(),
         };
+        let adaptive = SubagentPolicy::SingleModel {
+            model: "haiku".into(),
+            effort: Some(mj_core::subagent::ADAPTIVE_EFFORT.into()),
+        };
+        assert!(options.validate(&adaptive).is_ok());
+        let no_efforts = SubagentOptions {
+            efforts: Vec::new(),
+            ..options.clone()
+        };
+        let unavailable_adaptive = no_efforts.validate(&adaptive).unwrap_err();
+        assert!(
+            unavailable_adaptive.contains("adaptive effort needs at least one"),
+            "{unavailable_adaptive}"
+        );
         let policy = SubagentPolicy::SingleModel {
             model: "haiku".into(),
             effort: Some("low".into()),

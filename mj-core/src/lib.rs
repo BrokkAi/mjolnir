@@ -14,6 +14,7 @@ pub mod config;
 pub mod credentials;
 pub mod diagnostic;
 pub mod diff;
+pub mod effort_verdict;
 pub mod elicitation;
 pub mod event_outcome;
 pub mod github_item;

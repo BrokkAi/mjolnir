@@ -829,12 +829,16 @@ impl ApiBackend {
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
-                        parent_session_id,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         profile_id.as_deref(),
                         model.as_deref(),
                         effort.as_deref(),
+                        crate::server::api::AdaptiveEffortContext {
+                            parent_session_id,
+                            task_name,
+                            instructions,
+                        },
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -918,6 +922,7 @@ impl ApiBackend {
                     "task_name":relation.task_name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
+                    "effort":relation.effort,
                     "report_dir":report_dir,
                 }))
             }
@@ -969,6 +974,7 @@ impl ApiBackend {
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
                             "profile_id":relation.profile_id,
+                            "effort":relation.effort,
                             "state":state,
                         });
                         inputs.annotate(&relation.child_session_id, &mut entry);
