@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use crate::text_input::TextInput;
 use mj_core::storage::{HistoryScope, PromptHistoryEntry};
 
-use super::{ChatState, PromptPayload};
+use super::{ChatDaemonRequest, ChatState, PromptPayload};
 
 #[derive(Debug, Clone)]
 pub(super) struct HistorySearch {
@@ -105,6 +105,10 @@ impl ChatState {
 
     pub(super) fn take_history_search_request(&mut self) -> Option<HistorySearchRequest> {
         self.pending_history_search.take()
+    }
+
+    pub(super) fn take_abandoned_prompt_request(&mut self) -> Option<ChatDaemonRequest> {
+        self.pending_abandoned_prompt.take()
     }
 
     pub(super) fn apply_history_search_results(

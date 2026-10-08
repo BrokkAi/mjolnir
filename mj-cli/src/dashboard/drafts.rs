@@ -242,6 +242,15 @@ impl DashboardContext {
                 let result = async {
                     let mut daemon = crate::daemon::connect_or_start().await?;
                     match request {
+                        mj_chat::chat::ChatDaemonRequest::RecordAbandonedPrompt {
+                            session_id,
+                            bundle_id,
+                            text,
+                        } => {
+                            daemon
+                                .record_abandoned_prompt(session_id, bundle_id, text)
+                                .await
+                        }
                         mj_chat::chat::ChatDaemonRequest::SaveReview { session_id, review } => {
                             daemon.save_active_review(session_id, review).await
                         }

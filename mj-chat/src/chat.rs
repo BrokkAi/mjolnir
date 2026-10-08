@@ -576,6 +576,7 @@ pub struct ChatState {
     history_search: Option<HistorySearch>,
     next_history_search_generation: u64,
     pending_history_search: Option<HistorySearchRequest>,
+    pending_abandoned_prompt: Option<ChatDaemonRequest>,
     queued_prompts: VecDeque<QueuedPrompt>,
     /// Submits the relay refused, oldest first. Client-local: `apply_materialized`
     /// rebuilds `entries` from the projection, which never saw these.
@@ -790,6 +791,7 @@ impl ChatState {
             history_search: None,
             next_history_search_generation: 0,
             pending_history_search: None,
+            pending_abandoned_prompt: None,
             queued_prompts: VecDeque::new(),
             unsent_prompts: Vec::new(),
             pending_submissions: Vec::new(),
