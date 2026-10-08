@@ -38,7 +38,7 @@ fn settings_save_api_key_profiles_without_resolving_credentials_on_the_ui_thread
     assert!(!dialog.is_dirty());
     dialog.draft["notify"]["bell"] = json!(!config.notify.bell);
     assert!(dialog.is_dirty());
-    let DashboardAction::SaveSetup { updated, .. } = dialog.save() else {
+    let DashboardAction::SaveSetup { updated, .. } = dialog.save(&Default::default()) else {
         panic!("expected background save: {:?}", dialog.notice);
     };
     assert!(dialog.saving);
@@ -3009,7 +3009,7 @@ fn edit_field(dialog: &mut SetupDialog, section: &str, key: &str, text: &str) {
 }
 
 fn saved_config(dialog: &mut SetupDialog) -> Config {
-    let action = dialog.save();
+    let action = dialog.save(&Default::default());
     dialog.saving = false;
     match action {
         DashboardAction::SaveSetup { updated, .. } => serde_json::from_str(&updated).unwrap(),
@@ -3580,17 +3580,16 @@ fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page
     // The same label while the efforts load as after they arrive: the field
     // never claims "Model default" for a value the save will refuse.
     assert_eq!(effort(&dialog), "Select effort");
-    dialog.subagent_choices.as_mut().unwrap().result =
-        Some(Ok(mj_core::subagent::SubagentOptions {
-            models: vec![subagent_choice("chosen")],
-            efforts: vec![subagent_choice("low"), subagent_choice("high")],
-            unavailable: vec![],
-        }));
+    let capabilities = crate::test_support::profile_capabilities_fixture(
+        &config(),
+        &[("chosen", &["low", "high"])],
+    );
+    dialog.update_subagent_choices(&capabilities);
     assert_eq!(effort(&dialog), "Select effort");
 
     // Saving from another page says what is wrong where it can be fixed.
     dialog.path = Vec::new();
-    assert!(matches!(dialog.save(), DashboardAction::None));
+    assert!(matches!(dialog.save(&capabilities), DashboardAction::None));
     assert_eq!(dialog.path, page);
     assert!(
         dialog
@@ -3603,13 +3602,112 @@ fn an_unset_subagent_effort_asks_for_a_selection_and_the_refusal_opens_that_page
     );
 
     // A model that offers no efforts is where "Model default" is the answer.
-    dialog.subagent_choices.as_mut().unwrap().result =
-        Some(Ok(mj_core::subagent::SubagentOptions {
-            models: vec![subagent_choice("chosen")],
-            efforts: vec![],
-            unavailable: vec![],
-        }));
+    let capabilities =
+        crate::test_support::profile_capabilities_fixture(&config(), &[("chosen", &[])]);
+    dialog.update_subagent_choices(&capabilities);
     assert_eq!(effort(&dialog), "Model default");
+    assert!(matches!(
+        dialog.save(&capabilities),
+        DashboardAction::SaveSetup { .. }
+    ));
+}
+
+// Hard-won: 37a8681f: leaving Sub-agents bypassed effort validation after a model or profile change.
+#[test]
+fn settings_save_rechecks_subagent_policies_after_model_changes_and_navigation() {
+    for visit_other_profile in [false, true] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        let capabilities = crate::test_support::profile_capabilities_fixture(
+            &dashboard.config,
+            &[("model-a", &["high"]), ("model-b", &["medium"])],
+        );
+        dashboard.set_profile_capabilities(capabilities.clone());
+        dashboard.begin_settings_section("profiles", Some("claude-1"));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        dialog.path.push("subagents".into());
+        dialog.draft["profiles"]["claude-1"]["subagents"] =
+            json!({"mode":"single_model","model":"model-a","effort":"high"});
+        dialog.update_subagent_choices(&capabilities);
+        let (_, _, models, _, _) = dialog
+            .subagent_fields()
+            .into_iter()
+            .find(|(id, ..)| *id == SetupControl::SubagentModel)
+            .unwrap();
+        let selected = models.iter().position(|model| model == "model-b").unwrap();
+        dialog
+            .apply_subagent_field(SetupControl::SubagentModel, selected)
+            .unwrap();
+        assert!(dialog.subagent_choices.is_none());
+        assert!(dialog.draft["profiles"]["claude-1"]["subagents"]["effort"].is_null());
+
+        if visit_other_profile {
+            dialog.path = vec!["profiles".into(), "codex-1".into(), "subagents".into()];
+            dialog.draft["profiles"]["codex-1"]["subagents"] =
+                json!({"mode":"single_model","model":"model-a","effort":"high"});
+            dialog.update_subagent_choices(&capabilities);
+        }
+        dialog.path.clear();
+        let save = || KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            dashboard.handle_key(save()),
+            DashboardAction::None
+        ));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(!dialog.saving);
+        assert_eq!(dialog.path, ["profiles", "claude-1", "subagents"]);
+        assert!(
+            dialog
+                .notice
+                .as_ref()
+                .unwrap()
+                .contains("Select an available effort")
+        );
+
+        // The previous model's effort cannot be reused for the new model.
+        dialog.draft["profiles"]["claude-1"]["subagents"]["effort"] = json!("high");
+        assert!(matches!(
+            dashboard.handle_key(save()),
+            DashboardAction::None
+        ));
+        let dialog = setup_dialog_mut(&mut dashboard.mode).unwrap();
+        assert!(
+            dialog
+                .notice
+                .as_ref()
+                .unwrap()
+                .contains("Available efforts: medium")
+        );
+        dialog.draft["profiles"]["claude-1"]["subagents"]["effort"] = json!("medium");
+        dialog.path.clear();
+
+        // A lost/pending capability publication must refuse rather than skip
+        // validation, even though the old page still has cached choices.
+        dashboard.set_profile_capabilities(Default::default());
+        assert!(matches!(
+            dashboard.handle_key(save()),
+            DashboardAction::None
+        ));
+        assert!(
+            setup_dialog_mut(&mut dashboard.mode)
+                .unwrap()
+                .notice
+                .as_ref()
+                .unwrap()
+                .contains("finish loading")
+        );
+        dashboard.set_profile_capabilities(capabilities);
+        let DashboardAction::SaveSetup { updated, .. } = dashboard.handle_key(save()) else {
+            panic!("valid subagent settings should save");
+        };
+        let saved: Config = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            saved.profiles["claude-1"].subagents,
+            mj_core::subagent::SubagentPolicy::SingleModel {
+                model: "model-b".into(),
+                effort: Some("medium".into()),
+            }
+        );
+    }
 }
 
 #[test]
@@ -3697,14 +3795,6 @@ fn profile_subagent_settings_wait_for_global_hydration_and_warm_unsaved_installa
         dashboard.config.profiles["claude-1"].home, draft.profiles["claude-1"].home,
         "draft is not adopted"
     );
-}
-
-fn subagent_choice(value: &str) -> mj_core::acp::SessionConfigChoice {
-    mj_core::acp::SessionConfigChoice {
-        value: value.into(),
-        name: value.into(),
-        description: None,
-    }
 }
 
 fn setup_click(dashboard: &mut DashboardState, width: u16, height: u16, column: u16, row: u16) {
