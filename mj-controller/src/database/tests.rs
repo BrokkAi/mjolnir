@@ -728,7 +728,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
         DROP TABLE project_seed_failures;
         DELETE FROM schema_migrations WHERE version >= 66;
         UPDATE schema_compatibility SET minimum_compatible_version = 65;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
+        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
         )
         .unwrap();
     connection
@@ -803,7 +803,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        75
+        SCHEMA_VERSION
     );
     for table in [
         "github_watch_cursors",
@@ -878,7 +878,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
          ALTER TABLE sessions DROP COLUMN launch_branch;
          DELETE FROM schema_migrations WHERE version >= 47;
          UPDATE schema_compatibility SET minimum_compatible_version = 46;
-         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 46;",
+         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 46;",
         )
         .unwrap();
     drop(connection);
@@ -5433,7 +5433,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
         UPDATE schema_compatibility SET minimum_compatible_version = 43;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 43;",
+        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 43;",
     )
     .unwrap();
     drop(raw);
@@ -5959,7 +5959,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
          PRAGMA writable_schema = OFF;
          DELETE FROM schema_migrations WHERE version >= 53;
          UPDATE schema_compatibility SET minimum_compatible_version = 49;
-         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 52;",
+         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 52;",
     )
     .unwrap();
     drop(raw);
