@@ -146,6 +146,11 @@ pub struct CommandSpec {
     /// successful completion of a launch must not kill what it launched.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detaches: bool,
+    /// Let child processes finish if the supervisor cancels this command. The
+    /// caller must ensure children can complete without the command process.
+    /// This is executor-local behavior and is not part of serialized plans.
+    #[serde(skip)]
+    preserve_children_on_cancel: bool,
     /// The SSH destination this command opens a connection to, when it does.
     /// Tagged commands pass through [`SshAdmission`] so the daemon never
     /// exceeds the remote `sshd`'s `MaxStartups` budget, and a transport
@@ -186,6 +191,7 @@ impl CommandSpec {
             parallel_group: None,
             creates_target: false,
             detaches: false,
+            preserve_children_on_cancel: false,
             ssh_destination: None,
             ssh_session: None,
             ssh_session_probe: false,
@@ -275,6 +281,12 @@ impl CommandSpec {
     /// Mark this command as the one that creates the session's target.
     pub fn creates_target(mut self) -> Self {
         self.creates_target = true;
+        self
+    }
+
+    /// Keep child processes running if the supervising executor stops waiting.
+    pub fn preserve_children_on_cancel(mut self) -> Self {
+        self.preserve_children_on_cancel = true;
         self
     }
 
@@ -558,6 +570,18 @@ pub trait CommandExecutor {
     /// owners retry interrupted cleanup under the next lifecycle or daemon.
     fn execute_cleanup(&self, command: &CommandSpec) -> Result<CommandOutput> {
         self.execute(command)
+    }
+
+    /// Bound one cleanup attempt by `timeout`. Executors with shared
+    /// cancellation continue to honor it, and executor-specific hard limits
+    /// may cap the requested timeout. Executors without per-call deadlines
+    /// retain their normal cleanup behavior.
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        _timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.execute_cleanup(command)
     }
 
     /// Whether the operation supervising this executor has requested
@@ -868,7 +892,7 @@ fn stream_command_with_stdin(
         let mut group_killed = false;
         let status = loop {
             if is_cancelled() {
-                terminate_cancellable_child(&mut child);
+                terminate_cancellable_child(&mut child, false);
                 if let Err(error) = input_writer.join() {
                     tracing::warn!(
                         purpose = command.purpose.as_str(),
@@ -884,7 +908,7 @@ fn stream_command_with_stdin(
             } {
                 Ok(observed) => status = observed,
                 Err(error) => {
-                    terminate_cancellable_child(&mut child);
+                    terminate_cancellable_child(&mut child, false);
                     if let Err(join_error) = input_writer.join() {
                         tracing::warn!(
                             purpose = command.purpose.as_str(),
@@ -1128,18 +1152,26 @@ impl Drop for PipeCollector {
     }
 }
 
-fn terminate_cancellable_child(child: &mut std::process::Child) {
+fn terminate_cancellable_child(child: &mut std::process::Child, preserve_children: bool) {
     #[cfg(unix)]
-    // The child owns a fresh process group, so descendants such as an SSH or
-    // shell helper cannot keep its output pipes open after cancellation. A
-    // group that is already gone is the wanted outcome, not a failure, so the
-    // shared helper decides what deserves a warning.
-    if let Err(error) = crate::subprocess::signal_process_group(child.id() as i32, libc::SIGKILL) {
+    if preserve_children {
+        if let Err(error) = child.kill()
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(pid = child.id(), %error, "could not terminate cancelled command");
+        }
+    } else if let Err(error) =
+        crate::subprocess::signal_process_group(child.id() as i32, libc::SIGKILL)
+    {
+        // A group that is already gone is the wanted outcome, not a failure.
         tracing::warn!(pid = child.id(), %error, "could not terminate cancelled command process group");
     }
     #[cfg(not(unix))]
-    if let Err(error) = child.kill() {
-        tracing::warn!(pid = child.id(), %error, "could not terminate cancelled command");
+    {
+        let _ = preserve_children;
+        if let Err(error) = child.kill() {
+            tracing::warn!(pid = child.id(), %error, "could not terminate cancelled command");
+        }
     }
     if let Err(error) = child.wait() {
         tracing::warn!(pid = child.id(), %error, "could not reap cancelled command");
@@ -1167,7 +1199,7 @@ impl CancellableProcessExecutor {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
-        let group = (!command.detaches)
+        let group = (!command.detaches && !command.preserve_children_on_cancel)
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
@@ -1177,7 +1209,7 @@ impl CancellableProcessExecutor {
         let mut exited_at = None;
         let status = loop {
             if self.is_cancelled() {
-                terminate_cancellable_child(&mut child);
+                terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
                 let deadline = Instant::now() + IO_DRAIN_TIMEOUT;
                 for (stream, reader) in [("stdout", stdout_reader), ("stderr", stderr_reader)] {
                     if let Err(error) = reader.finish(stream, deadline) {
@@ -1217,6 +1249,14 @@ impl CommandExecutor for CancellableProcessExecutor {
         self.clone()
             .with_deadline(Duration::from_secs(15))
             .execute(command)
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        self.clone().with_deadline(timeout).execute(command)
     }
 
     fn cancellation_requested(&self) -> bool {
@@ -1317,6 +1357,16 @@ impl CommandExecutor for BoundedProcessExecutor {
                 error
             }
         })
+    }
+
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: Duration,
+    ) -> Result<CommandOutput> {
+        // This executor's configured timeout is a hard per-command cap; the
+        // call-specific cleanup timeout can only make the attempt shorter.
+        CancellableProcessExecutor::with_timeout(self.timeout.min(timeout)).execute(command)
     }
 
     fn execute_with_stdin(
@@ -2373,6 +2423,40 @@ mod executor_tests {
             .unwrap_err();
         assert!(error.to_string().contains("cancelled"), "{error:#}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn cleanup_timeout_replaces_an_expired_deadline_and_keeps_shared_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("completed");
+        let command = CommandSpec::new(
+            "sh",
+            [
+                "-c".to_owned(),
+                "printf ran > \"$1\"".to_owned(),
+                "cleanup-deadline".to_owned(),
+                marker.display().to_string(),
+            ],
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor =
+            CancellableProcessExecutor::new(cancelled.clone()).with_deadline(Duration::ZERO);
+
+        let output = executor
+            .execute_cleanup_with_timeout(&command, Duration::from_secs(5))
+            .unwrap();
+
+        assert_eq!(output.status, 0);
+        assert_eq!(fs::read_to_string(marker).unwrap(), "ran");
+
+        cancelled.store(true, Ordering::Release);
+        let error = executor
+            .execute_cleanup_with_timeout(&command, Duration::from_secs(5))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("operation cancelled"),
+            "{error:#}"
+        );
     }
 
     /// A stand-in for `ssh` that is refused by the server on its first call and

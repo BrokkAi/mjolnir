@@ -7,19 +7,20 @@
 //! or from another container, and neither does a checkout on a different
 //! filesystem from the target root, so their build output would wait for
 //! `target.max_age` (30 days by default) or for disk pressure. The code that
-//! removes a workspace therefore says so, with `mbx clean <workspace>`.
+//! removes a workspace therefore says so, with `mbx clean --under <root>`.
 //!
 //! [`BuildStateRelease`] is the one place that decides what to release and how.
 //! A release runs after the workspace and every process that could build in it
 //! are gone: the worker's process group, the container, then the files, and
 //! only then mbx's state. A build can no longer recreate what it removes, and
-//! `mbx clean` of a path that no longer exists removes exactly the state keyed
-//! by that path. A release is bounded by the executor's cleanup deadline, and
+//! `mbx clean --under` removes state recorded for the workspace and nested
+//! worktrees. A release is bounded by its own deadline, and
 //! a failure is reported, never returned: it must not fail or block the
 //! teardown that asked for it.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{CacheHost, host_for_locator};
 use crate::targets::{self, CommandExecutor, SshTarget};
@@ -28,6 +29,10 @@ use mj_core::state::SessionRecord;
 
 /// `$0` for the release script, so it is recognizable in a process list.
 const LABEL: &str = "mj-mbx-release";
+
+/// Remote cleanup can take longer than ordinary teardown commands, especially
+/// when mbx is running over SSH.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What `stdout` says when a bare host has no mbx at all, so there is no build
 /// state to release.
@@ -46,7 +51,8 @@ pub(crate) const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 
 /// `$1` mode (`native` or `shared`), `$2` the shared cache directory, `$3`
 /// its configuration home, `$4` the preferred in-cache mbx path, `$5` the
-/// old local binary root; the remaining arguments are workspaces.
+/// old local binary root, `$6` the optional workspace root; the remaining
+/// arguments are workspaces for older mbx versions.
 ///
 /// A shared cache prefers the host executable its container mounted, then
 /// searches the same locations as the native host probe. A bare host uses
@@ -54,11 +60,17 @@ pub(crate) const FAILURE_REPORT_SECS: u64 = 14 * 24 * 60 * 60;
 ///
 /// A bare workspace path is resolved through its nearest existing ancestor,
 /// because mbx records the physical path Cargo reported from inside the
-/// checkout, and the checkout itself is already gone. A container path is
+/// checkout, and the checkout itself is already gone. A container root is
 /// passed as written: it was never a path on this host.
-const RELEASE_SCRIPT: &str = r#"set -u
-mode=$1 cache=$2 config=$3 preferred=$4 legacy_root=$5
-shift 5
+///
+/// The script starts in the home directory, which a removed checkout cannot
+/// be, so neither the shell nor mbx inherits a deleted working directory. A
+/// bare SSH workspace is relative to that home.
+const RELEASE_SCRIPT: &str = r#"cd "${HOME:-/}" 2>/dev/null || cd / || exit 1
+trap '' HUP
+set -u
+mode=$1 cache=$2 config=$3 preferred=$4 legacy_root=$5 under_root=$6
+shift 6
 mbx=
 consider() {
     [ -z "$mbx" ] || return 0
@@ -102,12 +114,50 @@ if [ -z "$mbx" ]; then
     echo 'no mbx on this host can release the shared build cache' >&2
     exit 3
 fi
+run_clean() (
+    output_dir=$(mktemp -d "${TMPDIR:-/tmp}/mj-mbx-release.XXXXXX") || {
+        echo 'could not create temporary output directory for mbx clean' >&2
+        return 1
+    }
+    if [ "$mode" = shared ]; then
+        MBX_CACHE_DIR=$cache XDG_CONFIG_HOME=$config "$mbx" clean "$@" </dev/null \
+            >"$output_dir/stdout" 2>"$output_dir/stderr"
+    else
+        "$mbx" clean "$@" </dev/null >"$output_dir/stdout" 2>"$output_dir/stderr"
+    fi
+    clean_status=$?
+    cat "$output_dir/stdout"
+    cat "$output_dir/stderr" >&2
+    rm -rf "$output_dir"
+    return "$clean_status"
+)
 status=0
+if [ -n "$under_root" ]; then
+    if [ "$mode" = shared ]; then
+        help=$(MBX_CACHE_DIR=$cache XDG_CONFIG_HOME=$config "$mbx" clean --help 2>&1 || true)
+    else
+        help=$("$mbx" clean --help 2>&1 || true)
+    fi
+    case "$help" in
+        *--under*)
+            if [ "$mode" = shared ]; then
+                root=$under_root
+            elif root=$(physical "$under_root"); then
+                :
+            else
+                echo "could not resolve $under_root" >&2
+                exit 1
+            fi
+            run_clean --under "$root" || status=$?
+            exit "$status"
+            ;;
+    esac
+fi
 for workspace in "$@"; do
     if [ "$mode" = shared ]; then
-        MBX_CACHE_DIR=$cache XDG_CONFIG_HOME=$config "$mbx" clean "$workspace" || status=$?
+        run_clean "$workspace" || status=$?
     elif path=$(physical "$workspace"); then
-        "$mbx" clean "$path" || status=$?
+        run_clean "$path" || status=$?
     else
         echo "could not resolve $workspace" >&2
         status=1
@@ -133,6 +183,11 @@ pub(in crate::controller) struct BuildStateRelease {
     /// The old per-version cache used by local shared-cache sessions. Remote
     /// copies remain under the SSH user's home directory.
     legacy_mbx_root: Option<PathBuf>,
+    /// The session's own workspace root. Newer mbx can release every target
+    /// and incremental directory recorded at or below this path.
+    cleanup_root: Option<PathBuf>,
+    /// Repository paths used when the host has an older mbx without
+    /// `clean --under`.
     workspaces: Vec<PathBuf>,
 }
 
@@ -144,14 +199,15 @@ impl BuildStateRelease {
             store: Store::Native,
             preferred_mbx: None,
             legacy_mbx_root: None,
+            cleanup_root: Some(root.to_path_buf()),
             workspaces: vec![root.to_path_buf()],
         }
     }
 
-    /// The repositories a session's own target held: an SSH workspace, or a
-    /// container that mounted the shared build cache. `None` for a target
-    /// another session owns, one that never had build state Mjolnir can
-    /// name, and a container that ran without the cache.
+    /// The workspace root and fallback repository paths for a session's own
+    /// target: an SSH workspace, or a container that mounted the shared build
+    /// cache. `None` for a target another session owns, one that never had
+    /// build state Mjolnir can name, and a container that ran without the cache.
     pub(in crate::controller) fn for_target(
         session: &SessionRecord,
         backend: &targets::TargetLocator,
@@ -196,6 +252,7 @@ impl BuildStateRelease {
             store,
             preferred_mbx,
             legacy_mbx_root,
+            cleanup_root: Some(root),
             workspaces,
         })
     }
@@ -215,64 +272,92 @@ impl BuildStateRelease {
             live.and_then(|(session, backend)| workspace_root(session, backend))
             && host.key() == self.host.key()
         {
+            if self.cleanup_root.as_ref().is_some_and(|release_root| {
+                release_root.starts_with(&root) || root.starts_with(release_root)
+            }) {
+                self.cleanup_root = None;
+            }
             self.workspaces
                 .retain(|workspace| !workspace.starts_with(&root));
         }
-        (!self.workspaces.is_empty()).then_some(self)
+        (!self.workspaces.is_empty() || self.cleanup_root.is_some()).then_some(self)
     }
 
-    /// Run `mbx clean` for every workspace. Never fails: a release that does
-    /// not complete is logged, shown to the person, and kept for `mj doctor`.
+    /// Release the target root, or each known workspace for older mbx. Never
+    /// fails: a release that does not complete is logged, shown to the person,
+    /// and recorded for `mj doctor`.
     pub(in crate::controller) fn run(&self, executor: &impl CommandExecutor) {
         if !enabled() {
             return;
         }
         let command = self.command();
-        let failure = match executor.execute_cleanup(&command) {
-            Ok(output) if output.status == 0 => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.trim() == ABSENT {
-                    tracing::debug!(
-                        host = %self.host.key(),
-                        "no mbx on this host, so there is no build state to release"
-                    );
-                } else {
-                    // mbx exits 0 when it keeps a target a running command
-                    // holds, and says so on stderr.
-                    tracing::info!(
-                        host = %self.host.key(),
-                        workspaces = ?self.workspaces,
-                        output = %stdout.trim(),
-                        warnings = %String::from_utf8_lossy(&output.stderr).trim(),
-                        "released the mbx build state of removed workspaces"
-                    );
+        let (failure, not_confirmed) =
+            match executor.execute_cleanup_with_timeout(&command, RELEASE_TIMEOUT) {
+                Ok(output) if output.status == 0 => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.trim() == ABSENT {
+                        tracing::debug!(
+                            host = %self.host.key(),
+                            "no mbx on this host, so there is no build state to release"
+                        );
+                    } else {
+                        // mbx exits 0 when it keeps a target a running command
+                        // holds, and says so on stderr.
+                        tracing::info!(
+                            host = %self.host.key(),
+                            workspaces = ?self.workspaces,
+                            output = %stdout.trim(),
+                            warnings = %String::from_utf8_lossy(&output.stderr).trim(),
+                            "released the mbx build state of removed workspaces"
+                        );
+                    }
+                    return;
                 }
-                return;
-            }
-            Ok(output) => format!(
-                "exit status {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Err(error) => format!("{error:#}"),
-        };
+                Ok(output) => (
+                    format!(
+                        "exit status {}: {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    false,
+                ),
+                Err(error) if cleanup_was_interrupted(&error) => (
+                    format!("mj stopped waiting for mbx clean; it may still be running: {error:#}"),
+                    true,
+                ),
+                Err(error) => (format!("{error:#}"), false),
+            };
         let workspaces = self
             .workspaces
             .iter()
             .map(|workspace| workspace.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        tracing::warn!(
-            host = %self.host.key(),
-            workspaces,
-            error = failure,
-            "mbx kept the build state of removed workspaces"
-        );
-        executor.notify_notice(&format!(
-            "The Rust build cache on {} still holds build output for {workspaces}: {failure}. \
-             `mj doctor` shows how to remove it.",
-            self.host.key()
-        ));
+        if not_confirmed {
+            tracing::warn!(
+                host = %self.host.key(),
+                workspaces,
+                error = failure,
+                "mj stopped waiting for mbx clean; it may still be running"
+            );
+            executor.notify_notice(&format!(
+                "mj stopped waiting for mbx clean on {}; it may still be running. \
+                 `mj doctor` shows how to retry it for {workspaces}.",
+                self.host.key()
+            ));
+        } else {
+            tracing::warn!(
+                host = %self.host.key(),
+                workspaces,
+                error = failure,
+                "mbx kept the build state of removed workspaces"
+            );
+            executor.notify_notice(&format!(
+                "The Rust build cache on {} still holds build output for {workspaces}: {failure}. \
+                 `mj doctor` shows how to remove it.",
+                self.host.key()
+            ));
+        }
         if let Err(error) = record_failure(self, &failure) {
             tracing::warn!(
                 error = format!("{error:#}"),
@@ -304,17 +389,25 @@ impl BuildStateRelease {
                 .unwrap_or_default(),
         ]
         .into_iter()
+        .chain(std::iter::once(
+            self.cleanup_root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ))
         .chain(
             self.workspaces
                 .iter()
                 .map(|workspace| workspace.to_string_lossy().into_owned()),
         );
-        self.host.shell_command(
-            RELEASE_SCRIPT,
-            LABEL,
-            arguments,
-            "release the mbx build state of removed workspaces",
-        )
+        self.host
+            .shell_command(
+                RELEASE_SCRIPT,
+                LABEL,
+                arguments,
+                "release the mbx build state of removed workspaces",
+            )
+            .preserve_children_on_cancel()
     }
 
     /// The remediation `mj doctor` prints for this release.
@@ -327,11 +420,18 @@ impl BuildStateRelease {
                 configuration_home(directory).display()
             ),
         };
-        self.workspaces
+        let fallback = self
+            .workspaces
             .iter()
             .map(|workspace| format!("{environment}mbx clean {}", workspace.display()))
             .collect::<Vec<_>>()
-            .join("; ")
+            .join("; ");
+        self.cleanup_root.as_ref().map_or(fallback.clone(), |root| {
+            format!(
+                "{environment}mbx clean --under {} (older mbx: {fallback})",
+                root.display()
+            )
+        })
     }
 }
 
@@ -348,8 +448,12 @@ fn workspace_root(
         return None;
     }
     match backend {
+        // The root is released with `mbx clean --under`, so it must be this
+        // session's alone: a shared directory would release every session in
+        // it.
         targets::TargetLocator::SshBare { ssh, workspace, .. }
-            if checkout.project_directory().is_none() =>
+            if checkout.project_directory().is_none()
+                && targets::verify_session_workspace(workspace, &session.id).is_ok() =>
         {
             Some((CacheHost::Ssh(ssh.clone()), PathBuf::from(workspace)))
         }
@@ -358,10 +462,11 @@ fn workspace_root(
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::SshPodman { .. }
-        | targets::TargetLocator::SshDocker { .. } => Some((
-            host_for_locator(backend)?,
-            session.container_workspace.clone()?,
-        )),
+        | targets::TargetLocator::SshDocker { .. } => {
+            let workspace = session.container_workspace.clone()?;
+            (workspace == targets::new_container_workspace(&session.id).ok()?).then_some(())?;
+            Some((host_for_locator(backend)?, workspace))
+        }
         _ => None,
     }
 }
@@ -417,6 +522,12 @@ fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+fn cleanup_was_interrupted(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().starts_with("operation cancelled"))
 }
 
 /// A release that failed recently, for `mj doctor`.
@@ -480,7 +591,7 @@ pub(in crate::controller) fn enable_for_test() -> impl Drop {
 mod tests {
     use super::*;
     use crate::controller::mbx::MBX_VERSION;
-    use crate::targets::ProcessExecutor;
+    use crate::targets::{CancellableProcessExecutor, ProcessExecutor};
 
     /// A directory with a test-only `mbx` that logs each `clean` or rejects
     /// execution, plus a home with nothing in it.
@@ -490,14 +601,27 @@ mod tests {
 
     impl Sandbox {
         fn new(with_mbx: bool) -> Self {
+            Self::with_under_support(with_mbx, false)
+        }
+
+        fn with_under_support(with_mbx: bool, supports_under: bool) -> Self {
             let root = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(root.path().join("home")).unwrap();
             std::fs::create_dir_all(root.path().join("bin")).unwrap();
             let mbx = root.path().join("bin/mbx");
             let contents = if with_mbx {
                 format!(
-                    "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
+                         if [ \"$1\" = clean ] && [ \"${{2:-}}\" = --help ]; then\n\
+                             {}\n\
+                             exit 0\n\
+                         fi\n\
                          printf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                    if supports_under {
+                        "echo 'Usage: mbx clean [--under ROOT] [WORKSPACE]'"
+                    } else {
+                        "echo 'Usage: mbx clean WORKSPACE'"
+                    },
                     root.path().join("log").display()
                 )
             } else {
@@ -513,8 +637,8 @@ mod tests {
             self.root.path().join(relative)
         }
 
-        /// Run `release` with this sandbox's `PATH` and home.
-        fn run(&self, release: &BuildStateRelease) -> targets::CommandOutput {
+        /// Prepare a release command with this sandbox's `PATH` and home.
+        fn command(&self, release: &BuildStateRelease) -> targets::CommandSpec {
             let mut command = release.command();
             command.env.insert(
                 "PATH".into(),
@@ -525,7 +649,12 @@ mod tests {
                 .insert("HOME".into(), self.path("home").display().to_string());
             command.env.insert("MBX_CACHE_DIR".into(), String::new());
             command.env.insert("XDG_CONFIG_HOME".into(), String::new());
-            ProcessExecutor.execute(&command).unwrap()
+            command
+        }
+
+        /// Run `release` with this sandbox's `PATH` and home.
+        fn run(&self, release: &BuildStateRelease) -> targets::CommandOutput {
+            ProcessExecutor.execute(&self.command(release)).unwrap()
         }
 
         fn log(&self) -> String {
@@ -558,8 +687,56 @@ mod tests {
             // possibly live cache binary on the test host.
             preferred_mbx: None,
             legacy_mbx_root: None,
+            cleanup_root: None,
             workspaces: workspaces.iter().map(PathBuf::from).collect(),
         }
+    }
+
+    #[derive(Default)]
+    struct CleanupTimeoutRecorder {
+        timeout: std::cell::Cell<Option<Duration>>,
+    }
+
+    impl CommandExecutor for CleanupTimeoutRecorder {
+        fn execute(
+            &self,
+            _command: &targets::CommandSpec,
+        ) -> anyhow::Result<targets::CommandOutput> {
+            Ok(targets::CommandOutput {
+                status: 0,
+                stdout: b"released".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn execute_cleanup_with_timeout(
+            &self,
+            command: &targets::CommandSpec,
+            timeout: Duration,
+        ) -> anyhow::Result<targets::CommandOutput> {
+            self.timeout.set(Some(timeout));
+            self.execute(command)
+        }
+    }
+
+    #[test]
+    fn release_uses_its_own_cleanup_timeout() {
+        let _enabled = enable_for_test();
+        let executor = CleanupTimeoutRecorder::default();
+
+        BuildStateRelease::managed_checkout(None, Path::new("/gone")).run(&executor);
+
+        assert_eq!(executor.timeout.get(), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn only_an_interrupted_command_is_reported_as_not_confirmed() {
+        assert!(cleanup_was_interrupted(&anyhow::anyhow!(
+            "operation cancelled while release"
+        )));
+        assert!(!cleanup_was_interrupted(&anyhow::anyhow!(
+            "run sh for release: No such file or directory"
+        )));
     }
 
     #[test]
@@ -579,6 +756,144 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_managed_checkout_root_is_cleaned_by_its_physical_path() {
+        let sandbox = Sandbox::with_under_support(true, true);
+        std::fs::create_dir_all(sandbox.path("real/clones")).unwrap();
+        std::os::unix::fs::symlink(sandbox.path("real"), sandbox.path("link")).unwrap();
+        let release = BuildStateRelease::managed_checkout(None, &sandbox.path("link/clones/gone"));
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        let physical = std::fs::canonicalize(sandbox.path("real")).unwrap();
+        assert_eq!(
+            sandbox.log(),
+            format!("clean --under {}/clones/gone||\n", physical.display())
+        );
+    }
+
+    #[test]
+    fn release_script_recovers_from_a_deleted_starting_directory() {
+        let sandbox = Sandbox::new(true);
+        let release = BuildStateRelease::managed_checkout(None, &sandbox.path("gone"));
+        let deleted_cwd = sandbox.path("cwd/vanish");
+        std::fs::create_dir_all(&deleted_cwd).unwrap();
+        let cwd_log = sandbox.path("cwd.log");
+        std::fs::write(
+            sandbox.path("bin/mbx"),
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then pwd >/dev/null 2>&1 || exit 1; echo 'mbx {MBX_VERSION}'; exit 0; fi\n\
+                 if [ \"$1\" = clean ] && [ \"$2\" = --help ]; then echo 'Usage: mbx clean WORKSPACE'; exit 0; fi\n\
+                 pwd >> '{}'\nprintf '%s|%s|%s\\n' \"$*\" \"${{MBX_CACHE_DIR:-}}\" \"${{XDG_CONFIG_HOME:-}}\" >> '{}'\n",
+                cwd_log.display(),
+                sandbox.path("log").display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            sandbox.path("bin/mbx"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let mut command = sandbox.command(&release);
+        let original_args = command.args.clone();
+        command.cwd = Some(deleted_cwd.clone());
+        command.args = vec![
+            "-c".into(),
+            "directory=$1; script=$2; shift 2; rmdir \"$directory\" || exit 1; exec sh -c \"$script\" \"$@\"".into(),
+            "cwd-remover".into(),
+            deleted_cwd.to_string_lossy().into_owned(),
+            original_args[1].clone(),
+        ];
+        command.args.extend_from_slice(&original_args[2..]);
+
+        let output = ProcessExecutor.execute(&command).unwrap();
+
+        assert_eq!(output.status, 0, "{output:?}");
+        let cwd = std::fs::read_to_string(cwd_log).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(cwd.trim_end()).unwrap(),
+            std::fs::canonicalize(sandbox.path("home")).unwrap()
+        );
+    }
+
+    #[test]
+    fn mbx_output_is_captured_after_clean_completes() {
+        let sandbox = Sandbox::new(true);
+        std::fs::write(
+            sandbox.path("bin/mbx"),
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 echo 'clean output'\necho 'clean warning' >&2\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            sandbox.path("bin/mbx"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let output = sandbox.run(&shared(&["/workspace/abc/app"]));
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "clean output"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            "clean warning"
+        );
+    }
+
+    #[test]
+    fn mbx_clean_survives_its_release_deadline_and_is_not_confirmed() {
+        let sandbox = Sandbox::new(true);
+        std::fs::create_dir_all(sandbox.path("tmp")).unwrap();
+        std::fs::write(
+            sandbox.path("bin/mbx"),
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
+                 sleep 2.3\nprintf done > '{}'/completed\nprintf 'mbx output\\n'\nprintf 'mbx warning\\n' >&2\n",
+                sandbox.path("tmp").display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            sandbox.path("bin/mbx"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let release = shared(&["/workspace/abc/app"]);
+        let mut command = sandbox.command(&release);
+        command
+            .env
+            .insert("TMPDIR".into(), sandbox.path("tmp").display().to_string());
+
+        let error = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ))
+        .execute_cleanup_with_timeout(&command, Duration::from_millis(100))
+        .unwrap_err();
+
+        assert!(cleanup_was_interrupted(&error), "{error:#}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while (!sandbox.path("tmp/completed").exists()
+            || std::fs::read_dir(sandbox.path("tmp")).unwrap().count() != 1)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(sandbox.path("tmp/completed").exists());
+        assert_eq!(std::fs::read_dir(sandbox.path("tmp")).unwrap().count(), 1);
+    }
+
     // Hard-won: 741163fe: container workspace cleanup lost the cache mount policy and left stale build state
     #[test]
     fn a_container_workspace_is_cleaned_as_written_with_the_shared_cache_policy() {
@@ -591,6 +906,52 @@ mod tests {
             sandbox.log(),
             "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n\
              clean /workspace/abc/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
+        );
+    }
+
+    #[test]
+    fn a_container_session_releases_everything_under_its_workspace_root() {
+        let sandbox = Sandbox::with_under_support(true, true);
+        let (session, backend) = container_session("0123456789abcdef0123456789abcdef", None);
+        let config = bundle_config(&["app", "nested/lib"]);
+        let release = BuildStateRelease::for_target(&session, &backend, &config).unwrap();
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            format!(
+                "clean --under {}|/srv/cache|/srv/cache/.mjolnir/config\n",
+                session.container_workspace.as_ref().unwrap().display()
+            )
+        );
+        assert!(
+            release
+                .remediation()
+                .contains("mbx clean --under /workspace/0123456789abcdef0123456789abcdef")
+        );
+        assert!(release.remediation().contains("older mbx: MBX_CACHE_DIR="));
+        assert!(
+            release
+                .remediation()
+                .contains("mbx clean /workspace/0123456789abcdef0123456789abcdef/app")
+        );
+    }
+
+    #[test]
+    fn older_mbx_falls_back_to_each_repository_workspace() {
+        let sandbox = Sandbox::new(true);
+        let mut release = shared(&["/workspace/abc/app", "/workspace/abc/nested/lib"]);
+        release.cleanup_root = Some("/workspace/abc".into());
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            "clean /workspace/abc/app|/srv/cache|/srv/cache/.mjolnir/config\n\
+             clean /workspace/abc/nested/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
         );
     }
 
@@ -676,6 +1037,31 @@ mod tests {
         assert_eq!(output.status, 3, "{output:?}");
     }
 
+    fn bundle_config(destinations: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.bundles.insert(
+            "project".into(),
+            mj_core::config::ProjectBundle {
+                primary_repo: "app".into(),
+                repositories: destinations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, destination)| mj_core::config::ProjectRepository {
+                        id: if index == 0 {
+                            "app".into()
+                        } else {
+                            format!("repo{index}")
+                        },
+                        github: Some(format!("owner/repo{index}")),
+                        destination: (*destination).into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+        );
+        config
+    }
+
     fn container_session(
         id: &str,
         backend_host: Option<&str>,
@@ -712,19 +1098,7 @@ mod tests {
     #[test]
     fn a_moved_session_keeps_the_build_state_its_live_target_shares() {
         let id = "0123456789abcdef0123456789abcdef";
-        let mut config = Config::default();
-        config.bundles.insert(
-            "project".into(),
-            mj_core::config::ProjectBundle {
-                primary_repo: "app".into(),
-                repositories: vec![mj_core::config::ProjectRepository {
-                    id: "app".into(),
-                    github: Some("owner/app".into()),
-                    destination: "app".into(),
-                    ..Default::default()
-                }],
-            },
-        );
+        let config = bundle_config(&["app"]);
         let (retired, retired_backend) = container_session(id, None);
         let release =
             || BuildStateRelease::for_target(&retired, &retired_backend, &config).unwrap();
@@ -740,5 +1114,163 @@ mod tests {
             kept.workspaces,
             [PathBuf::from(format!("/workspace/{id}/app"))]
         );
+    }
+
+    #[test]
+    fn a_nested_live_root_disables_prefix_cleanup_and_filters_fallback_paths() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = bundle_config(&["app", "lib"]);
+        let (retired, retired_backend) = container_session(id, None);
+        let mut release =
+            BuildStateRelease::for_target(&retired, &retired_backend, &config).unwrap();
+        // `for_target` only names a session's own root; this covers a root
+        // that would contain the live one anyway.
+        release.cleanup_root = Some("/workspace".into());
+        release.workspaces = vec![
+            PathBuf::from(format!("/workspace/{id}/app")),
+            PathBuf::from("/workspace/other/lib"),
+        ];
+        let (live, live_backend) = container_session(id, None);
+
+        let kept = release.excluding(Some((&live, &live_backend))).unwrap();
+
+        assert_eq!(kept.cleanup_root, None);
+        assert_eq!(kept.workspaces, [PathBuf::from("/workspace/other/lib")]);
+
+        let sandbox = Sandbox::with_under_support(true, true);
+        let output = sandbox.run(&kept);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            sandbox.log(),
+            "clean /workspace/other/lib|/srv/cache|/srv/cache/.mjolnir/config\n"
+        );
+    }
+
+    #[test]
+    fn a_release_root_nested_under_the_live_root_is_discarded() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = bundle_config(&["app"]);
+        let (retired, retired_backend) = container_session(id, None);
+        let mut release =
+            BuildStateRelease::for_target(&retired, &retired_backend, &config).unwrap();
+        release.cleanup_root = Some(format!("/workspace/{id}/retired").into());
+        release.workspaces = vec![PathBuf::from(format!("/workspace/{id}/retired/app"))];
+        let (live, live_backend) = container_session(id, None);
+
+        assert!(release.excluding(Some((&live, &live_backend))).is_none());
+    }
+
+    #[test]
+    fn move_exclusion_compares_path_components_not_prefix_text() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = bundle_config(&["app"]);
+        let (retired, retired_backend) = container_session(id, None);
+        let release = BuildStateRelease::for_target(&retired, &retired_backend, &config).unwrap();
+        let (mut live, live_backend) = container_session(id, None);
+        live.container_workspace = Some(format!("/workspace/{id}-live").into());
+
+        let kept = release.excluding(Some((&live, &live_backend))).unwrap();
+
+        assert_eq!(
+            kept.cleanup_root,
+            Some(PathBuf::from(format!("/workspace/{id}")))
+        );
+    }
+
+    #[test]
+    fn an_ssh_bare_bundle_uses_its_workspace_as_the_release_root() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = bundle_config(&["app", "nested/lib"]);
+        let session = crate::controller::test_support::checkpoint_test_session(id);
+        let backend = targets::TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "builder.test".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: format!(".local/share/hel/workspaces/{id}"),
+            worker_id: None,
+        };
+
+        let release = BuildStateRelease::for_target(&session, &backend, &config).unwrap();
+
+        assert_eq!(
+            release.cleanup_root,
+            Some(PathBuf::from(format!(".local/share/hel/workspaces/{id}")))
+        );
+        assert_eq!(
+            release.workspaces,
+            [
+                PathBuf::from(format!(".local/share/hel/workspaces/{id}/app")),
+                PathBuf::from(format!(".local/share/hel/workspaces/{id}/nested/lib")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_the_sessions_own_has_no_release_root() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = bundle_config(&["app"]);
+        let session = crate::controller::test_support::checkpoint_test_session(id);
+        let shared_bare = targets::TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "builder.test".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: "/srv/mj/workspaces".into(),
+            worker_id: None,
+        };
+        assert!(BuildStateRelease::for_target(&session, &shared_bare, &config).is_none());
+
+        let (mut legacy, backend) = container_session(id, None);
+        legacy.container_workspace = Some("/workspace".into());
+        assert!(BuildStateRelease::for_target(&legacy, &backend, &config).is_none());
+    }
+
+    #[test]
+    fn a_relative_bare_workspace_resolves_against_home() {
+        let sandbox = Sandbox::with_under_support(true, true);
+        let release = BuildStateRelease::managed_checkout(
+            None,
+            Path::new(".local/share/hel/workspaces/gone"),
+        );
+
+        let output = sandbox.run(&release);
+
+        assert_eq!(output.status, 0, "{output:?}");
+        let home = std::fs::canonicalize(sandbox.path("home")).unwrap();
+        assert_eq!(
+            sandbox.log(),
+            format!(
+                "clean --under {}/.local/share/hel/workspaces/gone||\n",
+                home.display()
+            )
+        );
+    }
+
+    #[test]
+    fn borrowed_and_unmanaged_targets_have_no_release_root() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = bundle_config(&["app"]);
+        let (session, mut borrowed_backend) = container_session(id, None);
+        match &mut borrowed_backend {
+            targets::TargetLocator::LocalPodman { borrowed_from, .. } => {
+                *borrowed_from = Some("owner".into());
+            }
+            _ => unreachable!(),
+        }
+        assert!(BuildStateRelease::for_target(&session, &borrowed_backend, &config).is_none());
+
+        let mut unmanaged = crate::controller::test_support::checkpoint_test_session(id);
+        unmanaged.project_directory = Some("/home/user/project".into());
+        let bare_backend = targets::TargetLocator::SshBare {
+            ssh: SshTarget {
+                destination: "builder.test".into(),
+                ssh_args: Vec::new(),
+            },
+            workspace: "/home/user/project".into(),
+            worker_id: None,
+        };
+        assert!(BuildStateRelease::for_target(&unmanaged, &bare_backend, &config).is_none());
     }
 }
