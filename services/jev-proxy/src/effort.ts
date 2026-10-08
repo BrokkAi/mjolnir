@@ -1,7 +1,7 @@
 export const effortQuestions = {
   effort: {
     type: "choice",
-    instructions: "Which reasoning-effort level does this assignment need? Assess the assignment's difficulty and scope: how broadly the code must be read, how many independent decisions it requires, how much verification is needed, and how much risk there is of subtle bugs. Judge only the described assignment, not who performs it or which model is named.",
+    instructions: "Which reasoning-effort level does this assignment need? Assess the assignment's difficulty and scope: how broadly the code must be read, how many independent decisions it requires, how much verification is needed, and how much risk there is of subtle bugs. The model field names the agent that will do the work; a weaker model needs a higher level for the same assignment.",
     criteria: {
       medium: {
         what: "A narrow task with little code to read, few independent decisions, routine verification, and low risk of subtle bugs.",

@@ -118,7 +118,7 @@ test("effort verdict forwards the assignment and returns the bounded four-rung j
   const malformed = await proxy.fetch(new Request("https://proxy.example/v1/effort-verdict", {
     method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
   }), effortEnvironment());
-  await expectError(malformed, 502, "upstream_failure");
+  await expectError(malformed, 502, "invalid_upstream_response");
 });
 
 test("effort verdict rejects an invalid hosted request before calling upstream", async t => {

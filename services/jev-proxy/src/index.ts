@@ -310,8 +310,7 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
                 : version === 5 ? answersV5(body)
                   : version === 4 ? answersV4(body)
                     : version === 3 ? answersV3(body) : answers(body);
-        return result ? json("entries" in state ? result : { answers: result })
-          : error("task_name" in state ? "upstream_failure" : "invalid_upstream_response", 502);
+        return result ? json("entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
   } catch (cause) {
