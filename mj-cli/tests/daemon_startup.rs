@@ -73,9 +73,11 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     let connection = rusqlite::Connection::open(&path).unwrap();
     // 2.15.0's actual shape, not only a changed PRAGMA: migration 44 must
     // create the missing cache and advance the compatibility floor.
+    // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     connection
         .execute_batch(
-            "DROP TABLE quota_reset_cache;
+            "ALTER TABLE mailbox_outbox DROP COLUMN failure;
+         DROP TABLE quota_reset_cache;
          DROP TABLE subagent_accounting;
          DROP TABLE session_turn_selections;
          PRAGMA writable_schema=ON;

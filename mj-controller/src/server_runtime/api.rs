@@ -2167,9 +2167,20 @@ fn startup_context(
 
 /// Submit one prompt as a single text block, returning its acceptance ordinal.
 async fn submit_prompt(handle: &SessionHandle, text: String) -> Result<u64> {
+    submit_prompt_with_id(handle, text, None).await
+}
+
+async fn submit_prompt_with_id(
+    handle: &SessionHandle,
+    text: String,
+    command_id: Option<String>,
+) -> Result<u64> {
     handle
         .submit(
-            new_command_id("api")?,
+            match command_id {
+                Some(id) => id,
+                None => new_command_id("api")?,
+            },
             RelayCommand::Prompt {
                 prompt: vec![ContentBlock::Text(TextContent::new(text))],
             },
@@ -2763,6 +2774,15 @@ impl SubagentBackend for ApiBackend {
     }
 
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, Result<u64>> {
+        self.prompt_with_id(session_id, text, None)
+    }
+
+    fn prompt_with_id(
+        &self,
+        session_id: String,
+        text: String,
+        command_id: Option<String>,
+    ) -> BoxFuture<'_, Result<u64>> {
         Box::pin(async move {
             let (group_id, status) = self.exports.startup_context(session_id.clone()).await?;
             ensure!(
@@ -2774,7 +2794,7 @@ impl SubagentBackend for ApiBackend {
                 .session(session_id.clone())
                 .await
                 .with_context(|| format!("session {session_id} is not running"))?;
-            let turn = submit_prompt(&handle, text).await?;
+            let turn = submit_prompt_with_id(&handle, text, command_id).await?;
             self.exports
                 .dismiss_startup_status(session_id, group_id)
                 .await?;

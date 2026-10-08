@@ -123,6 +123,8 @@ enum Command {
     New(api_commands::NewArgs),
     /// Send a prompt to a session, optionally waiting for the turn.
     Prompt(api_commands::PromptArgs),
+    /// Cancel queued prompts while preserving the session and its current turn.
+    ClearQueue(api_commands::ClearQueueArgs),
     /// Queue an external event in a session's durable mailbox.
     Event(api_commands::EventArgs),
     /// Block until a turn ends and print how it ended.
@@ -530,6 +532,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Login(_)) => "login",
         Some(Command::New(_)) => "new",
         Some(Command::Prompt(_)) => "prompt",
+        Some(Command::ClearQueue(_)) => "clear-queue",
         Some(Command::Event(_)) => "event",
         Some(Command::Wait(_)) => "wait",
         Some(Command::Transcript(_)) => "transcript",
@@ -713,6 +716,9 @@ async fn run_command(
                 .map(|()| DashboardExit::Normal)
         }
         Some(Command::Prompt(args)) => api_commands::prompt(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::ClearQueue(args)) => api_commands::clear_queue(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Event(args)) => api_commands::event(args)

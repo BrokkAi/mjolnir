@@ -27,6 +27,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route("/sessions/{session_id}/prompt", post(prompt))
         .route(
+            "/sessions/{session_id}/queued-prompts/clear",
+            post(clear_queue),
+        )
+        .route(
             "/sessions/{session_id}/events",
             post(mailbox::enqueue_event),
         )

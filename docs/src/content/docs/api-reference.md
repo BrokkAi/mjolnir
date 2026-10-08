@@ -501,6 +501,31 @@ attaches. An `interrupt-turn` sent during that hold withdraws the prompt: it
 answers `409` and never becomes a turn. Any other session that cannot take a
 prompt right now answers `409`.
 
+For recovery operations, supply an optional `command_id` (also exposed as
+`mj prompt --command-id ID`). Retrying the identical command with the same ID
+returns its original relay acceptance ordinal. Keep the body unchanged; use a
+new ID for a different command. Ordinary clients may omit it.
+
+Typed `/clear` clears the native conversation in the same session and checkout.
+Its acceptance is not completion: observe the `command_ended` event and the
+context divider in the transcript before sending the new task. A rejected or
+failed clear does not authorize resetting the checkout.
+
+### Cancel queued prompts
+
+```text
+POST /api/v1/sessions/{session_id}/queued-prompts/clear
+```
+
+```json
+{ "command_id": "cancel-obsolete-input-1" }
+```
+
+The ID is optional. This returns `202` with the relay acceptance `turn_id`,
+cancels queued input, and preserves the active turn and environment. The CLI
+is `mj clear-queue --session ID [--command-id ID] --json`. Interrupt an active
+turn separately when needed.
+
 ### Wait for a turn
 
 ```text

@@ -174,6 +174,34 @@ pub trait SubagentBackend: Send + Sync {
     /// Submit a prompt, returning its relay acceptance ordinal.
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>>;
 
+    /// Submit under a producer-owned identity, preserving the receipt on retries.
+    fn prompt_with_id(
+        &self,
+        session_id: String,
+        text: String,
+        command_id: Option<String>,
+    ) -> BoxFuture<'_, AnyResult<u64>> {
+        let Some(command_id) = command_id else {
+            return self.prompt(session_id, text);
+        };
+        Box::pin(async move {
+            let handle = self
+                .session_handle(session_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("session has no live worker"))?;
+            handle
+                .submit(
+                    command_id,
+                    mj_core::relay::RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
+                            agent_client_protocol::schema::v1::TextContent::new(text),
+                        )],
+                    },
+                )
+                .await
+        })
+    }
+
     /// Durable turn state for a session with no live actor.
     fn turn_state(&self, session_id: String) -> BoxFuture<'_, AnyResult<Option<TurnState>>>;
 
