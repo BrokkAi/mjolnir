@@ -328,6 +328,10 @@ mod outcome_tests {
             command_id: String,
             outcome: crate::relay::RelayCommandOutcome,
         },
+        ElicitationResolved {
+            elicitation_id: String,
+            action: String,
+        },
     }
 
     #[test]
@@ -347,6 +351,10 @@ mod outcome_tests {
                 OldObservation::CommandCompleted {
                     command_id: "opaque".into(),
                     outcome: crate::relay::RelayCommandOutcome::Cancelled,
+                },
+                OldObservation::ElicitationResolved {
+                    elicitation_id: "form-1".into(),
+                    action: "accept".into(),
                 },
             ] {
                 let raw = serde_json::to_string(&old).unwrap();

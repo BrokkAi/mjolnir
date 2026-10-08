@@ -306,8 +306,8 @@ fn build_cache_release_check(
         "build-cache.release",
         "Build output of removed sessions",
         format!(
-            "{count} build cache {releases} failed in the last {days} days, so mbx still holds \
-             build output for workspaces Mjolnir removed. Latest, on {}: {}",
+            "{count} build cache {releases} failed or could not be confirmed in the last {days} \
+             days. Latest status, on {}: {}",
             latest.host, latest.error
         ),
         format!(

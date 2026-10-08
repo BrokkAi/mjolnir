@@ -707,7 +707,7 @@ fn tool_definitions_with_mailboxes(
 fn send_message_tool() -> Value {
     tool(
         "send_message",
-        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires an enabled mailbox and a protocol-35 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID. Check pending_messages and message_deliveries in wait or list_agents before retrying; do not resend an acknowledged message.",
+        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires an enabled mailbox and a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID. Check pending_messages and message_deliveries in wait or list_agents before retrying; do not resend an acknowledged message.",
         json!({
             "type":"object",
             "properties":{

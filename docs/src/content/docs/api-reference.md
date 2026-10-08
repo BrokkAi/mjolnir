@@ -531,7 +531,7 @@ sender to be an existing top-level session. An authenticated local caller may
 claim another top-level session ID. The reply is `202` with `session_id`, `via`
 (`mailbox` or `turn`), and an optional `turn_id`. Message delivery refuses an
 unknown, destroyed, stopped, self, or other session's sub-agent target. A peer
-mailbox message wakes an idle recipient; workers below relay protocol 35
+mailbox message wakes an idle recipient; workers below relay protocol 36
 receive a queued turn with the same sender label and reply instruction.
 
 Typed `/clear` clears the native conversation in the same session and checkout.

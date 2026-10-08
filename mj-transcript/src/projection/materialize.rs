@@ -20,7 +20,15 @@ pub fn materialized_session_from_entries(
         .filter(|entry| entry.start_seq > 0)
         .map(|entry| {
             let base_id = match entry.role {
-                ChatRole::User => format!("user:{}", entry.start_seq),
+                ChatRole::User => entry
+                    .source
+                    .0
+                    .as_ref()
+                    .map(|item| &item.stable_id)
+                    .or(entry.message_id.as_ref())
+                    .filter(|id| id.starts_with(mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX))
+                    .cloned()
+                    .unwrap_or_else(|| format!("user:{}", entry.start_seq)),
                 ChatRole::Agent => entry.message_id.as_ref().map_or_else(
                     || format!("agent:{}", entry.start_seq),
                     |id| format!("agent:{id}"),

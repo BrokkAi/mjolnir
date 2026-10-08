@@ -404,6 +404,29 @@ pub(super) fn unconstrained_permission_response(
         })
 }
 
+/// Taking the pending entry decides whether answering or withdrawal wins.
+/// Once an answer was accepted, cancellation must still receive it so its
+/// reply is recorded, even if both notifications are ready at the same time.
+pub(super) async fn await_elicitation_response(
+    pending: &PendingElicitations,
+    id: &str,
+    mut answer: oneshot::Receiver<ElicitationResponse>,
+    cancellation: impl std::future::Future<Output = ()>,
+) -> Option<ElicitationResponse> {
+    tokio::select! {
+        biased;
+        () = cancellation => {
+            let withdrawn = pending.lock().expect("pending elicitation lock poisoned").remove(id);
+            if withdrawn.is_some() {
+                None
+            } else {
+                answer.await.ok()
+            }
+        }
+        response = &mut answer => response.ok(),
+    }
+}
+
 pub(super) fn resolve_pending_elicitation(
     pending: &PendingElicitations,
     elicitation_id: &str,

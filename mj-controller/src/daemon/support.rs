@@ -102,6 +102,18 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         self.inner.execute_cleanup(command)
     }
 
+    fn execute_cleanup_with_timeout(
+        &self,
+        command: &CommandSpec,
+        timeout: std::time::Duration,
+    ) -> Result<CommandOutput> {
+        let _stage = command
+            .stage
+            .as_ref()
+            .map(|stage| ProvisionStageGuard::new(self, stage.clone()));
+        self.inner.execute_cleanup_with_timeout(command, timeout)
+    }
+
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         let _stage = command
             .stage

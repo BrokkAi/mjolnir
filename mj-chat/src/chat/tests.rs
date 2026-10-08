@@ -3013,6 +3013,51 @@ mod golden_cases {
             |_| Vec::new(),
         );
 
+        let question = mj_core::elicitation::ElicitationRequest::from_acp_params(
+            "question-1",
+            serde_json::json!({
+                "mode": "form", "sessionId": "session-1", "message": "Choose an architecture",
+                "requestedSchema": {"type": "object", "properties": {
+                    "architecture": {"type": "string", "title": "Architecture", "oneOf": [
+                        {"const": "thin", "title": "Thin callers"}
+                    ]}
+                }}
+            }),
+        )
+        .unwrap();
+        let reply = question.reply_text(&mj_core::elicitation::ElicitationResponse::Accept {
+            content: std::collections::BTreeMap::from([(
+                "architecture".into(),
+                mj_core::elicitation::ElicitationValue::String("thin".into()),
+            )]),
+        });
+        let mut answered_events = events.clone();
+        answered_events.push(SequencedEvent {
+            seq: 3,
+            recorded_at_ms: None,
+            request_id: None,
+            event: WorkerEvent::Adapter {
+                kind: "elicitation_resolved".into(),
+                payload: serde_json::to_value(RuntimeEvent::ElicitationResolved {
+                    elicitation_id: question.id,
+                    action: "accept".into(),
+                    reply: Some(reply),
+                })
+                .unwrap(),
+            },
+        });
+        initial.latest_seq = 3;
+        let mut answered = ChatState::new(&initial, &answered_events);
+        state(
+            &mut output,
+            "elicitation reply echoed as a user message after replay",
+            &mut answered,
+            WIDTH,
+            HEIGHT,
+            None,
+            |_| Vec::new(),
+        );
+
         let mut chat = ChatState::new(&snapshot(), &[]);
         chat.apply_session_update(
             1,

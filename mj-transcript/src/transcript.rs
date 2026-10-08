@@ -1273,6 +1273,15 @@ pub fn apply_runtime_event_to_entries(
             None
         }
         RuntimeEvent::SessionStarted { resumed: true, .. } => None,
+        RuntimeEvent::ElicitationResolved {
+            reply: Some(reply), ..
+        } => {
+            let mut entry =
+                ChatEntry::plain(seq, ChatRole::User, reply).with_recorded_at(recorded_at_ms);
+            entry.message_id = Some(format!("{ELICITATION_REPLY_ITEM_PREFIX}{seq}"));
+            entries.push(entry);
+            None
+        }
         other => Some(other),
     }
 }

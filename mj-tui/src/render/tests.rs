@@ -1692,7 +1692,7 @@ fn an_unreachable_session_on_a_full_disk_says_disk_full() {
 }
 
 /// `symbols = "ascii"` must reach the Targets pane's own row text, such as
-/// the Disks cell's expand mark. The symbol set is read from the dashboard's
+/// the Disks cell's dropdown mark. The symbol set is read from the dashboard's
 /// own configuration, the way a running session selects it, rather than
 /// through the thread-local override the render pipeline itself already
 /// scopes to that configuration.
@@ -1734,9 +1734,10 @@ fn precision_capacity_target() -> mj_core::targets::DeploymentCapacityTarget {
 
 /// The Disks cell names a filesystem only when it is low or full; free space
 /// on filesystems that are fine answers no question. Clicking the cell, or
-/// `d` on the selected row, expands it to list every filesystem.
+/// `d` on the selected row, opens its details in a dropdown without changing
+/// the one-line table layout.
 #[test]
-fn capacity_disks_cell_names_only_a_filesystem_in_trouble_and_expands_on_click() {
+fn capacity_disks_cell_opens_a_dropdown_and_keeps_the_table_one_line_per_target() {
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
     dashboard.set_target_storage(vec![precision_storage(40 << 30, 40 << 30)]);
@@ -1758,6 +1759,8 @@ fn capacity_disks_cell_names_only_a_filesystem_in_trouble_and_expands_on_click()
     dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), point));
     dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), point));
     assert_eq!(dashboard.focus, Focus::Targets);
+    assert_eq!(capacity_table_lines(&dashboard), 1);
+    assert!(dashboard.pane_menu.is_some());
 
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(
@@ -1769,11 +1772,45 @@ fn capacity_disks_cell_names_only_a_filesystem_in_trouble_and_expands_on_click()
         rendered.contains("/home/jonathan/Projects 3.0G free of 1000.0G low"),
         "{rendered}"
     );
+    assert_eq!(rendered.matches("precision-3260").count(), 1, "{rendered}");
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw disk details");
+    let buffer = terminal.backend().buffer();
+    let lines = buffer_lines(buffer);
+    let low_row = lines
+        .iter()
+        .position(|line| line.contains("3.0G free of 1000.0G low"))
+        .expect("low filesystem detail");
+    let low_column = lines[low_row]
+        .find("3.0G free of 1000.0G low")
+        .expect("detail column");
+    assert_eq!(
+        buffer[(
+            u16::try_from(low_column).unwrap(),
+            u16::try_from(low_row).unwrap()
+        )]
+            .fg,
+        mj_chat::theme::palette().warning
+    );
 
+    // The cell remains a close target even though the dropdown is modal.
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), point));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), point));
+    assert!(dashboard.pane_menu.is_none());
+
+    // The command opens the same anchored details list for the selected row.
     dashboard.handle_key(key(KeyCode::Char('d')));
+    assert!(dashboard.pane_menu.is_some());
+    assert_eq!(capacity_table_lines(&dashboard), 1);
     let rendered = drawn_dashboard(&mut dashboard, 160);
-    assert!(rendered.contains(summary), "{rendered}");
-    assert!(!rendered.contains("free of"), "{rendered}");
+    assert!(
+        rendered.contains("/home/jonathan/Projects 3.0G free of 1000.0G low"),
+        "{rendered}"
+    );
+    dashboard.handle_key(key(KeyCode::Char('d')));
+    assert!(dashboard.pane_menu.is_none());
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -3310,11 +3347,10 @@ fn golden_dashboard_resource_panels() {
     );
 }
 
-/// An expanded row with more filesystems than the Targets pane has lines is
-/// cut to the pane's height. A row taller than its table is otherwise not
-/// drawn at all, so expanding it made the row disappear.
+/// Long disk lists stay in the anchored dropdown and can be navigated without
+/// increasing the Targets table's row height.
 #[test]
-fn an_expanded_disks_row_taller_than_the_pane_is_cut_not_hidden() {
+fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     use mj_core::targets::storage::{FilesystemSpace, TargetStorageView};
     let mut dashboard = DashboardState::new(config(), State::default(), BTreeMap::new());
     dashboard.set_deployment_capacity_targets(vec![precision_capacity_target()]);
@@ -3335,10 +3371,24 @@ fn an_expanded_disks_row_taller_than_the_pane_is_cut_not_hidden() {
         |_| None,
         None,
     )]);
-    dashboard.expanded_disks.insert("ssh:precision-3260".into());
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    let lines = rendered.lines().map(str::to_owned).collect::<Vec<_>>();
+    let disk_cell = point(&lines, "Disks ▾");
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), disk_cell));
+    dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), disk_cell));
+    assert!(dashboard.pane_menu.is_some());
+    assert_eq!(capacity_table_lines(&dashboard), 1);
+
     let rendered = drawn_dashboard(&mut dashboard, 160);
     assert!(rendered.contains("precision-3260"), "{rendered}");
     assert!(rendered.contains("Disks ▴"), "{rendered}");
     assert!(rendered.contains("/srv/volume-00 40.0G free"), "{rendered}");
     assert!(!rendered.contains("/srv/volume-29"), "{rendered}");
+
+    for _ in 0..29 {
+        dashboard.handle_key(key(KeyCode::Down));
+    }
+    let rendered = drawn_dashboard(&mut dashboard, 160);
+    assert!(rendered.contains("/srv/volume-29 40.0G free"), "{rendered}");
+    assert_eq!(capacity_table_lines(&dashboard), 1);
 }

@@ -90,6 +90,14 @@ fn golden_plan_proposal_transcript() {
         RelayObservation::ElicitationResolved {
             elicitation_id: "plan-review-3".into(),
             action: "accept".into(),
+            reply: Some(
+                request.reply_text(&mj_core::elicitation::ElicitationResponse::Accept {
+                    content: BTreeMap::from([(
+                        "action".into(),
+                        mj_core::elicitation::ElicitationValue::String("implement".into()),
+                    )]),
+                }),
+            ),
         },
     );
     append_transcript_state(&mut output, "proposal remains after accepting", &session);
@@ -117,6 +125,142 @@ fn golden_plan_proposal_transcript() {
         "proposal stays between its conversation",
         &conversation,
     );
+
+    use mj_core::elicitation::{ElicitationRequest, ElicitationResponse, ElicitationValue};
+    let question = ElicitationRequest::from_acp_params("question-1", json!({
+        "mode": "form", "sessionId": "session-1", "message": "How should we build this?",
+        "requestedSchema": {"type": "object", "properties": {
+            "architecture": {"type": "string", "title": "Architecture", "oneOf": [
+                {"const": "thin", "title": "Thin callers"}, {"const": "matrix", "title": "Dynamic matrix"}
+            ]},
+            "architecture_note": {"type": "string", "title": "Other", "_meta": {
+                "codex": {"role": "user_note", "questionId": "architecture"}
+            }},
+            "features": {"type": "array", "title": "Features", "items": {"type": "string", "anyOf": [
+                {"const": "tui", "title": "Terminal"}, {"const": "web", "title": "Browser"}
+            ]}},
+            "ratio": {"type": "number", "title": "Ratio"},
+            "token": {"type": "string", "title": "Access token", "_meta": {"codex": {"isSecret": true}}},
+            "token_note": {"type": "string", "title": "Other token", "_meta": {
+                "codex": {"role": "user_note", "questionId": "token"}
+            }},
+            "verify": {"type": "boolean", "title": "Verify"},
+            "workers": {"type": "integer", "title": "Workers"}
+        }}
+    })).unwrap();
+    apply_observation(
+        &mut conversation,
+        RelayObservation::ElicitationRequested {
+            request: question.clone(),
+        },
+    );
+    let response = ElicitationResponse::Accept {
+        content: BTreeMap::from([
+            (
+                "architecture_note".into(),
+                ElicitationValue::String("Keep one owner.\n支持 Unicode".into()),
+            ),
+            (
+                "features".into(),
+                ElicitationValue::StringArray(vec!["tui".into(), "web".into()]),
+            ),
+            ("ratio".into(), ElicitationValue::Number(1.5)),
+            (
+                "token_note".into(),
+                ElicitationValue::String("private-token".into()),
+            ),
+            ("verify".into(), ElicitationValue::Boolean(true)),
+            ("workers".into(), ElicitationValue::Integer(4)),
+        ]),
+    };
+    question.validate_response(&response).unwrap();
+    let reply = question.reply_text(&response);
+    let resolution = RelayObservation::ElicitationResolved {
+        elicitation_id: question.id.clone(),
+        action: "accept".into(),
+        reply: Some(reply.clone()),
+    };
+    let encoded = serde_json::to_string(&resolution).unwrap();
+    assert!(!encoded.contains("private-token"));
+    apply_observation(&mut conversation, serde_json::from_str(&encoded).unwrap());
+    assert!(matches!(
+        conversation.transcript.last().unwrap().body,
+        TranscriptBody::User { .. }
+    ));
+    assert!(!conversation.transcript.last().unwrap().is_turn_start());
+    apply_observation(
+        &mut conversation,
+        untagged_agent_chunk("I will use one owner."),
+    );
+    append_transcript_state(
+        &mut output,
+        "custom answers and masked secrets between assistant messages",
+        &conversation,
+    );
+
+    let restored =
+        serde_json::from_str::<MaterializedSession>(&serde_json::to_string(&conversation).unwrap())
+            .unwrap();
+    assert_eq!(restored, conversation);
+    assert_eq!(
+        rendered_materialized_transcript(&restored),
+        rendered_materialized_transcript(&conversation)
+    );
+
+    // Harness IDs can repeat after restart; the journal ordinal owns identity.
+    for response in [ElicitationResponse::Decline, ElicitationResponse::Cancel] {
+        apply_observation(
+            &mut conversation,
+            RelayObservation::ElicitationRequested {
+                request: question.clone(),
+            },
+        );
+        apply_observation(
+            &mut conversation,
+            RelayObservation::ElicitationResolved {
+                elicitation_id: question.id.clone(),
+                action: response.action_name().into(),
+                reply: Some(question.reply_text(&response)),
+            },
+        );
+    }
+    apply_observation(
+        &mut conversation,
+        RelayObservation::ElicitationRequested {
+            request: question.clone(),
+        },
+    );
+    apply_observation(
+        &mut conversation,
+        RelayObservation::ElicitationResolved {
+            elicitation_id: question.id,
+            action: "cancel".into(),
+            reply: None,
+        },
+    );
+    append_transcript_state(
+        &mut output,
+        "explicit skip and cancel survive automatic withdrawal",
+        &conversation,
+    );
+
+    let mut reviewer_entries = Vec::new();
+    crate::transcript::apply_runtime_event_to_entries(
+        &mut reviewer_entries,
+        1,
+        Some(100),
+        mj_core::acp::RuntimeEvent::ElicitationResolved {
+            elicitation_id: "review-question".into(),
+            action: "accept".into(),
+            reply: Some(reply),
+        },
+    );
+    writeln!(
+        output,
+        "reviewer reply ({:?}):\n{}",
+        reviewer_entries[0].role, reviewer_entries[0].text
+    )
+    .unwrap();
 
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),

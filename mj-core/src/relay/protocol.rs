@@ -145,7 +145,7 @@ pub enum RelayRequest {
     },
     /// Remove the worker's synchronized GitHub CLI token.
     RemoveGithubToken,
-    /// Resolve one in-flight form without journaling its answer.
+    /// Resolve one in-flight form. Only its rendered, masked reply is journaled.
     RespondElicitation {
         elicitation_id: String,
         response: ElicitationResponse,

@@ -1009,6 +1009,61 @@ fn host_config_file(host: &CacheHost, executor: &impl CommandExecutor) -> Result
     configuration::read_file(host, &directory.join("config.toml"), executor)
 }
 
+/// The local directories mbx uses for its cache and managed targets.
+pub(crate) fn local_storage_paths() -> Vec<PathBuf> {
+    let config_file = dirs::config_dir()
+        .map(|directory| directory.join("mbx/config.toml"))
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let cache_override = std::env::var_os("MBX_CACHE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let target_root_override = std::env::var_os("MBX_TARGET_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let default_cache = dirs::cache_dir().map(|directory| directory.join("mbx"));
+
+    resolve_local_storage_paths(
+        cache_override,
+        target_root_override,
+        config_file.as_deref(),
+        default_cache,
+    )
+}
+
+fn resolve_local_storage_paths(
+    cache_override: Option<PathBuf>,
+    target_root_override: Option<PathBuf>,
+    config_file: Option<&str>,
+    default_cache: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let document = config_file.and_then(|text| toml::from_str::<toml::Value>(text).ok());
+    let configured_cache = document
+        .as_ref()
+        .and_then(|document| document.get("cache_dir"))
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from);
+    let Some(cache) = cache_override.or(configured_cache).or(default_cache) else {
+        return Vec::new();
+    };
+    let configured_target_root = document
+        .as_ref()
+        .and_then(|document| document.get("target"))
+        .and_then(|target| target.get("root"))
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from);
+    let target_root = target_root_override
+        .or(configured_target_root)
+        .map(|root| {
+            if root.is_absolute() {
+                root
+            } else {
+                cache.join(root)
+            }
+        })
+        .unwrap_or_else(|| cache.join("targets"));
+    vec![cache, target_root]
+}
+
 /// The `[target] root` a host configuration sets, when it lies outside the
 /// cache directory and therefore needs its own mount.
 fn relocated_target_root(config_file: &str, directory: &Path) -> Option<PathBuf> {
@@ -1698,6 +1753,54 @@ mod tests {
         assert_eq!(
             relocated_target_root("[target]\nroot = \"/cache/targets\"\n", Path::new("/cache")),
             None
+        );
+    }
+
+    #[test]
+    fn local_storage_paths_follow_mbx_cache_and_target_root_resolution() {
+        let default_cache = PathBuf::from("/home/dev/.cache/mbx");
+        assert_eq!(
+            resolve_local_storage_paths(
+                None,
+                None,
+                Some(
+                    "cache_dir = \"/mnt/optane/mbx-cache\"\n\
+                     [target]\nroot = \"/mnt/optane/mbx-targets\"\n",
+                ),
+                Some(default_cache.clone()),
+            ),
+            vec![
+                PathBuf::from("/mnt/optane/mbx-cache"),
+                PathBuf::from("/mnt/optane/mbx-targets"),
+            ]
+        );
+        assert_eq!(
+            resolve_local_storage_paths(
+                None,
+                None,
+                Some("cache_dir = \"/mnt/optane/mbx-cache\"\n[target]\nroot = \"views\"\n"),
+                Some(default_cache.clone()),
+            ),
+            vec![
+                PathBuf::from("/mnt/optane/mbx-cache"),
+                PathBuf::from("/mnt/optane/mbx-cache/views"),
+            ]
+        );
+        assert_eq!(
+            resolve_local_storage_paths(None, None, None, Some(default_cache.clone())),
+            vec![default_cache.clone(), default_cache.join("targets")]
+        );
+        assert_eq!(
+            resolve_local_storage_paths(
+                Some(PathBuf::from("/env/cache")),
+                Some(PathBuf::from("views")),
+                Some("cache_dir = \"/file/cache\"\n[target]\nroot = \"file-views\"\n"),
+                Some(default_cache),
+            ),
+            vec![
+                PathBuf::from("/env/cache"),
+                PathBuf::from("/env/cache/views")
+            ]
         );
     }
 

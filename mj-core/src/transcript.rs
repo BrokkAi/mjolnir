@@ -27,6 +27,8 @@ pub const TURN_INTERRUPTED_ITEM_PREFIX: &str = "system:turn-interrupted:";
 /// Marks the point where the harness resumed work with no prompt in flight.
 pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
+/// User replies within an existing turn, rather than prompts that start one.
+pub const ELICITATION_REPLY_ITEM_PREFIX: &str = "elicitation-reply:";
 
 /// Where a tool's compact presentation source came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,12 +309,17 @@ impl TranscriptItem {
         self.latest_content_event_ordinal.unwrap_or(self.position)
     }
 
-    /// Whether this item begins a turn: a user message, or the marker for a
+    /// A submitted prompt, excluding replies within an existing turn.
+    pub fn is_user_prompt(&self) -> bool {
+        matches!(self.body, TranscriptBody::User { .. })
+            && !self.stable_id.starts_with(ELICITATION_REPLY_ITEM_PREFIX)
+    }
+
+    /// Whether this item begins a turn: a user prompt, or the marker for a
     /// turn the harness started on its own. The recovery boundary and the
     /// scope of a plan update both key on the newest of these.
     pub fn is_turn_start(&self) -> bool {
-        matches!(self.body, TranscriptBody::User { .. })
-            || self.stable_id.starts_with(HARNESS_TURN_ITEM_PREFIX)
+        self.is_user_prompt() || self.stable_id.starts_with(HARNESS_TURN_ITEM_PREFIX)
     }
 
     pub fn is_nonempty_agent_message(&self) -> bool {

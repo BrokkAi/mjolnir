@@ -130,9 +130,9 @@ mod tests {
                 },
             },
         };
-        assert_eq!(session_message.minimum_protocol(), 35);
-        assert!(!session_message.supported_at(34));
-        assert!(session_message.supported_at(35));
+        assert_eq!(session_message.minimum_protocol(), 36);
+        assert!(!session_message.supported_at(35));
+        assert!(session_message.supported_at(36));
     }
 
     #[test]

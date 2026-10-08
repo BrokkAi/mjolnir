@@ -576,10 +576,12 @@ pub(crate) fn record_runtime_event(
         RuntimeEvent::ElicitationResolved {
             elicitation_id,
             action,
+            reply,
         } => {
             relay.record_observation(RelayObservation::ElicitationResolved {
                 elicitation_id,
                 action,
+                reply,
             })?;
         }
         RuntimeEvent::PromptFinished {

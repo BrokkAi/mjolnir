@@ -136,6 +136,43 @@ impl ElicitationRequest {
                 )
         })
     }
+
+    /// The user's reply for conversation history. Mask secrets here, before
+    /// the runtime event or durable journal can retain them.
+    pub fn reply_text(&self, response: &ElicitationResponse) -> String {
+        let mut lines = vec![
+            self.title.as_ref().unwrap_or(&self.message).clone(),
+            String::new(),
+        ];
+        match response {
+            ElicitationResponse::Accept { content } => {
+                for field in &self.fields {
+                    let Some(value) = content.get(&field.id) else {
+                        continue;
+                    };
+                    let parent = field
+                        .custom_answer_for
+                        .as_ref()
+                        .and_then(|id| self.fields.iter().find(|parent| parent.id == *id));
+                    let title = parent
+                        .filter(|parent| !content.contains_key(&parent.id))
+                        .map_or(&field.title, |parent| &parent.title);
+                    let text = if field.secret || parent.is_some_and(|parent| parent.secret) {
+                        "[hidden]".to_owned()
+                    } else {
+                        field.reply_value_text(value)
+                    };
+                    lines.push(format!("{title}: {text}"));
+                }
+                if lines.len() == 2 {
+                    lines.push("Accepted".to_owned());
+                }
+            }
+            ElicitationResponse::Decline => lines.push("Skipped".to_owned()),
+            ElicitationResponse::Cancel => lines.push("Cancelled".to_owned()),
+        }
+        lines.join("\n")
+    }
 }
 
 /// Whether one answered value satisfies the constraints of the field it
@@ -288,6 +325,31 @@ pub struct ElicitationField {
     pub custom_answer_option: Option<String>,
     #[serde(flatten)]
     pub kind: ElicitationFieldKind,
+}
+
+impl ElicitationField {
+    fn reply_value_text(&self, value: &ElicitationValue) -> String {
+        let option_title = |value: &str| match &self.kind {
+            ElicitationFieldKind::SingleSelect { options, .. }
+            | ElicitationFieldKind::MultiSelect { options, .. } => options
+                .iter()
+                .find(|option| option.value == value)
+                .map_or(value, |option| option.title.as_str())
+                .to_owned(),
+            _ => value.to_owned(),
+        };
+        match value {
+            ElicitationValue::String(value) => option_title(value),
+            ElicitationValue::StringArray(values) => values
+                .iter()
+                .map(|value| option_title(value))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ElicitationValue::Integer(value) => value.to_string(),
+            ElicitationValue::Number(value) => value.to_string(),
+            ElicitationValue::Boolean(value) => if *value { "Yes" } else { "No" }.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

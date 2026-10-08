@@ -8,6 +8,9 @@ pending decisions: 1
 Session: session-1
 1: 1. Read the code
 2. Change it
+2: Plan review
+
+Decision: Implement
 pending decisions: 0
 
 === proposal stays between its conversation (session transcript) ===
@@ -15,3 +18,51 @@ Session: session-1
 1: here is my plan
 2: do the work
 3: starting now
+
+=== custom answers and masked secrets between assistant messages (session transcript) ===
+Session: session-1
+1: here is my plan
+2: do the work
+3: starting now
+5: How should we build this?
+
+Architecture: Keep one owner.
+支持 Unicode
+Features: Terminal, Browser
+Ratio: 1.5
+Access token: [hidden]
+Verify: Yes
+Workers: 4
+6: I will use one owner.
+
+=== explicit skip and cancel survive automatic withdrawal (session transcript) ===
+Session: session-1
+1: here is my plan
+2: do the work
+3: starting now
+5: How should we build this?
+
+Architecture: Keep one owner.
+支持 Unicode
+Features: Terminal, Browser
+Ratio: 1.5
+Access token: [hidden]
+Verify: Yes
+Workers: 4
+6: I will use one owner.
+8: How should we build this?
+
+Skipped
+10: How should we build this?
+
+Cancelled
+reviewer reply (User):
+How should we build this?
+
+Architecture: Keep one owner.
+支持 Unicode
+Features: Terminal, Browser
+Ratio: 1.5
+Access token: [hidden]
+Verify: Yes
+Workers: 4

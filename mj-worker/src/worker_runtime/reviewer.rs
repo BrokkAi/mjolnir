@@ -611,8 +611,7 @@ impl ReviewerRole {
     /// Answers a form the reviewer's harness is waiting on.
     ///
     /// The answer goes straight to the reviewer's ACP runtime, never through
-    /// its command queue: form content is the user's, and the primary's
-    /// answers are kept out of the durable ledger for the same reason.
+    /// its command queue. Only the rendered, masked reply enters the ledger.
     async fn respond_elicitation(
         &mut self,
         elicitation_id: String,

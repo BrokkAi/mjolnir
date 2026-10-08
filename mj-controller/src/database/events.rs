@@ -549,6 +549,16 @@ mod tests {
             "requestedSchema": {"type": "object", "properties": {"directory": {"type": "string"}}, "required": ["directory"]}
         })).unwrap();
         let mut observations = turn();
+        let RelayObservation::CommandQueued {
+            command: RelayCommand::Prompt { prompt },
+            ..
+        } = &mut observations[0]
+        else {
+            unreachable!("turn fixture starts with a prompt")
+        };
+        prompt.push(agent_client_protocol::schema::v1::ContentBlock::from(
+            "Inspect the chosen directory",
+        ));
         observations.splice(
             2..2,
             [
@@ -558,6 +568,14 @@ mod tests {
                 RelayObservation::ElicitationResolved {
                     elicitation_id: request.id.clone(),
                     action: "accept".into(),
+                    reply: Some(request.reply_text(
+                        &mj_core::elicitation::ElicitationResponse::Accept {
+                            content: std::collections::BTreeMap::from([(
+                                "directory".into(),
+                                mj_core::elicitation::ElicitationValue::String("src".into()),
+                            )]),
+                        },
+                    )),
                 },
             ],
         );
@@ -596,6 +614,42 @@ mod tests {
             .unwrap();
         assert!(current.pending_elicitations.is_empty());
         assert!(current.active_turn.is_none());
+        let reply = current
+            .transcript
+            .iter()
+            .find(|item| {
+                item.stable_id
+                    .starts_with(mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX)
+            })
+            .unwrap();
+        assert_eq!(
+            mj_transcript::transcript::transcript_item_text(reply),
+            "Which directory?\n\ndirectory: src"
+        );
+        assert!(!reply.is_turn_start());
+        let turn_start = current
+            .transcript
+            .iter()
+            .find(|item| item.is_turn_start())
+            .unwrap()
+            .position;
+        assert_eq!(
+            mj_core::state::latest_completed_turn_ordinal(&current),
+            Some(turn_start)
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            super::super::materialized::last_materialized_turn_start(&connection, "session-1")
+                .unwrap(),
+            Some(turn_start)
+        );
+        assert_eq!(
+            super::super::materialized::last_materialized_user_message(&connection, "session-1")
+                .unwrap()
+                .unwrap()
+                .0,
+            turn_start
+        );
         assert_eq!(current.last_turn_outcome.unwrap().accepted_ordinal, Some(1));
     }
 

@@ -63,11 +63,13 @@ pub const RELAY_RETRY_ID_RETENTION: usize = 512;
 /// 33 adds durable mailbox events, their leased hook drain/ack requests, and
 /// parent mailbox messages in the sub-agent request queue. 34 carries
 /// structured mailbox bodies; controllers keep the old text representation
-/// when they submit to a protocol-33 worker. 35 adds typed peer-message
-/// senders, which older workers receive as queued turns.
+/// when they submit to a protocol-33 worker.
+/// 35 records rendered elicitation replies in resolution events.
+/// 36 adds typed peer-message senders, which older workers receive as
+/// queued turns.
 pub const RELAY_LEGACY_MAILBOX_PROTOCOL: u32 = 33;
 pub const RELAY_STRUCTURED_MAILBOX_PROTOCOL: u32 = 34;
-pub const RELAY_SESSION_MESSAGE_PROTOCOL: u32 = 35;
+pub const RELAY_SESSION_MESSAGE_PROTOCOL: u32 = 36;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SESSION_MESSAGE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
