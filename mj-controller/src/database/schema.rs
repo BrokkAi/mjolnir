@@ -1352,14 +1352,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     // already failed by a newer daemon; their explicit-column updates preserve
     // the failure value. The compatibility floor stays at 74.
     if version < 76 {
-        connection.execute_batch(
+        let add_column =
+            if super::legacy_schema::table_has_column(connection, "mailbox_outbox", "failure")? {
+                ""
+            } else {
+                "ALTER TABLE mailbox_outbox ADD COLUMN failure TEXT;"
+            };
+        connection.execute_batch(&format!(
             "BEGIN IMMEDIATE;
-             ALTER TABLE mailbox_outbox ADD COLUMN failure TEXT;
+             {add_column}
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (76, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
              PRAGMA user_version = 76;
-             COMMIT;",
-        )?;
+             COMMIT;"
+        ))?;
     }
 
     let recorded: Option<i64> =

@@ -803,7 +803,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        75
+        SCHEMA_VERSION
     );
     for table in [
         "github_watch_cursors",
