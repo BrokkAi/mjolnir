@@ -251,7 +251,11 @@ mod tests {
 
     const TEST_TICK: Duration = Duration::from_millis(5);
     const TEST_STALL: Duration = Duration::from_millis(100);
+    // Bounds waits that loaded test machines can stretch; passing runs
+    // finish in milliseconds.
+    const RECOVERY_DEADLINE: Duration = Duration::from_secs(10);
 
+    // Hard-won: #1263: one serving tick left a 100 ms recovery window that loaded runs missed.
     #[tokio::test]
     async fn diagnostics_report_a_stalled_runtime_before_it_can_run_again() {
         let (tx, rx) = mpsc::channel();
@@ -263,15 +267,26 @@ mod tests {
             move |report| {
                 let operations = mj_core::targets::active_blocking_operations();
                 match report {
-                    Report::Stalled { .. } if !reported_stall => {
+                    Report::Stalled {
+                        runtime_ms,
+                        serving_ms,
+                        ..
+                    } if !reported_stall => {
                         // Other tests execute target commands concurrently.
                         // A contended registry deliberately returns None; wait
                         // for a later nonblocking snapshot that sees our guard.
-                        if operations.as_ref().is_some_and(|operations| {
-                            operations
-                                .iter()
-                                .any(|operation| operation.purpose == "diagnostics-runtime-blocked")
-                        }) {
+                        // Either clock can cross the threshold first, because
+                        // their last ticks are a few milliseconds apart, so
+                        // also wait for a sample in which both are stale.
+                        let threshold = TEST_STALL.as_millis() as u64;
+                        if runtime_ms >= threshold
+                            && serving_ms.is_some_and(|serving_ms| serving_ms >= threshold)
+                            && operations.as_ref().is_some_and(|operations| {
+                                operations.iter().any(|operation| {
+                                    operation.purpose == "diagnostics-runtime-blocked"
+                                })
+                            })
+                        {
                             tx.send((report, operations)).unwrap();
                             reported_stall = true;
                         }
@@ -290,7 +305,7 @@ mod tests {
             mj_core::targets::BlockingOperation::start("diagnostics-runtime-blocked", "ssh");
         // Blocking this current-thread runtime is the fault under test. The
         // report must arrive without letting another async task execute.
-        let (report, operations) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (report, operations) = rx.recv_timeout(RECOVERY_DEADLINE).unwrap();
         assert!(
             matches!(report, Report::Stalled { runtime_ms, serving_ms: Some(serving_ms), .. }
             if runtime_ms >= 100 && serving_ms >= 100)
@@ -302,60 +317,105 @@ mod tests {
                 .any(|operation| operation.purpose == "diagnostics-runtime-blocked")
         );
         drop(blocked);
-        monitor.serving_tick();
-        // Keep the runtime progressing until the observer sees recovery.
-        // A brief sleep followed by another blocking receive can hide that
-        // recovery window from an OS thread on a heavily loaded machine.
-        let (received, rx) = tokio::task::spawn_blocking(move || {
-            let received = rx.recv_timeout(Duration::from_secs(5));
-            (received, rx)
-        })
-        .await
-        .unwrap();
-        let (report, _) = received.unwrap();
-        assert!(matches!(report, Report::Recovered { .. }));
+        // The daemon's serving loop ticks on every pass, so recovery needs the
+        // runtime and the serving loop to be fresh in the same sample. Keep
+        // ticking like the real loop until the observer sees it; one tick
+        // leaves only a 100 ms window, which a loaded machine can miss.
+        let deadline = Instant::now() + RECOVERY_DEADLINE;
+        loop {
+            monitor.serving_tick();
+            match rx.try_recv() {
+                Ok((report, _)) => {
+                    assert!(matches!(report, Report::Recovered { .. }));
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    assert!(Instant::now() < deadline, "no recovery report");
+                    tokio::time::sleep(TEST_TICK).await;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => panic!("reporter stopped"),
+            }
+        }
         drop(monitor);
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_millis(100)),
-            Err(mpsc::RecvTimeoutError::Disconnected)
-        ));
+        // A starved test process can stall and recover again before the
+        // drop; such reports are valid. Only a reporter that never stops fails.
+        loop {
+            match rx.recv_timeout(RECOVERY_DEADLINE) {
+                Ok((report, _)) => assert!(matches!(report, Report::Recovered { .. })),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!("reporter did not stop"),
+            }
+        }
     }
 
+    // Hard-won: #1263: a starved process made the first stall sample show the runtime stalled too.
     #[tokio::test]
     async fn diagnostics_distinguish_a_stuck_serving_loop_from_a_running_runtime() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Report every stalled sample, so a sample taken while the whole test
+        // process was starved (both clocks stale, which is a correct report)
+        // is followed by later ones.
         let monitor = DaemonProgressMonitor::start_reporting(
             TEST_TICK,
             TEST_STALL,
-            Duration::from_secs(1),
+            TEST_TICK,
             move |report| {
-                tx.send(report).unwrap();
+                let _ = tx.send(report);
             },
         )
         .unwrap();
         monitor.serving_tick();
         monitor.phase(ServingPhase::Recovery);
-        let report = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(report, Report::Stalled { runtime_ms, serving_ms: Some(serving_ms), serving_phase: "publish recovery and upgrade results" }
-            if runtime_ms < 100 && serving_ms >= 100)
-        );
-        monitor.serving_tick();
-        let report = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(report, Report::Recovered { .. }));
+        tokio::time::timeout(RECOVERY_DEADLINE, async {
+            loop {
+                match rx.recv().await.unwrap() {
+                    Report::Stalled {
+                        runtime_ms,
+                        serving_ms: Some(serving_ms),
+                        serving_phase,
+                    } if runtime_ms < 100 && serving_ms >= 100 => {
+                        assert_eq!(serving_phase, "publish recovery and upgrade results");
+                        break;
+                    }
+                    Report::Stalled { .. } => {}
+                    Report::Recovered { .. } => panic!("recovered without a serving tick"),
+                }
+            }
+        })
+        .await
+        .expect("no report of a stuck serving loop with a running runtime");
+        // Tick like the daemon's serving loop until the observer sees both
+        // clocks fresh in one sample.
+        tokio::time::timeout(RECOVERY_DEADLINE, async {
+            loop {
+                monitor.serving_tick();
+                tokio::select! {
+                    report = rx.recv() => {
+                        if matches!(report.unwrap(), Report::Recovered { .. }) {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(TEST_TICK) => {}
+                }
+            }
+        })
+        .await
+        .expect("no recovery report");
         monitor.phase(ServingPhase::Shutdown);
         tokio::time::sleep(TEST_STALL * 2).await;
-        assert!(matches!(
-            rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
+        // Shutdown stops observing the serving loop: only the runtime can
+        // still count as stalled.
+        assert!(
+            monitor
+                .progress
+                .stalled(TEST_STALL)
+                .is_none_or(|(_, serving_ms)| serving_ms.is_none())
+        );
         drop(monitor);
-        assert!(rx.recv().await.is_none());
+        tokio::time::timeout(RECOVERY_DEADLINE, async {
+            while rx.recv().await.is_some() {}
+        })
+        .await
+        .expect("reporter did not stop");
     }
 }
