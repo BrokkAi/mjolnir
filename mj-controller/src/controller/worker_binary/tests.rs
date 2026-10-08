@@ -4637,7 +4637,6 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         "list_profiles",
         "spawn",
         "list_agents",
-        "send_input",
         "send_message",
         "wait",
         "close",

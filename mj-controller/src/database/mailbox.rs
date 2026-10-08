@@ -120,6 +120,15 @@ pub(crate) fn pending_mailbox_events(limit: usize) -> Result<Vec<MailboxOutboxEn
         .collect()
 }
 
+pub(crate) fn mailbox_event_exists(event_key: &str) -> Result<bool> {
+    let connection = open_reader(&database_path())?;
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mailbox_outbox WHERE event_key=?1)",
+        [event_key],
+        |row| row.get(0),
+    )?)
+}
+
 /// Recent parent messages addressed to this session's children, including
 /// whether the child's relay has accepted each waking event.
 pub(crate) fn subagent_mailbox_messages(
@@ -196,7 +205,7 @@ pub(crate) fn mark_mailbox_event_accepted(
 }
 
 /// A stopped child cannot receive parent messages and cannot be resumed by
-/// `send_input`. Remove only unaccepted parent-message rows; keep accepted
+/// `send_message`. Remove only unaccepted parent-message rows; keep accepted
 /// delivery history and events addressed to stopped primary sessions.
 pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
     submit_database_write(

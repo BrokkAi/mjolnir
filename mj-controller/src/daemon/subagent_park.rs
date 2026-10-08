@@ -214,7 +214,7 @@ impl RuntimeState {
     /// is already running needs nothing. On failure the child stays parked.
     pub async fn unpark_subagent(self: &Arc<Self>, child_session_id: String) -> Result<()> {
         // A park still finishing would otherwise refuse this as a second
-        // lifecycle operation; waiting for it keeps a `send_input` that raced
+        // lifecycle operation; waiting for it keeps a `send_message` that raced
         // the park from failing.
         self.wait_for_subagent_park(&child_session_id).await;
         let parked = self

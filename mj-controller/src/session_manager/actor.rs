@@ -1087,7 +1087,7 @@ pub(super) async fn run_session_actor(
     }
     // A submission still in the command queue never reached the relay. Say
     // so, instead of dropping its reply, which its caller would have to read
-    // as possibly delivered: a sub-agent's `send_input` resends a prompt only
+    // as possibly delivered: a sub-agent's `send_message` resends a prompt only
     // when it knows the first one was not delivered.
     commands.close();
     while let Ok(command) = commands.try_recv() {

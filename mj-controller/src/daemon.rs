@@ -255,7 +255,7 @@ enum LifecycleKind {
     /// worker stopped, keeping everything else (#1161).
     Park,
     /// A parked sub-agent's worker is being started again for its parent's
-    /// `send_input`.
+    /// `send_message`.
     Unpark,
     Cleanup,
     StartupCleanup,

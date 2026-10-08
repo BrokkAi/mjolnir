@@ -364,7 +364,7 @@ mod tests {
 
     /// Stands in for the target: every command succeeds, and the first one,
     /// which is the park's stop, also sends the child a prompt through its
-    /// actor, the way a parent's `send_input` can race a park.
+    /// actor, the way a parent's `send_message` can race a park.
     #[derive(Default)]
     struct RacingStop {
         purposes: Mutex<Vec<String>>,

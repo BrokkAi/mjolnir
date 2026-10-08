@@ -48,7 +48,7 @@ pub enum SessionState {
     /// worker process tree is stopped so it holds no processes in the
     /// parent's container, while its record, relation, target locator and
     /// worker root (relay journal, native session id) stay. Only a parent's
-    /// `send_input` starts it again. Nothing that connects to, reconnects,
+    /// `send_message` starts it again. Nothing that connects to, reconnects,
     /// recovers or upgrades live sessions acts on it.
     Parked,
     Lost,

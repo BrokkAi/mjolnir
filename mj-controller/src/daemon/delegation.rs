@@ -97,6 +97,7 @@ async fn run(
                                 request.action,
                                 SubagentToolAction::WaitAgents
                                     | SubagentToolAction::SendInput { .. }
+                                    | SubagentToolAction::SendMessage { .. }
                                     | SubagentToolAction::Spawn { .. }
                             ) {
                                 None
@@ -168,7 +169,7 @@ async fn run(
                     observations.remove(&id);
                     retry.remove(&id);
                     // A parked child loses its observer and gets a new one
-                    // when `send_input` starts it again. That observer first
+                    // when `send_message` starts it again. That observer first
                     // reports the turn this loop already settled; forgetting
                     // it here parked the child again under the input that
                     // was starting it. Forget a session only once it is gone.

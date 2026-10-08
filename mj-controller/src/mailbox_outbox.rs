@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::daemon::RuntimeState;
 use crate::session_manager::SessionManagerControl;
 
-const TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR: &str = "This child runs an older mj worker that cannot receive trusted parent messages; use send_input, or wait for the worker to upgrade.";
+const TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR: &str = "This queued parent message reached an older mj worker that cannot receive structured mailbox events; it was not delivered.";
 const PENDING_BATCH: usize = 256;
 const SESSION_CONCURRENCY: usize = 8;
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(15);

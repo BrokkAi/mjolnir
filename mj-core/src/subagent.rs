@@ -195,7 +195,7 @@ pub const WAIT_STATUS_NOTHING_TO_WAIT_FOR: &str = "nothing_to_wait_for";
 /// Identity of one finish already returned to the parent by `wait`.
 ///
 /// Turn spans distinguish repeated finishes of a child resumed with
-/// `send_input`. Terminal failures without a turn span use their state,
+/// `send_message`. Terminal failures without a turn span use their state,
 /// detail, and the last completed turn ordinal. Session metadata such as a
 /// title or updated timestamp does not change the identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +386,9 @@ pub enum SubagentToolAction {
         child_session_id: String,
         message: String,
     },
+    /// Persisted requests from older parent workers still use this action.
+    /// New MCP calls use SendMessage; cached `send_input` calls keep their old
+    /// action and the daemon routes both identically.
     SendMessage {
         child_session_id: String,
         message: String,
@@ -653,19 +656,11 @@ impl SubagentMcpRole {
                 "list_profiles",
                 "spawn",
                 "list_agents",
-                "send_input",
                 "send_message",
                 "wait",
                 "close",
             ],
-            Self::FixedParent => &[
-                "spawn",
-                "list_agents",
-                "send_input",
-                "send_message",
-                "wait",
-                "close",
-            ],
+            Self::FixedParent => &["spawn", "list_agents", "send_message", "wait", "close"],
             Self::Child => &["handback"],
         }
     }
@@ -750,7 +745,7 @@ pub fn bounded_report(text: &str) -> (String, bool) {
     let kept: String = text.chars().take(MAX_HANDBACK_CHARS).collect();
     (
         format!(
-            "{kept}\n[truncated: {} more characters; use send_input to ask the child to write the details to files in its report directory and send you the paths]",
+            "{kept}\n[truncated: {} more characters; use send_message to ask the child to write the details to files in its report directory and send you the paths]",
             total - MAX_HANDBACK_CHARS
         ),
         true,
@@ -1058,7 +1053,7 @@ pub fn in_place_subagents_prompt_context(children: &[InPlaceSubagent]) -> Option
         "Any wait that was in progress during the swap was interrupted; reissue wait without arguments to collect reports from these children.".into(),
     );
     lines.push(
-        "Before resending input, call list_agents and check pending_inputs so you do not send it twice.".into(),
+        "Before resending a message, call list_agents and check pending_messages so you do not send it twice.".into(),
     );
     lines.push(format!("</{IN_PLACE_SUBAGENTS_TAG}>"));
     Some(lines.join("\n"))
@@ -1082,7 +1077,7 @@ pub fn in_place_subagents_notice(children: &[InPlaceSubagent]) -> Option<String>
         })
         .collect::<Vec<_>>();
     Some(format!(
-        "In-place harness swap kept these sub-agents attached: {}. Any wait in progress was interrupted; reissue wait without arguments to collect reports. Check list_agents for pending_inputs before resending input.",
+        "In-place harness swap kept these sub-agents attached: {}. Any wait in progress was interrupted; reissue wait without arguments to collect reports. Check list_agents for pending_messages before resending a message.",
         listed.join(", ")
     ))
 }
@@ -1180,7 +1175,7 @@ pub fn stopped_subagents_prompt_context(stopped: &[StoppedSubagent]) -> Option<S
         .to_owned(),
     );
     lines.push(
-        "A stopped sub-agent no longer exists: wait, send_input, send_message and close cannot reach it."
+        "A stopped sub-agent no longer exists: wait, send_message and close cannot reach it."
             .to_owned(),
     );
     lines.push(format!("</{STOPPED_SUBAGENTS_TAG}>"));
@@ -1337,7 +1332,7 @@ mod tests {
             },
             SubagentToolAction::SendMessage {
                 child_session_id: "child".into(),
-                message: "note".into(),
+                message: "legacy note".into(),
             },
             SubagentToolAction::LegacyInterruptAgent {
                 child_session_id: "child".into(),
@@ -1818,11 +1813,46 @@ mod tests {
                 child_session_id: "child".into()
             }
         );
+        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
+    }
+
+    #[test]
+    fn a_persisted_send_message_request_remains_readable() {
+        let old: SubagentToolRequest = serde_json::from_str(
+            r#"{"request_id":"old-message","created_at_ms":1,"action":{"action":"send_message","params":{"child_session_id":"child","message":"continue"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old.action,
+            SubagentToolAction::SendMessage {
+                child_session_id: "child".into(),
+                message: "continue".into(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(old).unwrap()["action"],
+            serde_json::json!({
+                "action":"send_message",
+                "params":{"child_session_id":"child","message":"continue"}
+            })
+        );
+        let cached_alias: SubagentToolRequest = serde_json::from_str(
+            r#"{"request_id":"cached-input","created_at_ms":2,"action":{"action":"send_input","params":{"child_session_id":"child","message":"continue too"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cached_alias.action,
+            SubagentToolAction::SendInput {
+                child_session_id: "child".into(),
+                message: "continue too".into(),
+            }
+        );
         assert!(
             SubagentMcpRole::Parent
                 .tool_names()
                 .contains(&"send_message")
         );
+        assert!(!SubagentMcpRole::Parent.tool_names().contains(&"send_input"));
         assert!(!SubagentMcpRole::Parent.tool_names().contains(&"interrupt"));
     }
 
@@ -1886,7 +1916,7 @@ mod tests {
         assert!(truncated);
         assert!(cut.starts_with(&exact));
         assert!(cut.contains("[truncated: 25 more characters"), "{cut}");
-        assert!(cut.contains("send_input"), "{cut}");
+        assert!(cut.contains("send_message"), "{cut}");
     }
 
     // Hard-won: 89c54ab1: Timed-out waits were presented as failures instead of a still-running result with an ask-again action.
@@ -1972,12 +2002,12 @@ mod tests {
         assert!(context.contains("wait that was in progress"));
         assert!(context.contains("reissue wait without arguments"));
         assert!(!context.contains("same child ids"));
-        assert!(context.contains("list_agents and check pending_inputs"));
+        assert!(context.contains("list_agents and check pending_messages"));
         let notice = in_place_subagents_notice(&children).unwrap();
         assert!(notice.contains("inspect migration (child_session_id child-running; running)"));
         assert!(notice.contains("review tests (child_session_id child-parked; parked)"));
         assert!(notice.contains("wait in progress was interrupted"));
-        assert!(notice.contains("pending_inputs before resending"));
+        assert!(notice.contains("pending_messages before resending"));
         assert_eq!(in_place_subagents_prompt_context(&[]), None);
         assert_eq!(in_place_subagents_notice(&[]), None);
     }
@@ -2010,7 +2040,7 @@ mod tests {
              - \"Fix the parser\" (child_session_id id-Fix the parser), task: Fix the off-by-one.; had not handed back\n\
              - \"Review the docs\" (child_session_id id-Review the docs); had not handed back\n\
              Their work was not handed back; spawn them again if you still need it.\n\
-             A stopped sub-agent no longer exists: wait, send_input, send_message and close cannot reach it.\n\
+             A stopped sub-agent no longer exists: wait, send_message and close cannot reach it.\n\
              </mj-stopped-subagents>"
         );
         assert_eq!(

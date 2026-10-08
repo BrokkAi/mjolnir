@@ -3355,7 +3355,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
 
 /// #1186: a park can hand back its lease after stopping the worker, before
 /// the actor learns the target is gone. A deferred submit that then cannot
-/// even connect was never sent, so it must reach `send_input` as a definite
+/// even connect was never sent, so it must reach `send_message` as a definite
 /// refusal it can retry, not as a delivery that may have happened.
 // Hard-won: #1186: A command that never connected to the parked worker must be retryable as definitely unsent.
 #[test]

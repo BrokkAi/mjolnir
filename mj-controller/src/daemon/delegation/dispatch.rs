@@ -84,6 +84,9 @@ impl SubagentDispatch {
             let ordered_child = match &entry.request.action {
                 SubagentToolAction::SendInput {
                     child_session_id, ..
+                }
+                | SubagentToolAction::SendMessage {
+                    child_session_id, ..
                 } => Some(child_session_id),
                 SubagentToolAction::Handback { .. } => Some(&id.0),
                 _ => None,
@@ -148,9 +151,7 @@ impl SubagentDispatch {
 fn execution_lane(request: &SubagentToolRequest) -> usize {
     usize::from(matches!(
         request.action,
-        SubagentToolAction::SendMessage { .. }
-            | SubagentToolAction::LegacyInterruptAgent { .. }
-            | SubagentToolAction::CloseAgent { .. }
+        SubagentToolAction::LegacyInterruptAgent { .. } | SubagentToolAction::CloseAgent { .. }
     ))
 }
 
@@ -180,7 +181,7 @@ mod tests {
         }
     }
     #[test]
-    fn orders_child_inputs_without_blocking_other_children_or_messages() {
+    fn orders_child_messages_without_blocking_other_children() {
         let mut queue = SubagentDispatch::default();
         let mut message = input("message", "a", 3);
         message.action = SubagentToolAction::SendMessage {
@@ -199,7 +200,7 @@ mod tests {
         let now = Instant::now() + Duration::from_secs(1);
         let ids =
             |ready: Vec<(Identity, Job)>| ready.into_iter().map(|(id, _)| id.1).collect::<Vec<_>>();
-        assert_eq!(ids(queue.ready(now)), ["first", "other", "message"]);
+        assert_eq!(ids(queue.ready(now)), ["first", "other"]);
         assert!(queue.ready(now).is_empty());
         let first = ("p".into(), "first".into());
         queue.unaccepted(&first);
@@ -209,6 +210,11 @@ mod tests {
         assert_eq!(ids(queue.ready(now)), ["first"]);
         queue.delivered(&first, true);
         assert_eq!(ids(queue.ready(now)), ["second"]);
+        let second = ("p".into(), "second".into());
+        queue.executed(&second, result("second"));
+        assert_eq!(ids(queue.ready(now)), ["second"]);
+        queue.delivered(&second, true);
+        assert_eq!(ids(queue.ready(now)), ["message"]);
     }
     #[test]
     fn a_lost_delivery_acknowledgement_retries_the_result_without_reexecuting() {
@@ -291,16 +297,21 @@ mod tests {
         assert_eq!(first.len(), 32);
         assert!(queue.ready(Instant::now()).is_empty());
         let mut requests = requests;
-        let mut message = input("message", "child-0", 101);
+        let mut message = input("message", "child-100", 101);
         message.action = SubagentToolAction::SendMessage {
-            child_session_id: "child-0".into(),
+            child_session_id: "child-100".into(),
             message: "note".into(),
         };
+        let mut close = input("close", "child-close", 102);
+        close.action = SubagentToolAction::CloseAgent {
+            child_session_id: "child-close".into(),
+        };
         requests.push(message);
+        requests.push(close);
         queue.observe("parent", &requests);
         let control = queue.ready(Instant::now());
         assert_eq!(control.len(), 1);
-        assert_eq!(control[0].0.1, "message");
+        assert_eq!(control[0].0.1, "close");
         queue.executed(&first[0].0, result(&first[0].0.1));
         let next = queue.ready(Instant::now());
         assert_eq!(next.len(), 2);

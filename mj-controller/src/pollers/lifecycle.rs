@@ -98,7 +98,7 @@ pub fn interrupted_lifecycle_cause(session: &SessionRecord) -> Option<String> {
                 .to_owned(),
         ),
         // A parked sub-agent is settled: its worker was stopped on purpose and
-        // it waits for its parent's next `send_input`.
+        // it waits for its parent's next `send_message`.
         SessionState::StartupCleanup
         | SessionState::Checkpointing
         | SessionState::Running

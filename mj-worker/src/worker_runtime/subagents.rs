@@ -1469,7 +1469,7 @@ enabled = false
     }
 
     #[tokio::test]
-    async fn saturated_wait_lane_rejects_before_queueing_and_keeps_send_message_available() {
+    async fn saturated_wait_lane_keeps_send_message_available() {
         let root = tempfile::tempdir().unwrap();
         let endpoint = SubagentEndpoint::open(root.path()).unwrap();
         let mut tasks = tokio::task::JoinSet::new();
@@ -1586,6 +1586,58 @@ enabled = false
         assert_eq!(
             reopened.enqueue(request("request-1")).unwrap(),
             Some(result)
+        );
+
+        let legacy_request = serde_json::json!({
+            "originating_command_id":null,
+            "request_id":"legacy-message",
+            "created_at_ms":1,
+            "action":{"action":"send_message","params":{
+                "child_session_id":"child","message":"continue"
+            }}
+        });
+        let cached_alias = serde_json::json!({
+            "originating_command_id":null,
+            "request_id":"cached-input",
+            "created_at_ms":2,
+            "action":{"action":"send_input","params":{
+                "child_session_id":"child","message":"continue through the cached alias"
+            }}
+        });
+        std::fs::write(
+            directory.path().join(SUBAGENT_QUEUE),
+            serde_json::to_vec(&serde_json::json!({
+                "requests":{
+                    "legacy-message":legacy_request,
+                    "cached-input":cached_alias
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let legacy_queue = SubagentEndpoint::open(directory.path()).unwrap();
+        let requests = legacy_queue.snapshot().0;
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request.request_id == "legacy-message")
+                .unwrap()
+                .action,
+            SubagentToolAction::SendMessage {
+                child_session_id: "child".into(),
+                message: "continue".into(),
+            }
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request.request_id == "cached-input")
+                .unwrap()
+                .action,
+            SubagentToolAction::SendInput {
+                child_session_id: "child".into(),
+                message: "continue through the cached alias".into(),
+            }
         );
     }
 

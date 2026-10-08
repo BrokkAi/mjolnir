@@ -66,21 +66,23 @@ child sessions in the same target and filesystem:
 - `spawn` — start a child; returns `child_session_id` at once, before the child
   has started running.
 - `list_agents` — this parent's children and their status.
-- `send_input` — durably queue follow-up input to one child, including while it
-  starts. The queue receipt is not delivery confirmation; do not resend it.
-  `wait` and `list_agents` show pending input and delivery failures.
+- `send_message` — send follow-up work to one child. With mailboxes enabled and
+  a worker that supports structured events, a running child receives it at its
+  next tool boundary without its turn being cancelled; an idle child wakes and
+  a parked child starts again. Several messages sent while the child is busy
+  arrive together. Otherwise Mjolnir queues a new turn. A mailbox queue
+  receipt is not child delivery confirmation; do not resend it. `wait` and `list_agents` show
+  pending messages and delivery failures, marked `via: mailbox` or `via: turn`.
 - `wait` — call without arguments to watch every child that is not stopped. It
   returns as soon as one has a new report, when nothing is unfinished, or when
   this harness's wait window ends. A wait may end before work is done, and
   another wait is normal. Each finish is
-  reported once; `send_input` can start another turn and produce another
+  reported once; `send_message` can start another turn and produce another
   report. Status `reported` means new reports are in `output`;
   `nothing_to_wait_for` means no new report or unfinished child;
   `still_running` means the wait window ended first. Call `wait` again later to
   collect reports that become ready. A prompt may remind you to call `wait`,
   but does not include child output.
-- `interrupt` — stop only the child's current turn. With no active turn it
-  returns immediately; queued input remains queued.
 - `close` — stop a child and keep its conversation.
 
 Prefer these tools when they are listed; they work where the CLI cannot reach

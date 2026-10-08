@@ -332,7 +332,7 @@ impl Controller {
     /// Refuse to start another child process tree for `parent_session_id`
     /// when it already has the maximum number of live children.
     ///
-    /// `starting` is the child a `send_input` is about to start again from
+    /// `starting` is the child a `send_message` is about to start again from
     /// parked; it is not counted against itself. A spawn passes `None`.
     ///
     /// Every child whose worker may be holding processes in the parent's

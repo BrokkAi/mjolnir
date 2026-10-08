@@ -290,7 +290,7 @@ def main():
         assert idless["status"] == "nothing_to_wait_for", idless
         assert [agent["child_session_id"] for agent in idless["agents"]] == [child], idless
         assert idless["agents"][0]["output"] is None, idless
-        # Submit the next wait while send_input is still starting the parked
+        # Submit the next wait while send_message is still starting the parked
         # child. It must not answer with the old report or return early, and
         # the daemon must not re-park the child under the input. Then replace
         # only this instance's daemon: workers and their accepted input
@@ -298,7 +298,7 @@ def main():
         with concurrent.futures.ThreadPoolExecutor() as pool:
             tool(
                 parent,
-                "send_input",
+                "send_message",
                 {"child_session_id": child, "message": "second turn"},
             )
             waiting = pool.submit(
@@ -320,6 +320,7 @@ def main():
                 "send_message",
                 {"child_session_id": child, "message": "after daemon replacement"},
             )
+            assert message["via"] == "mailbox", message
             assert message["status"] == "queued", (
                 "a child message is queued without cancelling its turn"
             )

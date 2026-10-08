@@ -713,10 +713,19 @@ impl ApiBackend {
         if let Some((child_session_id, kind)) = child_id {
             let (mut value, is_error) = match outcome {
                 Ok(value) => (value, false),
-                Err(error) => (
-                    serde_json::json!({"status":"failed", "error":format!("{error:#}")}),
-                    true,
-                ),
+                Err(error) => {
+                    let via = error
+                        .downcast_ref::<subagent_input::InputDeliveryFailure>()
+                        .map_or("turn", |failure| failure.via);
+                    (
+                        serde_json::json!({
+                            "status":"failed",
+                            "via":via,
+                            "error":format!("{error:#}")
+                        }),
+                        true,
+                    )
+                }
             };
             value["child_session_id"] = child_session_id.clone().into();
             value["request_id"] = request.request_id.clone().into();
@@ -972,85 +981,37 @@ impl ApiBackend {
             SubagentToolAction::SendInput {
                 child_session_id,
                 message,
-            } => {
-                self.require_owned_child(parent_session_id, child_session_id)
-                    .await?;
-                let turn_id = self
-                    .deliver_subagent_input(parent_session_id, child_session_id, message, request)
-                    .await?;
-                blocking("record sub-agent prompt", {
-                    let child_id = child_session_id.clone();
-                    move || crate::database::record_subagent_prompt(&child_id, turn_id)
-                })
-                .await?;
-                Ok(
-                    serde_json::json!({"child_session_id":child_session_id,"turn_id":turn_id,"status":"submitted"}),
-                )
             }
-            SubagentToolAction::SendMessage {
+            | SubagentToolAction::SendMessage {
                 child_session_id,
                 message,
             } => {
-                ensure!(
-                    self.exports.agent_mailboxes_enabled(),
-                    "agent mailboxes are disabled; send_message was not queued"
-                );
                 self.require_owned_child(parent_session_id, child_session_id)
                     .await?;
-                ensure!(
-                    !self.exports.close_is_requested(child_session_id),
-                    "child session is closing; queued message was not delivered"
-                );
-                let record = self
-                    .exports
-                    .session_record(child_session_id)
-                    .context("child session no longer exists")?;
-                subagent_input::ensure_subagent_child_can_receive_work(&record, "message")?;
-                let published_protocol = match self.sessions.session(child_session_id.clone()).await
-                {
-                    Ok(handle) => {
-                        crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())
+                let delivery = self
+                    .deliver_subagent_input(parent_session_id, child_session_id, message, request)
+                    .await?;
+                let via = delivery.via();
+                match delivery {
+                    subagent_input::SubagentInputDelivery::Mailbox => Ok(serde_json::json!({
+                        "child_session_id":child_session_id,
+                        "status":"queued",
+                        "via":via
+                    })),
+                    subagent_input::SubagentInputDelivery::Turn { ordinal } => {
+                        blocking("record sub-agent prompt", {
+                            let child_id = child_session_id.clone();
+                            move || crate::database::record_subagent_prompt(&child_id, ordinal)
+                        })
+                        .await?;
+                        Ok(serde_json::json!({
+                            "child_session_id":child_session_id,
+                            "turn_id":ordinal,
+                            "status":"submitted",
+                            "via":via
+                        }))
                     }
-                    Err(error) => {
-                        tracing::debug!(
-                            child_session_id,
-                            error = %format!("{error:#}"),
-                            "child worker protocol is not published yet; parent message will remain in the durable outbox"
-                        );
-                        None
-                    }
-                };
-                if let Some(reason) =
-                    crate::mailbox_outbox::trusted_parent_message_protocol_error(published_protocol)
-                {
-                    bail!("{reason}");
                 }
-                let event_key = format!("subagent-message-{}", request.request_id);
-                let event = mj_core::mailbox::MailboxEvent {
-                    key: event_key.clone(),
-                    source: "parent".into(),
-                    wake: true,
-                    created_at_ms: request.created_at_ms.max(0) as u64,
-                    body: mj_core::mailbox::MailboxEventBody::ParentMessage {
-                        text: message.clone(),
-                    },
-                };
-                let event_json = serde_json::to_string(&event)?;
-                let target = child_session_id.clone();
-                blocking("enqueue parent message for child", move || {
-                    crate::database::enqueue_mailbox_event(
-                        &event_key,
-                        &target,
-                        &event_json,
-                        true,
-                        true,
-                    )
-                })
-                .await?;
-                Ok(serde_json::json!({
-                    "child_session_id":child_session_id,
-                    "status":"queued"
-                }))
             }
             SubagentToolAction::WaitAgents => {
                 // The budget runs from when the caller made the request, not
@@ -2117,7 +2078,7 @@ fn wait_agent_entry(
 
 /// Say in a `wait` or `list_agents` entry that the child is parked: its turn
 /// ended and its worker is stopped, so it holds no processes, and the next
-/// `send_input` starts it again. Its state is reported as for any finished
+/// `send_message` starts it again. Its state is reported as for any finished
 /// child; only a parked child carries the field.
 fn mark_parked(entry: &mut serde_json::Value, record: Option<&mj_core::state::SessionRecord>) {
     if record.is_some_and(|record| record.state == SessionState::Parked) {

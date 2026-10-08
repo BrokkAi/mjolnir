@@ -1997,7 +1997,7 @@ fn a_wait_entry_bounds_its_output_and_names_the_report_directory() {
     assert_eq!(entry["report_dir"], "/workspace/p/.mj-agents/c1");
     assert_eq!(entry["report_source"], "last_message");
     let output = entry["output"].as_str().unwrap();
-    assert!(output.contains("10 more characters") && output.contains("send_input"));
+    assert!(output.contains("10 more characters") && output.contains("send_message"));
 
     let short = super::wait_agent_entry(
         "c1",
@@ -2018,10 +2018,19 @@ struct ParkingExports {
     records: std::sync::Mutex<BTreeMap<String, SessionRecord>>,
     unparks: std::sync::atomic::AtomicUsize,
     unpark_failure: Option<String>,
+    mailboxes_enabled: bool,
 }
 
 impl ParkingExports {
     fn new(child_state: SessionState, unpark_failure: Option<&str>) -> Arc<Self> {
+        Self::with_mailboxes_enabled(child_state, unpark_failure, false)
+    }
+
+    fn with_mailboxes_enabled(
+        child_state: SessionState,
+        unpark_failure: Option<&str>,
+        mailboxes_enabled: bool,
+    ) -> Arc<Self> {
         let mut child = parent_record("child-1", "helper");
         child.state = child_state;
         let records = [parent_record("parent-1", "parent"), child]
@@ -2032,6 +2041,7 @@ impl ParkingExports {
             records: std::sync::Mutex::new(records),
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
+            mailboxes_enabled,
         })
     }
 
@@ -2054,6 +2064,10 @@ impl ParkingExports {
 }
 
 impl ExportRuntime for ParkingExports {
+    fn agent_mailboxes_enabled(&self) -> bool {
+        self.mailboxes_enabled
+    }
+
     fn startup_status(&self, session_id: String) -> BoxFuture<'_, Result<Option<StartStatus>>> {
         Box::pin(load_startup_status(session_id))
     }
@@ -2361,17 +2375,19 @@ fn reserved_parking_backend(
 }
 
 #[tokio::test]
-async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
-    if !isolated_parked_test("send_message_to_parked_child_unparks_and_delivers_once_on_retry") {
+async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_same_route() {
+    if !isolated_parked_test(
+        "send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_same_route",
+    ) {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let exports = ParkingExports::new(SessionState::Parked, None);
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Parked, None, true);
     let (backend, _) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
     let request = mj_core::subagent::SubagentToolRequest {
         originating_command_id: None,
-        request_id: "message-request".into(),
+        request_id: "first-request".into(),
         created_at_ms: mj_core::clock::epoch_millis(),
         action: mj_core::subagent::SubagentToolAction::SendMessage {
             child_session_id: "child-1".into(),
@@ -2388,6 +2404,10 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
             serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["status"],
             "queued"
         );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["via"],
+            "mailbox"
+        );
     }
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert_eq!(pending.len(), 1, "a request retry inserts one outbox event");
@@ -2403,7 +2423,7 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
             text: "keep going".into()
         }
     );
-    assert_eq!(event.key, "subagent-message-message-request");
+    assert_eq!(event.key, "subagent-message-first-request");
 
     let mut remote = crate::session_manager::spawn_remote_session_manager().unwrap();
     remote
@@ -2462,13 +2482,13 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
     );
     assert_eq!(
         command_id,
-        crate::mailbox_outbox::mailbox_command_id("subagent-message-message-request")
+        crate::mailbox_outbox::mailbox_command_id("subagent-message-first-request")
     );
     assert_eq!(
         command,
         RelayCommand::DeliverMailboxEvent {
             event: mj_core::mailbox::MailboxEvent {
-                key: "subagent-message-message-request".into(),
+                key: "subagent-message-first-request".into(),
                 source: "parent".into(),
                 wake: true,
                 created_at_ms: request.created_at_ms.max(0) as u64,
@@ -2486,9 +2506,13 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
     crate::database::mark_mailbox_event_accepted(&pending[0].event_key, &command_id, 17).unwrap();
 
     let retried = backend
-        .execute_subagent_tool("parent-1".into(), request)
+        .execute_subagent_tool("parent-1".into(), request.clone())
         .await;
     assert!(!retried.is_error, "{}", retried.message);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&retried.message).unwrap()["via"],
+        "mailbox"
+    );
     assert!(
         crate::database::pending_mailbox_events(10)
             .unwrap()
@@ -2500,6 +2524,74 @@ async fn send_message_to_parked_child_unparks_and_delivers_once_on_retry() {
     assert_eq!(
         messages[0].accepted_command_id.as_deref(),
         Some(command_id.as_str())
+    );
+
+    // A daemon retry keeps the durable route even if mailbox settings change.
+    let retry_exports = ParkingExports::with_mailboxes_enabled(SessionState::Parked, None, false);
+    let (retry_backend, mut retry_delivered) = parking_backend(retry_exports, &[], Arc::new(|| {}));
+    let retried = retry_backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(!retried.is_error, "{}", retried.message);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&retried.message).unwrap()["via"],
+        "mailbox"
+    );
+    assert!(retry_delivered.try_recv().is_err());
+    assert_eq!(
+        crate::database::subagent_mailbox_messages("parent-1")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A request recovered from an older parent queue still takes the same
+    // mailbox route, retaining its existing request identity.
+    let legacy: mj_core::subagent::SubagentToolRequest =
+        serde_json::from_value(serde_json::json!({
+            "originating_command_id":null,
+            "request_id":"legacy-message-request",
+            "created_at_ms":mj_core::clock::epoch_millis(),
+            "action":{"action":"send_message","params":{
+                "child_session_id":"child-1","message":"legacy follow-up"
+            }}
+        }))
+        .unwrap();
+    let legacy_answer = backend
+        .execute_subagent_tool("parent-1".into(), legacy)
+        .await;
+    assert!(!legacy_answer.is_error, "{}", legacy_answer.message);
+    let legacy_result: serde_json::Value = serde_json::from_str(&legacy_answer.message).unwrap();
+    assert_eq!(legacy_result["via"], "mailbox");
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].event_key,
+        "subagent-message-legacy-message-request"
+    );
+
+    let cached_alias = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "cached-input-alias".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendInput {
+            child_session_id: "child-1".into(),
+            message: "follow-up from a cached tool list".into(),
+        },
+    };
+    let alias_answer = backend
+        .execute_subagent_tool("parent-1".into(), cached_alias)
+        .await;
+    assert!(!alias_answer.is_error, "{}", alias_answer.message);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&alias_answer.message).unwrap()["via"],
+        "mailbox"
+    );
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert!(
+        pending
+            .iter()
+            .any(|row| row.event_key == "subagent-message-cached-input-alias")
     );
     remote.shutdown.shutdown().await.unwrap();
 }
@@ -2545,14 +2637,14 @@ async fn send_message_refuses_a_stopped_child_without_queueing() {
 }
 
 #[tokio::test]
-async fn send_message_refuses_a_protocol_33_child_without_queueing() {
-    if !isolated_parked_test("send_message_refuses_a_protocol_33_child_without_queueing") {
+async fn send_message_uses_a_turn_for_a_protocol_33_child() {
+    if !isolated_parked_test("send_message_uses_a_turn_for_a_protocol_33_child") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
-    let exports = ParkingExports::new(SessionState::Running, None);
-    let (backend, _) = parking_backend_with_protocol(
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let (backend, mut delivered) = parking_backend_with_protocol(
         exports,
         &[],
         Arc::new(|| {}),
@@ -2564,26 +2656,68 @@ async fn send_message_refuses_a_protocol_33_child_without_queueing() {
         created_at_ms: mj_core::clock::epoch_millis(),
         action: mj_core::subagent::SubagentToolAction::SendMessage {
             child_session_id: "child-1".into(),
-            message: "trusted parent message".into(),
+            message: "continue the task".into(),
         },
     };
 
     let answer = backend
         .execute_subagent_tool("parent-1".into(), request)
         .await;
-    assert!(answer.is_error, "{}", answer.message);
-    assert!(
-        answer.message.contains(
-            "This child runs an older mj worker that cannot receive trusted parent messages; use send_input, or wait for the worker to upgrade."
-        ),
-        "{}",
-        answer.message
+    assert!(!answer.is_error, "{}", answer.message);
+    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(result["status"], "submitted");
+    assert_eq!(result["via"], "turn");
+    assert_eq!(
+        delivered.try_recv().unwrap(),
+        (
+            "subagent-input-message-to-old-worker".into(),
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::Text(TextContent::new("continue the task"))],
+            }
+        )
     );
     assert!(
         crate::database::pending_mailbox_events(10)
             .unwrap()
             .is_empty(),
-        "a refused trusted message must not enter the outbox"
+        "an older worker receives a queued turn instead of a mailbox row"
+    );
+}
+
+#[tokio::test]
+async fn send_message_uses_a_turn_when_mailboxes_are_disabled() {
+    if !isolated_parked_test("send_message_uses_a_turn_when_mailboxes_are_disabled") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, false);
+    let (backend, mut delivered) = parking_backend(exports, &[], Arc::new(|| {}));
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "mailboxes-disabled".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "child-1".into(),
+            message: "continue the task".into(),
+        },
+    };
+
+    let answer = backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(result["status"], "submitted");
+    assert_eq!(result["via"], "turn");
+    assert!(matches!(
+        delivered.try_recv().unwrap().1,
+        RelayCommand::Prompt { .. }
+    ));
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -2649,7 +2783,7 @@ async fn outbox_fails_queued_parent_message_for_protocol_33_and_reports_it() {
         pending,
     )
     .await;
-    let reason = "This child runs an older mj worker that cannot receive trusted parent messages; use send_input, or wait for the worker to upgrade.";
+    let reason = "This queued parent message reached an older mj worker that cannot receive structured mailbox events; it was not delivered.";
     assert!(
         crate::database::pending_mailbox_events(10)
             .unwrap()
@@ -2716,10 +2850,12 @@ async fn outbox_fails_queued_parent_message_for_protocol_33_and_reports_it() {
                 "request_id":"queued-before-worker-version",
                 "created_at_ms":123,
                 "status":"failed",
+                "via":"mailbox",
                 "error":reason
             }),
             "{response}"
         );
+        assert_eq!(child["input_deliveries"], child["message_deliveries"]);
     }
     remote.shutdown.shutdown().await.unwrap();
 }
@@ -2820,8 +2956,8 @@ fn hold_child_start(_backend: &ApiBackend) -> String {
 }
 
 #[tokio::test]
-async fn queued_input_waits_for_initial_prompt_while_message_enqueues() {
-    if !isolated_parked_test("queued_input_waits_for_initial_prompt_while_message_enqueues") {
+async fn queued_input_waits_for_initial_prompt_when_mailboxes_are_disabled() {
+    if !isolated_parked_test("queued_input_waits_for_initial_prompt_when_mailboxes_are_disabled") {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -2844,30 +2980,6 @@ async fn queued_input_waits_for_initial_prompt_while_message_enqueues() {
             .iter()
             .any(|label| label.starts_with("subagent input delivery"))
     );
-    let message = backend.execute_subagent_tool(
-        "parent-1".into(),
-        mj_core::subagent::SubagentToolRequest {
-            originating_command_id: None,
-            request_id: "message-start".into(),
-            created_at_ms: mj_core::clock::epoch_millis(),
-            action: mj_core::subagent::SubagentToolAction::SendMessage {
-                child_session_id: "child-1".into(),
-                message: "message while starting".into(),
-            },
-        },
-    );
-    let answer = tokio::time::timeout(Duration::from_secs(1), message)
-        .await
-        .unwrap();
-    assert!(!answer.is_error, "{}", answer.message);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["status"],
-        "queued"
-    );
-    let queued = crate::database::pending_mailbox_events(10).unwrap();
-    assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].target_session_id, "child-1");
-    assert!(queued[0].unpark);
     assert!(!pending.is_finished());
     let handle = backend.sessions.session("child-1").await.unwrap();
     let turn = submit_prompt(&handle, "initial".into()).await.unwrap();
@@ -2879,6 +2991,8 @@ async fn queued_input_waits_for_initial_prompt_while_message_enqueues() {
         .unwrap()
         .unwrap();
     assert!(!answer.is_error, "{}", answer.message);
+    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(result["via"], "turn");
     assert_eq!(delivered_prompts(&mut delivered), ["initial", "follow-up"]);
 }
 
@@ -3076,7 +3190,8 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
     );
     let mut entry = serde_json::json!({});
     pending.annotate("child", &mut entry);
-    assert_eq!(entry["pending_inputs"], serde_json::json!(["input"]));
+    assert_eq!(entry["pending_messages"], serde_json::json!(["input"]));
+    assert_eq!(entry["pending_inputs"], entry["pending_messages"]);
     snapshot.subagent_requests.clear();
     snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
         request_id: "input".into(), completed_at_ms: 2, is_error: true,
@@ -3087,12 +3202,14 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
         failed.status("child", old_report()),
         (
             "failed".into(),
-            Some("Input input: login refused".into()),
+            Some("Message input: login refused".into()),
             true
         )
     );
     failed.annotate("child", &mut entry);
-    assert_eq!(entry["input_deliveries"][0]["error"], "login refused");
+    assert_eq!(entry["message_deliveries"][0]["error"], "login refused");
+    assert_eq!(entry["message_deliveries"][0]["via"], "turn");
+    assert_eq!(entry["input_deliveries"], entry["message_deliveries"]);
     snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
         request_id: "later".into(), completed_at_ms: 4, is_error: false,
         message: serde_json::json!({"child_session_id":"child","status":"submitted","created_at_ms":3,"turn_id":12}).to_string(),
@@ -3212,28 +3329,35 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
             assert!(!answer.is_error, "{}", answer.message);
             let value: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
             let child = &value["agents"][0];
-            // A pending waking message supersedes an older failed input and
+            // A pending waking input supersedes an older failed input and
             // keeps the parked child active for the queued delivery.
             assert_eq!(child["state"], "running");
             if failed {
-                assert_eq!(child["input_deliveries"][0]["error"], "restart refused");
+                assert_eq!(child["message_deliveries"][0]["error"], "restart refused");
+                assert_eq!(child["message_deliveries"][0]["via"], "turn");
+                assert_eq!(
+                    child["pending_messages"],
+                    serde_json::json!(["pending-message"])
+                );
             } else {
-                assert_eq!(child["pending_inputs"], serde_json::json!(["follow-up"]));
+                assert_eq!(
+                    child["pending_messages"],
+                    serde_json::json!(["follow-up", "pending-message"])
+                );
             }
             assert_eq!(
-                child["pending_messages"],
-                serde_json::json!(["pending-message"])
-            );
-            assert_eq!(
-                child["message_deliveries"],
-                serde_json::json!([{
+                child["message_deliveries"][if failed { 1 } else { 0 }],
+                serde_json::json!({
                     "request_id":"delivered-message",
                     "created_at_ms":2,
                     "status":"delivered",
+                    "via":"mailbox",
                     "command_id":"mailbox-delivered",
                     "accepted_ordinal":12
-                }])
+                })
             );
+            assert_eq!(child["pending_inputs"], child["pending_messages"]);
+            assert_eq!(child["input_deliveries"], child["message_deliveries"]);
             if wait {
                 assert_eq!(
                     value["status"],

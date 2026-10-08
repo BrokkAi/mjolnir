@@ -204,7 +204,7 @@ and its parent has been told, Mjolnir parks it:
 - Mjolnir parks a sub-agent only when nothing is queued for it. A sub-agent
   that Mjolnir reminded to hand back its report is parked after the reminder
   turn ends.
-- When the parent sends it input with `send_input`, Mjolnir starts it again in
+- When the parent sends it a message with `send_message`, Mjolnir starts it again in
   place, waits until its harness has loaded its conversation, and then
   delivers the input. That can take tens of seconds. If the start fails, the
   sub-agent stays parked, and the parent is told what failed so it can try
@@ -214,7 +214,7 @@ and its parent has been told, Mjolnir parks it:
 A session may have at most `max_concurrent` live sub-agents (see
 [Sub-agents configuration](/configuration/#sub-agents-subagents)). A
 sub-agent counts while it holds processes, idle or not; a parked, stopped, or
-failed sub-agent does not. A `spawn`, or a `send_input` that would start a
+failed sub-agent does not. A `spawn`, or a `send_message` that would start a
 parked sub-agent, is refused over the limit. The refusal lists the live
 sub-agents with their state and says that a sub-agent frees its slot when it
 hands back or is closed.

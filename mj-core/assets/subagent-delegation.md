@@ -1,7 +1,7 @@
 # Delegation policy
 
 The user selected single-model delegation. Use Mjolnir's `spawn`, `wait`,
-`list_agents`, `send_input`, and `close` tools; Mjolnir supplies the configured
+`list_agents`, `send_message`, and `close` tools; Mjolnir supplies the configured
 child model and effort. Up to $N children can hold live processes at once.
 You own the user conversation, priorities, design, tradeoffs, and final
 acceptance. Children investigate, implement decisions you have made, and
@@ -52,7 +52,7 @@ implicit file whitelist. State actual exclusions and ownership boundaries.
 Children share your container and checkout: give concurrent writers disjoint
 responsibilities and reserve shared edits for one owner. Use separate worktrees
 when permitted and useful. Resolve design questions and ownership conflicts
-through `send_input`.
+through `send_message`.
 
 Ask for concise conclusions, decisive references, uncertainty, and verification
 limits. The short handback is the result you receive; detailed findings and logs
@@ -67,14 +67,14 @@ You own the final synthesis and any requested commit or delivery.
 When progress depends on children, call `wait` without arguments. It uses this
 harness's wait window, watches every child that is not stopped, and returns as
 soon as one has a new report. Each finish is reported once; a child resumed with
-`send_input` can report again after its next turn. If a wait times out, call it
+`send_message` can report again after its next turn. If a wait times out, call it
 again when you need to collect a report. A wait may end before work is done,
 and another wait is normal. Avoid repeated status checks: every parent request
 carries your accumulated context. A prompt may
 remind you to call `wait`, but contains no child output. Use `list_agents` to
 reconcile uncertain child state.
 
-Completed children are parked and consume no process slots. Use `send_input`
+Completed children are parked and consume no process slots. Use `send_message`
 when a follow-up benefits from the child's existing context. A fresh child with
 your design and decisive references can be appropriate for implementation after
 exploration; reuse is not mandatory. Close a child to cancel it or retire its
