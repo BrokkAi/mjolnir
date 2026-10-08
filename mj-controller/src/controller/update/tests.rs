@@ -158,6 +158,39 @@ fn linux_x64() -> Platform {
     }
 }
 
+fn macos(arch: &'static str) -> Platform {
+    Platform {
+        os_family: "macos",
+        arch,
+        rust_target: format!("{arch}-apple-darwin"),
+    }
+}
+
+#[test]
+fn macos_update_selects_the_running_architecture_even_with_a_universal_asset() {
+    // Releases still carrying a universal archive must not win over the
+    // running architecture's own archive; the universal asset is only a
+    // legacy worker-name fallback, not an update payload.
+    let assets = [
+        asset("brokk-mjolnir-v2.37.0-universal-apple-darwin.tar.gz"),
+        asset("brokk-mjolnir-v2.37.0-x86_64-apple-darwin.tar.gz"),
+        asset("brokk-mjolnir-v2.37.0-aarch64-apple-darwin.tar.gz"),
+    ];
+
+    assert_eq!(
+        select_mj_asset(&assets, &macos("aarch64"))
+            .expect("Apple silicon asset")
+            .name,
+        "brokk-mjolnir-v2.37.0-aarch64-apple-darwin.tar.gz"
+    );
+    assert_eq!(
+        select_mj_asset(&assets, &macos("x86_64"))
+            .expect("Intel asset")
+            .name,
+        "brokk-mjolnir-v2.37.0-x86_64-apple-darwin.tar.gz"
+    );
+}
+
 #[test]
 fn release_newer_than_current_requires_checksum_asset() {
     let release = GitHubRelease {

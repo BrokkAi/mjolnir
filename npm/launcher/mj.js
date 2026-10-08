@@ -9,8 +9,11 @@ import { spawn } from "node:child_process";
 const require = createRequire(import.meta.url);
 
 export function platformPackageName(platform = process.platform, arch = process.arch) {
-  if (platform === "darwin" && (arch === "arm64" || arch === "x64")) {
-    return "@brokkai/mjolnir-darwin-universal";
+  if (platform === "darwin" && arch === "x64") {
+    return "@brokkai/mjolnir-darwin-x64";
+  }
+  if (platform === "darwin" && arch === "arm64") {
+    return "@brokkai/mjolnir-darwin-arm64";
   }
   if (platform === "linux" && arch === "x64") {
     return "@brokkai/mjolnir-linux-x64-gnu";

@@ -461,13 +461,6 @@ fn select_mj_asset(assets: &[ReleaseAsset], platform: &Platform) -> Result<Relea
         platform.rust_target,
         platform_archive_ext(platform)
     );
-    if platform.os_family == "macos"
-        && let Some(asset) = assets.iter().find(|asset| {
-            is_mj_archive(&asset.name) && asset.name.ends_with("-universal-apple-darwin.tar.gz")
-        })
-    {
-        return Ok(asset.clone());
-    }
     assets
         .iter()
         .find(|asset| is_mj_archive(&asset.name) && asset.name.ends_with(&target_suffix))
