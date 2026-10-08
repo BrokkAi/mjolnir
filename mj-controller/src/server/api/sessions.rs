@@ -22,10 +22,11 @@ pub(super) async fn list_sessions(
             .sessions
             .iter()
             .filter(|session| {
-                query
-                    .workspace_id
-                    .as_ref()
-                    .is_none_or(|id| &session.workspace_id == id)
+                (query.all || !session.is_subagent_session)
+                    && query
+                        .workspace_id
+                        .as_ref()
+                        .is_none_or(|id| &session.workspace_id == id)
             })
             .map(ApiSession::from)
             .collect(),

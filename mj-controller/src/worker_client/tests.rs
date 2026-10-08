@@ -1416,3 +1416,60 @@ sys.stdin.read()
     assert_eq!(client.cpu_usage().await.unwrap(), None);
     assert_eq!(client.next_request, before);
 }
+
+// Hard-won: adc0d368: a worker whose harness preparation failed rejected
+// sub-agent polling, so its session could not sync, suspend or close.
+#[cfg(unix)]
+#[tokio::test]
+async fn sub_agent_polling_reads_a_preparation_rejection_as_no_requests() {
+    for (code, accepted) in [
+        (RelayErrorCode::InvalidState, true),
+        (RelayErrorCode::Internal, false),
+    ] {
+        let rejection = serde_json::to_value(RelayResponseEnvelope {
+            request_id: "REQUEST_ID".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            body: RelayResponseBody::Error {
+                error: RelayProtocolError {
+                    code,
+                    message: "harness preparation failed at harness-profile: missing staged \
+                              Claude delegation server"
+                        .into(),
+                    retryable: false,
+                    detail: None,
+                },
+            },
+        })
+        .unwrap()
+        .to_string();
+        let script = format!(
+            r#"
+import json, sys
+rejection = {rejection:?}
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req["request"]["method"]
+    if method == "hello":
+        payload = {{"type": "hello", "data": {{"negotiated": {RELAY_PROTOCOL_VERSION}, "relay_version": "preparation-fixture", "session_id": "{SESSION_ID}"}}}}
+        print(json.dumps({{"request_id": req["request_id"], "protocol_version": {RELAY_PROTOCOL_VERSION}, "result": "ok", "payload": payload}}), flush=True)
+    elif method == "subagent_requests":
+        print(rejection.replace("REQUEST_ID", req["request_id"]), flush=True)
+    else:
+        raise AssertionError(method)
+"#
+        );
+        let spec =
+            CommandSpec::new("python3", ["-c", &script]).purpose("failed preparation fixture");
+        let mut client =
+            RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(5))
+                .await
+                .unwrap();
+        let result = client.subagent_requests().await;
+        if accepted {
+            let (requests, results) = result.unwrap();
+            assert!(requests.is_empty() && results.is_empty());
+        } else {
+            assert!(result.is_err(), "{code:?} must still fail the sync");
+        }
+    }
+}

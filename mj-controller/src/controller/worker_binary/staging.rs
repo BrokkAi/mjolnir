@@ -116,7 +116,7 @@ pub(super) fn configure_kimi_history_mcp(
 pub(super) fn configure_claude_subagent_mcp(
     profile_stage: &Path,
     worker_root: &str,
-    role: mj_core::subagent::SubagentMcpRole,
+    role: Option<mj_core::subagent::SubagentMcpRole>,
     agent_mailboxes_enabled: bool,
 ) -> Result<()> {
     use mj_core::subagent::SUBAGENT_MCP_SERVER;
@@ -133,9 +133,10 @@ pub(super) fn configure_claude_subagent_mcp(
                     path.display()
                 )
             })?;
-        servers.insert(
-            SUBAGENT_MCP_SERVER.into(),
-            serde_json::json!({
+        if let Some(role) = role {
+            servers.insert(
+                SUBAGENT_MCP_SERVER.into(),
+                serde_json::json!({
                 "type":"stdio",
                 // Delegation is part of the session's core toolset, like
                 // Claude's native Agent tool, rather than optional discovery.
@@ -159,8 +160,11 @@ pub(super) fn configure_claude_subagent_mcp(
                     "--agent-mailboxes-enabled",
                     agent_mailboxes_enabled.to_string()
                 ]
-            }),
-        );
+                }),
+            );
+        } else {
+            servers.remove(SUBAGENT_MCP_SERVER);
+        }
         Ok(())
     })?;
 
@@ -185,10 +189,12 @@ pub(super) fn configure_claude_subagent_mcp(
                     path.display()
                 )
             })?;
-        for tool in role.tool_names() {
-            let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
-            if !allow.contains(&rule) {
-                allow.push(rule);
+        if let Some(role) = role {
+            for tool in role.tool_names() {
+                let rule = serde_json::Value::from(format!("mcp__{SUBAGENT_MCP_SERVER}__{tool}"));
+                if !allow.contains(&rule) {
+                    allow.push(rule);
+                }
             }
         }
         Ok(())

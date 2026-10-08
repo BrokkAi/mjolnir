@@ -1136,6 +1136,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::FixedParent,
+            SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
             for policy in [

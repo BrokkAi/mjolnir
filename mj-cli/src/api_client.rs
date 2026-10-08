@@ -16,8 +16,8 @@ use mj_controller::server::api::{
     API_VERSION, API_VERSION_HEADER, ApiSession, CreateWorkspaceRequest, CreateWorkspaceResponse,
     ExportRequest, GithubTokenResponse, MailboxEventRequest, MailboxEventResponse, PromptRequest,
     PromptResponse, PushedBranch, ResumeSessionRequest, ResumeSessionResponse, SessionListResponse,
-    StartSessionRequest, StartSessionResponse, SuspendSessionResponse, TranscriptResponse,
-    WaitRequest, WaitResponse, WorkspaceListResponse,
+    SessionMessageRequest, SessionMessageResponse, StartSessionRequest, StartSessionResponse,
+    SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
 use mj_controller::server::api_token_path;
 use serde::Serialize;
@@ -351,16 +351,30 @@ impl ApiClient {
     pub(crate) async fn sessions_in_workspace(
         &self,
         workspace_id: Option<String>,
+        all: bool,
     ) -> Result<SessionListResponse> {
         let response = self
             .send(
                 self.http
                     .get(self.url("/sessions"))
-                    .query(&mj_controller::server::api::SessionListQuery { workspace_id })
+                    .query(&mj_controller::server::api::SessionListQuery { workspace_id, all })
                     .timeout(REQUEST_TIMEOUT),
             )
             .await?;
         decode(response).await
+    }
+
+    pub(crate) async fn message(
+        &self,
+        session_id: &str,
+        request: &SessionMessageRequest,
+    ) -> Result<SessionMessageResponse> {
+        self.post_json(
+            &format!("/sessions/{session_id}/message"),
+            request,
+            REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn models(
@@ -1125,7 +1139,7 @@ mod tests {
         let (url, seen) = serve(Some("1")).await;
         let client = ApiClient::new(url, "secret-token".to_owned()).unwrap();
 
-        let sessions = client.sessions_in_workspace(None).await.unwrap();
+        let sessions = client.sessions_in_workspace(None, true).await.unwrap();
         assert_eq!(sessions.sessions[0].id, "session-1");
         let session = client
             .session_if_known("session-2")
@@ -1338,7 +1352,7 @@ mod tests {
         let (url, _seen) = serve(None).await;
         let error = ApiClient::new(url, "secret-token".to_owned())
             .unwrap()
-            .sessions_in_workspace(None)
+            .sessions_in_workspace(None, true)
             .await
             .unwrap_err();
         assert!(
@@ -1349,7 +1363,7 @@ mod tests {
         let (url, _seen) = serve(Some("2")).await;
         let error = ApiClient::new(url, "secret-token".to_owned())
             .unwrap()
-            .sessions_in_workspace(None)
+            .sessions_in_workspace(None, true)
             .await
             .unwrap_err();
         assert!(

@@ -174,6 +174,19 @@ pub trait SubagentBackend: Send + Sync {
     /// Submit a prompt, returning its relay acceptance ordinal.
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>>;
 
+    /// Deliver a session message using the daemon's shared authorization and
+    /// mailbox/turn routing operation.
+    fn deliver_message(
+        &self,
+        _sender_session_id: Option<String>,
+        _target_session_id: String,
+        _text: String,
+        _request_id: String,
+        _created_at_ms: i64,
+    ) -> BoxFuture<'_, AnyResult<SessionMessageResponse>> {
+        Box::pin(async { anyhow::bail!("session messaging is unavailable") })
+    }
+
     /// Submit under a producer-owned identity, preserving the receipt on retries.
     fn prompt_with_id(
         &self,

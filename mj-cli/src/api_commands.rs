@@ -226,6 +226,49 @@ pub(crate) struct EventArgs {
     text: String,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct MessageArgs {
+    /// Session id, as `mj sessions` lists it.
+    #[arg(long)]
+    session: String,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+    /// Message text.
+    text: String,
+}
+
+pub(crate) async fn message(args: MessageArgs) -> Result<()> {
+    let sender_session_id = match std::env::var_os("MJ_SESSION_ID") {
+        Some(value) => Some(
+            value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("MJ_SESSION_ID is not valid Unicode"))?,
+        ),
+        None => None,
+    };
+    let request = mj_controller::server::api::SessionMessageRequest {
+        request_id: mj_core::state::new_session_id()?,
+        text: args.text,
+        sender_session_id,
+    };
+    let response = ApiClient::connect()
+        .await?
+        .message(&args.session, &request)
+        .await?;
+    if args.json {
+        return print_json(&response);
+    }
+    match response.turn_id {
+        Some(turn_id) => println!(
+            "message queued for session {} as turn {}",
+            response.session_id, turn_id
+        ),
+        None => println!("message queued for session {}", response.session_id),
+    }
+    Ok(())
+}
+
 pub(crate) async fn event(args: EventArgs) -> Result<()> {
     let key = match args.key {
         Some(key) => key,
@@ -634,6 +677,9 @@ pub(crate) struct SessionsArgs {
     /// Show one session, including how its last turn ended.
     #[arg(long)]
     session: Option<String>,
+    /// Include sub-agents as well as top-level sessions.
+    #[arg(long)]
+    all: bool,
     /// Print the response as JSON instead of text.
     #[arg(long)]
     json: bool,
@@ -1539,7 +1585,7 @@ pub(crate) async fn sessions(
         Some(name) => Some(crate::resolve_store_workspace(Some(&name)).await?),
         None => None,
     };
-    let list = client.sessions_in_workspace(workspace).await?;
+    let list = client.sessions_in_workspace(workspace, args.all).await?;
     if args.json {
         return print_json(&list);
     }

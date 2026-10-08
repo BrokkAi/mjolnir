@@ -241,13 +241,14 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
+mj message --session <id> <text> [--json]
 mj wait --session <id> [--turn <turn-id>] [--timeout <seconds>] [--return-on-input] [--json]
 mj transcript --session <id> [--after-seq <seq>] [--limit <count>]
              [--role <role>]... [--finished-only] [--json]
 mj diff --session <id> [--base <revision>] [--json]
 mj export --session <id> [--kind patch|branch|bundle|file] [--branch <name>]
            [--path <workspace-relative path>] [--out <path>] [--json]
-mj sessions [--session <id>] [--workspace <name>] [--json]
+mj sessions [--session <id>] [--all] [--workspace <name>] [--json]
 mj suspend --session <id> [--acknowledge-unpublished-work] [--json]
 mj destroy --session <id> [--delete-branch] [--json]
 mj resume (--session <id> | --wiki <sessionwiki-id>)
@@ -361,12 +362,21 @@ The terminal dashboard still names its first workspace after the directory it
 was started in. A store from an earlier release that holds sessions made
 without a workspace lists them in a workspace named `default`.
 
+`mj sessions` lists top-level sessions by default. Add `--all` to include
+Mjolnir sub-agents.
+
 These commands run one Mjolnir session as a subagent: `mj new` starts it with a
 first prompt and prints its id, `mj wait` blocks until the turn ends and prints
 the outcome, the elapsed time, the number of tool calls, and the agent's final message,
 and `mj prompt --wait` does both for the next prompt. A prompt comes from the
 positional argument, from `--prompt-file`, or from standard input when the
 argument is `-`.
+
+`mj message --session <id> <text>` sends a message to a top-level session, or
+to one of the caller's own sub-agents when `MJ_SESSION_ID` identifies that
+top-level sender. Messages from sessions show the sender's title and full ID,
+with a reply instruction. When `MJ_SESSION_ID` is not set, the message is
+labelled as coming from the user.
 
 The first line of a wait says how the turn ended in the same words as
 `mj sessions --session <id>`, for example

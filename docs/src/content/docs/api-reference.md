@@ -169,6 +169,11 @@ call this before every run. An unusable name returns **400**.
 GET /api/v1/sessions
 ```
 
+The list includes top-level sessions and sub-agents by default, preserving the
+original API behavior. Pass `?all=false` to list only top-level sessions or
+`?all=true` to request all sessions explicitly. The CLI uses `all=false` by
+default; `mj sessions --all` includes sub-agents.
+
 ```json
 {
   "sessions": [
@@ -505,6 +510,29 @@ For recovery operations, supply an optional `command_id` (also exposed as
 `mj prompt --command-id ID`). Retrying the identical command with the same ID
 returns its original relay acceptance ordinal. Keep the body unchanged; use a
 new ID for a different command. Ordinary clients may omit it.
+
+### Send a session message
+
+```text
+POST /api/v1/sessions/{session_id}/message
+```
+
+```json
+{
+  "request_id": "message-1",
+  "text": "Please check the retry path.",
+  "sender_session_id": "sender-session-1"
+}
+```
+
+`sender_session_id` is optional. The CLI sets it from `MJ_SESSION_ID` when
+present; otherwise the message is from the user. The daemon requires a claimed
+sender to be an existing top-level session. An authenticated local caller may
+claim another top-level session ID. The reply is `202` with `session_id`, `via`
+(`mailbox` or `turn`), and an optional `turn_id`. Message delivery refuses an
+unknown, destroyed, stopped, self, or other session's sub-agent target. A peer
+mailbox message wakes an idle recipient; workers below relay protocol 36
+receive a queued turn with the same sender label and reply instruction.
 
 Typed `/clear` clears the native conversation in the same session and checkout.
 Its acceptance is not completion: observe the `command_ended` event and the
@@ -890,6 +918,7 @@ Preconditions, all answering `409` with the reason:
 | `mj new` | `POST /sessions` |
 | `mj prompt --session <id>` | `POST /sessions/{id}/prompt` |
 | `mj prompt --session <id> --wait` | `POST /sessions/{id}/prompt`, then `POST /sessions/{id}/wait` on the turn it returned |
+| `mj message --session <id> <text>` | `POST /sessions/{id}/message` |
 | `mj wait --session <id>` | `POST /sessions/{id}/wait` |
 | `mj transcript --session <id>` | `GET /sessions/{id}/transcript` |
 | `mj diff --session <id>` | `GET /sessions/{id}/diff` |

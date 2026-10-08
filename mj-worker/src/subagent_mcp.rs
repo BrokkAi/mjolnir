@@ -25,6 +25,14 @@ static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another top-level Mjolnir session or one of your own Mjolnir sub-agents. The recipient sees your full session ID and can reply with send_message.";
+
+static DELEGATION_ONLY_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{DELEGATION_ROUTING} Finished children are parked. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
+    )
+});
+
 /// Legacy shared Codex homes still receive this server over ACP, where its
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
 static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
@@ -313,21 +321,35 @@ fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
     socket: &Path,
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
-    _agent_mailboxes_enabled: bool,
+    agent_mailboxes_enabled: bool,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
     let parent_instructions = match harness {
-        Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
-        _ => SERVER_INSTRUCTIONS.as_str(),
+        Some(HarnessKind::Codex) if agent_mailboxes_enabled => CODEX_SERVER_INSTRUCTIONS.as_str(),
+        Some(HarnessKind::Codex) => DELEGATION_ONLY_INSTRUCTIONS.as_str(),
+        _ if agent_mailboxes_enabled => SERVER_INSTRUCTIONS.as_str(),
+        _ => DELEGATION_ONLY_INSTRUCTIONS.as_str(),
     };
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (
             parent_instructions,
-            tool_definitions_with_mailboxes(harness, true),
+            tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
         ),
         SubagentMcpRole::FixedParent => (
             parent_instructions,
-            fixed_tool_definitions_with_mailboxes(harness, true),
+            fixed_tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
+        ),
+        SubagentMcpRole::MessageOnly => (
+            if agent_mailboxes_enabled {
+                MESSAGE_ONLY_INSTRUCTIONS
+            } else {
+                ""
+            },
+            if agent_mailboxes_enabled {
+                vec![send_message_tool()]
+            } else {
+                Vec::new()
+            },
         ),
         SubagentMcpRole::Child => (CHILD_INSTRUCTIONS.as_str(), child_tool_definitions()),
     };
@@ -340,7 +362,14 @@ fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
-                call_with_mailboxes(&socket, harness, role, params, progress, true)
+                call_with_mailboxes(
+                    &socket,
+                    harness,
+                    role,
+                    params,
+                    progress,
+                    agent_mailboxes_enabled,
+                )
             },
         },
     )
@@ -378,6 +407,13 @@ struct ChildArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SendMessageArgs {
+    session_id: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HandbackArgs {
     message: String,
 }
@@ -403,7 +439,7 @@ fn call_with_mailboxes(
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
-    _agent_mailboxes_enabled: bool,
+    agent_mailboxes_enabled: bool,
 ) -> Result<(Value, bool)> {
     call_with_budget_and_mailboxes(
         socket,
@@ -412,7 +448,7 @@ fn call_with_mailboxes(
         params,
         progress,
         |action| reply_timeout(action, harness),
-        true,
+        agent_mailboxes_enabled,
     )
 }
 
@@ -437,11 +473,14 @@ fn call_with_budget_and_mailboxes(
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
-    _agent_mailboxes_enabled: bool,
+    agent_mailboxes_enabled: bool,
 ) -> Result<(Value, bool)> {
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input" && role != SubagentMcpRole::Child;
-    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
+    let mailbox_tool_enabled = params.name != "send_message" || agent_mailboxes_enabled;
+    if (!role.tool_names().contains(&params.name.as_str()) || !mailbox_tool_enabled)
+        && !legacy_alias
+    {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     if role == SubagentMcpRole::FixedParent
@@ -484,11 +523,13 @@ fn call_with_budget_and_mailboxes(
         }
         "list_agents" => SubagentToolAction::ListAgents,
         "send_message" => {
-            let args: ChildArgs = serde_json::from_value(params.arguments)?;
-            let message = args.message.context("send_message requires message")?;
+            if params.arguments.get("child_session_id").is_some() {
+                bail!("unknown parameter `child_session_id`; use `session_id`");
+            }
+            let args: SendMessageArgs = serde_json::from_value(params.arguments)?;
             SubagentToolAction::SendMessage {
-                child_session_id: args.child_session_id,
-                message,
+                child_session_id: args.session_id,
+                message: args.message,
             }
         }
         "send_input" => {
@@ -611,14 +652,14 @@ fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
 
 fn tool_definitions_with_mailboxes(
     _harness: Option<HarnessKind>,
-    _agent_mailboxes_enabled: bool,
+    agent_mailboxes_enabled: bool,
 ) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     let current = mj_core::subagent::CURRENT_MODEL;
     let model = format!(
         "A model value from list_profiles, or \"{current}\" for this session's own model. Unless profile_id is given, Mjolnir runs the child on the eligible profile that offers this model and has the most quota left (the lower of its 5-hour and weekly remaining)."
     );
-    let definitions = vec![
+    let mut definitions = vec![
         tool(
             "list_profiles",
             "List eligible sub-agent profiles and the models and efforts each offers. Profiles that offer the same models are listed once, as the one with the most quota left.",
@@ -642,11 +683,7 @@ fn tool_definitions_with_mailboxes(
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing.",
             json!({"type":"object","additionalProperties":false}),
         ),
-        tool(
-            "send_message",
-            "Send a message to one child. Mailbox delivery returns after durable storage, not child delivery; queued turn delivery returns once the prompt is accepted. If agent mailboxes are enabled and the child supports structured mailbox events, a running child receives it at the next tool boundary without its turn being cancelled; an idle child wakes, and a parked child is restarted before delivery. Messages sent while a child is busy arrive together at a tool boundary. Otherwise, Mjolnir queues a new turn and delivers messages in order after startup. An idle or parked child starts a turn; a parked child resumes with its conversation intact, which can take tens of seconds. Check pending_messages and message_deliveries in wait or list_agents before retrying; each delivery says whether it used mailbox or turn routing. Do not resend acknowledged messages. If restarting a parked child exceeds the live-child limit or startup fails, wait/list_agents report the delivery failure and the child stays parked. Retry only after checking that result.",
-            json!({"type":"object","properties":{"child_session_id":{"type":"string"},"message":{"type":"string"}},"required":["child_session_id","message"],"additionalProperties":false}),
-        ),
+        send_message_tool(),
         tool(
             "wait",
             &format!(
@@ -661,7 +698,26 @@ fn tool_definitions_with_mailboxes(
             child,
         ),
     ];
+    if !agent_mailboxes_enabled {
+        definitions.retain(|definition| definition["name"] != "send_message");
+    }
     definitions
+}
+
+fn send_message_tool() -> Value {
+    tool(
+        "send_message",
+        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires an enabled mailbox and a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID. Check pending_messages and message_deliveries in wait or list_agents before retrying; do not resend an acknowledged message.",
+        json!({
+            "type":"object",
+            "properties":{
+                "session_id":{"type":"string","description":"Top-level session ID, or the ID of one of your own Mjolnir sub-agents."},
+                "message":{"type":"string"}
+            },
+            "required":["session_id","message"],
+            "additionalProperties":false
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -671,9 +727,9 @@ fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
 
 fn fixed_tool_definitions_with_mailboxes(
     harness: Option<HarnessKind>,
-    _agent_mailboxes_enabled: bool,
+    agent_mailboxes_enabled: bool,
 ) -> Vec<Value> {
-    let mut tools = tool_definitions_with_mailboxes(harness, true);
+    let mut tools = tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled);
     tools.retain(|tool| tool["name"] != "list_profiles");
     let spawn = tools
         .iter_mut()
@@ -686,9 +742,14 @@ fn fixed_tool_definitions_with_mailboxes(
             .remove(key);
     }
     spawn["inputSchema"]["required"] = json!(["task_name", "instructions"]);
-    spawn["description"] = json!(
-        "Start a child in your target and filesystem using the model and effort fixed by the user. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Prefer send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the exact model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted."
-    );
+    spawn["description"] = json!(format!(
+        "Start a child in your target and filesystem using the model and effort fixed by the user. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. {} Mjolnir selects an eligible profile with the most quota supporting the exact model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted.",
+        if agent_mailboxes_enabled {
+            "Use send_message for follow-up work when an idle child's context helps."
+        } else {
+            "Use an independent spawn for follow-up work."
+        }
+    ));
     tools
 }
 
@@ -730,6 +791,7 @@ mod tests {
         for role in [
             SubagentMcpRole::Parent,
             SubagentMcpRole::FixedParent,
+            SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
             for harness in [HarnessKind::Claude, HarnessKind::Codex] {
@@ -779,70 +841,196 @@ mod tests {
                     );
                     assert!(!description.contains(DELEGATION_ROUTING));
                 }
-                if role == SubagentMcpRole::Child {
-                    assert!(!instructions.contains(DELEGATION_ROUTING));
-                    assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
-                } else {
-                    assert!(instructions.contains(DELEGATION_ROUTING));
-                    assert!(
-                        instructions
-                            .contains("Before spawning, give follow-up work through send_message")
-                    );
-                    assert_eq!(
-                        instructions.contains("ALL_TOOLS"),
-                        harness == HarnessKind::Codex
-                    );
-                    let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
-                    let props = &spawn["inputSchema"]["properties"];
-                    assert!(props.get("files").is_none() && props.get("context").is_none());
-                    assert_eq!(
-                        props.get("model").is_some(),
-                        role == SubagentMcpRole::Parent
-                    );
-                    if role == SubagentMcpRole::Parent {
-                        assert!(
-                            props["effort"]["description"]
-                                .as_str()
-                                .unwrap()
-                                .contains("adaptive")
-                        );
-                        assert!(
-                            spawn["description"]
-                                .as_str()
-                                .unwrap()
-                                .contains("all-models")
+                match role {
+                    SubagentMcpRole::Child => {
+                        assert!(!instructions.contains(DELEGATION_ROUTING));
+                        assert!(instructions.contains(mj_core::subagent::HANDBACK_REPORT_RULES));
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .map(|tool| tool["name"].as_str().unwrap())
+                                .collect::<Vec<_>>(),
+                            ["handback"]
                         );
                     }
-                    assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
-                    assert_eq!(
-                        tools
-                            .iter()
-                            .filter(|tool| tool["name"] == "send_message")
-                            .count(),
-                        1
-                    );
-                    assert!(!tools.iter().any(|tool| tool["name"] == "send_input"));
-                    assert!(!tools.iter().any(|t| t["name"] == "interrupt"));
-                    let send_message = tools.iter().find(|t| t["name"] == "send_message").unwrap();
-                    assert_eq!(
-                        send_message["inputSchema"]["required"],
-                        json!(["child_session_id", "message"])
-                    );
-                    assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
-                    let description = send_message["description"].as_str().unwrap();
-                    for behavior in [
-                        "at the next tool boundary",
-                        "without its turn being cancelled",
-                        "an idle child wakes",
-                        "a parked child is restarted",
-                        "arrive together",
-                        "Otherwise, Mjolnir queues a new turn",
-                    ] {
-                        assert!(description.contains(behavior), "{description}");
+                    SubagentMcpRole::MessageOnly => {
+                        assert!(!instructions.contains(DELEGATION_ROUTING));
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .map(|tool| tool["name"].as_str().unwrap())
+                                .collect::<Vec<_>>(),
+                            ["send_message"]
+                        );
+                        let send_message = &tools[0];
+                        assert_eq!(
+                            send_message["inputSchema"]["required"],
+                            json!(["session_id", "message"])
+                        );
+                        assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
+                        let description = send_message["description"].as_str().unwrap();
+                        for behavior in [
+                            "another top-level session",
+                            "stopped (suspended)",
+                            "full session ID",
+                        ] {
+                            assert!(description.contains(behavior), "{description}");
+                        }
+                        assert!(!description.contains("child_session_id"));
+                    }
+                    SubagentMcpRole::Parent | SubagentMcpRole::FixedParent => {
+                        assert!(instructions.contains(DELEGATION_ROUTING));
+                        assert!(
+                            instructions.contains(
+                                "Before spawning, give follow-up work through send_message"
+                            )
+                        );
+                        assert_eq!(
+                            instructions.contains("ALL_TOOLS"),
+                            harness == HarnessKind::Codex
+                        );
+                        let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
+                        let props = &spawn["inputSchema"]["properties"];
+                        assert!(props.get("files").is_none() && props.get("context").is_none());
+                        assert_eq!(
+                            props.get("model").is_some(),
+                            role == SubagentMcpRole::Parent
+                        );
+                        if role == SubagentMcpRole::Parent {
+                            assert!(
+                                props["effort"]["description"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("adaptive")
+                            );
+                            assert!(
+                                spawn["description"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("all-models")
+                            );
+                        }
+                        assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .filter(|tool| tool["name"] == "send_message")
+                                .count(),
+                            1
+                        );
+                        assert!(!tools.iter().any(|tool| tool["name"] == "send_input"));
+                        assert!(!tools.iter().any(|t| t["name"] == "interrupt"));
+                        let send_message =
+                            tools.iter().find(|t| t["name"] == "send_message").unwrap();
+                        assert_eq!(
+                            send_message["inputSchema"]["required"],
+                            json!(["session_id", "message"])
+                        );
+                        assert_eq!(send_message["inputSchema"]["additionalProperties"], false);
+                        let description = send_message["description"].as_str().unwrap();
+                        for behavior in [
+                            "another top-level session",
+                            "stopped (suspended)",
+                            "next tool boundary",
+                            "without turn cancellation",
+                            "idle recipient wakes",
+                            "queues a turn",
+                            "full session ID",
+                        ] {
+                            assert!(description.contains(behavior), "{description}");
+                        }
+                        assert!(!description.contains("child_session_id"));
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn send_message_rejects_the_old_public_target_name() {
+        let error = call_with_budget(
+            Path::new("unused.sock"),
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({
+                "name":"send_message",
+                "arguments":{"child_session_id":"peer","message":"hello"}
+            })),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+            |_| Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "unknown parameter `child_session_id`; use `session_id`"
+        );
+    }
+
+    #[test]
+    fn send_message_disappears_from_every_role_when_mailboxes_are_disabled() {
+        let input = format!(
+            "{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+        );
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::FixedParent] {
+            let output = Arc::new(Mutex::new(Vec::new()));
+            run_with_mailboxes(
+                input.as_bytes(),
+                ContractWriter(output.clone()),
+                Path::new("unused.sock"),
+                Some(HarnessKind::Codex),
+                role,
+                false,
+            )
+            .unwrap();
+            let output = output.lock().unwrap();
+            let replies: Vec<Value> = std::str::from_utf8(&output)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let tools_reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
+            assert!(
+                !tools_reply["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == "send_message")
+            );
+            let initialize_reply = replies.iter().find(|reply| reply["id"] == 1).unwrap();
+            assert!(
+                !initialize_reply["result"]["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("send_message")
+            );
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        run_with_mailboxes(
+            input.as_bytes(),
+            ContractWriter(output.clone()),
+            Path::new("unused.sock"),
+            Some(HarnessKind::Codex),
+            SubagentMcpRole::MessageOnly,
+            false,
+        )
+        .unwrap();
+        let output = output.lock().unwrap();
+        let replies: Vec<Value> = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let tools_reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
+        assert!(
+            tools_reply["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let initialize_reply = replies.iter().find(|reply| reply["id"] == 1).unwrap();
+        assert_eq!(initialize_reply["result"]["instructions"], "");
     }
 
     #[test]
@@ -882,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_mailboxes_still_offer_send_message() {
+    fn disabled_mailboxes_hide_send_message() {
         let input = format!(
             "{}\n{}\n",
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
@@ -908,18 +1096,12 @@ mod tests {
             replies.iter().find(|reply| reply["id"] == 1).unwrap()["result"]["instructions"]
                 .as_str()
                 .unwrap();
-        assert!(instructions.contains("send_message"));
+        assert!(!instructions.contains("send_message"));
         assert!(!instructions.contains("send_input"));
         let tools = replies.iter().find(|reply| reply["id"] == 2).unwrap()["result"]["tools"]
             .as_array()
             .unwrap();
-        assert_eq!(
-            tools
-                .iter()
-                .filter(|tool| tool["name"] == "send_message")
-                .count(),
-            1
-        );
+        assert!(!tools.iter().any(|tool| tool["name"] == "send_message"));
         assert!(!tools.iter().any(|tool| tool["name"] == "send_input"));
         assert!(!tools.iter().any(|tool| tool["name"] == "interrupt"));
     }
