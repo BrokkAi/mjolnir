@@ -447,9 +447,31 @@ impl ApiClient {
     }
 
     pub(crate) async fn prompt(&self, session_id: &str, text: String) -> Result<PromptResponse> {
+        self.prompt_with_id(session_id, text, None).await
+    }
+
+    pub(crate) async fn prompt_with_id(
+        &self,
+        session_id: &str,
+        text: String,
+        command_id: Option<String>,
+    ) -> Result<PromptResponse> {
         self.post_json(
             &format!("/sessions/{session_id}/prompt"),
-            &PromptRequest { text },
+            &PromptRequest { text, command_id },
+            REQUEST_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(crate) async fn clear_queue(
+        &self,
+        session_id: &str,
+        command_id: Option<String>,
+    ) -> Result<PromptResponse> {
+        self.post_json(
+            &format!("/sessions/{session_id}/queued-prompts/clear"),
+            &mj_controller::server::api::ClearQueueRequest { command_id },
             REQUEST_TIMEOUT,
         )
         .await
@@ -1411,5 +1433,54 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_controls_preserve_command_ids_in_http_requests() {
+        use axum::{Json, Router, routing::post};
+        use serde_json::{Value, json};
+        use std::sync::{Arc, Mutex};
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = requests.clone();
+        let handler = move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push(body);
+                (
+                    [(API_VERSION_HEADER, API_VERSION)],
+                    Json(json!({"turn_id": 17})),
+                )
+            }
+        };
+        let app = Router::new()
+            .route("/api/v1/sessions/s1/prompt", post(handler.clone()))
+            .route("/api/v1/sessions/s1/queued-prompts/clear", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = ApiClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            "test".into(),
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let clear = client
+            .prompt_with_id("s1", "/clear".into(), Some("attempt-1-clear".into()))
+            .await
+            .unwrap();
+        let queue = client
+            .clear_queue("s1", Some("attempt-1-queue".into()))
+            .await
+            .unwrap();
+        assert_eq!(clear.turn_id, 17);
+        assert_eq!(queue.turn_id, 17);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![
+                json!({"text":"/clear", "command_id":"attempt-1-clear"}),
+                json!({"command_id":"attempt-1-queue"})
+            ]
+        );
+        server.abort();
     }
 }

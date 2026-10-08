@@ -638,6 +638,7 @@ const SPAWNED_CHILD: &str = "spawned-child-1";
 struct FakeSession {
     session_id: String,
     view: ManagedSessionView,
+    submissions: Arc<Mutex<Vec<(String, mj_core::relay::RelayCommand)>>>,
 }
 
 impl SessionHandleBackend for FakeSession {
@@ -678,9 +679,10 @@ impl SessionHandleBackend for FakeSession {
     }
     fn enqueue_submit(
         &self,
-        _command_id: String,
-        _command: mj_core::relay::RelayCommand,
+        command_id: String,
+        command: mj_core::relay::RelayCommand,
     ) -> BoxFuture<'_, AnyResult<PendingRelaySubmit>> {
+        self.submissions.lock().unwrap().push((command_id, command));
         Box::pin(async { Ok(PendingRelaySubmit::new(Box::pin(async { Ok(1) }))) })
     }
     fn enqueue_sync(&self) -> BoxFuture<'_, AnyResult<PendingRelaySync>> {
@@ -713,6 +715,7 @@ struct FakeBackend {
     turn_states: Mutex<Vec<Option<TurnState>>>,
     prompt_ordinal: u64,
     prompts: Mutex<Vec<(String, String)>>,
+    submissions: Arc<Mutex<Vec<(String, mj_core::relay::RelayCommand)>>>,
     summary: Option<TurnSummary>,
     /// Follow-ups the start handler asked for.
     followups: Mutex<Vec<(String, StartFollowup)>>,
@@ -902,7 +905,13 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, AnyResult<Option<SessionHandle>>> {
         let view = self.live_view.clone();
         Box::pin(async move {
-            Ok(view.map(|view| SessionHandle::new(FakeSession { session_id, view })))
+            Ok(view.map(|view| {
+                SessionHandle::new(FakeSession {
+                    session_id,
+                    view,
+                    submissions: self.submissions.clone(),
+                })
+            }))
         })
     }
     fn prompt(&self, session_id: String, text: String) -> BoxFuture<'_, AnyResult<u64>> {
@@ -5429,4 +5438,95 @@ async fn resolving_a_review_sends_the_controller_action_or_explains_the_refusal(
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recovery_prompt_identity_is_forwarded_to_the_worker() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _, _, _) = api_app(backend.clone(), |snapshot| {
+        snapshot.sessions[0].capabilities.prompt = true;
+    });
+    for (text, command_id) in [
+        ("/clear", "clear-1"),
+        ("/clear", "clear-1"),
+        ("restart attempt", "restart-1"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "text": text, "command_id": command_id
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(json_body(response).await["turn_id"], 1);
+    }
+    let submissions = backend.submissions.lock().unwrap();
+    assert_eq!(
+        submissions
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["clear-1", "clear-1", "restart-1"]
+    );
+    for ((_, command), text) in submissions
+        .iter()
+        .zip(["/clear", "/clear", "restart attempt"])
+    {
+        assert!(
+            matches!(command, mj_core::relay::RelayCommand::Prompt { prompt: actual, .. } if matches!(actual.as_slice(), [agent_client_protocol::schema::v1::ContentBlock::Text(block)] if block.text == text))
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovery_queue_cancellation_uses_the_authenticated_live_worker() {
+    let backend = Arc::new(FakeBackend {
+        live_view: Some(live_view("flash", &["high"])),
+        ..FakeBackend::default()
+    });
+    let (app, _, _, _) = api_app(backend.clone(), |_| {});
+    let response = app
+        .oneshot(
+            bearer(Request::post(
+                "/api/v1/sessions/session-1/queued-prompts/clear",
+            ))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"command_id":"clear-old-queue"}"#))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(json_body(response).await["turn_id"], 1);
+    let submissions = backend.submissions.lock().unwrap();
+    assert_eq!(submissions[0].0, "clear-old-queue");
+    assert!(matches!(
+        submissions[0].1,
+        mj_core::relay::RelayCommand::ClearQueuedPrompts
+    ));
+}
+
+#[test]
+fn old_prompt_requests_remain_wire_compatible_and_recovery_ids_roundtrip() {
+    let old: PromptRequest = serde_json::from_str(r#"{"text":"hello"}"#).unwrap();
+    assert_eq!(old.command_id, None);
+    assert_eq!(
+        serde_json::to_value(old).unwrap(),
+        serde_json::json!({"text":"hello"})
+    );
+    let new: PromptRequest =
+        serde_json::from_str(r#"{"text":"/clear","command_id":"restart-1"}"#).unwrap();
+    assert_eq!(new.command_id.as_deref(), Some("restart-1"));
 }

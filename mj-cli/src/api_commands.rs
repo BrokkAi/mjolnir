@@ -185,6 +185,9 @@ pub(crate) struct NewArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct PromptArgs {
+    /// Stable producer-chosen identity; repeat it after an ambiguous reply.
+    #[arg(long)]
+    command_id: Option<String>,
     /// Session id, as `mj sessions` lists it.
     #[arg(long)]
     session: String,
@@ -1068,12 +1071,41 @@ pub(crate) fn name_suspend_flags(error: anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!(named)
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct ClearQueueArgs {
+    /// Session id, as `mj sessions` lists it.
+    #[arg(long)]
+    session: String,
+    /// Stable producer-chosen identity; repeat it after an ambiguous reply.
+    #[arg(long)]
+    command_id: Option<String>,
+    /// Print the API response as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+pub(crate) async fn clear_queue(args: ClearQueueArgs) -> Result<()> {
+    let result = ApiClient::connect()
+        .await?
+        .clear_queue(&args.session, args.command_id)
+        .await?;
+    if args.json {
+        print_json(&result)
+    } else {
+        println!("queue cancellation {} accepted", result.turn_id);
+        Ok(())
+    }
+}
+
 /// Send a prompt, and with `--wait` block on the turn it became.
 pub(crate) async fn prompt(args: PromptArgs) -> Result<()> {
     let text = read_prompt(args.text.clone(), args.prompt_file.clone())?
         .context("pass the prompt text, --prompt-file, or `-` to read standard input")?;
     let client = ApiClient::connect().await?;
-    let accepted = client.prompt(&args.session, text).await?;
+    let accepted = match args.command_id {
+        Some(id) => client.prompt_with_id(&args.session, text, Some(id)).await?,
+        None => client.prompt(&args.session, text).await?,
+    };
     if !args.wait {
         return match args.json {
             true => print_json(&accepted),

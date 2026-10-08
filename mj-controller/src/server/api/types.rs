@@ -370,6 +370,16 @@ pub struct SubagentListResponse {
 #[serde(deny_unknown_fields)]
 pub struct PromptRequest {
     pub text: String,
+    /// Caller-chosen relay command identity for recovery after a lost reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearQueueRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -70,7 +70,7 @@ pub(super) async fn prompt(
 ) -> Result<(StatusCode, Json<PromptResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
     let action = ControllerAction::Prompt {
-        command_id: None,
+        command_id: request.command_id.clone(),
         session_id: session_id.clone(),
         text: request.text.clone(),
         images: Vec::new(),
@@ -129,7 +129,9 @@ pub(super) async fn prompt(
     if hold.is_some_and(|held| !held.release()) {
         return Err(withdrawn_prompt());
     }
-    let turn_id = backend.prompt(session_id, request.text).await?;
+    let turn_id = backend
+        .prompt_with_id(session_id, request.text, request.command_id)
+        .await?;
     Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
 }
 
@@ -624,4 +626,26 @@ pub(super) async fn send_action(
         Some(rejection) => Err(rejection.into()),
         None => Ok(StatusCode::ACCEPTED),
     }
+}
+
+/// Cancel queued input without interrupting the current turn or releasing files.
+pub(super) async fn clear_queue(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ClearQueueRequest>,
+) -> Result<(StatusCode, Json<PromptResponse>), ApiFailure> {
+    require_session_record(&state.snapshot_rx.borrow(), &session_id)?;
+    let command_id = match request.command_id {
+        Some(id) => id,
+        None => format!("api-clear-queue-{}", mj_core::state::new_session_id()?),
+    };
+    super::super::validate_public_id(&command_id)?;
+    let handle = backend(&state)?
+        .session_handle(session_id)
+        .await?
+        .ok_or_else(|| ApiFailure::conflict("session has no live worker"))?;
+    let turn_id = handle
+        .submit(command_id, mj_core::relay::RelayCommand::ClearQueuedPrompts)
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(PromptResponse { turn_id })))
 }
