@@ -306,9 +306,24 @@ impl RelayClient {
         if !request.supported_at(self.protocol_version) {
             return Ok((Vec::new(), Vec::new()));
         }
-        match self.call(request).await? {
-            RelayResponsePayload::SubagentRequests { requests, results } => Ok((requests, results)),
-            _ => bail!("relay returned an unexpected sub-agent request response"),
+        match self.call(request).await {
+            Ok(RelayResponsePayload::SubagentRequests { requests, results }) => {
+                Ok((requests, results))
+            }
+            Ok(_) => bail!("relay returned an unexpected sub-agent request response"),
+            // The worker refuses this only while its harness preparation is
+            // pending or has failed. The harness and its MCP server are not
+            // running then, so no request can exist. Failing here would make
+            // the session unsyncable, and so impossible to suspend or close;
+            // the preparation failure stays visible in the worker's state.
+            Err(error)
+                if error
+                    .downcast_ref::<RelayRejected>()
+                    .is_some_and(|rejected| rejected.0.code == RelayErrorCode::InvalidState) =>
+            {
+                Ok((Vec::new(), Vec::new()))
+            }
+            Err(error) => Err(error),
         }
     }
 
