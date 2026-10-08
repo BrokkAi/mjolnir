@@ -1563,13 +1563,19 @@ async fn prepare_and_start_harness(
                 .clone();
             let root = root.to_owned();
             let configure_subagents = subagent_role.is_some();
+            let registration_required =
+                subagent_role != Some(mj_core::subagent::SubagentMcpRole::MessageOnly);
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring the Claude profile");
                 }
                 if configure_subagents {
-                    super::subagents::resolve_claude_mcp_paths(&root, &home)?;
+                    super::subagents::resolve_claude_mcp_paths(
+                        &root,
+                        &home,
+                        registration_required,
+                    )?;
                 }
                 super::subagents::configure_claude_mailbox_hook(&root, &home, mailboxes_enabled)?;
                 Ok(true)

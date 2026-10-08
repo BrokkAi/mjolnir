@@ -28,26 +28,44 @@ const CLAUDE_MAILBOX_HOOK_MARKER: &str = "MJOLNIR_MAILBOX_HOOK=1 ";
 /// Finalize the controller's staged registration on the target, where the
 /// worker root is absolute. Claude launches MCP servers from the checkout,
 /// not from the home against which remote staging paths were written.
-pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path) -> Result<()> {
+///
+/// A delegating parent's registration is `required`. The message-only server
+/// is not: a profile staged by an older controller lacks it, and a worker
+/// upgrade replaces the launch configuration without restaging the profile.
+/// Such a session runs without `send_message` until it is restaged, rather
+/// than failing its harness preparation.
+pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path, required: bool) -> Result<()> {
     anyhow::ensure!(
         root.is_absolute(),
         "Claude MCP worker root must be absolute"
     );
     let path = home.join(".claude.json");
-    let body = std::fs::read(&path)
-        .with_context(|| format!("read staged Claude configuration {}", path.display()))?;
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read staged Claude configuration {}", path.display()));
+        }
+    };
     let mut config: serde_json::Value = serde_json::from_slice(&body)
         .with_context(|| format!("parse staged Claude configuration {}", path.display()))?;
-    let server = config
+    let Some(server) = config
         .get_mut("mcpServers")
         .and_then(|servers| servers.get_mut(mj_core::subagent::SUBAGENT_MCP_SERVER))
         .and_then(serde_json::Value::as_object_mut)
-        .with_context(|| {
-            format!(
-                "missing staged Claude delegation server in {}",
-                path.display()
-            )
-        })?;
+    else {
+        anyhow::ensure!(
+            !required,
+            "missing staged Claude delegation server in {}",
+            path.display()
+        );
+        tracing::info!(
+            path = %path.display(),
+            "the staged Claude profile predates the message-only server; send_message is unavailable until the session is restaged"
+        );
+        return Ok(());
+    };
     let args = server
         .get_mut("args")
         .and_then(serde_json::Value::as_array_mut)
@@ -1064,9 +1082,9 @@ print(sys.argv[sys.argv.index('--role') + 1])
             });
             let path = home.join(".claude.json");
             std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
-            resolve_claude_mcp_paths(&root, &home).unwrap();
+            resolve_claude_mcp_paths(&root, &home, true).unwrap();
             let first = std::fs::read(&path).unwrap();
-            resolve_claude_mcp_paths(&root, &home).unwrap();
+            resolve_claude_mcp_paths(&root, &home, true).unwrap();
             assert_eq!(std::fs::read(&path).unwrap(), first);
             let config: serde_json::Value = serde_json::from_slice(&first).unwrap();
             assert_eq!(config["userSetting"], original["userSetting"]);
@@ -1108,13 +1126,30 @@ print(sys.argv[sys.argv.index('--role') + 1])
         }
     }
 
+    // Hard-won: adc0d368: an upgraded worker failed preparation on a profile staged without the message-only server.
+    #[test]
+    fn a_message_only_session_starts_without_a_staged_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("profile");
+        std::fs::create_dir(&home).unwrap();
+        // No profile file at all, then one an older controller staged.
+        resolve_claude_mcp_paths(root.path(), &home, false).unwrap();
+        let path = home.join(".claude.json");
+        let staged = br#"{"mcpServers":{"other":{"command":"x"}}}"#;
+        std::fs::write(&path, staged).unwrap();
+        resolve_claude_mcp_paths(root.path(), &home, false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), staged, "left untouched");
+        // A delegating parent still requires its registration.
+        assert!(resolve_claude_mcp_paths(root.path(), &home, true).is_err());
+    }
+
     #[test]
     fn claude_delegation_reports_invalid_registration_without_rewriting_it() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("profile");
         std::fs::create_dir(&home).unwrap();
         let path = home.join(".claude.json");
-        assert!(resolve_claude_mcp_paths(root.path(), &home).is_err());
+        assert!(resolve_claude_mcp_paths(root.path(), &home, true).is_err());
         assert!(!path.exists());
         for broken in [
             "{",
@@ -1124,7 +1159,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
             r#"{"mcpServers":{"mj-agents":{"args":["--socket",42]}}}"#,
         ] {
             std::fs::write(&path, broken).unwrap();
-            assert!(resolve_claude_mcp_paths(root.path(), &home).is_err());
+            assert!(resolve_claude_mcp_paths(root.path(), &home, true).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
         }
     }
