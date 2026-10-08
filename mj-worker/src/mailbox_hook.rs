@@ -1,6 +1,8 @@
 //! Harness-hook client for draining the worker-owned session mailbox.
 
-use anyhow::{Context, Result, bail};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail};
 use serde_json::json;
 use std::io::Write;
 use std::path::Path;
@@ -68,6 +70,7 @@ fn acknowledge(socket: &Path, lease_id: &str) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn send_request(
     socket: &Path,
     request: mj_core::relay::RelayRequest,
@@ -102,6 +105,19 @@ fn send_request(
         mj_core::relay::RelayResponseBody::Ok { payload } => Ok(payload),
         other => bail!("worker refused mailbox hook request: {other:?}"),
     }
+}
+
+/// Workers run on Unix; the hook command compiles everywhere so the CLI stays
+/// one shape, and says plainly where it cannot run.
+#[cfg(not(unix))]
+fn send_request(
+    socket: &Path,
+    _request: mj_core::relay::RelayRequest,
+) -> Result<mj_core::relay::RelayResponsePayload> {
+    anyhow::bail!(
+        "the mailbox hook socket {} needs a Unix platform",
+        socket.display()
+    )
 }
 
 fn write_stdout(value: &serde_json::Value) -> Result<()> {

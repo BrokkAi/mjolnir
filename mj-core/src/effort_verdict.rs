@@ -309,6 +309,18 @@ mod tests {
     }
 
     #[test]
+    fn questions_json_ships_in_published_package() {
+        // `QUESTIONS` is embedded with `include_str!`, and `cargo package`
+        // verifies the crate builds from the packaged subset, so the file
+        // must be in the `include` list in mj-core/Cargo.toml.
+        const MANIFEST: &str = include_str!("../Cargo.toml");
+        assert!(
+            MANIFEST.contains("src/effort_verdict/questions.json"),
+            "mj-core/Cargo.toml `include` must list src/effort_verdict/questions.json"
+        );
+    }
+
+    #[test]
     fn effort_rungs_map_after_default_removal_ordering_and_ladder_capping() {
         let offered = efforts(&[
             "max", "default", "medium", "low", "xhigh", "high", "minimal",

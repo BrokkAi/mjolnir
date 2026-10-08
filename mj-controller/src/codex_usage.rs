@@ -627,6 +627,10 @@ enum QueryError {
         expected: Option<PathBuf>,
         detail: Option<String>,
     },
+    // `spawn_codex` only reaches the launcher spawn on Unix; other platforms
+    // return `NotInstalled` first, so this stays compiled with the code that
+    // constructs it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Launch(String),
     NotSignedIn,
     UnsupportedAccount,
