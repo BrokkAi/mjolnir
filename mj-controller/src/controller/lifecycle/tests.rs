@@ -1595,10 +1595,14 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
     );
     let arguments = release_arguments(release);
     assert_eq!(arguments[0], "native", "{release:?}");
+    let checkout = checkout.to_string_lossy().into_owned();
+    // `$6` is the root newer mbx cleans with `clean --under`; the paths after
+    // it are the fallback for older mbx. A clone's root is its checkout.
+    assert_eq!(arguments[5], checkout, "the clone is the released root");
     assert_eq!(
-        &arguments[5..],
-        [checkout.to_string_lossy().into_owned()],
-        "the clone is the only workspace released"
+        &arguments[6..],
+        [checkout],
+        "the clone is the only fallback workspace"
     );
     assert!(!controller.state.sessions.contains_key(session_id));
 }
@@ -1765,8 +1769,11 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
             .to_string_lossy()
             .as_ref()
     );
+    // `$6` is the session's own root for `mbx clean --under`; the
+    // repository paths after it are the fallback for older mbx.
+    assert_eq!(arguments[5], format!("/workspace/{session_id}"));
     assert_eq!(
-        &arguments[5..],
+        &arguments[6..],
         [
             format!("/workspace/{session_id}/app"),
             format!("/workspace/{session_id}/lib"),
