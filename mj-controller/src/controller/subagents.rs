@@ -195,7 +195,7 @@ impl Controller {
             &parent.subagents
         {
             ensure!(
-                request.model.as_ref() == Some(model) && &request.effort == effort,
+                fixed_selectors_match(model, effort.as_deref(), &request),
                 "child selectors must match the parent's fixed model and effort"
             );
         }
@@ -568,6 +568,24 @@ fn ensure_parent_may_delegate(parent: &SessionRecord) -> Result<()> {
     Ok(())
 }
 
+/// Whether a child's selectors satisfy a single-model parent's fixed model and
+/// effort. The spawn path resolves a fixed `adaptive` effort to the child's own
+/// effort before registration, so under `adaptive` any resolved effort, or
+/// none, matches; only the unresolved `adaptive` itself does not.
+fn fixed_selectors_match(
+    model: &str,
+    effort: Option<&str>,
+    request: &RegisterSubagentRequest,
+) -> bool {
+    let effort_matches = match effort {
+        Some(mj_core::subagent::ADAPTIVE_EFFORT) => {
+            request.effort.as_deref() != Some(mj_core::subagent::ADAPTIVE_EFFORT)
+        }
+        fixed => request.effort.as_deref() == fixed,
+    };
+    request.model.as_deref() == Some(model) && effort_matches
+}
+
 /// Where a parent's children keep their report directories, before the target
 /// resolves it, and the repository whose `info/exclude` must list it.
 fn subagent_report_root(
@@ -601,6 +619,52 @@ fn subagent_report_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_with(model: Option<&str>, effort: Option<&str>) -> RegisterSubagentRequest {
+        RegisterSubagentRequest {
+            parent_session_id: "parent".into(),
+            task_name: "task".into(),
+            profile_id: "codex".into(),
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            working_directory: PathBuf::new(),
+            initial_prompt: "do the task".into(),
+            request_key: "key".into(),
+            report_root: None,
+        }
+    }
+
+    /// Issue #1271: the spawn path resolves `adaptive` before registration,
+    /// so a fixed `adaptive` parent must accept the resolved child effort.
+    #[test]
+    fn a_fixed_adaptive_parent_accepts_a_resolved_child_effort() {
+        let adaptive = Some(mj_core::subagent::ADAPTIVE_EFFORT);
+        let matches = |model, effort| {
+            fixed_selectors_match("gpt-6-luna", adaptive, &request_with(model, effort))
+        };
+        assert!(matches(Some("gpt-6-luna"), Some("medium")));
+        assert!(matches(Some("gpt-6-luna"), Some("high")));
+        assert!(matches(Some("gpt-6-luna"), None));
+        assert!(!matches(Some("gpt-6-luna"), adaptive));
+        assert!(!matches(Some("other-model"), Some("medium")));
+        assert!(!matches(None, Some("medium")));
+    }
+
+    #[test]
+    fn a_fixed_concrete_effort_still_needs_an_exact_match() {
+        let matches = |fixed, effort| {
+            fixed_selectors_match(
+                "gpt-6-luna",
+                fixed,
+                &request_with(Some("gpt-6-luna"), effort),
+            )
+        };
+        assert!(matches(Some("max"), Some("max")));
+        assert!(!matches(Some("max"), Some("high")));
+        assert!(!matches(Some("max"), None));
+        assert!(matches(None, None));
+        assert!(!matches(None, Some("high")));
+    }
 
     fn run_prepare_script(directory: &Path, exclude_in: Option<&Path>) -> String {
         let argv = prepare_report_dir_argv(
