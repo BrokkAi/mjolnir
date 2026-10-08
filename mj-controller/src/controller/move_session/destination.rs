@@ -291,6 +291,7 @@ impl Controller {
     pub(in crate::controller) fn adopt_prepared_ec2_destination(
         &mut self,
         id: &str,
+        github_token: Option<&str>,
     ) -> Result<Option<targets::CommandPlan>> {
         let Some(mut operation) = crate::database::load_move_operation(id)? else {
             return Ok(None);
@@ -310,7 +311,7 @@ impl Controller {
         let bundle = self
             .move_destination_bundle(id)?
             .context("prepared EC2 Move bundle missing")?;
-        let plan = targets::provision_on_locator_plan(&backend, id, &bundle)?;
+        let plan = targets::provision_on_locator_plan(&backend, id, &bundle, github_token)?;
         let session = self
             .state
             .sessions

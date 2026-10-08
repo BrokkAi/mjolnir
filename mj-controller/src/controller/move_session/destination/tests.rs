@@ -454,7 +454,7 @@ fn destination_adoption_preserves_the_created_instance_and_handoff_identity() {
     controller.state.sessions.get_mut(ID).unwrap().state = SessionState::Provisioning;
     crate::database::save_session(&controller.state.sessions[ID]).unwrap();
     let plan = controller
-        .adopt_prepared_ec2_destination(ID)
+        .adopt_prepared_ec2_destination(ID, None)
         .unwrap()
         .unwrap();
     assert!(plan.commands.iter().all(|command| command.program != "aws"));

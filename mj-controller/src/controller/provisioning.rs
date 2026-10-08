@@ -514,7 +514,7 @@ impl Controller {
         if session.state != SessionState::Provisioning {
             bail!("session {session_id} is not provisioning");
         }
-        if let Some(plan) = self.adopt_prepared_ec2_destination(session_id)? {
+        if let Some(plan) = self.adopt_prepared_ec2_destination(session_id, github_token)? {
             return Ok(plan);
         }
         let preparation = (|| {
@@ -787,6 +787,7 @@ impl Controller {
                         bundle
                             .as_ref()
                             .context("AWS provisioning requires a project bundle")?,
+                        github_token,
                     )
                 } else {
                     Ok(remainder)

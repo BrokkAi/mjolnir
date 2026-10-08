@@ -2371,6 +2371,40 @@ fn aws_plan_tags_instance_and_close_uses_recorded_id() {
 }
 
 #[test]
+fn aws_clone_receives_github_token_on_stdin_only() {
+    let locator = TargetLocator::AwsEc2 {
+        profile: "work".to_owned(),
+        region: "us-east-2".to_owned(),
+        instance_id: "i-0123456789abcdef0".to_owned(),
+        ssh: ssh(),
+        workspace: format!(".local/share/hel/workspaces/{SESSION}"),
+    };
+    let token = "ghs_secret-token";
+    let plan = provision_on_locator_plan(&locator, SESSION, &bundle(), Some(token)).unwrap();
+    let clones = plan
+        .commands
+        .iter()
+        .filter(|command| command.purpose.starts_with("clone "))
+        .collect::<Vec<_>>();
+    assert!(!clones.is_empty());
+    for command in clones {
+        let remote = command.args.last().unwrap();
+        assert!(remote.starts_with("'sh' '-c' 'IFS= read -r GH_TOKEN"));
+        assert!(remote.contains("'credential.helper=' '-c' 'credential.helper=!f()"));
+        assert!(remote.contains("'git' '-c'") && remote.contains("'clone'"));
+        assert!(!format!("{command:?}").contains(token));
+    }
+
+    let plan = provision_on_locator_plan(&locator, SESSION, &bundle(), None).unwrap();
+    assert!(
+        plan.commands
+            .iter()
+            .filter(|command| command.purpose.starts_with("clone "))
+            .all(|command| command.args.last().unwrap().starts_with("'git' 'clone'"))
+    );
+}
+
+#[test]
 fn tilde_workspace_prefix_becomes_home_relative() {
     // Remote commands are single-quoted, so a literal "~" would name a
     // real directory instead of the login home.

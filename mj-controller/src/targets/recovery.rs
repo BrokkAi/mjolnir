@@ -5,6 +5,7 @@ pub fn provision_on_locator_plan(
     locator: &TargetLocator,
     session_id: &str,
     bundle: &ProjectBundleSpec,
+    github_token: Option<&str>,
 ) -> Result<CommandPlan> {
     bundle.validate()?;
     verify_locator(locator, session_id)?;
@@ -21,9 +22,17 @@ pub fn provision_on_locator_plan(
             .stage(ProvisionStage::Cloning),
     ];
     commands.extend(install_git_plan(ExecutionBoundary::Ssh(ssh)).commands);
-    commands.extend(clone_commands(bundle, workspace, |args| {
-        ssh_command_owned(ssh, args)
-    }));
+    commands.extend(clone_commands(
+        bundle,
+        workspace,
+        |args| match github_token {
+            Some(token) if args.get(1).is_some_and(|arg| arg == "clone") => {
+                let (args, input) = clone_with_github_token(args, token);
+                ssh_command_owned(ssh, args).with_sensitive_stdin(input)
+            }
+            _ => ssh_command_owned(ssh, args),
+        },
+    ));
     Ok(CommandPlan {
         description: format!("initialize EC2 session {session_id}"),
         commands,
