@@ -2142,7 +2142,10 @@ impl SetupDialog {
         self.subagent_choices = Some(choices);
     }
 
-    fn save(&mut self) -> DashboardAction {
+    fn save(
+        &mut self,
+        capabilities: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) -> DashboardAction {
         if self.saving {
             return DashboardAction::None;
         }
@@ -2156,18 +2159,37 @@ impl SetupDialog {
                 {
                     return Err(error);
                 }
-                if let Some(choices) = &self.subagent_choices
-                    && let Some(profile) = config.profiles.get(&choices.profile)
-                    && let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } =
+                let original = mj_core::config::with_environment_sources_only(|| {
+                    serde_json::from_str::<Config>(&self.original)
+                })
+                .map_err(|error| error.to_string())?;
+                for (id, profile) in config.enabled_profiles() {
+                    let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } =
                         &profile.subagents
-                    && choices.model.as_deref() == Some(model.as_str())
-                {
+                    else {
+                        continue;
+                    };
+                    let visited = self
+                        .subagent_choices
+                        .as_ref()
+                        .is_some_and(|choices| choices.profile == *id);
+                    if !visited
+                        && original
+                            .profiles
+                            .get(id)
+                            .is_some_and(|old| old.subagents == profile.subagents)
+                        && original.subagent_discovery_inputs(id)
+                            == config.subagent_discovery_inputs(id)
+                    {
+                        continue;
+                    }
                     // A refusal here is about this page's fields, so the
                     // dialog opens the page that holds them.
-                    subagent_page = Some(choices.profile.clone());
-                    match &choices.result {
-                        Some(Ok(options)) => options.validate(&profile.subagents)?,
-                        Some(Err(error)) => return Err(error.clone()),
+                    // Validate every affected policy from the current draft,
+                    // not just the last page's cached model and efforts.
+                    subagent_page = Some(id.to_owned());
+                    match capabilities.options(&config, id, Some(model)) {
+                        Some(options) => options.validate(&profile.subagents)?,
                         None => {
                             return Err(
                                 "Wait for subagent models and efforts to finish loading.".into()
@@ -2515,7 +2537,7 @@ impl DashboardState {
                 );
             if save_shortcut {
                 dialog.sync_review_validation(&review);
-                let action = dialog.save();
+                let action = dialog.save(&self.profile_capabilities);
                 if dialog.saving {
                     dialog.form = RefCell::new(Dialog::default());
                     self.mode = Mode::Setup(dialog);
@@ -2548,7 +2570,7 @@ impl DashboardState {
                     dialog.sync_review_validation(&review);
                     dialog.review_editor = None;
                     dialog.form = RefCell::new(Dialog::default());
-                    action = dialog.save();
+                    action = dialog.save(&self.profile_capabilities);
                     if !dialog.saving {
                         review.save_error = dialog.notice.clone();
                         dialog.review_editor = Some(review);
@@ -2807,7 +2829,7 @@ impl DashboardState {
                 }
             }
             Some(Interaction::Activate(Save)) if dialog.editor.is_none() => {
-                action = dialog.save();
+                action = dialog.save(&self.profile_capabilities);
             }
             Some(Interaction::Activate(control @ (DetectProfiles | DetectRuntimes)))
                 if !dialog.discovering =>
