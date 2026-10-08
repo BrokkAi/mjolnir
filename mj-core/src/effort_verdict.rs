@@ -241,13 +241,26 @@ pub fn map_rung_to_offered(
         return None;
     }
     if choices.iter().all(|value| KNOWN_EFFORTS.contains(value)) {
-        choices.sort_by_key(|value| {
+        // Vendor names on the standard scale: take the offered effort whose
+        // rank is nearest the rung's, and the cheaper one on a tie, so a
+        // model offering only `high` and `max` starts at `high` for `xhigh`.
+        let rank = |value: &str| {
             KNOWN_EFFORTS
                 .iter()
-                .position(|known| known == value)
-                .expect("all effort names were checked as known")
-        });
+                .position(|known| *known == value)
+                .expect("all effort names were checked as known") as i64
+        };
+        let target = rank(rung);
+        return choices
+            .iter()
+            .min_by_key(|value| {
+                let distance = rank(value) - target;
+                (distance.abs(), distance)
+            })
+            .map(|value| (*value).to_owned());
     }
+    // Unknown names: trust the advertised order as ascending, keep the top
+    // four, and map the ladder onto them by position.
     if choices.len() > RUNGS.len() {
         choices.drain(..choices.len() - RUNGS.len());
     }
@@ -308,12 +321,17 @@ mod tests {
         let two = efforts(&["high", "low"]);
         assert_eq!(
             RUNGS.map(|rung| map_rung_to_offered(&two, rung).unwrap()),
-            ["low", "low", "high", "high"]
+            ["low", "high", "high", "high"]
         );
         let three = efforts(&["high", "low", "medium"]);
         assert_eq!(
             RUNGS.map(|rung| map_rung_to_offered(&three, rung).unwrap()),
-            ["low", "medium", "medium", "high"]
+            ["medium", "high", "high", "high"]
+        );
+        let deepseek = efforts(&["high", "max"]);
+        assert_eq!(
+            RUNGS.map(|rung| map_rung_to_offered(&deepseek, rung).unwrap()),
+            ["high", "high", "high", "max"]
         );
 
         let unknown = efforts(&["provider-top", "default", "provider-bottom"]);

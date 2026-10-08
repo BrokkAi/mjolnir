@@ -1426,6 +1426,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(adaptive.effort.as_deref(), Some("medium"));
+        assert_eq!(adaptive.effort.as_deref(), Some("high"));
     }
 }
