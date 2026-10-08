@@ -46,24 +46,15 @@ pub(crate) struct CapacityTableRow {
     targets: Line<'static>,
     cpu: Line<'static>,
     memory: Line<'static>,
-    /// The Disks cell. Its first line is the button that expands or collapses
-    /// the row; an expanded row adds one line per filesystem.
-    disks: Text<'static>,
+    /// The one-line Disks button, which opens filesystem details in a popup.
+    disks: Line<'static>,
     staleness: Option<String>,
 }
 
 impl CapacityTableRow {
-    fn height(&self) -> u16 {
-        u16::try_from(self.disks.lines.len().max(1)).unwrap_or(u16::MAX)
-    }
-
-    /// Width of the Disks button, the cell's first line. Zero when the row
-    /// has no storage reading and so nothing to expand.
+    /// Width of the Disks button. Zero when the row has no storage reading.
     fn disks_button_width(&self) -> u16 {
-        self.disks
-            .lines
-            .first()
-            .map_or(0, |line| u16::try_from(line.width()).unwrap_or(u16::MAX))
+        u16::try_from(self.disks.width()).unwrap_or(u16::MAX)
     }
 }
 
@@ -82,11 +73,7 @@ pub(crate) fn capacity_table_rows(
                 targets: capacity_target_labels(&detail.target.target_ids, dashboard),
                 cpu,
                 memory,
-                disks: capacity_disks_cell(
-                    dashboard,
-                    detail,
-                    dashboard.expanded_disks.contains(&detail.target.id),
-                ),
+                disks: capacity_disks_cell(dashboard, detail),
                 staleness,
             }
         })
@@ -149,15 +136,10 @@ fn capacity_cpu_and_memory(detail: &CapacityDetail, stale: bool) -> (Line<'stati
 /// The Disks cell of one row. Free space comes from the daemon's storage
 /// owner, the same verdict that refuses writes and holds recovery back.
 ///
-/// Collapsed, the cell is one line: `Disks ▾` while every filesystem is fine,
-/// or the filesystem in the worst condition, as `/srv low ▾`. Free space on a
-/// filesystem that is fine answers no question, so it is not listed until
-/// the row is expanded.
-fn capacity_disks_cell(
-    dashboard: &DashboardState,
-    detail: &CapacityDetail,
-    expanded: bool,
-) -> Text<'static> {
+/// The cell is one line: `Disks ▾` while every filesystem is fine, or the
+/// filesystem in the worst condition, as `/srv low ▾`. Details are in the
+/// anchored dropdown.
+fn capacity_disks_cell(dashboard: &DashboardState, detail: &CapacityDetail) -> Line<'static> {
     use mj_core::targets::storage::StorageCondition;
     let fleet = detail.target.kind == DeploymentCapacityKind::AwsFleet;
     let filesystems = dashboard
@@ -175,19 +157,9 @@ fn capacity_disks_cell(
         })
         .collect::<Vec<_>>();
     if filesystems.is_empty() {
-        return Text::default();
+        return Line::default();
     }
-    let style = |condition| match condition {
-        StorageCondition::Full => Style::default().fg(theme::palette().error),
-        StorageCondition::Low => Style::default().fg(theme::palette().warning),
-        StorageCondition::Ok => Style::default(),
-    };
-    let flag = |condition| match condition {
-        StorageCondition::Full => " full",
-        StorageCondition::Low => " low",
-        StorageCondition::Ok => "",
-    };
-    let mark = if expanded {
+    let mark = if dashboard.capacity_disks_menu_open(&detail.target.id) {
         theme::glyphs().dropup
     } else {
         theme::glyphs().dropdown
@@ -201,49 +173,70 @@ fn capacity_disks_cell(
                 std::cmp::Reverse(filesystem.space.available_bytes),
             )
         });
-    let summary = match worst {
+    match worst {
         Some((place, filesystem)) => Line::styled(
-            format!("{place}{} {mark}", flag(filesystem.condition)),
-            style(filesystem.condition),
+            format!(
+                "{place}{} {mark}",
+                storage_condition_flag(filesystem.condition)
+            ),
+            storage_condition_style(filesystem.condition),
         ),
         None => Line::raw(format!("Disks {mark}")),
-    };
-    let mut lines = vec![summary];
-    if expanded {
-        lines.extend(filesystems.iter().map(|(place, filesystem)| {
-            Line::styled(
-                format!(
-                    "  {place} {} free of {}{}",
-                    format_resource_bytes(filesystem.space.available_bytes),
-                    format_resource_bytes(filesystem.space.total_bytes),
-                    flag(filesystem.condition)
-                ),
-                style(filesystem.condition),
-            )
-        }));
     }
-    Text::from(lines)
 }
 
-/// Lines the Targets table's rows take: one per row, and an expanded row
-/// adds one per filesystem it lists.
-pub(crate) fn capacity_table_lines(dashboard: &DashboardState) -> usize {
+fn storage_condition_style(condition: mj_core::targets::storage::StorageCondition) -> Style {
+    use mj_core::targets::storage::StorageCondition;
+    match condition {
+        StorageCondition::Full => Style::default().fg(theme::palette().error),
+        StorageCondition::Low => Style::default().fg(theme::palette().warning),
+        StorageCondition::Ok => Style::default(),
+    }
+}
+
+fn storage_condition_flag(condition: mj_core::targets::storage::StorageCondition) -> &'static str {
+    use mj_core::targets::storage::StorageCondition;
+    match condition {
+        StorageCondition::Full => " full",
+        StorageCondition::Low => " low",
+        StorageCondition::Ok => "",
+    }
+}
+
+/// Filesystem details for the dropdown, styled like the former expanded rows.
+pub(crate) fn capacity_disks_menu_lines(
+    dashboard: &DashboardState,
+    detail: &CapacityDetail,
+) -> Vec<Line<'static>> {
+    let fleet = detail.target.kind == DeploymentCapacityKind::AwsFleet;
     dashboard
-        .capacity_details
-        .values()
-        .map(|detail| {
-            if dashboard.expanded_disks.contains(&detail.target.id) {
-                let listed = dashboard
-                    .capacity_storage(detail)
-                    .iter()
-                    .map(|view| view.filesystems.len())
-                    .sum::<usize>();
-                1 + listed
-            } else {
-                1
-            }
+        .capacity_storage(detail)
+        .into_iter()
+        .flat_map(|view| {
+            view.filesystems.iter().map(move |filesystem| {
+                let place = if fleet {
+                    format!("{} {}", view.host, filesystem.space.mount)
+                } else {
+                    filesystem.space.mount.clone()
+                };
+                Line::styled(
+                    format!(
+                        "{place} {} free of {}{}",
+                        format_resource_bytes(filesystem.space.available_bytes),
+                        format_resource_bytes(filesystem.space.total_bytes),
+                        storage_condition_flag(filesystem.condition)
+                    ),
+                    storage_condition_style(filesystem.condition),
+                )
+            })
         })
-        .sum()
+        .collect()
+}
+
+/// The Targets table always has one line per row; filesystem details are
+/// rendered in a dropdown above the table.
+pub(crate) fn capacity_table_lines(dashboard: &DashboardState) -> usize {
+    dashboard.capacity_details.len()
 }
 
 /// The Disks column has no heading: its cell already says `Disks ▾`, or
@@ -356,16 +349,7 @@ pub(crate) fn render_capacity(
             dashboard.pane_maximize_enabled(SupportPane::Targets),
         ))
     });
-    // A row taller than the pane would not be drawn at all, so an expanded
-    // row is cut to the pane's height instead.
-    let viewport_lines = area
-        .height
-        .saturating_sub(SESSION_TABLE_CHROME_HEIGHT)
-        .max(1);
-    let row_heights = rows
-        .iter()
-        .map(|row| row.height().min(viewport_lines))
-        .collect::<Vec<_>>();
+    let row_heights = vec![1; rows.len()];
     let disks_buttons = rows
         .iter()
         .map(CapacityTableRow::disks_button_width)
@@ -376,21 +360,19 @@ pub(crate) fn render_capacity(
     }
     let stale_column = column_widths.len() > CAPACITY_HEADERS.len();
     let table = Table::new(
-        rows.into_iter()
-            .zip(row_heights.iter().copied())
-            .map(|(row, height)| {
-                let mut cells = vec![
-                    Cell::from(row.host).style(Style::default().add_modifier(Modifier::BOLD)),
-                    Cell::from(row.targets).style(theme::muted()),
-                    Cell::from(row.cpu),
-                    Cell::from(row.memory),
-                    Cell::from(row.disks),
-                ];
-                if stale_column {
-                    cells.push(Cell::from(row.staleness.unwrap_or_default()).style(theme::muted()));
-                }
-                Row::new(cells).height(height)
-            }),
+        rows.into_iter().map(|row| {
+            let mut cells = vec![
+                Cell::from(row.host).style(Style::default().add_modifier(Modifier::BOLD)),
+                Cell::from(row.targets).style(theme::muted()),
+                Cell::from(row.cpu),
+                Cell::from(row.memory),
+                Cell::from(row.disks),
+            ];
+            if stale_column {
+                cells.push(Cell::from(row.staleness.unwrap_or_default()).style(theme::muted()));
+            }
+            Row::new(cells).height(1)
+        }),
         column_widths.iter().copied().map(Constraint::Length),
     )
     .column_spacing(CAPACITY_COLUMN_SPACING)
@@ -408,7 +390,6 @@ pub(crate) fn render_capacity(
     .highlight_spacing(HighlightSpacing::Always)
     .block(block);
     let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
-    let row_heights = row_heights.into_iter().map(usize::from).collect::<Vec<_>>();
     let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.targets_scroll.get(),
         &row_heights,
@@ -426,7 +407,7 @@ pub(crate) fn render_capacity(
         dashboard,
         area,
         &column_widths,
-        &row_heights,
+        row_heights.len(),
         &disks_buttons,
         state.offset(),
     );
@@ -458,15 +439,15 @@ pub(crate) fn render_capacity(
     );
 }
 
-/// Registers each visible row's Disks summary as the button that expands or
-/// collapses that row. The cell positions repeat the table's own layout:
+/// Registers each visible row's Disks summary as the button that opens its
+/// filesystem dropdown. The cell positions repeat the table's own layout:
 /// a border and the two-cell selection marker, then each column and its gap,
 /// and below the border, the header and the rows from the scroll offset.
 fn register_disks_buttons(
     dashboard: &DashboardState,
     area: Rect,
     column_widths: &[u16],
-    row_heights: &[usize],
+    row_count: usize,
     buttons: &[u16],
     offset: usize,
 ) {
@@ -480,22 +461,26 @@ fn register_disks_buttons(
         },
     );
     let mut y = area.y.saturating_add(2);
+    let mut areas = vec![None; row_count];
     let mut form = dashboard.surface_form.borrow_mut();
-    for (index, (width, height)) in buttons.iter().zip(row_heights).enumerate().skip(offset) {
+    for (index, width) in buttons.iter().enumerate().skip(offset) {
         if y >= inner_bottom || x >= inner_right {
             break;
         }
         let width = (*width).min(inner_right - x);
         if width > 0 {
+            let button_area = Rect::new(x, y, width, 1);
             form.register(
                 crate::surface_controls::SurfaceControl::CapacityDisks(index),
                 ControlKind::Button,
-                Rect::new(x, y, width, 1),
+                button_area,
                 true,
             );
+            areas[index] = Some(button_area);
         }
-        y = y.saturating_add(u16::try_from(*height).unwrap_or(u16::MAX));
+        y = y.saturating_add(1);
     }
+    *dashboard.capacity_disks_areas.borrow_mut() = areas;
 }
 
 /// The colour the quota bar gives a percentage of headroom left.

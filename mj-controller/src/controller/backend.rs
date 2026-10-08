@@ -361,9 +361,10 @@ impl Controller {
             // CPU and memory come from sysinfo; storage is measured over the
             // paths by `targets::measure_local_storage`.
             let mut paths = Vec::new();
+            let mbx_paths = super::mbx::local_storage_paths();
             for target_id in &local_ids {
                 if let Some(template) = self.config.targets.get(target_id) {
-                    push_unique(&mut paths, local_storage_paths(template));
+                    push_unique(&mut paths, local_storage_paths(template, &mbx_paths));
                 }
                 push_unique(&mut paths, self.session_storage_paths(target_id));
             }
@@ -496,15 +497,17 @@ fn build_cache_directory(template: &TargetTemplate) -> Option<String> {
 }
 
 /// The paths the local probe measures for one local target.
-fn local_storage_paths(template: &TargetTemplate) -> Vec<String> {
-    use mj_core::targets::storage::{
-        ContainerStorage, DEFAULT_BUILD_CACHE_DIRECTORY, TEMPORARY_DIRECTORY, local_home_path,
-    };
+fn local_storage_paths(template: &TargetTemplate, mbx_paths: &[PathBuf]) -> Vec<String> {
+    use mj_core::targets::storage::{ContainerStorage, TEMPORARY_DIRECTORY, local_home_path};
     let mut paths = vec![
         data_dir().to_string_lossy().into_owned(),
         TEMPORARY_DIRECTORY.to_owned(),
-        local_home_path(DEFAULT_BUILD_CACHE_DIRECTORY),
     ];
+    paths.extend(
+        mbx_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
     match template {
         TargetTemplate::LocalPodman { .. } => {
             paths.push(local_home_path(ContainerStorage::Podman.path()));
