@@ -1564,6 +1564,11 @@ fn architecture_form() -> serde_json::Value {
                             {"const": "thin", "title": "Thin callers"},
                             {"const": "dynamic", "title": "Dynamic matrix"}
                         ]
+                    },
+                    "token": {
+                        "type": "string",
+                        "title": "Access token",
+                        "_meta": {"codex": {"isSecret": true}}
                     }
                 }
             }
@@ -1787,15 +1792,37 @@ async fn answer_architecture_form(
             assert!(!matches!(event, RuntimeEvent::ElicitationResolved { .. }));
         }
     }
-    let (resolved_tx, resolved_rx) = oneshot::channel();
+    let (refused_tx, refused_rx) = oneshot::channel();
     request_tx
         .send(CommandRequest::ResolveElicitation {
-            elicitation_id: request.id,
+            elicitation_id: request.id.clone(),
             response: ElicitationResponse::Accept {
                 content: BTreeMap::from([(
                     "architecture".into(),
-                    mj_core::elicitation::ElicitationValue::String("thin".into()),
+                    ElicitationValue::String("unoffered".into()),
                 )]),
+            },
+            resolved: refused_tx,
+        })
+        .await
+        .unwrap();
+    assert!(refused_rx.await.unwrap().is_err());
+
+    let (resolved_tx, resolved_rx) = oneshot::channel();
+    request_tx
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id.clone(),
+            response: ElicitationResponse::Accept {
+                content: BTreeMap::from([
+                    (
+                        "architecture".into(),
+                        ElicitationValue::String("thin".into()),
+                    ),
+                    (
+                        "token".into(),
+                        ElicitationValue::String("private-token".into()),
+                    ),
+                ]),
             },
             resolved: resolved_tx,
         })
@@ -1808,6 +1835,93 @@ async fn answer_architecture_form(
         .expect("answer is published");
     assert_eq!(answered["result"]["action"], "accept");
     assert_eq!(answered["result"]["content"]["architecture"], "thin");
+    assert_eq!(answered["result"]["content"]["token"], "private-token");
+
+    let resolution = loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("the accepted reply reaches conversation history")
+            .unwrap();
+        if let RuntimeEvent::ElicitationResolved { .. } = event {
+            break event;
+        }
+    };
+    assert!(
+        !serde_json::to_string(&resolution)
+            .unwrap()
+            .contains("private-token")
+    );
+    let RuntimeEvent::ElicitationResolved {
+        elicitation_id,
+        action,
+        reply,
+    } = resolution
+    else {
+        unreachable!()
+    };
+    assert_eq!(elicitation_id, request.id);
+    assert_eq!(action, "accept");
+    assert_eq!(
+        reply.as_deref(),
+        Some("Choose an architecture\n\nArchitecture: Thin callers\nAccess token: [hidden]")
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay =
+        crate::relay::DurableRelay::open(temp.path(), "elicitation-echo", "1.0.0").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::ElicitationRequested {
+            request: request.clone(),
+        })
+        .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::ElicitationResolved {
+            elicitation_id,
+            action,
+            reply,
+        })
+        .unwrap();
+    let mut session = mj_core::state::MaterializedSession::empty("elicitation-echo");
+    for event in relay
+        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+        .unwrap()
+    {
+        let projected = mj_transcript::projection::project_relay_event(&session, &event).unwrap();
+        mj_transcript::projection::apply_committed_projection_event(
+            &mut session,
+            &event,
+            projected.mutation,
+        )
+        .unwrap();
+    }
+    assert!(session.pending_elicitations.is_empty());
+    assert_eq!(session.transcript.len(), 1);
+    assert!(matches!(
+        session.transcript[0].body,
+        mj_core::state::TranscriptBody::User { .. }
+    ));
+    assert!(!session.transcript[0].is_turn_start());
+    assert_eq!(
+        mj_transcript::transcript::transcript_item_text(&session.transcript[0]),
+        "Choose an architecture\n\nArchitecture: Thin callers\nAccess token: [hidden]"
+    );
+
+    let (duplicate_tx, duplicate_rx) = oneshot::channel();
+    request_tx
+        .send(CommandRequest::ResolveElicitation {
+            elicitation_id: request.id,
+            response: ElicitationResponse::Cancel,
+            resolved: duplicate_tx,
+        })
+        .await
+        .unwrap();
+    assert!(duplicate_rx.await.unwrap().is_err());
+    while let Ok(event) = event_rx.try_recv() {
+        assert!(
+            !matches!(event, RuntimeEvent::ElicitationResolved { .. }),
+            "a duplicate answer must not echo twice"
+        );
+    }
 
     drop(request_tx);
     tokio::time::timeout(Duration::from_secs(5), driver)
@@ -6812,6 +6926,37 @@ fn cancelling_a_turn_withdraws_its_pending_permission_forms() {
     assert_eq!(pending.lock().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn accepted_elicitation_replies_survive_concurrent_withdrawal() {
+    for accepted in [true, false] {
+        let pending = PendingElicitations::default();
+        let (answer, received) = oneshot::channel();
+        pending.lock().unwrap().insert(
+            "question-1".into(),
+            PendingElicitation::open("question-1", answer),
+        );
+        if accepted {
+            resolve_pending_elicitation(
+                &pending,
+                "question-1",
+                ElicitationResponse::Accept {
+                    content: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+        }
+        let response =
+            await_elicitation_response(&pending, "question-1", received, std::future::ready(()))
+                .await;
+        assert_eq!(response.is_some(), accepted);
+        assert!(pending.lock().unwrap().is_empty());
+        assert!(
+            resolve_pending_elicitation(&pending, "question-1", ElicitationResponse::Cancel)
+                .is_err()
+        );
+    }
+}
+
 // Hard-won: 710ffb6: Codex thread-not-found errors were mislabeled as stray ACP output.
 #[test]
 fn an_agent_error_is_not_blamed_on_stray_bridge_output() {
@@ -7085,7 +7230,11 @@ async fn a_form_the_harness_withdraws_still_resolves() {
                 RuntimeEvent::ElicitationResolved {
                     elicitation_id,
                     action,
-                } => break (requested, (elicitation_id, action)),
+                    reply,
+                } => {
+                    assert!(reply.is_none(), "harness withdrawal is not a user reply");
+                    break (requested, (elicitation_id, action));
+                }
                 _ => {}
             }
         }

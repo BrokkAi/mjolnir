@@ -598,6 +598,7 @@ async fn a_withdrawn_saved_model_starts_on_the_default_and_its_replacement_survi
             RuntimeEvent::ElicitationResolved {
                 elicitation_id,
                 action,
+                ..
             } => {
                 assert_eq!(elicitation_id, SESSION_CONFIG_RECOVERY_ID);
                 assert_eq!(action, "accept");
@@ -702,6 +703,7 @@ async fn declining_the_recovery_question_keeps_the_harness_default_and_clears_th
             RuntimeEvent::ElicitationResolved {
                 elicitation_id,
                 action,
+                ..
             } => {
                 assert_eq!(elicitation_id, SESSION_CONFIG_RECOVERY_ID);
                 assert_eq!(action, "decline");

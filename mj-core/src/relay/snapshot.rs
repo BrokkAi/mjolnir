@@ -1047,6 +1047,9 @@ pub enum RelayObservation {
     ElicitationResolved {
         elicitation_id: String,
         action: String,
+        /// Rendered user reply, with secret fields masked before recording.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<String>,
     },
     ElicitationsCleared,
     CommandQueued {

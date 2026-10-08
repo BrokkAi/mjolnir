@@ -422,7 +422,7 @@ where
                     let cancellation = responder.cancellation();
                     tokio::spawn(async move {
                         if events
-                            .send(RuntimeEvent::ElicitationRequested { request: review })
+                            .send(RuntimeEvent::ElicitationRequested { request: review.clone() })
                             .await
                             .is_err()
                         {
@@ -442,14 +442,9 @@ where
                             }
                             return;
                         }
-                        let response = tokio::select! {
-                            response = answer_rx => response.ok(),
-                            () = cancellation.cancelled() => None,
-                        };
-                        pending
-                            .lock()
-                            .expect("pending elicitation lock poisoned")
-                            .remove(&id);
+                        let response = await_elicitation_response(
+                            &pending, &id, answer_rx, cancellation.cancelled(),
+                        ).await;
                         let action = response
                             .as_ref()
                             .map_or("cancel", ElicitationResponse::action_name)
@@ -458,6 +453,7 @@ where
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
+                                reply: response.as_ref().map(|response| review.reply_text(response)),
                             })
                             .await
                         {
@@ -575,10 +571,12 @@ where
                 let events = permission_events.clone();
                 let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let response = if events.send(RuntimeEvent::ElicitationRequested { request: form }).await.is_ok() {
-                        tokio::select! { response = answer_rx => response.ok(), () = cancellation.cancelled() => None }
-                    } else { None };
-                    pending.lock().expect("pending elicitation lock poisoned").remove(&id);
+                    let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
+                        await_elicitation_response(&pending, &id, answer_rx, cancellation.cancelled()).await
+                    } else {
+                        pending.lock().expect("pending elicitation lock poisoned").remove(&id);
+                        None
+                    };
                     let selected = match &response {
                         Some(ElicitationResponse::Accept { content }) if !cancellation.is_cancelled() => {
                             match content.get("choice") {
@@ -596,6 +594,7 @@ where
                     if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
                         elicitation_id: id,
                         action: response.as_ref().map_or("cancel", ElicitationResponse::action_name).into(),
+                        reply: response.as_ref().map(|response| form.reply_text(response)),
                     }).await {
                         tracing::debug!(%error, "harness permission result receiver closed");
                     }
@@ -807,7 +806,7 @@ where
                     let cancellation = responder.cancellation();
                     tokio::spawn(async move {
                         if events
-                            .send(RuntimeEvent::ElicitationRequested { request })
+                            .send(RuntimeEvent::ElicitationRequested { request: request.clone() })
                             .await
                             .is_err()
                         {
@@ -827,14 +826,9 @@ where
                             }
                             return;
                         }
-                        let response = tokio::select! {
-                            response = answer_rx => response.ok(),
-                            () = cancellation.cancelled() => None,
-                        };
-                        pending
-                            .lock()
-                            .expect("pending elicitation lock poisoned")
-                            .remove(&id);
+                        let response = await_elicitation_response(
+                            &pending, &id, answer_rx, cancellation.cancelled(),
+                        ).await;
                         let action = response
                             .as_ref()
                             .map_or("cancel", ElicitationResponse::action_name)
@@ -843,6 +837,7 @@ where
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
+                                reply: response.as_ref().map(|response| request.reply_text(response)),
                             })
                             .await
                         {
@@ -911,7 +906,7 @@ where
                     let cancellation = responder.cancellation();
                     tokio::spawn(async move {
                         if events
-                            .send(RuntimeEvent::ElicitationRequested { request: review })
+                            .send(RuntimeEvent::ElicitationRequested { request: review.clone() })
                             .await
                             .is_err()
                         {
@@ -931,14 +926,9 @@ where
                             }
                             return;
                         }
-                        let response = tokio::select! {
-                            response = answer_rx => response.ok(),
-                            () = cancellation.cancelled() => None,
-                        };
-                        pending
-                            .lock()
-                            .expect("pending elicitation lock poisoned")
-                            .remove(&id);
+                        let response = await_elicitation_response(
+                            &pending, &id, answer_rx, cancellation.cancelled(),
+                        ).await;
                         let action = response
                             .as_ref()
                             .map_or("cancel", ElicitationResponse::action_name)
@@ -947,6 +937,7 @@ where
                             .send(RuntimeEvent::ElicitationResolved {
                                 elicitation_id: id.clone(),
                                 action,
+                                reply: response.as_ref().map(|response| review.reply_text(response)),
                             })
                             .await
                         {

@@ -586,6 +586,8 @@ pub enum RuntimeEvent {
     ElicitationResolved {
         elicitation_id: String,
         action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<String>,
     },
     PromptFinished {
         #[serde(default, skip_serializing_if = "Option::is_none")]

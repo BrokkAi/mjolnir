@@ -146,12 +146,14 @@ pub(super) async fn resolve_session_config_recovery(
         )));
     }
     let action = response.action_name().to_owned();
+    let reply = Some(request.reply_text(response));
     *pending = None;
     emit_runtime_event(
         events,
         RuntimeEvent::ElicitationResolved {
             elicitation_id: elicitation_id.to_owned(),
             action,
+            reply,
         },
     )
     .await?;

@@ -64,9 +64,10 @@ pub const RELAY_RETRY_ID_RETENTION: usize = 512;
 /// parent mailbox messages in the sub-agent request queue. 34 carries
 /// structured mailbox bodies; controllers keep the old text representation
 /// when they submit to a protocol-33 worker.
+/// 35 records rendered elicitation replies in resolution events.
 pub const RELAY_LEGACY_MAILBOX_PROTOCOL: u32 = 33;
 pub const RELAY_STRUCTURED_MAILBOX_PROTOCOL: u32 = 34;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_STRUCTURED_MAILBOX_PROTOCOL;
+pub const RELAY_PROTOCOL_VERSION: u32 = 35;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

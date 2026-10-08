@@ -64,7 +64,33 @@ pub(super) fn project_observation(
                 );
             }
         }
-        RelayObservation::ElicitationResolved { elicitation_id, .. } => {
+        RelayObservation::ElicitationResolved {
+            elicitation_id,
+            reply,
+            ..
+        } => {
+            if let Some(reply) = reply {
+                close_streams(index, mutation, event.recorded_at_ms);
+                upsert(
+                    mutation,
+                    TranscriptItem {
+                        stable_id: format!(
+                            "{}{}",
+                            mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX,
+                            event.ordinal
+                        ),
+                        position: event.ordinal,
+                        latest_content_event_ordinal: None,
+                        created_at_ms: event.recorded_at_ms,
+                        last_changed_at_ms: event.recorded_at_ms,
+                        body: TranscriptBody::User {
+                            content: vec![serde_json::to_value(ContentBlock::Text(
+                                TextContent::new(reply.clone()),
+                            ))?],
+                        },
+                    },
+                );
+            }
             let mut pending = current.pending_elicitations.clone();
             pending.retain(|request| request.id != *elicitation_id);
             mutation.pending_elicitations = Some(pending);

@@ -412,6 +412,9 @@ impl MaterializedSession {
             .and_then(normalize_session_title)
             .or_else(|| {
                 self.transcript.iter().find_map(|item| {
+                    if !item.is_user_prompt() {
+                        return None;
+                    }
                     let TranscriptBody::User { content } = &item.body else {
                         return None;
                     };
@@ -609,6 +612,9 @@ impl ProjectionWindow {
         Self {
             omitted_items: 0,
             provisional_title: session.transcript.iter().find_map(|item| {
+                if !item.is_user_prompt() {
+                    return None;
+                }
                 let TranscriptBody::User { content } = &item.body else {
                     return None;
                 };

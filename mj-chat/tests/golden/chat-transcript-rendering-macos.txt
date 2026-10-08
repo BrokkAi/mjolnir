@@ -135,6 +135,32 @@ render mode: Rich
 ╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 
+=== elicitation reply echoed as a user message after replay (100x24) ===
+╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ You                                                                                           ▐│
+│ │ work                                                                                          ▐│
+│                                                                                                 ▐│
+│ ● Agent                                                                                         ▐│
+│ │ done                                                                                          ▐│
+│                                                                                                 ▐│
+│ ❯ You                                                                                           ▐│
+│ │ Choose an architecture                                                                        ▐│
+│ │                                                                                               ▐│
+│ │ Architecture: Thin callers                                                                    ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+│                                                                                                 ▐│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
+│> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
 === pending tool call title (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
 │ • Tool · waiting                                                                                ▐│
