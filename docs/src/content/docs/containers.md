@@ -96,14 +96,18 @@ the host's `kernel.perf_event_paranoid` set to 1 or lower, or a host/runtime
 that already provides the required capability. Mjolnir does not expose a
 container-capability override. Optional local coverage tooling includes the
 `llvm-tools-preview` component, pinned `cargo-llvm-cov`, and `lcov` for
-`genhtml`. It's published at
-`ghcr.io/brokkai/mjolnir/agent-dev:latest`, public and
+`genhtml`. It's published as
+`ghcr.io/brokkai/mjolnir/agent-dev`, public and
 multi-arch for both `linux/amd64` and `linux/arm64`, so the same image name
 works whether Mjolnir is running it through Podman, Docker, Apple's `container`
-runtime, or an arm64 SSH host.
+runtime, or an arm64 SSH host. Master publishes the floating `:latest` tag, and
+each release publishes an immutable tag for its own version, such as
+`agent-dev:2.36.0`.
 
-The standard local targets already use this published image. Podman, Docker,
-and Apple's container runtime pull it automatically when first needed.
+The standard local targets already use this published image: an installed
+release names the image built for its own version, while a development build
+names `:latest`. Podman, Docker, and Apple's container runtime pull it
+automatically when first needed.
 
 Building it yourself remains a supported alternative, for example to
 customize the image or to work offline:

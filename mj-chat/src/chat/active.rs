@@ -66,6 +66,11 @@ use crate::clipboard::{ClipboardContent, ClipboardImage};
 /// database: everything here crosses to the daemon, which does. Review actions
 /// travel this way too -- the review runs there.
 pub enum ChatDaemonRequest {
+    RecordAbandonedPrompt {
+        session_id: String,
+        bundle_id: String,
+        text: String,
+    },
     SaveReview {
         session_id: String,
         review: mj_core::storage::StoredReview,

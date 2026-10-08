@@ -2493,6 +2493,65 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
 
 #[cfg(unix)]
 #[test]
+fn in_place_move_reopens_message_only_queue_after_parent_policy_becomes_native() {
+    let name =
+        test_name("in_place_move_reopens_message_only_queue_after_parent_policy_becomes_native");
+    if std::env::var_os("MJ_MOVE_MESSAGE_ONLY_REOPEN_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_MOVE_MESSAGE_ONLY_REOPEN_CHILD", "1")
+            .env(
+                crate::controller::checkpoint::tests::LATCH_RECORD_SUBAGENT_ADMISSION,
+                "1",
+            )
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let source = controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    source.subagents = Some(mj_core::subagent::SubagentPolicy::SingleModel {
+        model: "sonnet".into(),
+        effort: None,
+    });
+    crate::database::save_session(source).unwrap();
+
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    operation.configuration_fingerprint = controller
+        .move_configuration_fingerprint(&operation.selection)
+        .unwrap();
+    run_in_place_move(
+        &mut controller,
+        &mut operation,
+        &worker_root,
+        &RecordingProcessExecutor::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        controller.state.sessions[LATCH_RELAY_SESSION].subagents,
+        Some(mj_core::subagent::SubagentPolicy::Native)
+    );
+    let queue: serde_json::Value =
+        serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
+    assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+}
+
+#[cfg(unix)]
+#[test]
 fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
     let name = test_name("in_place_move_reopens_gate_after_lost_admission_close_reply");
     if std::env::var_os("MJ_MOVE_ADMISSION_CLOSE_LOST_REPLY_CHILD").is_none() {

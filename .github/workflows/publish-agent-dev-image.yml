@@ -10,6 +10,28 @@ on:
       - 'scripts/install-muse.py'
       - '.github/workflows/publish-agent-dev-image.yml'
   workflow_dispatch: {}
+  # Called by release.yml so a tagged release publishes agent-dev:<version>
+  # from the same workflow that publishes :latest from master. The push,
+  # schedule and dispatch triggers use these defaults and keep publishing the
+  # floating :latest tag.
+  workflow_call:
+    inputs:
+      extra_tags:
+        description: >-
+          Space-separated extra tags for the published manifest list, such as
+          "2.37.0" for a release.
+        type: string
+        default: ''
+      # A string rather than a boolean so the push, schedule and dispatch
+      # triggers, which have no inputs context, still fall back to :latest.
+      publish_latest:
+        description: Whether to move the floating :latest tag, "true" or "false".
+        type: string
+        default: 'true'
+    outputs:
+      digest:
+        description: Digest of the published multi-arch manifest list.
+        value: ${{ jobs.merge.outputs.digest }}
   # Rebuild weekly so the image picks up new base layers and apt security
   # updates even when containers/ has not changed.
   schedule:
@@ -55,7 +77,9 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # github.token works in a workflow_call context, where a called
+          # workflow is not guaranteed to receive the GITHUB_TOKEN secret.
+          password: ${{ github.token }}
 
       # Each runner is native for its own platform, so no QEMU emulation is
       # involved. Buildx passes TARGETARCH to the build automatically.
@@ -104,6 +128,8 @@ jobs:
     name: Publish manifest
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
 
     steps:
       - name: Download digests
@@ -129,24 +155,35 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
       # The per-arch jobs pushed untagged manifests. This joins them into one
       # multi-arch tag that resolves to the right image on each host.
       - name: Create multi-arch manifest
+        id: publish
         shell: bash
         working-directory: /tmp/digests
         env:
           IMAGE: ${{ steps.image.outputs.name }}
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          PUBLISH_LATEST: ${{ inputs.publish_latest || 'true' }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create \
-            --tag "$IMAGE:latest" \
-            --tag "$IMAGE:sha-${GITHUB_SHA:0:7}" \
-            $(printf "$IMAGE@sha256:%s " *)
+          tags=()
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
+          tags+=(--tag "$IMAGE:sha-${GITHUB_SHA:0:7}")
+          for tag in $EXTRA_TAGS; do
+            tags+=(--tag "$IMAGE:$tag")
+          done
+          docker buildx imagetools create "${tags[@]}" $(printf "$IMAGE@sha256:%s " *)
+          digest="$(docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA:0:7}" \
+            --format '{{.Manifest.Digest}}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Inspect published image
         shell: bash
         env:
           IMAGE: ${{ steps.image.outputs.name }}
-        run: docker buildx imagetools inspect "$IMAGE:latest"
+        run: docker buildx imagetools inspect "$IMAGE:sha-${GITHUB_SHA:0:7}"

@@ -27,19 +27,19 @@ function fixture(t) {
 }
 
 const release = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
-for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin', 'x86_64-pc-windows-msvc']) {
+for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc']) {
   test(`archive assembly preserves binaries, modes, notices and checksum for ${target}`, t => {
     const dir = fixture(t);
-    const mac = target === 'universal-apple-darwin';
+    const mac = target.endsWith('-apple-darwin');
     const windows = target === 'x86_64-pc-windows-msvc';
     const binaries = windows ? ['mj.exe', 'mj-desktop.exe'] : ['mj', 'mj-desktop', 'mj-voice-worker'];
     if (mac) binaries.push('mj-worker');
-    const native = join(dir, mac ? 'target/universal-apple-darwin/release' : 'native');
+    const native = join(dir, 'native');
     mkdirSync(native, { recursive: true });
     for (const binary of binaries) writeFileSync(join(native, binary), binary);
     // A Windows controller drives Linux containers and SSH hosts only.
     const workerTriples = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'];
-    if (!windows) workerTriples.push('universal-apple-darwin');
+    if (!windows) workerTriples.push('x86_64-apple-darwin', 'aarch64-apple-darwin');
     for (const triple of workerTriples) {
       const worker = `mj-worker-${triple}`;
       mkdirSync(join(dir, 'workers', worker), { recursive: true });
@@ -54,7 +54,7 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
     for (const file of ['THIRD_PARTY_LICENSES.html', 'SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt']) {
       writeFileSync(join(dir, 'release-notices', file), `generated for this tag: ${file}`);
     }
-    const job = mac ? 'package-macos' : `package-${target}`;
+    const job = `package-${target}`;
     const block = release.split(`  ${job}:\n`)[1].split(/\n  [\w-]+:\n/)[0];
     const result = spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(block, 'Package archive')], {
       cwd: dir, encoding: 'utf8', env: { ...process.env, GITHUB_REF_NAME: 'v1.2.3' },
@@ -83,13 +83,88 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
 }
 
 const npmWorkflow = readFileSync(join(root, '.github/workflows/publish-npm.yml'), 'utf8');
+
+const publishImage = readFileSync(join(root, '.github/workflows/publish-agent-dev-image.yml'), 'utf8');
+
+// The release's container sessions default to agent-dev:<version>, so the
+// tagged workflow must publish that image and must not move the floating
+// :latest tag that development builds use.
+test('a release publishes its version image and leaves :latest to master', () => {
+  const job = release.split('  publish-agent-dev-image:\n')[1].split(/\n  [\w-]+:\n/)[0];
+  assert.match(job, /uses: \.\/\.github\/workflows\/publish-agent-dev-image\.yml/);
+  assert.match(job, /extra_tags: \$\{\{ needs\.verify-version\.outputs\.version \}\}/);
+  assert.match(job, /publish_latest: 'false'/);
+  const releaseJob = release.split('  release:\n')[1].split('    steps:')[0];
+  assert.match(releaseJob, /needs: \[[^\]]*publish-agent-dev-image\]/);
+});
+
+for (const { label, publishLatest, extraTags, expectedTags, absentTags } of [
+  {
+    label: 'master keeps moving :latest',
+    publishLatest: 'true',
+    extraTags: '',
+    expectedTags: ['latest', 'sha-abcdef1'],
+    absentTags: [],
+  },
+  {
+    label: 'a release tags its version and leaves :latest alone',
+    publishLatest: 'false',
+    extraTags: '2.37.0',
+    expectedTags: ['sha-abcdef1', '2.37.0'],
+    absentTags: ['latest'],
+  },
+]) {
+  test(`agent-dev manifest tags when ${label}`, t => {
+    const dir = fixture(t);
+    // The per-arch jobs upload bare digest-file names; the merge step prefixes
+    // each with `sha256:`.
+    writeFileSync(join(dir, 'a1'.repeat(32)), '');
+    writeFileSync(join(dir, 'b2'.repeat(32)), '');
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin/docker'), `#!/bin/bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FIXTURE/args"
+case "$*" in
+  *imagetools\\ inspect*) echo 'sha256:deadbeef' ;;
+esac
+`, { mode: 0o755 });
+    const output = join(dir, 'github-output');
+    writeFileSync(output, '');
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(publishImage, 'Create multi-arch manifest')], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+        FIXTURE: dir,
+        IMAGE: 'ghcr.io/test/mjolnir/agent-dev',
+        EXTRA_TAGS: extraTags,
+        PUBLISH_LATEST: publishLatest,
+        GITHUB_SHA: 'abcdef1234567890',
+        GITHUB_OUTPUT: output,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const create = readFileSync(join(dir, 'args'), 'utf8')
+      .split('\n')
+      .find(line => line.includes('imagetools create'));
+    for (const tag of expectedTags) {
+      assert.ok(create.includes(`--tag ghcr.io/test/mjolnir/agent-dev:${tag}`), create);
+    }
+    for (const tag of absentTags) {
+      assert.ok(!create.includes(`--tag ghcr.io/test/mjolnir/agent-dev:${tag}`), create);
+    }
+    assert.match(readFileSync(output, 'utf8'), /digest=sha256:deadbeef/);
+  });
+}
+
 test('npm downloads assets when the release lookup omits its embedded asset list', t => {
   const dir = fixture(t);
   const work = join(dir, 'work');
   mkdirSync(work);
   mkdirSync(join(dir, 'bin'));
   const assets = [];
-  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin', 'x86_64-pc-windows-msvc']) {
+  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc']) {
     const archive = target.endsWith('-windows-msvc') ? 'zip' : 'tar.gz';
     for (const suffix of [archive, `${archive}.sha256`]) {
       const name = `brokk-mjolnir-v1.2.3-${target}.${suffix}`;
@@ -145,13 +220,13 @@ if [[ "$name" != brokkai-mjolnir-1.2.3 ]]; then
   # A sequential upload loop cannot pass this barrier.
   for ((attempt=0; attempt<100; attempt++)); do
     count=$(find "$FIXTURE" -name '*.started' | wc -l)
-    ((count >= 3)) && break
+    ((count >= 4)) && break
     sleep 0.02
   done
-  ((count >= 3)) || exit 22
+  ((count >= 4)) || exit 22
   [[ -z "$FAIL_PLATFORM" || "$name" != *"$FAIL_PLATFORM"* ]] || exit 23
 else
-  for platform in darwin-universal linux-x64-gnu linux-arm64-gnu; do
+  for platform in darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
     test -f "$FIXTURE/brokkai-mjolnir-$platform-1.2.3.ready"
   done
 fi
@@ -178,7 +253,7 @@ ${curlBody}`, { mode: 0o755 });
     const files = readdirSync(dir);
     assert.equal(files.includes('brokkai-mjolnir-1.2.3.started'), !fail);
     // Both other uploads complete even when a sibling fails.
-    assert.ok(files.includes('brokkai-mjolnir-darwin-universal-1.2.3.ready'));
+    assert.ok(files.includes('brokkai-mjolnir-darwin-arm64-1.2.3.ready'));
     assert.ok(files.includes('brokkai-mjolnir-linux-arm64-gnu-1.2.3.ready'));
   });
 }

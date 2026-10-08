@@ -1,7 +1,8 @@
 use super::*;
 
 use crate::chat::test_support::{
-    agent_message_item, agent_transcript_item, drawn_transcript, fast_mode_option, queued, snapshot,
+    agent_message_item, agent_transcript_item, ctrl, drawn_transcript, fast_mode_option, key,
+    queued, snapshot,
 };
 use agent_client_protocol::schema::v1::{
     SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
@@ -123,6 +124,43 @@ async fn handle_event_result_reports_which_events_the_chat_consumed() {
     let clamped =
         chat.handle_event_result(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
     assert!(clamped.consumed);
+}
+
+#[tokio::test]
+async fn control_c_queues_abandoned_prompt_persistence_and_keeps_local_history() {
+    let fixture = mj_client::session::replacement_session_test_fixture("abandoned-prompt", 72);
+    let (persistence, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let mut chat = ActiveChat::open_with_persistence(
+        fixture.stopped,
+        "bundle-1",
+        None,
+        fixture.control,
+        SessionHeaderIdentity::default(),
+        String::new(),
+        Notices::default(),
+        Some(persistence),
+    );
+    chat.state.set_input("unfinished prompt".into());
+
+    chat.handle_event(crossterm::event::Event::Key(ctrl('c')));
+
+    assert!(chat.state.input.is_empty());
+    assert_eq!(chat.state.prompt_history, ["unfinished prompt"]);
+    match requests.try_recv().expect("abandoned prompt request") {
+        ChatDaemonRequest::RecordAbandonedPrompt {
+            session_id,
+            bundle_id,
+            text,
+        } => {
+            assert_eq!(session_id, "abandoned-prompt");
+            assert_eq!(bundle_id, "bundle-1");
+            assert_eq!(text, "unfinished prompt");
+        }
+        request => panic!("unexpected daemon request: {request:?}"),
+    }
+
+    chat.handle_event(crossterm::event::Event::Key(key(KeyCode::Up)));
+    assert_eq!(chat.state.input, "unfinished prompt");
 }
 
 #[test]

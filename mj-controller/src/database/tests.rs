@@ -3226,6 +3226,130 @@ fn history_search_scopes_by_project_session_and_all_projects() {
 }
 
 #[test]
+fn abandoned_prompts_are_searchable_in_session_and_project_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_prompt_to(
+        &database,
+        "session-2",
+        "project-1",
+        1,
+        Some("2026-08-12T00:00:00Z"),
+        "another session prompt",
+    )
+    .unwrap();
+
+    let connection = open_reader(&database).unwrap();
+    let ordinal: Option<i64> = connection
+        .query_row(
+            "SELECT event_ordinal FROM prompt_history WHERE session_id = 'session-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ordinal, None);
+    drop(connection);
+
+    let session = search_prompts_from(
+        &database,
+        "session-1",
+        "project-1",
+        HistoryScope::Session,
+        "unfinished",
+    )
+    .unwrap();
+    assert_eq!(session.len(), 1);
+    assert_eq!(session[0].text, "unfinished draft");
+
+    let project = search_prompts_from(
+        &database,
+        "session-1",
+        "project-1",
+        HistoryScope::Project,
+        "prompt",
+    )
+    .unwrap();
+    assert_eq!(
+        project
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        ["another session prompt"]
+    );
+    let project_abandoned = search_prompts_from(
+        &database,
+        "session-1",
+        "project-1",
+        HistoryScope::Project,
+        "unfinished",
+    )
+    .unwrap();
+    assert_eq!(project_abandoned[0].session_id, "session-1");
+}
+
+#[test]
+fn abandoned_prompt_deduplication_uses_the_latest_row_and_keeps_delivered_dedupe() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    record_prompt_to(
+        &database,
+        "session-1",
+        "project-1",
+        7,
+        Some("2026-08-12T00:00:00Z"),
+        "submitted prompt",
+    )
+    .unwrap();
+    record_abandoned_prompt_to(&database, "session-1", "project-1", "submitted prompt").unwrap();
+    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    record_abandoned_prompt_to(&database, "session-1", "project-1", "unfinished draft").unwrap();
+    // The delivered prompt's ordinal remains its idempotency key after the
+    // nullable-ordinal migration.
+    record_prompt_to(
+        &database,
+        "session-1",
+        "project-1",
+        7,
+        Some("2026-08-12T00:00:00Z"),
+        "submitted prompt",
+    )
+    .unwrap();
+
+    let connection = open_reader(&database).unwrap();
+    let rows: Vec<(Option<i64>, String)> = connection
+        .prepare(
+            "SELECT event_ordinal, text FROM prompt_history
+             WHERE session_id = 'session-1' ORDER BY history_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (Some(7), "submitted prompt".into()),
+            (None, "unfinished draft".into()),
+        ]
+    );
+
+    record_abandoned_prompt_to(&database, "session-2", "project-1", " \n\t ").unwrap();
+    assert!(
+        search_prompts_from(
+            &database,
+            "session-2",
+            "project-1",
+            HistoryScope::Session,
+            "",
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
 fn rebinding_a_session_moves_its_prompt_history_to_the_new_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

@@ -61,11 +61,11 @@ jobs:
           release_id="$(gh api "repos/BrokkAi/mjolnir/releases/tags/$RELEASE_TAG" --jq .id)"
           assets="$(gh api "repos/BrokkAi/mjolnir/releases/$release_id/assets?per_page=100")"
           # The release lookup can report no embedded assets even when the
-          # dedicated asset endpoint lists all uploaded files: three tarballs,
+          # dedicated asset endpoint lists all uploaded files: four tarballs,
           # the Windows zip, and a checksum for each.
-          jq -e 'length == 8' <<< "$assets" > /dev/null
+          jq -e 'length == 10' <<< "$assets" > /dev/null
           mkdir release-assets
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu universal-apple-darwin; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
             for suffix in tar.gz tar.gz.sha256; do
               name="brokk-mjolnir-$RELEASE_TAG-$target.$suffix"
               record="$(jq -er --arg name "$name" \
@@ -156,12 +156,14 @@ jobs:
               "https://registry.npmjs.org/${package/\//%2F}/$version" 2>/dev/null
           }
           packages=(
-            @brokkai/mjolnir-darwin-universal
+            @brokkai/mjolnir-darwin-x64
+            @brokkai/mjolnir-darwin-arm64
             @brokkai/mjolnir-linux-x64-gnu
             @brokkai/mjolnir-linux-arm64-gnu
           )
           tarballs=(
-            brokkai-mjolnir-darwin-universal-$version.tgz
+            brokkai-mjolnir-darwin-x64-$version.tgz
+            brokkai-mjolnir-darwin-arm64-$version.tgz
             brokkai-mjolnir-linux-x64-gnu-$version.tgz
             brokkai-mjolnir-linux-arm64-gnu-$version.tgz
           )
@@ -173,7 +175,7 @@ jobs:
               npm publish "./npm-tarballs/$tarball" --access public --provenance --tag "$dist_tag" || return "$?"
             fi
           }
-          # Publish all three concurrently, then the wrapper once every upload
+          # Publish all four concurrently, then the wrapper once every upload
           # has succeeded. Nothing waits for a published version to become
           # readable: the registry's read path lags its write path, and a fresh
           # version can 404 for many minutes. The wrapper resolves the platform

@@ -6,6 +6,8 @@
 
 use toml_edit::{Document, Item, TableLike};
 
+use super::{LEGACY_DEFAULT_CONTAINER_IMAGE, LEGACY_DEFAULT_IMAGE_LAST_VERSION};
+
 /// The first version whose file shape this build writes in place. Earlier
 /// files store fused runtime and host tables that a save has to convert, so
 /// they are rewritten whole.
@@ -68,7 +70,40 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
         *value = toml_edit::Value::from(version.as_integer().unwrap_or_default());
         *value.decor_mut() = decor;
     }
+    // Up to version 14 a container target the user had touched carried the
+    // then-current default image in the file. Drop that literal now, so an
+    // upgraded build follows the image built for its own version. The diff
+    // above cannot remove it on its own: a value equal to the default is
+    // absent from both serializations it compares, so the key never looks
+    // stale. Only the first save of such a file is affected; once the written
+    // version is current, an explicitly chosen image is left alone.
+    if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION as i64 {
+        drop_legacy_default_images(&mut document, LEGACY_DEFAULT_CONTAINER_IMAGE);
+    }
     Some(document.to_string())
+}
+
+/// Remove the historical default `image` from every container target in
+/// `document`.
+fn drop_legacy_default_images(document: &mut Document, legacy: &str) {
+    let Some(targets) = document
+        .get_mut("targets")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    let ids: Vec<String> = targets.iter().map(|(id, _)| id.to_owned()).collect();
+    for id in ids {
+        let Some(target) = targets
+            .get_mut(&id)
+            .and_then(|item| item.as_table_like_mut())
+        else {
+            continue;
+        };
+        if target.get("image").and_then(Item::as_str) == Some(legacy) {
+            target.remove("image");
+        }
+    }
 }
 
 fn existing_version(document: &Document) -> Option<i64> {

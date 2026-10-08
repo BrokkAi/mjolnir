@@ -13,7 +13,8 @@ test("declares every release target exactly once", () => {
   assert.deepEqual(
     PLATFORMS.map((platform) => platform.packageName),
     [
-      "@brokkai/mjolnir-darwin-universal",
+      "@brokkai/mjolnir-darwin-x64",
+      "@brokkai/mjolnir-darwin-arm64",
       "@brokkai/mjolnir-linux-x64-gnu",
       "@brokkai/mjolnir-linux-arm64-gnu",
     ],
@@ -48,24 +49,30 @@ test("generates platform constraints without committed manifests", () => {
 });
 
 
-test("stages Linux and Darwin workers in every platform package", async (t) => {
-  const { mkdtemp, mkdir, writeFile, readFile, stat, rm } = await import("node:fs/promises");
+test("stages each platform's declared session workers and nothing else", async (t) => {
+  const { mkdtemp, mkdir, writeFile, readFile, readdir, stat, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = await import("node:path");
   const root = await mkdtemp(path.join(tmpdir(), "mj-npm-workers-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const source = path.join(root, "source");
   await mkdir(path.join(source, "licenses"), { recursive: true });
-  const workers = ["mj-worker-x86_64-unknown-linux-musl", "mj-worker-aarch64-unknown-linux-musl", "mj-worker-universal-apple-darwin"];
+  const workers = [...new Set(PLATFORMS.flatMap((platform) => platform.sessionWorkers))];
   for (const name of ["README.md", "LICENSE", "mj", "mj-worker", "mj-desktop", "mj-voice-worker", ...workers]) {
     await writeFile(path.join(source, name), name, { mode: 0o755 });
   }
   for (const platform of PLATFORMS) {
     const staged = await stagePlatform(platform, "1.2.3", source, path.join(root, "stage"));
-    for (const worker of workers) {
+    for (const worker of platform.sessionWorkers) {
       const filename = path.join(staged, "bin", worker);
       assert.equal(await readFile(filename, "utf8"), worker);
       assert.ok((await stat(filename)).mode & 0o111);
     }
+    // A macOS package carrying the other architecture's Darwin worker is the
+    // regression that pushed the tarball past the registry limit.
+    const stagedWorkers = (await readdir(path.join(staged, "bin")))
+      .filter((name) => name.startsWith("mj-worker-"))
+      .sort();
+    assert.deepEqual(stagedWorkers, [...platform.sessionWorkers].sort(), platform.packageName);
   }
 });

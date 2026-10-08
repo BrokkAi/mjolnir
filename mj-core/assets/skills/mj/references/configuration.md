@@ -66,14 +66,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 14
+version = 15
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `14`. |
+| `version` | integer | yes | none | Configuration schema version; use `15`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -876,7 +876,7 @@ EC2 machine launches one instance per session. See
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `image` | string | no | `"ghcr.io/brokkai/mjolnir/agent-dev:latest"` | Non-blank image reference. The default is the reference image used by built-in container targets. |
+| `image` | string | no | the running Mjolnir's agent-dev image | Non-blank image reference. A release uses the immutable image published for its own version, such as `ghcr.io/brokkai/mjolnir/agent-dev:2.36.0`; a development build uses `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Omitting the field follows the running build at every upgrade; an explicit value pins that reference. |
 | `pull_policy` | string enum | no | `"auto"` | `auto`, `always`, `newer`, `missing`, or `never`. |
 | `platform` | string | no | unset (runtime selection) | Image platform such as `linux/amd64` or `linux/arm64`; it also determines the required worker architecture when recognizable. |
 | `cpus` | string | no | unset (no template override) | Runtime CPU value, for example `"8"`. Per-session selection can override it. |
@@ -925,7 +925,6 @@ runtime behavior.
 ```toml
 [targets.podman]
 kind = "podman"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 platform = "linux/amd64"
 cpus = "8"
@@ -946,7 +945,6 @@ container boundary. See [Podman](/podman/) and [SSH and SSH Podman](/ssh/).
 [targets.remote-podman]
 kind = "podman"
 machine = "builder"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 ### `docker`
@@ -954,7 +952,6 @@ image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```toml
 [targets.docker]
 kind = "docker"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 platform = "linux/amd64"
 cpus = "8"
@@ -972,7 +969,6 @@ this machine or on an SSH machine. See [Docker](/docker/).
 ```toml
 [targets.apple]
 kind = "apple-container"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 platform = "linux/arm64"
 cpus = "8"
@@ -1003,7 +999,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 14
+version = 15
 
 [phone]
 enabled = true
@@ -1038,7 +1034,6 @@ kind = "bare"
 
 [targets.podman]
 kind = "podman"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 pull_policy = "auto"
 ```
 

@@ -316,6 +316,13 @@ fn default_container_image() -> String {
     super::DEFAULT_CONTAINER_IMAGE.to_owned()
 }
 
+/// Whether a container image is exactly this build's default. A template that
+/// keeps the default writes no `image` line, so an upgraded install follows
+/// the image built for its own version.
+fn is_default_image(image: &String) -> bool {
+    image == super::DEFAULT_CONTAINER_IMAGE
+}
+
 /// Every key a container runtime's table may carry beside `kind` and
 /// `machine`. A target table flattens [`ContainerTemplate`] into a tagged
 /// enum, where serde cannot refuse unknown keys, so the loader compares the
@@ -334,7 +341,10 @@ pub(super) const CONTAINER_TEMPLATE_KEYS: [&str; 8] = [
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerTemplate {
-    #[serde(default = "default_container_image")]
+    #[serde(
+        default = "default_container_image",
+        skip_serializing_if = "is_default_image"
+    )]
     pub image: String,
     #[serde(default, skip_serializing_if = "ImagePullPolicy::is_auto")]
     pub pull_policy: ImagePullPolicy,
@@ -560,6 +570,18 @@ impl TargetTemplate {
 
     /// The container this runtime starts, for the container runtimes.
     pub fn container(&self) -> Option<&ContainerTemplate> {
+        match self {
+            Self::LocalPodman { container }
+            | Self::LocalDocker { container }
+            | Self::AppleContainer { container }
+            | Self::SshPodman { container, .. }
+            | Self::SshDocker { container, .. } => Some(container),
+            _ => None,
+        }
+    }
+
+    /// The container this runtime starts, for editing during a load.
+    pub(super) fn container_mut(&mut self) -> Option<&mut ContainerTemplate> {
         match self {
             Self::LocalPodman { container }
             | Self::LocalDocker { container }

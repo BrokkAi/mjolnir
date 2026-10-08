@@ -669,13 +669,15 @@ impl Controller {
                 mj_core::subagent::stopped_subagents_prompt_context(&stopped_subagents);
             let reopen_move_subagents =
                 matches!(&worker_root_reset, WorkerRootReset::InPlace { .. })
-                    && self.state.sessions[session_id]
-                        .subagents
-                        .clone()
-                        .unwrap_or_default()
-                        .for_launch(profile.kind, false)
-                        .parent_role()
-                        .is_some();
+                    && super::move_session::worker_subagent_queue_enabled(
+                        &self.state.sessions[session_id]
+                            .subagents
+                            .clone()
+                            .unwrap_or_default(),
+                        profile.kind,
+                        self.state.subagents.get(session_id),
+                        self.config.agent_mailboxes_enabled(),
+                    );
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
                 &stopped_subagents,
             ));
