@@ -11,7 +11,7 @@ An invalidated speculative merge reuses its session and checkout, clears obsolet
 - [x] Inspect deployed clear-context and background-stop behavior.
 - [x] Add optional prompt command IDs and queue cancellation through the authenticated API and CLI.
 - [x] Validate routes and CLI request wiring, touched crate suites and workspace Clippy.
-- [ ] Commit, publish and deploy before enabling monitor lookahead.
+- [x] Commit, publish and deploy before enabling monitor lookahead.
 
 ## Surprises & Discoveries
 
@@ -29,4 +29,4 @@ First expose optional `command_id` on prompt requests and `mj prompt --command-i
 
 ## Outcomes & Retrospective
 
-The API and CLI changes are validated, including an isolated daemon capability probe. Controller and CLI full suites were run; failing historical fixtures and CLI tests passed after focused corrections. Workspace Clippy passed. Matching release binaries are staged for CI deployment. No live session was reset during validation.
+The API and CLI changes are validated, including an isolated daemon capability probe. Controller and CLI full suites were run; failing historical fixtures and CLI tests passed after focused corrections. Workspace Clippy passed. Matching release binaries were deployed to the MergeMarshall CI host after checksum verification. The read-only recovery capability probe passed and all 45 existing CI session IDs were preserved across the daemon handoff. No live session was reset during validation.
