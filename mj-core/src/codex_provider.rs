@@ -79,15 +79,74 @@ impl BuiltInCodexProvider {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// `Debug` is written by hand below so an inline key is redacted.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CustomCodexProvider {
     pub id: String,
     pub base_url: String,
     /// Environment variable that carries the API key, when the provider uses
     /// `env_key`.
     pub env_key: Option<String>,
-    /// True when the key is inline as `experimental_bearer_token`.
-    pub inline_bearer_token: bool,
+    /// The key itself, when the provider inlines it as
+    /// `experimental_bearer_token`. It already lives in the profile's
+    /// `config.toml`, which Mjolnir copies into every staged home, so Mjolnir
+    /// may use it for its own provider calls but never treats it as a secret
+    /// of its own.
+    pub bearer_token: Option<String>,
+}
+
+/// A custom provider's API key source, as its own table names it.
+///
+/// `parse_config` rejects a table that names neither, so a custom provider
+/// always resolves to one of these.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CodexProviderKey<'a> {
+    /// The profile supplies the key in this environment variable.
+    EnvKey(&'a str),
+    /// The key is written into the provider table itself.
+    Inline(&'a str),
+}
+
+impl std::fmt::Debug for CodexProviderKey<'_> {
+    /// An inline key must never reach a log or an error, so the derived
+    /// `Debug` is replaced with one that redacts it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EnvKey(env_key) => f.debug_tuple("EnvKey").field(env_key).finish(),
+            Self::Inline(_) => f.debug_tuple("Inline").field(&"<redacted>").finish(),
+        }
+    }
+}
+
+/// A provider's inline key must never reach a log or an error, so the derived
+/// `Debug` is replaced with one that redacts it.
+impl std::fmt::Debug for CustomCodexProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomCodexProvider")
+            .field("id", &self.id)
+            .field("base_url", &self.base_url)
+            .field("env_key", &self.env_key)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl CustomCodexProvider {
+    /// Which key source this provider names. When a table names both, `env_key`
+    /// wins, matching the documented preference for the form that keeps the key
+    /// out of the staged configuration.
+    pub fn key(&self) -> Option<CodexProviderKey<'_>> {
+        Some(
+            match (self.env_key.as_deref(), self.bearer_token.as_deref()) {
+                (Some(env_key), _) => CodexProviderKey::EnvKey(env_key),
+                (None, Some(token)) => CodexProviderKey::Inline(token),
+                (None, None) => return None,
+            },
+        )
+    }
 }
 
 impl CodexProvider {
@@ -249,17 +308,19 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Option<CodexProvider>> {
             path.display()
         ),
     }
-    let inline_bearer_token = table
+    let bearer_token = table
         .experimental_bearer_token
         .as_deref()
-        .is_some_and(|token| !token.trim().is_empty());
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned);
     let env_key = table
         .env_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(str::to_owned);
-    if env_key.is_none() && !inline_bearer_token {
+    if env_key.is_none() && bearer_token.is_none() {
         bail!(
             "{} declares model provider {id:?} with neither env_key nor experimental_bearer_token",
             path.display()
@@ -270,7 +331,7 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Option<CodexProvider>> {
             id,
             base_url,
             env_key,
-            inline_bearer_token,
+            bearer_token,
         }),
         model_catalog_json,
     }))
@@ -325,7 +386,8 @@ mod tests {
         assert_eq!(custom.id, "zai");
         assert_eq!(custom.base_url, "https://api.z.ai/api/v1");
         assert_eq!(custom.env_key.as_deref(), Some("ZAI_API_KEY"));
-        assert!(!custom.inline_bearer_token);
+        assert_eq!(custom.bearer_token, None);
+        assert_eq!(custom.key(), Some(CodexProviderKey::EnvKey("ZAI_API_KEY")));
         assert_eq!(provider.host().as_deref(), Some("api.z.ai"));
     }
 
@@ -342,7 +404,27 @@ mod tests {
         .expect("provider");
         let custom = provider.custom().expect("custom provider");
         assert_eq!(custom.env_key, None);
-        assert!(custom.inline_bearer_token);
+        assert_eq!(custom.bearer_token.as_deref(), Some("secret"));
+        assert_eq!(custom.key(), Some(CodexProviderKey::Inline("secret")));
+    }
+
+    #[test]
+    fn an_inline_bearer_token_never_appears_in_debug_output() {
+        let provider = parse(
+            "model_provider = \"zai\"\n\
+             [model_providers.zai]\n\
+             base_url = \"https://api.z.ai/api/v1\"\n\
+             experimental_bearer_token = \"super-secret-token\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .expect("parse")
+        .expect("provider");
+        let rendered = format!("{provider:?}");
+        assert!(!rendered.contains("super-secret-token"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        let custom = provider.custom().expect("custom provider");
+        let rendered = format!("{:?}", custom.key());
+        assert!(!rendered.contains("super-secret-token"), "{rendered}");
     }
 
     #[test]

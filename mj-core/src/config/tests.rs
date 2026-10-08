@@ -225,6 +225,7 @@ fn an_api_key_codex_profile_needs_its_key_in_the_profile_environment() {
             env_key: "ZAI_API_KEY".to_owned()
         }
     );
+    assert_eq!(with_key.codex_provider_api_key().as_deref(), Some("secret"));
     assert_eq!(
         with_key.authentication_marker(),
         home.path().join("config.toml"),
@@ -270,6 +271,58 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
         crate::credentials::login_command(&profile).is_err(),
         "an AWS role profile has no interactive Codex login"
     );
+}
+
+#[test]
+fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
+    let home = tempfile::tempdir().expect("temporary home");
+    // An inline-token provider never writes `auth.json`, so the profile is
+    // proven by the same `config.toml` that carries the key.
+    fs::write(
+        home.path().join("config.toml"),
+        "model = \"deepseek-flash\"\n\
+         model_provider = \"deepseek\"\n\
+         \n\
+         [model_providers.deepseek]\n\
+         base_url = \"https://api.deepseek.com/v1\"\n\
+         experimental_bearer_token = \"inline-deepseek-key\"\n\
+         wire_api = \"responses\"\n",
+    )
+    .expect("write Codex configuration");
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: BTreeMap::new().into(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+
+    profile
+        .validate("deepseek")
+        .expect("an inline-token profile is valid");
+    profile
+        .ensure_ready("deepseek")
+        .expect("an inline token needs no profile environment");
+    assert_eq!(profile.auth_scheme(), AuthScheme::InlineApiKey);
+    assert!(profile.auth_scheme().is_api_key());
+    assert!(!profile.auth_scheme().uses_native_login_file());
+    assert_eq!(
+        profile.authentication_marker(),
+        home.path().join("config.toml"),
+        "the Codex configuration proves an inline-key profile is set up"
+    );
+    assert_eq!(profile.credential_freshness(b"{}"), None);
+    assert_eq!(profile.credential_expiry(b"{}"), None);
+    assert_eq!(
+        profile.codex_provider_api_key().as_deref(),
+        Some("inline-deepseek-key")
+    );
+    let error = crate::credentials::login_command(&profile)
+        .expect_err("an inline-token profile has no interactive login")
+        .to_string();
+    assert!(error.contains("inlines its provider API key"), "{error}");
 }
 
 /// A Codex home that names its key variable works the way standalone Codex

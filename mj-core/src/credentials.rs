@@ -608,6 +608,9 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
         AuthScheme::ApiKey { env_key } => bail!(
             "this profile authenticates with the {env_key} API key, from its `environment` entry or the environment Mjolnir started with, so it has no interactive login"
         ),
+        AuthScheme::InlineApiKey => bail!(
+            "this profile inlines its provider API key in its Codex `config.toml`, so it has no interactive login"
+        ),
         AuthScheme::AwsCredentialChain => bail!(
             "this profile authenticates with the AWS credential chain, so it has no interactive login"
         ),
