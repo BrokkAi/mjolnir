@@ -183,7 +183,8 @@ permissions = "guardian"
 A bare SSH runtime can run directly on an Intel or Apple silicon Mac. The
 controller detects the remote operating system and architecture and uploads
 the worker from its own release. Linux controllers can manage Mac workers;
-release archives and npm packages include the universal macOS worker.
+release archives include both per-architecture macOS workers, and each macOS
+npm package includes its own architecture's worker.
 
 Enable Remote Login on the Mac and configure noninteractive SSH key access.
 Install working Git (including the Xcode Command Line Tools if using Apple's
@@ -216,8 +217,9 @@ hosts, install Xcode, or manage signing identities.
 
 When developing from source, provide a worker built from the same source
 revision as the controller. `MJ_WORKER_DIR` accepts
-`mj-worker-aarch64-apple-darwin`, `mj-worker-x86_64-apple-darwin`, or the
-combined `mj-worker-universal-apple-darwin`. Build an architecture-specific
+`mj-worker-aarch64-apple-darwin` or `mj-worker-x86_64-apple-darwin`; the older
+combined `mj-worker-universal-apple-darwin` is still accepted as a fallback for
+bundles that predate the per-architecture split. Build an architecture-specific
 worker on a Mac with `cargo build -p brokk-mj-worker --bin mj-worker`; copy it
 under the matching name in that directory. A release controller and a worker
 from another revision cannot be mixed.

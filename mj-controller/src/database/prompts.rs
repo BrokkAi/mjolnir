@@ -23,6 +23,60 @@ pub fn record_prompt(
     })
 }
 
+pub fn record_abandoned_prompt(session_id: &str, bundle_id: &str, text: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let bundle_id = bundle_id.to_owned();
+    let text = text.to_owned();
+    submit_database_write("record_abandoned_prompt", move |_| {
+        record_abandoned_prompt_to(&database_path(), &session_id, &bundle_id, &text)
+    })
+}
+
+pub(super) fn record_abandoned_prompt_to(
+    path: &Path,
+    session_id: &str,
+    bundle_id: &str,
+    text: &str,
+) -> Result<()> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let submitted_at = Utc::now().to_rfc3339();
+    let mut connection = open(path)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let canonical_bundle = super::projects::session_project_id(&tx, session_id, bundle_id)?;
+    tx.execute(
+        "INSERT INTO session_contexts(session_id, bundle_id, created_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id) DO NOTHING",
+        params![session_id, canonical_bundle, submitted_at],
+    )?;
+    let actual_bundle: String = tx.query_row(
+        "SELECT bundle_id FROM session_contexts WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if actual_bundle != canonical_bundle {
+        bail!("session {session_id} belongs to bundle {actual_bundle}, not {bundle_id}");
+    }
+    let most_recent: Option<String> = tx
+        .query_row(
+            "SELECT text FROM prompt_history WHERE session_id = ?1
+             ORDER BY history_id DESC LIMIT 1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if most_recent.as_deref() != Some(text) {
+        tx.execute(
+            "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+             VALUES (?1, NULL, ?2, ?3)",
+            params![session_id, submitted_at, text],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub(super) fn record_prompt_to(
     path: &Path,
     session_id: &str,

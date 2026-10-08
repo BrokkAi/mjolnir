@@ -27,19 +27,19 @@ function fixture(t) {
 }
 
 const release = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
-for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin', 'x86_64-pc-windows-msvc']) {
+for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc']) {
   test(`archive assembly preserves binaries, modes, notices and checksum for ${target}`, t => {
     const dir = fixture(t);
-    const mac = target === 'universal-apple-darwin';
+    const mac = target.endsWith('-apple-darwin');
     const windows = target === 'x86_64-pc-windows-msvc';
     const binaries = windows ? ['mj.exe', 'mj-desktop.exe'] : ['mj', 'mj-desktop', 'mj-voice-worker'];
     if (mac) binaries.push('mj-worker');
-    const native = join(dir, mac ? 'target/universal-apple-darwin/release' : 'native');
+    const native = join(dir, 'native');
     mkdirSync(native, { recursive: true });
     for (const binary of binaries) writeFileSync(join(native, binary), binary);
     // A Windows controller drives Linux containers and SSH hosts only.
     const workerTriples = ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'];
-    if (!windows) workerTriples.push('universal-apple-darwin');
+    if (!windows) workerTriples.push('x86_64-apple-darwin', 'aarch64-apple-darwin');
     for (const triple of workerTriples) {
       const worker = `mj-worker-${triple}`;
       mkdirSync(join(dir, 'workers', worker), { recursive: true });
@@ -54,7 +54,7 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
     for (const file of ['THIRD_PARTY_LICENSES.html', 'SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt']) {
       writeFileSync(join(dir, 'release-notices', file), `generated for this tag: ${file}`);
     }
-    const job = mac ? 'package-macos' : `package-${target}`;
+    const job = `package-${target}`;
     const block = release.split(`  ${job}:\n`)[1].split(/\n  [\w-]+:\n/)[0];
     const result = spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(block, 'Package archive')], {
       cwd: dir, encoding: 'utf8', env: { ...process.env, GITHUB_REF_NAME: 'v1.2.3' },
@@ -164,7 +164,7 @@ test('npm downloads assets when the release lookup omits its embedded asset list
   mkdirSync(work);
   mkdirSync(join(dir, 'bin'));
   const assets = [];
-  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'universal-apple-darwin', 'x86_64-pc-windows-msvc']) {
+  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-pc-windows-msvc']) {
     const archive = target.endsWith('-windows-msvc') ? 'zip' : 'tar.gz';
     for (const suffix of [archive, `${archive}.sha256`]) {
       const name = `brokk-mjolnir-v1.2.3-${target}.${suffix}`;
@@ -220,13 +220,13 @@ if [[ "$name" != brokkai-mjolnir-1.2.3 ]]; then
   # A sequential upload loop cannot pass this barrier.
   for ((attempt=0; attempt<100; attempt++)); do
     count=$(find "$FIXTURE" -name '*.started' | wc -l)
-    ((count >= 3)) && break
+    ((count >= 4)) && break
     sleep 0.02
   done
-  ((count >= 3)) || exit 22
+  ((count >= 4)) || exit 22
   [[ -z "$FAIL_PLATFORM" || "$name" != *"$FAIL_PLATFORM"* ]] || exit 23
 else
-  for platform in darwin-universal linux-x64-gnu linux-arm64-gnu; do
+  for platform in darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu; do
     test -f "$FIXTURE/brokkai-mjolnir-$platform-1.2.3.ready"
   done
 fi
@@ -253,7 +253,7 @@ ${curlBody}`, { mode: 0o755 });
     const files = readdirSync(dir);
     assert.equal(files.includes('brokkai-mjolnir-1.2.3.started'), !fail);
     // Both other uploads complete even when a sibling fails.
-    assert.ok(files.includes('brokkai-mjolnir-darwin-universal-1.2.3.ready'));
+    assert.ok(files.includes('brokkai-mjolnir-darwin-arm64-1.2.3.ready'));
     assert.ok(files.includes('brokkai-mjolnir-linux-arm64-gnu-1.2.3.ready'));
   });
 }

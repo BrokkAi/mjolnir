@@ -187,6 +187,25 @@ pub(super) async fn handle_action(
             blocking(move || crate::database::clear_active_review(&session_id)).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::RecordAbandonedPrompt {
+            session_id,
+            bundle_id,
+            text,
+        } => {
+            let warning_session_id = session_id.clone();
+            if let Err(error) = blocking(move || {
+                crate::database::record_abandoned_prompt(&session_id, &bundle_id, &text)
+            })
+            .await
+            {
+                tracing::warn!(
+                    session_id = warning_session_id,
+                    error = format!("{error:#}"),
+                    "abandoned prompt history could not be stored"
+                );
+            }
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SaveWorkspacePaneSizes {
             workspace_id,
             sizes,

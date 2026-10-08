@@ -187,6 +187,18 @@ impl ActiveChat {
         }
     }
 
+    pub(crate) fn dispatch_abandoned_prompt_request(&mut self) {
+        let Some(request) = self.state.take_abandoned_prompt_request() else {
+            return;
+        };
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        if let Err(error) = persistence.send(request) {
+            tracing::warn!(%error, "an abandoned prompt could not be queued for the daemon");
+        }
+    }
+
     /// Reports a daemon refusal in the review pane, or as a notice when no
     /// review is open -- a refused `/review` has nowhere else to appear.
     pub fn report_review_refusal(&mut self, message: String) {

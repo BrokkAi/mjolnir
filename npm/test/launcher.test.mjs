@@ -24,8 +24,8 @@ test("recognizes npm's symlinked bin entrypoint", () => {
 });
 
 test("selects each published native package", () => {
-  assert.equal(platformPackageName("darwin", "arm64"), "@brokkai/mjolnir-darwin-universal");
-  assert.equal(platformPackageName("darwin", "x64"), "@brokkai/mjolnir-darwin-universal");
+  assert.equal(platformPackageName("darwin", "arm64"), "@brokkai/mjolnir-darwin-arm64");
+  assert.equal(platformPackageName("darwin", "x64"), "@brokkai/mjolnir-darwin-x64");
   assert.equal(platformPackageName("linux", "x64"), "@brokkai/mjolnir-linux-x64-gnu");
   assert.equal(platformPackageName("linux", "arm64"), "@brokkai/mjolnir-linux-arm64-gnu");
 });

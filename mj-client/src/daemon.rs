@@ -474,6 +474,11 @@ pub enum DaemonAction {
     ClearActiveReview {
         session_id: String,
     },
+    RecordAbandonedPrompt {
+        session_id: String,
+        bundle_id: String,
+        text: String,
+    },
     SaveWorkspacePaneSizes {
         workspace_id: String,
         sizes: mj_core::workspace::PaneSizes,
@@ -1609,6 +1614,26 @@ impl DaemonClient {
         }
     }
 
+    /// Persist a prompt the user abandoned in the chat composer.
+    pub async fn record_abandoned_prompt(
+        &mut self,
+        session_id: String,
+        bundle_id: String,
+        text: String,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::RecordAbandonedPrompt {
+                session_id,
+                bundle_id,
+                text,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected abandoned-prompt reply {reply:?}"),
+        }
+    }
+
     pub async fn save_workspace_pane_sizes(
         &mut self,
         workspace_id: String,
@@ -2396,7 +2421,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Runtime deltas carry transcript item changes, and a client fetches a
 // session's tail from the daemon at its cursor instead of reading SQLite.
 // Lifecycle stages can name the harness preparation step a worker reports.
-pub const PROTOCOL_VERSION: u32 = 55;
+pub const PROTOCOL_VERSION: u32 = 56;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -2534,6 +2559,57 @@ mod tests {
         assert!(message.contains(&format!("client protocol {PROTOCOL_VERSION}")));
         assert!(message.contains("restart the daemon"));
         drop(client);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_prompt_history_uses_the_daemon_protocol_action() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "abandoned-prompt-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+        };
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+            assert_eq!(request.protocol_version, PROTOCOL_VERSION);
+            assert_eq!(request.token, "abandoned-prompt-test");
+            assert_eq!(
+                serde_json::to_value(request.action).unwrap(),
+                serde_json::json!({
+                    "action": "record_abandoned_prompt",
+                    "arguments": {
+                        "session_id": "session-1",
+                        "bundle_id": "project-1",
+                        "text": "unfinished draft"
+                    }
+                })
+            );
+            write_frame(
+                &mut stream,
+                &ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+
+        client
+            .record_abandoned_prompt(
+                "session-1".into(),
+                "project-1".into(),
+                "unfinished draft".into(),
+            )
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 

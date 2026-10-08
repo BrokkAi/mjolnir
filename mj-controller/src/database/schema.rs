@@ -1368,6 +1368,38 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Compatible: abandoned composer prompts have no relay event ordinal.
+    // Older readers select the history id, session, and text without decoding
+    // this column; older writers continue inserting non-null ordinals. The
+    // uniqueness constraint and existing rows are preserved, and NULL ordinals
+    // remain distinct under SQLite's UNIQUE semantics.
+    if version < 77 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE prompt_history_nullable_v77 (
+                 history_id INTEGER PRIMARY KEY,
+                 session_id TEXT NOT NULL REFERENCES session_contexts(session_id),
+                 event_ordinal INTEGER CHECK(event_ordinal IS NULL OR event_ordinal >= 0),
+                 submitted_at TEXT NOT NULL,
+                 text TEXT NOT NULL CHECK(length(trim(text)) > 0),
+                 UNIQUE(session_id, event_ordinal)
+             ) STRICT;
+             INSERT INTO prompt_history_nullable_v77
+                 SELECT history_id, session_id, event_ordinal, submitted_at, text
+                 FROM prompt_history;
+             DROP TABLE prompt_history;
+             ALTER TABLE prompt_history_nullable_v77 RENAME TO prompt_history;
+             CREATE INDEX prompt_history_session_recent
+                 ON prompt_history(session_id, history_id DESC);
+             CREATE INDEX prompt_history_recent
+                 ON prompt_history(history_id DESC);
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (77, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 77;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2071,6 +2103,84 @@ mod reader_tests {
             forget_verified_schema(&path);
             drop(open_writer(&path).unwrap());
         }
+    }
+
+    #[test]
+    fn revision_77_makes_prompt_ordinals_nullable_and_preserves_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        migrate_schema(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_contexts(session_id, bundle_id, created_at)
+                 VALUES ('old-session', 'project', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO prompt_history(session_id, event_ordinal, submitted_at, text)
+                 VALUES ('old-session', 11, '2026-01-01T00:00:00Z', 'kept prompt')",
+                [],
+            )
+            .unwrap();
+        // Restore the previous table definition and migration ledger, retaining
+        // a real row so the forward migration proves it copies existing data.
+        connection
+            .execute_batch(
+                "CREATE TABLE prompt_history_v76 (
+                     history_id INTEGER PRIMARY KEY,
+                     session_id TEXT NOT NULL REFERENCES session_contexts(session_id),
+                     event_ordinal INTEGER NOT NULL CHECK(event_ordinal >= 0),
+                     submitted_at TEXT NOT NULL,
+                     text TEXT NOT NULL CHECK(length(trim(text)) > 0),
+                     UNIQUE(session_id, event_ordinal)
+                 ) STRICT;
+                 INSERT INTO prompt_history_v76
+                     SELECT history_id, session_id, event_ordinal, submitted_at, text
+                     FROM prompt_history;
+                 DROP TABLE prompt_history;
+                 ALTER TABLE prompt_history_v76 RENAME TO prompt_history;
+                 CREATE INDEX prompt_history_session_recent
+                     ON prompt_history(session_id, history_id DESC);
+                 CREATE INDEX prompt_history_recent ON prompt_history(history_id DESC);
+                 DELETE FROM schema_migrations WHERE version = 77;
+                 PRAGMA user_version = 76;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let migrated = open_writer(&path).unwrap();
+        assert_eq!(read_schema_state(&migrated).unwrap().revision, 77);
+        let preserved: (i64, i64, String) = migrated
+            .query_row(
+                "SELECT history_id, event_ordinal, text FROM prompt_history",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, (1, 11, "kept prompt".into()));
+        let ordinal_not_null: i64 = migrated
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('prompt_history')
+                 WHERE name = 'event_ordinal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ordinal_not_null, 0);
+        let indexes: Vec<String> = migrated
+            .prepare("PRAGMA index_list('prompt_history')")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(indexes.contains(&"prompt_history_session_recent".into()));
+        assert!(indexes.contains(&"prompt_history_recent".into()));
     }
 
     #[test]

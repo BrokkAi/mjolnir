@@ -240,7 +240,8 @@ jobs:
           cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
-          cp workers/mj-worker-universal-apple-darwin/mj-worker "$name/mj-worker-universal-apple-darwin"
+          cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
+          cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
@@ -330,7 +331,8 @@ jobs:
           cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
-          cp workers/mj-worker-universal-apple-darwin/mj-worker "$name/mj-worker-universal-apple-darwin"
+          cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
+          cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
           chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
@@ -349,7 +351,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
-    name: Build macOS universal
+    name: Build macOS per architecture
     needs: verify-version
     runs-on: macos-latest
     steps:
@@ -365,52 +367,51 @@ jobs:
             cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop -p brokk-mj-voice-worker --target "$target"
           done
 
-      - name: Create universal binary
+      - name: Stage native binaries
         run: |
-          mkdir -p target/universal-apple-darwin/release
-          lipo -create \
-            target/x86_64-apple-darwin/release/mj \
-            target/aarch64-apple-darwin/release/mj \
-            -output target/universal-apple-darwin/release/mj
-          lipo -info target/universal-apple-darwin/release/mj
-          lipo -create \
-            target/x86_64-apple-darwin/release/mj-worker \
-            target/aarch64-apple-darwin/release/mj-worker \
-            -output target/universal-apple-darwin/release/mj-worker
-          lipo -info target/universal-apple-darwin/release/mj-worker
-          lipo -create \
-            target/x86_64-apple-darwin/release/mj-desktop \
-            target/aarch64-apple-darwin/release/mj-desktop \
-            -output target/universal-apple-darwin/release/mj-desktop
-          lipo -info target/universal-apple-darwin/release/mj-desktop
-          lipo -create \
-            target/x86_64-apple-darwin/release/mj-voice-worker \
-            target/aarch64-apple-darwin/release/mj-voice-worker \
-            -output target/universal-apple-darwin/release/mj-voice-worker
-          lipo -info target/universal-apple-darwin/release/mj-voice-worker
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            mkdir -p "native/$target"
+            cp "target/$target/release/mj" "target/$target/release/mj-worker" \
+              "target/$target/release/mj-desktop" "target/$target/release/mj-voice-worker" "native/$target/"
+          done
 
       - uses: actions/upload-artifact@v7
         with:
-          name: native-universal-apple-darwin
-          path: target/universal-apple-darwin/release/
+          name: native-x86_64-apple-darwin
+          path: native/x86_64-apple-darwin/
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
         with:
-          name: mj-worker-universal-apple-darwin
-          path: target/universal-apple-darwin/release/mj-worker
+          name: native-aarch64-apple-darwin
+          path: native/aarch64-apple-darwin/
           if-no-files-found: error
 
-  package-macos:
-    name: Package macOS universal
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mj-worker-x86_64-apple-darwin
+          path: target/x86_64-apple-darwin/release/mj-worker
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mj-worker-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/mj-worker
+          if-no-files-found: error
+
+  # The macOS archives keep both Darwin workers: a controller on either Mac
+  # architecture can drive a Mac of the other one. Only the npm packages are
+  # per-architecture, because the registry rejects the larger tarball.
+  package-x86_64-apple-darwin:
+    name: Package x86_64-apple-darwin
     needs: [build-macos, build-worker-x64, build-worker-arm64, release-notices]
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
-          name: native-universal-apple-darwin
-          path: target/universal-apple-darwin/release
+          name: native-x86_64-apple-darwin
+          path: native
 
       - name: Download session workers
         uses: actions/download-artifact@v8
@@ -426,15 +427,16 @@ jobs:
 
       - name: Package archive
         run: |
-          name="brokk-mjolnir-${GITHUB_REF_NAME}-universal-apple-darwin"
+          name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-apple-darwin"
           mkdir "$name"
-          cp target/universal-apple-darwin/release/mj "$name/"
-          cp target/universal-apple-darwin/release/mj-worker "$name/"
-          cp target/universal-apple-darwin/release/mj-desktop "$name/"
-          cp target/universal-apple-darwin/release/mj-voice-worker "$name/"
+          cp "native/mj" "$name/"
+          cp "native/mj-worker" "$name/"
+          cp "native/mj-desktop" "$name/"
+          cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
-          cp workers/mj-worker-universal-apple-darwin/mj-worker "$name/mj-worker-universal-apple-darwin"
+          cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
+          cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
           chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
@@ -446,7 +448,59 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: archive-universal-apple-darwin
+          name: archive-x86_64-apple-darwin
+          path: |
+            brokk-mjolnir-*.tar.gz
+            brokk-mjolnir-*.tar.gz.sha256
+          if-no-files-found: error
+
+  package-aarch64-apple-darwin:
+    name: Package aarch64-apple-darwin
+    needs: [build-macos, build-worker-x64, build-worker-arm64, release-notices]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-aarch64-apple-darwin
+          path: native
+
+      - name: Download session workers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mj-worker-*
+          path: workers
+
+      - name: Download generated notices
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notices
+          path: release-notices
+
+      - name: Package archive
+        run: |
+          name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-apple-darwin"
+          mkdir "$name"
+          cp "native/mj" "$name/"
+          cp "native/mj-worker" "$name/"
+          cp "native/mj-desktop" "$name/"
+          cp "native/mj-voice-worker" "$name/"
+          cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
+          cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
+          cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
+          cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
+          chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
+          cp README.md LICENSE "$name/"
+          mkdir "$name/licenses"
+          cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
+          cp -R licenses/native "$name/licenses/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: archive-aarch64-apple-darwin
           path: |
             brokk-mjolnir-*.tar.gz
             brokk-mjolnir-*.tar.gz.sha256
@@ -535,7 +589,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
+    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-x86_64-apple-darwin, package-aarch64-apple-darwin, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
     runs-on: ubuntu-latest
     permissions:
       actions: write

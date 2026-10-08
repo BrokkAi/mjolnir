@@ -12,17 +12,43 @@ const repositoryRoot = path.resolve(npmRoot, "..");
 
 export const ROOT_PACKAGE = "@brokkai/mjolnir";
 
+// Session workers are uploaded to Linux targets and SSH Macs; the controller
+// looks for them beside its own executable. Each macOS npm package ships only
+// its own architecture's Darwin worker because the registry rejects a package
+// carrying both, while the Linux packages ship both so a Linux controller can
+// drive either Mac.
 export const PLATFORMS = [
   {
-    packageName: "@brokkai/mjolnir-darwin-universal",
-    target: "universal-apple-darwin",
+    packageName: "@brokkai/mjolnir-darwin-x64",
+    target: "x86_64-apple-darwin",
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
     nativeWorker: true,
-    description: "Native universal macOS bundle for @brokkai/mjolnir",
+    sessionWorkers: [
+      "mj-worker-x86_64-unknown-linux-musl",
+      "mj-worker-aarch64-unknown-linux-musl",
+      "mj-worker-x86_64-apple-darwin",
+    ],
+    description: "Native Intel macOS bundle for @brokkai/mjolnir",
     os: ["darwin"],
-    cpu: ["x64", "arm64"],
+    cpu: ["x64"],
+  },
+  {
+    packageName: "@brokkai/mjolnir-darwin-arm64",
+    target: "aarch64-apple-darwin",
+    extension: ".tar.gz",
+    binary: "mj",
+    desktop: true,
+    nativeWorker: true,
+    sessionWorkers: [
+      "mj-worker-x86_64-unknown-linux-musl",
+      "mj-worker-aarch64-unknown-linux-musl",
+      "mj-worker-aarch64-apple-darwin",
+    ],
+    description: "Native Apple silicon macOS bundle for @brokkai/mjolnir",
+    os: ["darwin"],
+    cpu: ["arm64"],
   },
   {
     packageName: "@brokkai/mjolnir-linux-x64-gnu",
@@ -30,6 +56,12 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    sessionWorkers: [
+      "mj-worker-x86_64-unknown-linux-musl",
+      "mj-worker-aarch64-unknown-linux-musl",
+      "mj-worker-x86_64-apple-darwin",
+      "mj-worker-aarch64-apple-darwin",
+    ],
     description: "Native Linux x64 glibc bundle for @brokkai/mjolnir",
     os: ["linux"],
     cpu: ["x64"],
@@ -41,6 +73,12 @@ export const PLATFORMS = [
     extension: ".tar.gz",
     binary: "mj",
     desktop: true,
+    sessionWorkers: [
+      "mj-worker-x86_64-unknown-linux-musl",
+      "mj-worker-aarch64-unknown-linux-musl",
+      "mj-worker-x86_64-apple-darwin",
+      "mj-worker-aarch64-apple-darwin",
+    ],
     description: "Native Linux ARM64 glibc bundle for @brokkai/mjolnir",
     os: ["linux"],
     cpu: ["arm64"],
@@ -172,13 +210,8 @@ export async function stagePlatform(platform, version, source, stagingRoot) {
       await cp(path.join(source, nativeWorker), path.join(destination, "bin", nativeWorker));
       await ensureBinary(path.join(destination, "bin", nativeWorker), true);
     }
-    // Session workers are uploaded to Linux targets and SSH Macs; the
-    // controller looks for them beside its own executable.
-    for (const sessionWorker of [
-      "mj-worker-x86_64-unknown-linux-musl",
-      "mj-worker-aarch64-unknown-linux-musl",
-      "mj-worker-universal-apple-darwin",
-    ]) {
+    // Worker names the controller looks for beside its own executable.
+    for (const sessionWorker of platform.sessionWorkers) {
       await cp(path.join(source, sessionWorker), path.join(destination, "bin", sessionWorker));
       await ensureBinary(path.join(destination, "bin", sessionWorker), platform.binary !== "mj.exe");
     }

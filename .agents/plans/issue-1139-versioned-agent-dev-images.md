@@ -36,6 +36,9 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
 - [x] (2026-10-08 16:11Z) Milestone 2: `mj`'s default container image is version-derived for release builds and
       `:latest` for development builds, including a config migration for files that spell out the
       old literal default.
+- [x] (2026-10-08 17:00Z) Integrate with master and land the work: merged `origin/master`
+      (release 2.37.0 and per-architecture macOS packaging) into the two commits, re-ran the checks,
+      and pushed to `master`.
 - [ ] Milestone 3: the image bakes the worker in at `/opt/mjolnir/mj-worker` with a build label,
       built from the same commit as the image.
 - [ ] Milestone 4: upgrading `mj` recreates stopped container sessions from the new image
@@ -71,6 +74,11 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   (`matches!(version, 1..=13)`), so adding a config version without extending the range makes
   every existing file fail `validate` with "unsupported Mjolnir config version". The range is now
   `1..=14`. Any later config-version bump must extend it again.
+- Observation: master moved from 2.36.0 to 2.37.0 while this work was local, and `7988e3db`
+  replaced the single `package-macos` job with `package-x86_64-apple-darwin` and
+  `package-aarch64-apple-darwin`. The merge's only conflict was the `release` job's `needs` list;
+  the resolution keeps upstream's per-architecture macOS packaging and adds
+  `publish-agent-dev-image` to it.
 
 ## Decision Log
 

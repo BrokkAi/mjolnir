@@ -529,9 +529,8 @@ install_from_asset() {
 install_mjolnir() {
   local -a patterns=()
 
-  if [[ "$OS_FAMILY" == "macos" ]]; then
-    patterns+=("^brokk-mjolnir-.*-universal-apple-darwin[.]tar[.]gz$")
-  fi
+  # macOS publishes one archive per CPU architecture, so RUST_TARGET's
+  # <arch>-apple-darwin form already names the asset the host needs.
   patterns+=("^brokk-mjolnir-.*-${RUST_TARGET}[.]tar[.]gz$")
 
   # Helpers install beside mj so the controller finds them without PATH

@@ -23,6 +23,7 @@ impl ActiveChat {
         };
         let consumed = self.state.event_consumed(&event, &action);
         let dispatched = self.dispatch(action);
+        self.dispatch_abandoned_prompt_request();
         dispatch_history_search_request(self.session.clone(), &mut self.state, &self.chat_io_tx);
         self.dispatch_earlier_history();
         let action = (!matches!(dispatched, ChatEventOutcome::None)).then_some(dispatched);
