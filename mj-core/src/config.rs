@@ -472,11 +472,54 @@ impl Config {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 14;
+pub const CONFIG_VERSION: u32 = 15;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
-pub const DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+/// The registry repository every session image name is built from.
+pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
+/// The container image a session uses when its target names none.
+///
+/// A release build names the immutable image published for its own version; a
+/// development build names the floating image published from master.
+/// `mj-core/build.rs` resolves which one this build is and bakes the answer in.
+pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+/// The image name every configuration up to [`LEGACY_DEFAULT_IMAGE_LAST_VERSION`]
+/// wrote into a container target a user had touched.
+///
+/// Loading such a file replaces this literal with [`DEFAULT_CONTAINER_IMAGE`],
+/// so an upgraded install follows the image built for its own version instead
+/// of pinning whatever was current when the file was written.
+pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+/// The last configuration version that wrote the default image into a file.
+const LEGACY_DEFAULT_IMAGE_LAST_VERSION: u32 = 14;
+
+/// The rule [`DEFAULT_CONTAINER_IMAGE`] is resolved from.
+///
+/// It is a function so one test build can exercise both channels; a single
+/// `build.rs` run compiles only one of them.
+#[must_use]
+pub fn container_image_for(version: &str, release: bool) -> String {
+    if release {
+        format!("{CONTAINER_IMAGE_REPOSITORY}:{version}")
+    } else {
+        format!("{CONTAINER_IMAGE_REPOSITORY}:latest")
+    }
+}
+
+/// Move a container target still carrying the historical default image onto
+/// `default_image`.
+///
+/// A target the user customized -- any other image -- is left alone. Split from
+/// [`TryFrom<StoredConfig>`] so a test build can exercise the release channel's
+/// rewrite without compiling a release `build.rs`.
+fn migrate_legacy_default_image(target: &mut TargetTemplate, default_image: &str) {
+    if let Some(container) = target.container_mut()
+        && container.image == LEGACY_DEFAULT_CONTAINER_IMAGE
+    {
+        container.image = default_image.to_owned();
+    }
+}
 
 // Old config files may still contain [startup]. Accept it without retaining
 // settings that could recreate automatic first-session behavior on save.
@@ -768,15 +811,25 @@ impl TryFrom<StoredConfig> for Config {
         for (id, runtime) in &runtimes {
             resolved.insert(id.clone(), resolve_target(id, runtime, &machines)?);
         }
+        // Up to version 14, a container target the user had touched carried
+        // the then-current default image in the file. Move that literal back
+        // onto this build's default so an upgraded install follows the image
+        // built for its own version; a customized image is left alone.
+        if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION {
+            for target in resolved.values_mut() {
+                migrate_legacy_default_image(target, DEFAULT_CONTAINER_IMAGE);
+            }
+        }
         Ok(Self {
             sessions_side,
             advanced,
             notify,
-            // Versions 1 through 13 acquire this build's defaults in memory
+            // Versions 1 through 14 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
-            // machines from runtimes; version 13 adds automatic continuation.
-            // Version 14 moves the global cache opt-out onto machines.
-            version: if matches!(version, 1..=13) {
+            // machines from runtimes; version 13 adds automatic continuation;
+            // version 14 moves the global cache opt-out onto machines; version
+            // 15 stops writing the default image into a container target.
+            version: if matches!(version, 1..=14) {
                 CONFIG_VERSION
             } else {
                 version

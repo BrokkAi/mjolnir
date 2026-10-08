@@ -257,7 +257,6 @@ It takes the same container keys as a local Podman runtime (`image`, and optiona
 [targets.builder-podman]
 kind = "podman"
 machine = "builder"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 ## Verifying a target

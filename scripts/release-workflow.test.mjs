@@ -83,6 +83,81 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
 }
 
 const npmWorkflow = readFileSync(join(root, '.github/workflows/publish-npm.yml'), 'utf8');
+
+const publishImage = readFileSync(join(root, '.github/workflows/publish-agent-dev-image.yml'), 'utf8');
+
+// The release's container sessions default to agent-dev:<version>, so the
+// tagged workflow must publish that image and must not move the floating
+// :latest tag that development builds use.
+test('a release publishes its version image and leaves :latest to master', () => {
+  const job = release.split('  publish-agent-dev-image:\n')[1].split(/\n  [\w-]+:\n/)[0];
+  assert.match(job, /uses: \.\/\.github\/workflows\/publish-agent-dev-image\.yml/);
+  assert.match(job, /extra_tags: \$\{\{ needs\.verify-version\.outputs\.version \}\}/);
+  assert.match(job, /publish_latest: 'false'/);
+  const releaseJob = release.split('  release:\n')[1].split('    steps:')[0];
+  assert.match(releaseJob, /needs: \[[^\]]*publish-agent-dev-image\]/);
+});
+
+for (const { label, publishLatest, extraTags, expectedTags, absentTags } of [
+  {
+    label: 'master keeps moving :latest',
+    publishLatest: 'true',
+    extraTags: '',
+    expectedTags: ['latest', 'sha-abcdef1'],
+    absentTags: [],
+  },
+  {
+    label: 'a release tags its version and leaves :latest alone',
+    publishLatest: 'false',
+    extraTags: '2.37.0',
+    expectedTags: ['sha-abcdef1', '2.37.0'],
+    absentTags: ['latest'],
+  },
+]) {
+  test(`agent-dev manifest tags when ${label}`, t => {
+    const dir = fixture(t);
+    // The per-arch jobs upload bare digest-file names; the merge step prefixes
+    // each with `sha256:`.
+    writeFileSync(join(dir, 'a1'.repeat(32)), '');
+    writeFileSync(join(dir, 'b2'.repeat(32)), '');
+    mkdirSync(join(dir, 'bin'));
+    writeFileSync(join(dir, 'bin/docker'), `#!/bin/bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$FIXTURE/args"
+case "$*" in
+  *imagetools\\ inspect*) echo 'sha256:deadbeef' ;;
+esac
+`, { mode: 0o755 });
+    const output = join(dir, 'github-output');
+    writeFileSync(output, '');
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', runStep(publishImage, 'Create multi-arch manifest')], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+        FIXTURE: dir,
+        IMAGE: 'ghcr.io/test/mjolnir/agent-dev',
+        EXTRA_TAGS: extraTags,
+        PUBLISH_LATEST: publishLatest,
+        GITHUB_SHA: 'abcdef1234567890',
+        GITHUB_OUTPUT: output,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const create = readFileSync(join(dir, 'args'), 'utf8')
+      .split('\n')
+      .find(line => line.includes('imagetools create'));
+    for (const tag of expectedTags) {
+      assert.ok(create.includes(`--tag ghcr.io/test/mjolnir/agent-dev:${tag}`), create);
+    }
+    for (const tag of absentTags) {
+      assert.ok(!create.includes(`--tag ghcr.io/test/mjolnir/agent-dev:${tag}`), create);
+    }
+    assert.match(readFileSync(output, 'utf8'), /digest=sha256:deadbeef/);
+  });
+}
+
 test('npm downloads assets when the release lookup omits its embedded asset list', t => {
   const dir = fixture(t);
   const work = join(dir, 'work');

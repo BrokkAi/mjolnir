@@ -152,12 +152,12 @@ workspace cleanup.
 
 All container targets use an image and accept optional `pull_policy`,
 `platform`, `cpus`, `memory`, and target `environment`. If `image` is omitted,
-they use this published multi-architecture default:
-
-```toml
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
-pull_policy = "auto"
-```
+they use Mjolnir's published multi-architecture agent-dev image. An installed
+release names the immutable image published for its own version, such as
+`ghcr.io/brokkai/mjolnir/agent-dev:2.36.0`; a development build names
+`ghcr.io/brokkai/mjolnir/agent-dev:latest` from master. Both keep the default
+`pull_policy = "auto"`, which for an immutable version tag pulls only when the
+host has no copy.
 
 It carries the supported bridges and common development tools. A plain image
 can work, but every new session may need to install Git, GitHub CLI, Node, or a
@@ -169,7 +169,6 @@ harness bridge. See [Container targets](/containers/) and
 ```toml
 [targets.podman]
 kind = "podman"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 Rootless Podman 4.0 or newer is the reference Linux/WSL2 runtime. It is the only
@@ -182,7 +181,6 @@ See [Podman](/podman/).
 ```toml
 [targets.docker]
 kind = "docker"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 Docker requires a reachable Linux daemon. Mjolnir owns a managed volume for the
@@ -195,7 +193,6 @@ directories. Podman's `workspace_storage` override is not accepted. See
 ```toml
 [targets.apple]
 kind = "apple-container"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 platform = "linux/arm64"
 ```
 
@@ -215,7 +212,6 @@ user = "ubuntu"
 [targets.remote-podman]
 kind = "podman"
 machine = "builder"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 The machine carries the SSH connection; the runtime carries every Podman

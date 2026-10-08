@@ -29,11 +29,11 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
 
 ## Progress
 
-- [ ] (2026-10-08 16:02Z) Write and check in this ExecPlan (issue #1139 claimed with the
+- [x] (2026-10-08 16:02Z) Write and check in this ExecPlan (issue #1139 claimed with the
       `agent-in-progress` label and the `foundev` assignee).
-- [ ] Milestone 1: release builds publish `agent-dev:<version>` from the tagged commit, and the
+- [x] (2026-10-08 16:11Z) Milestone 1: release builds publish `agent-dev:<version>` from the tagged commit, and the
       release is blocked if that build or push fails.
-- [ ] Milestone 2: `mj`'s default container image is version-derived for release builds and
+- [x] (2026-10-08 16:11Z) Milestone 2: `mj`'s default container image is version-derived for release builds and
       `:latest` for development builds, including a config migration for files that spell out the
       old literal default.
 - [ ] Milestone 3: the image bakes the worker in at `/opt/mjolnir/mj-worker` with a build label,
@@ -61,6 +61,16 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
 - Observation: `mj-core/build.rs` already treats the presence of `.cargo_vcs_info.json` as "this is
   a published crate", which is the only reliable in-checkout difference between a `cargo install`
   of a release and a developer's local build.
+- Observation: the in-place config editor (`mj-core/src/config/document.rs`) only writes
+  differences between two serializations of the *same* config, the one read from the file
+  (`before`) and the one being saved (`after`). It cannot delete a key that is absent from both,
+  so a `skip_serializing_if` that hides the default image also hides the migration: the literal
+  stayed in the file. The save now drops the legacy literal at the document level for the one
+  save that reads a pre-version-15 file.
+- Observation: `TryFrom<StoredConfig>` only upgrades versions in an explicit range
+  (`matches!(version, 1..=13)`), so adding a config version without extending the range makes
+  every existing file fail `validate` with "unsupported Mjolnir config version". The range is now
+  `1..=14`. Any later config-version bump must extend it again.
 
 ## Decision Log
 
@@ -83,11 +93,46 @@ already resolves to "pull only if missing" for it (see `ImagePullPolicy::resolve
   equals the resolved default. Rationale: a migrated file must not pin today's version forever;
   the value only becomes concrete again when the user customizes it. Date/Author: 2026-10-08,
   Codex.
+- Decision: drop the legacy literal from the saved document, rather than trusting
+  `skip_serializing_if` alone. Rationale: the in-place editor compares two serializations of the
+  same config, so a key both omit is preserved from the file; the explicit drop is what makes the
+  migration visible on disk. Date/Author: 2026-10-08, Codex.
+- Decision: keep `DEFAULT_CONTAINER_IMAGE` as a `const &str` built from `env!("MJ_AGENT_DEV_IMAGE")`
+  instead of replacing it with a function. Rationale: every reader, re-export and the TUI's
+  editable-defaults JSON keep working unchanged, and the value is still resolved once at compile
+  time by `build.rs`. Date/Author: 2026-10-08, Codex.
+- Decision: bump `CONFIG_VERSION` to 15 and extend the upgrade range to `1..=14`. Rationale: this
+  is the repository's established way to change the file's meaning, and the extended range is what
+  keeps an installed 14 file loadable. The cost is that an older binary refuses a version-15 file,
+  which the version gate already reports as "Update Mjolnir". Date/Author: 2026-10-08, Codex.
 
 ## Outcomes & Retrospective
 
-Not yet started. This section will summarize the result against the purpose at each milestone and
-at completion.
+Milestones 1 and 2 are complete. A tagged release now builds and publishes
+`ghcr.io/brokkai/mjolnir/agent-dev:<version>` from the tag through the same reusable workflow that
+publishes `:latest` from master, the release is blocked if that build fails, and the release notes
+carry an `agent-dev-image.txt` asset naming the published digest. The default container image is
+now resolved at build time: `MJ_BUILD_CHANNEL=release` (set for the whole release workflow) or a
+crates.io source package bakes `agent-dev:<version>`; anything else bakes `agent-dev:latest`.
+Verified by building the CLI both ways and reading the string out of the binary:
+
+    MJ_BUILD_CHANNEL=release cargo build -p brokk-mjolnir
+    strings target/debug/mj | grep -o 'ghcr.io/brokkai/mjolnir/agent-dev:2[^ ]*'
+    → ghcr.io/brokkai/mjolnir/agent-dev:2.36.0
+
+    cargo build -p brokk-mjolnir
+    strings target/debug/mj | grep -c 'agent-dev:2.36.0' → 0
+
+What remains: milestones 3 through 5, which bake the worker into the image and recreate stopped
+containers on upgrade. Until those land, the container path still copies the worker in and relies
+on the #1138 build-stamp check. Documentation examples that show an explicit
+`image = "...:latest"` were removed from the default-target examples and the configuration
+reference; `docker pull ...:latest` commands in the runtime guides were left, since pulling the
+master image to prove the registry is reachable is still meaningful.
+
+The lesson worth keeping: `skip_serializing_if` and the in-place editor do not compose. Any future
+field whose default is meant to be *absent* from an existing file needs a document-level step in
+the save that migrates it, not just a serialization predicate.
 
 ## Context and Orientation
 
@@ -145,20 +190,22 @@ image build blocks publication. Add `packages: write` to `release.yml`'s permiss
 returned digest in the release body or as a small asset so digest pinning is available.
 
 Milestone 2 — version-derived default. In `mj-core/build.rs`, compute an image reference and emit
-it as `cargo:rustc-env=MJ_AGENT_DEV_IMAGE`. The rule: an explicit `MJ_AGENT_DEV_IMAGE` wins;
-otherwise `MJ_BUILD_CHANNEL=release` or the presence of `.cargo_vcs_info.json` yields
-`ghcr.io/brokkai/mjolnir/agent-dev:<CARGO_PKG_VERSION>`; otherwise
+it as `cargo:rustc-env=MJ_AGENT_DEV_IMAGE`, plus `MJ_AGENT_DEV_IMAGE_RELEASE` (1 or 0). The rule:
+an explicit `MJ_AGENT_DEV_IMAGE` wins; otherwise `MJ_BUILD_CHANNEL=release` or the presence of
+`.cargo_vcs_info.json` yields `ghcr.io/brokkai/mjolnir/agent-dev:<CARGO_PKG_VERSION>`; otherwise
 `ghcr.io/brokkai/mjolnir/agent-dev:latest`. Set `MJ_BUILD_CHANNEL: release` for the whole
-`release.yml` workflow so shipped archives embed the version tag. In `mj-core/src/config.rs`
-replace the `DEFAULT_CONTAINER_IMAGE` constant with a resolver plus a private
-`LEGACY_DEFAULT_CONTAINER_IMAGE` literal, keep a public
-`default_container_image()` (or equivalent) that returns the resolved reference, and add a
-`skip_serializing_if` predicate so a template whose image equals the resolved default writes no
-`image` line. In `TryFrom<StoredConfig>`, when the file's version is at most
-`CONFIG_VERSION - 1`, replace any container image equal to the legacy literal with the resolved
-default. Bump `CONFIG_VERSION` to 15. Update every re-export and display site
-(`mj-client/src/target.rs`, `mj-controller/src/setup.rs`, `mj-tui/src/setup/schema.rs`) and the
-configuration docs that name the default.
+`release.yml` workflow so shipped archives embed the version tag. In `mj-core/src/config.rs`,
+keep `DEFAULT_CONTAINER_IMAGE` as a `const &str` whose value is `env!("MJ_AGENT_DEV_IMAGE")`
+(every reader and re-export then works unchanged), add `CONTAINER_IMAGE_REPOSITORY`,
+`LEGACY_DEFAULT_CONTAINER_IMAGE`, the pure rule `container_image_for(version, release)` and
+`migrate_legacy_default_image(target, default_image)`. Add a `skip_serializing_if` predicate so a
+template whose image equals the resolved default writes no `image` line. In `TryFrom<StoredConfig>`,
+for a file at or below `LEGACY_DEFAULT_IMAGE_LAST_VERSION`, replace any container image equal to
+the legacy literal with the resolved default. Extend the upgrade range from `1..=13` to `1..=14`
+and bump `CONFIG_VERSION` to 15. Because the in-place editor only diffs two serializations of the
+same config, also drop the legacy literal from the document in `document.rs` during that first
+save; otherwise the file keeps the old value. No re-export sites change, but the configuration
+docs and the embedded skill reference that name the default and the schema version are updated.
 
 Milestone 3 — bake the worker. Add a builder stage to `containers/Containerfile.agent-dev` that
 builds `mj-worker` for the image architecture from the same commit (mirroring the existing Bifrost
@@ -258,11 +305,13 @@ In `mj-core/build.rs`, emit a stable build-time value consumed by `env!("MJ_AGEN
     pub enum ImageChannel { Release, Development }
     pub fn container_image_for(version: &str, channel: ImageChannel) -> String;
 
-In `mj-core/src/config.rs`, keep a public accessor that returns the resolved default and a private
-literal for the historical name:
+In `mj-core/src/config.rs`, keep the public constant that returns the resolved default and add the
+historical literal and the rule as separate names:
 
-    pub fn default_container_image() -> &'static str; // env!("MJ_AGENT_DEV_IMAGE")
-    const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+    pub const DEFAULT_CONTAINER_IMAGE: &str = env!("MJ_AGENT_DEV_IMAGE");
+    pub const CONTAINER_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
+    pub const LEGACY_DEFAULT_CONTAINER_IMAGE: &str = "ghcr.io/brokkai/mjolnir/agent-dev:latest";
+    pub fn container_image_for(version: &str, release: bool) -> String;
 
 `ContainerTemplate::image` must keep the serde default of the resolved reference and gain a
 `skip_serializing_if` that omits the key when the value equals it. `CONFIG_VERSION` becomes 15, and
@@ -272,6 +321,14 @@ The reusable workflow contract is:
 
     inputs:
       extra_tags: string, default ""
-      publish_latest: boolean, default true
+      publish_latest: string, default "true"   # a string so the push/schedule triggers keep :latest
     outputs:
       digest: string
+
+Revision history. 2026-10-08, Codex: recorded milestones 1 and 2 as complete and corrected the
+plan's Milestone 2 and Interfaces sections to match what was built. The original plan proposed a
+resolver function and `publish_latest` as a boolean; the implementation keeps
+`DEFAULT_CONTAINER_IMAGE` as a compile-time constant built from `env!` (so no reader or re-export
+changes), needs `publish_latest` as a string because GitHub's `inputs` context is empty for the
+push and schedule triggers, and must drop the legacy image from the saved document because the
+in-place editor cannot delete a key that both serializations omit.

@@ -32,14 +32,13 @@ before allowing selection. Customize it in **prefix+s Settings → Runtimes**:
 ```toml
 [targets.apple-container]
 kind = "apple-container"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 The target accepts the common container fields:
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `image` | no | Linux image used for every new session; defaults to `ghcr.io/brokkai/mjolnir/agent-dev:latest`. |
+| `image` | no | Linux image used for every new session; defaults to the agent-dev image published for the running Mjolnir version (a development build uses `:latest`). |
 | `pull_policy` | no | `auto` (default), `always`, `newer`, `missing`, or `never`. |
 | `platform` | no | Explicit image platform when runtime selection needs it. |
 | `cpus` | no | Backend CPU fallback when an API launch omits a per-session allocation. |

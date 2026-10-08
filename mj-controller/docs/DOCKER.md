@@ -18,7 +18,6 @@ install Docker locally for an SSH target.
 ```toml
 [targets.docker]
 kind = "docker"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 An SSH Docker target uses the existing OpenSSH configuration and runs Docker
@@ -32,7 +31,6 @@ host = "builder"
 [targets.builder-docker]
 kind = "docker"
 machine = "builder"
-image = "ghcr.io/brokkai/mjolnir/agent-dev:latest"
 ```
 
 The `host` value is an SSH destination (usually an alias from

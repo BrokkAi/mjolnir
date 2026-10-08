@@ -1,5 +1,10 @@
 use std::path::{Path, PathBuf};
 
+/// The registry repository every session image name is built from. Keep it
+/// equal to `mj_core::config::CONTAINER_IMAGE_REPOSITORY`, which
+/// `the_baked_default_image_agrees_with_the_channel_rule` checks.
+const AGENT_DEV_IMAGE_REPOSITORY: &str = "ghcr.io/brokkai/mjolnir/agent-dev";
+
 fn tracked_read(path: &Path) -> Option<String> {
     match std::fs::read_to_string(path) {
         Ok(value) => {
@@ -110,6 +115,28 @@ fn main() {
     println!(
         "cargo:rustc-env=MJ_BUILD_COMMIT_TIME={}",
         commit_time(&root, &revision).map_or_else(String::new, |time| time.to_string())
+    );
+    // Which container image a session uses when its target names none. A
+    // release runs the immutable image published for its own version; a
+    // development build runs the floating image published from master. The
+    // release workflow sets MJ_BUILD_CHANNEL, and a crates.io source package
+    // carries .cargo_vcs_info.json, so both count as releases.
+    println!("cargo:rerun-if-env-changed=MJ_BUILD_CHANNEL");
+    println!("cargo:rerun-if-env-changed=MJ_AGENT_DEV_IMAGE");
+    let release = std::env::var("MJ_BUILD_CHANNEL").as_deref() == Ok("release")
+        || root.join(".cargo_vcs_info.json").exists();
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    let image = std::env::var("MJ_AGENT_DEV_IMAGE").unwrap_or_else(|_| {
+        if release {
+            format!("{AGENT_DEV_IMAGE_REPOSITORY}:{version}")
+        } else {
+            format!("{AGENT_DEV_IMAGE_REPOSITORY}:latest")
+        }
+    });
+    println!("cargo:rustc-env=MJ_AGENT_DEV_IMAGE={image}");
+    println!(
+        "cargo:rustc-env=MJ_AGENT_DEV_IMAGE_RELEASE={}",
+        u8::from(release)
     );
     if std::env::var_os("CARGO_FEATURE_TEST_HOOKS").is_some() {
         // Generate this fixture at build time: writing an executable during

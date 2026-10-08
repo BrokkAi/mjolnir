@@ -177,8 +177,10 @@ than running `sshd -T`, which needs root, so it says when a drop-in was
 unreadable instead of guessing sshd's default.
 
 Mjolnir's bundled agent-development image is published at
-`ghcr.io/brokkai/mjolnir/agent-dev:latest` (multi-arch: `linux/amd64` and
-`linux/arm64`, public, no authentication needed to pull). Pull it directly:
+`ghcr.io/brokkai/mjolnir/agent-dev` (multi-arch: `linux/amd64` and
+`linux/arm64`, public, no authentication needed to pull). Master publishes
+`:latest`; each release publishes an immutable tag for its own version. Pull it
+directly:
 
 ```console
 podman pull ghcr.io/brokkai/mjolnir/agent-dev:latest

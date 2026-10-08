@@ -8,17 +8,42 @@ on:
 permissions:
   contents: write
 
+# Every binary built for this tag belongs to the release channel: its default
+# container image is the immutable agent-dev:<version> tag built below, not the
+# floating :latest a development build uses. See mj-core/build.rs.
+env:
+  MJ_BUILD_CHANNEL: release
+
 jobs:
   verify-version:
     name: Verify release version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Check tag against Cargo package versions
+        id: version
         run: |
+          version="${GITHUB_REF_NAME#v}"
           cargo metadata --locked --no-deps --format-version 1 |
-            jq -e --arg version "${GITHUB_REF_NAME#v}" 'all(.packages[]; .version == $version)'
+            jq -e --arg version "$version" 'all(.packages[]; .version == $version)'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # A release's container sessions default to this image, so it has to exist
+  # for the tag before the release is published. :latest keeps tracking master;
+  # only the release's own version tag and the commit tag are published here.
+  publish-agent-dev-image:
+    name: Publish agent-dev image
+    needs: verify-version
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-agent-dev-image.yml
+    with:
+      extra_tags: ${{ needs.verify-version.outputs.version }}
+      publish_latest: 'false'
 
   # The full CI suite on the tagged commit. Builds run beside it; only
   # publication waits for it, so a release never depends on a branch CI run
@@ -510,7 +535,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos, package-x86_64-pc-windows-msvc]
+    needs: [ci, package-x86_64-unknown-linux-gnu, package-aarch64-unknown-linux-gnu, package-macos, package-x86_64-pc-windows-msvc, publish-agent-dev-image]
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -525,6 +550,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # The release binaries name agent-dev:<version>; publish the digest of the
+      # multi-arch manifest list beside them so a host can pin the exact image.
+      - name: Stage the release image reference
+        env:
+          IMAGE_DIGEST: ${{ needs.publish-agent-dev-image.outputs.digest }}
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf 'ghcr.io/brokkai/mjolnir/agent-dev:%s@%s\n' "$VERSION" "$IMAGE_DIGEST" \
+            > agent-dev-image.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
@@ -534,6 +570,7 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
+            agent-dev-image.txt
             artifacts/brokk-mjolnir-*.tar.gz
             artifacts/brokk-mjolnir-*.tar.gz.sha256
             artifacts/brokk-mjolnir-*.zip

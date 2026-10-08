@@ -2238,3 +2238,89 @@ fn the_current_version_refuses_the_old_fused_kinds() {
     assert!(error.contains("local-podman"), "{error}");
     assert!(error.contains("machine"), "{error}");
 }
+
+/// A single `build.rs` run compiles one channel, so the rule both channels
+/// follow is checked directly here, and the baked value is checked against it.
+#[test]
+fn the_baked_default_image_agrees_with_the_channel_rule() {
+    let release = env!("MJ_AGENT_DEV_IMAGE_RELEASE") == "1";
+    assert_eq!(
+        DEFAULT_CONTAINER_IMAGE,
+        container_image_for(env!("CARGO_PKG_VERSION"), release)
+    );
+}
+
+#[test]
+fn a_release_pins_its_version_and_a_development_build_uses_latest() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        container_image_for(version, true),
+        format!("{CONTAINER_IMAGE_REPOSITORY}:{version}")
+    );
+    assert_eq!(
+        container_image_for(version, false),
+        LEGACY_DEFAULT_CONTAINER_IMAGE
+    );
+}
+
+fn container_target(image: &str) -> TargetTemplate {
+    TargetTemplate::LocalDocker {
+        container: ContainerTemplate {
+            image: image.to_owned(),
+            pull_policy: Default::default(),
+            platform: None,
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+            build_cache: None,
+        },
+    }
+}
+
+#[test]
+fn migrating_the_legacy_default_image_rewrites_only_the_default() {
+    let release_default = "ghcr.io/brokkai/mjolnir/agent-dev:9.9.9";
+    let mut default = container_target(LEGACY_DEFAULT_CONTAINER_IMAGE);
+    migrate_legacy_default_image(&mut default, release_default);
+    assert_eq!(default.container().unwrap().image, release_default);
+
+    let mut custom = container_target("example.invalid/agent:1");
+    migrate_legacy_default_image(&mut custom, release_default);
+    assert_eq!(custom.container().unwrap().image, "example.invalid/agent:1");
+}
+
+/// A file written before the running build's default image existed must follow
+/// that build instead of pinning the image that was current when it was written.
+#[test]
+fn a_version_14_file_follows_the_running_builds_default_image() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = 14\n\
+             [targets.podman]\nkind = \"podman\"\nimage = \"{LEGACY_DEFAULT_CONTAINER_IMAGE}\"\n\
+             [targets.custom]\nkind = \"docker\"\nimage = \"example.invalid/agent:1\"\n"
+        ),
+    )
+    .unwrap();
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(config.version, CONFIG_VERSION);
+    assert_eq!(
+        config.targets["podman"].container().unwrap().image,
+        DEFAULT_CONTAINER_IMAGE
+    );
+    config.save_to(&path).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(
+        saved.contains(&format!("version = {CONFIG_VERSION}")),
+        "{saved}"
+    );
+    // The default is implicit now; only the customized image stays pinned.
+    assert!(
+        !saved.contains(&format!("image = \"{LEGACY_DEFAULT_CONTAINER_IMAGE}\"")),
+        "{saved}"
+    );
+    assert!(saved.contains("example.invalid/agent:1"), "{saved}");
+}
