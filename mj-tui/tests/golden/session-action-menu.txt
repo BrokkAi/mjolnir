@@ -49,7 +49,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │› · ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
 │  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│  │             │  Sub-agents Mjolnir, gpt-5 (high)                                                  │                │
+│  │             │  Sub-agents Mjolnir, gpt-5 (Adaptive (Jev chooses per task))                       │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │  Container  4 CPUs · 8g memory                                                     │                │
 │                │                                                                                    │                │

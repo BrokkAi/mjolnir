@@ -1205,17 +1205,23 @@ impl SetupDialog {
                 } else {
                     &options.efforts
                 };
-                choices = std::iter::once(if path[3] == "model" {
-                    Value::String(String::new())
+                choices = if path[3] == "effort" {
+                    crate::widgets::subagent_effort_choice_values(
+                        self.draft["profiles"][&path[1]]["subagents"]["effort"].as_str(),
+                        entries,
+                    )
+                    .into_iter()
+                    .map(|value| json!(value))
+                    .collect()
                 } else {
-                    Value::Null
-                })
-                .chain(
-                    entries
-                        .iter()
-                        .map(|choice| Value::String(choice.value.clone())),
-                )
-                .collect();
+                    std::iter::once(Value::String(String::new()))
+                        .chain(
+                            entries
+                                .iter()
+                                .map(|choice| Value::String(choice.value.clone())),
+                        )
+                        .collect()
+                };
             }
             let selected = choices
                 .iter()
@@ -1977,7 +1983,7 @@ impl SetupDialog {
                 .as_ref()
                 .and_then(|c| c.result.as_ref())
                 .and_then(|r| r.as_ref().ok());
-            let efforts = crate::widgets::config_choice_values(
+            let efforts = crate::widgets::subagent_effort_choice_values(
                 policy["effort"].as_str(),
                 efforts.map_or(&[], |options| &options.efforts),
             )

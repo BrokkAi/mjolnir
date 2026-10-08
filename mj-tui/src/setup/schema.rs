@@ -710,7 +710,7 @@ pub(super) fn help(path: &[String]) -> &'static str {
         _ => {}
     }
     if path.len() >= 3 && path[0] == "profiles" && path[2] == "subagents" {
-        return "Creation defaults copied into new sessions. Existing sessions keep their own policy; edit it in Move. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort.";
+        return "Creation defaults copied into new sessions. Existing sessions keep their own policy; edit it in Move. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort; Adaptive asks Jev to choose an effort for each child task.";
     }
     match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {

@@ -917,7 +917,7 @@ impl ApiError {
         }
         let remedy = match self.code.as_deref() {
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE) => {
-                " To change it for one session, pass --subagent-model and --subagent-effort to `mj new`; to change the profile's default, use Settings → Agent Profiles → the profile → Sub-agents."
+                " To change it for one session, pass --subagent-model and --subagent-effort (including `adaptive` when the model offers efforts) to `mj new`; to change the profile's default, use Settings → Agent Profiles → the profile → Sub-agents."
             }
             _ => "",
         };

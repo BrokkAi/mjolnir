@@ -142,7 +142,8 @@ pub(crate) struct NewArgs {
     /// Fixed child model, required with --subagents single-model.
     #[arg(long, requires = "subagents")]
     subagent_model: Option<String>,
-    /// Fixed child reasoning effort.
+    /// Fixed child reasoning effort, or `adaptive` for a per-task Jev choice
+    /// when available.
     #[arg(long, requires = "subagents")]
     subagent_effort: Option<String>,
     /// Review every turn of this session with this model, even when

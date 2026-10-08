@@ -20,6 +20,20 @@ to another profile. **Move…** lets you explicitly edit a session's Subagents,
 Model, and Effort. Legacy All models policies are preserved when untouched;
 All models is unavailable for new selections.
 
+When the selected model offers effort choices, a Mjolnir policy can use
+**Adaptive (Jev chooses per task)** to choose the child's effort based on the
+task it receives.
+Mjolnir sends Jev the clipped child task name and instructions, plus the child
+model ID. Jev chooses one of four levels:
+`medium`, `high`, `xhigh`, or `max`. Mjolnir maps that level by rank onto the
+efforts the model offers. It skips a `default` entry and, when a model offers
+more than four efforts, drops the lowest ones so the remaining choices fit
+the four-level ladder. The child starts with an effort the model actually
+offers. If Jev is disabled or cannot be reached, Mjolnir uses the `high` ladder
+level and maps it to an effort the model offers. Set `[jev] enabled = false`
+to turn off Jev requests; see
+[Security boundaries](/security/#what-leaves-this-machine-by-default).
+
 ## Supported harnesses
 
 | Harness | `kind` | Home variable | Conventional home | Authentication marker | Guardian approvals on a raw target |

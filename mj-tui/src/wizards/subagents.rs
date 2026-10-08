@@ -79,7 +79,10 @@ impl SubagentDraft {
             SubagentPolicy::SingleModel { effort, .. } => effort.as_deref(),
             _ => None,
         };
-        crate::widgets::config_choice_values(effort, self.options().map_or(&[], |o| &o.efforts))
+        crate::widgets::subagent_effort_choice_values(
+            effort,
+            self.options().map_or(&[], |o| &o.efforts),
+        )
     }
 
     pub(crate) fn models_ready(&self) -> bool {

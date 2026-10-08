@@ -176,7 +176,11 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     let mut delegation = match &policy {
         SubagentPolicy::Native => "Native".to_owned(),
         SubagentPolicy::AllModels => "Mjolnir, all models".to_owned(),
-        SubagentPolicy::SingleModel { model, effort } => match effort {
+        SubagentPolicy::SingleModel { model, effort } => match effort.as_deref() {
+            Some(mj_core::subagent::ADAPTIVE_EFFORT) => format!(
+                "Mjolnir, {model} ({})",
+                mj_core::subagent::ADAPTIVE_EFFORT_LABEL
+            ),
             Some(effort) => format!("Mjolnir, {model} ({effort})"),
             None => format!("Mjolnir, {model}"),
         },
@@ -1558,7 +1562,7 @@ mod tests {
         let mut session = running_session();
         session.subagents = Some(SubagentPolicy::SingleModel {
             model: "gpt-5".into(),
-            effort: Some("high".into()),
+            effort: Some(mj_core::subagent::ADAPTIVE_EFFORT.into()),
         });
         session.container_cpus = Some("4".into());
         session.container_memory = Some("8g".into());

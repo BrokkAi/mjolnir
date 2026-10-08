@@ -165,11 +165,12 @@ uses its configured defaults; attached directories remain part of the fixed
 workspace selection.
 
 `--subagents native` switches to the harness's native sub-agents;
-`--subagents none` disables delegation. For a fixed Mjolnir child model, pass
+`--subagents none` disables delegation. For a Mjolnir child model, pass
 `--subagents single-model --subagent-model <model>` and optionally
-`--subagent-effort <effort>`. Omitting these options retains the session's
-policy. A retry of a sealed Move retains its recorded policy; an explicit
-different policy is refused.
+`--subagent-effort <effort>`. When the model offers efforts, use `adaptive`
+to let Jev choose one for each child task. Omitting these options retains the
+session's policy. A retry of a sealed Move retains its recorded policy; an
+explicit different policy is refused.
 
 A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
@@ -289,8 +290,9 @@ cannot be combined with a session that runs directly in the selected directory.
   for Claude and Codex. Without this option, it uses the selected profile’s creation default,
   which defaults to Native.
   `single-model` requires `--subagent-model` and a corresponding
-  `--subagent-effort` when that model offers effort choices. Mjolnir fixes
-  every child's model and effort and selects an eligible profile by quota.
+  `--subagent-effort` when that model offers effort choices. Pass `adaptive`
+  to choose an effort for each child task. Mjolnir fixes every child's model
+  and effort and selects an eligible profile by quota.
   `none` disables delegation; an explicit choice overrides the profile for this
   session without changing its settings. `all-models` is no longer accepted.
   The old `--mj-subagents` and

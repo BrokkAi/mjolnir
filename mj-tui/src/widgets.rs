@@ -57,6 +57,9 @@ pub(crate) fn config_choice_label(
     let Some(value) = value else {
         return "Profile default".to_owned();
     };
+    if value == mj_core::subagent::ADAPTIVE_EFFORT {
+        return mj_core::subagent::ADAPTIVE_EFFORT_LABEL.to_owned();
+    }
     choices
         .iter()
         .find(|choice| choice.value == value)
@@ -87,4 +90,27 @@ pub(crate) fn config_choice_values(
         values.push(Some(value.to_owned()));
     }
     values
+}
+
+pub(crate) fn subagent_effort_choice_values(
+    value: Option<&str>,
+    choices: &[mj_core::acp::SessionConfigChoice],
+) -> Vec<Option<String>> {
+    if choices.is_empty() {
+        return config_choice_values(value, choices);
+    }
+
+    let mut effort_choices = Vec::with_capacity(choices.len() + 1);
+    if !choices
+        .iter()
+        .any(|choice| choice.value == mj_core::subagent::ADAPTIVE_EFFORT)
+    {
+        effort_choices.push(mj_core::acp::SessionConfigChoice {
+            value: mj_core::subagent::ADAPTIVE_EFFORT.to_owned(),
+            name: mj_core::subagent::ADAPTIVE_EFFORT_LABEL.to_owned(),
+            description: None,
+        });
+    }
+    effort_choices.extend_from_slice(choices);
+    config_choice_values(value, &effort_choices)
 }
