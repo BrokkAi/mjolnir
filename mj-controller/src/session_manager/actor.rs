@@ -1547,22 +1547,30 @@ async fn reopen_subagent_admission_after_move(
 
     let id = target.session_id.clone();
     let query_owner = owner.clone();
-    let (parent_role_enabled, move_active) = tokio::task::spawn_blocking(move || {
+    let (queue_enabled, move_active) = tokio::task::spawn_blocking(move || {
         query_owner.scope_blocking(|| -> Result<_> {
             let Some(session) = crate::database::load_session_record(&id)? else {
                 return Ok((false, false));
             };
-            let parent_role_enabled = crate::controller::move_session::parent_tools_enabled(
+            let subagent = crate::database::load_subagent(&id)?;
+            // The worker kept the setting it launched with. An unreadable
+            // config must not stop the reconnect, so assume the queue exists;
+            // a worker without one refuses the reopen harmlessly below.
+            let agent_mailboxes_enabled = mj_core::config::Config::load()
+                .map_or(true, |config| config.agent_mailboxes_enabled());
+            let queue_enabled = crate::controller::move_session::worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
                 session.harness_kind,
+                subagent.as_ref(),
+                agent_mailboxes_enabled,
             );
             let move_active = crate::database::has_active_in_place_move(&id)?;
-            Ok((parent_role_enabled, move_active))
+            Ok((queue_enabled, move_active))
         })
     })
     .await
     .context("inspect sub-agent admission ownership")??;
-    if !parent_role_enabled || move_active {
+    if !queue_enabled || move_active {
         return Ok(());
     }
     if !(mj_core::relay::RelayRequest::SetSubagentAdmission { open: true })
@@ -1570,7 +1578,20 @@ async fn reopen_subagent_admission_after_move(
     {
         return Ok(());
     }
-    connection.set_subagent_admission(true).await
+    match connection.set_subagent_admission(true).await {
+        // The mailbox setting can change after launch. A worker started
+        // without the queue has no gate to reopen.
+        Err(error)
+            if error
+                .downcast_ref::<RelayRejected>()
+                .is_some_and(|rejected| {
+                    rejected.0.code == mj_core::relay::RelayErrorCode::InvalidRequest
+                }) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 async fn observe_worker_readiness(

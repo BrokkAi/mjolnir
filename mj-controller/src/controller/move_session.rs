@@ -1654,9 +1654,11 @@ impl Controller {
         if !matches!(
             session.state,
             SessionState::Running | SessionState::Disconnected
-        ) || !parent_tools_enabled(
+        ) || !worker_subagent_queue_enabled(
             &session.subagents.clone().unwrap_or_default(),
             session.harness_kind,
+            self.state.subagents.get(session_id),
+            self.config.agent_mailboxes_enabled(),
         ) {
             return Ok(outcome);
         }
@@ -2558,6 +2560,27 @@ pub(crate) fn parent_tools_enabled(
     harness: mj_core::config::HarnessKind,
 ) -> bool {
     policy.for_launch(harness, false).parent_role().is_some()
+}
+
+/// Whether this launch exposes the worker's durable sub-agent request queue.
+/// Top-level launches stage the message-only marker; child launches instead
+/// depend on the recorded handback choice.
+pub(crate) fn worker_subagent_queue_enabled(
+    policy: &mj_core::subagent::SubagentPolicy,
+    harness: mj_core::config::HarnessKind,
+    subagent: Option<&mj_core::subagent::SubagentRecord>,
+    agent_mailboxes_enabled: bool,
+) -> bool {
+    let managed_subagent = subagent.is_some();
+    let launch_policy = policy.for_launch(harness, managed_subagent);
+    mj_core::worker_launch::resolve_subagent_mcp_role(
+        &launch_policy,
+        managed_subagent,
+        subagent.is_some_and(|record| record.handback_tool),
+        agent_mailboxes_enabled,
+        !managed_subagent,
+    )
+    .is_some()
 }
 
 pub(in crate::controller) fn move_children(

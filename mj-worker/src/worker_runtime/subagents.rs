@@ -744,7 +744,7 @@ impl SubagentEndpoint {
                 request_id: request.request_id,
                 completed_at_ms: mj_core::clock::epoch_millis(),
                 is_error: true,
-                message: "Sub-agent request was not accepted: the parent is replacing its harness. Retry after Move finishes.".into(),
+                message: "Sub-agent request was not accepted: this session is replacing its harness (Move). Retry after the Move finishes.".into(),
             }), mark));
         }
         let mut next = state.clone();

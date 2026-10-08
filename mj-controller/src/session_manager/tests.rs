@@ -2191,6 +2191,103 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     assert_eq!(state["calls"], 2, "{state}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_retries_message_only_admission_after_lost_open_reply() {
+    if std::env::var_os("MJ_TEST_MESSAGE_ONLY_ADMISSION_RECONNECT_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(exact_test_name(
+            "reconnect_retries_message_only_admission_after_lost_open_reply",
+        ))
+        .env("MJ_TEST_MESSAGE_ONLY_ADMISSION_RECONNECT_CHILD", "1")
+        .env(DROP_ADMISSION_OPEN_REPLY, "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (_config, ()) = mj_core::config::Config::update(|config| {
+        config.mailbox.enabled = true;
+        config.jev.enabled = true;
+        Ok(())
+    })
+    .unwrap();
+    register_leased_relay_session();
+    let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    crate::database::save_session(&session).unwrap();
+
+    let relay_root = tempfile::tempdir().unwrap();
+    let target = leased_relay_target(relay_root.path());
+    let mut connection = None;
+    let first = sync_actor_connection(&target, &mut connection).await;
+    assert!(first.is_err(), "the first worker lost the open reply");
+    assert!(
+        connection.is_none(),
+        "the failed connection must be abandoned"
+    );
+    assert!(
+        relay_root
+            .path()
+            .join("drop-admission-open-reply-once")
+            .exists()
+    );
+
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .expect("the next relay connection repairs the message-only gate");
+    assert!(connection.is_some());
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(relay_root.path().join("subagent-admission.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["open"], true, "{state}");
+    assert_eq!(state["calls"], 2, "{state}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_skips_subagent_admission_when_worker_has_no_queue_endpoint() {
+    if std::env::var_os("MJ_TEST_NO_QUEUE_ADMISSION_RECONNECT_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(exact_test_name(
+            "reconnect_skips_subagent_admission_when_worker_has_no_queue_endpoint",
+        ))
+        .env("MJ_TEST_NO_QUEUE_ADMISSION_RECONNECT_CHILD", "1")
+        .env("MJ_DATA_DIR", directory.path())
+        .env("MJ_CONFIG_DIR", directory.path().join("config"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (_config, ()) = mj_core::config::Config::update(|config| {
+        config.mailbox.enabled = false;
+        Ok(())
+    })
+    .unwrap();
+    register_leased_relay_session();
+    let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    crate::database::save_session(&session).unwrap();
+
+    let relay_root = tempfile::tempdir().unwrap();
+    let target = leased_relay_target(relay_root.path());
+    let mut connection = None;
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .expect("reconnect succeeds without a sub-agent queue endpoint");
+    assert!(connection.is_some());
+    assert!(
+        !relay_root.path().join("subagent-admission.json").exists(),
+        "the controller must not send SetSubagentAdmission to a worker without a queue"
+    );
+}
+
 /// Register the session the projection writes to. `apply_projection_event`
 /// rejects events for sessions the controller database does not know.
 #[cfg(unix)]

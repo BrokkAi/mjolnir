@@ -394,27 +394,41 @@ impl ReviewerLaunchConfig {
     }
 }
 
+/// Resolve the `mj-agents` server role from the launch values that control
+/// whether its durable request queue exists in the worker.
+#[must_use]
+pub fn resolve_subagent_mcp_role(
+    subagents: &crate::subagent::SubagentPolicy,
+    managed_subagent: bool,
+    handback_tool: bool,
+    agent_mailboxes_enabled: bool,
+    message_mcp_staged: bool,
+) -> Option<crate::subagent::SubagentMcpRole> {
+    subagents.parent_role().or_else(|| {
+        if managed_subagent {
+            handback_tool.then_some(crate::subagent::SubagentMcpRole::Child)
+        } else {
+            (agent_mailboxes_enabled && message_mcp_staged)
+                .then_some(crate::subagent::SubagentMcpRole::MessageOnly)
+        }
+    })
+}
+
 impl WorkerLaunchConfig {
     /// The `mj-agents` role is derived once from the launch's ownership and
     /// policy so Codex and Claude expose the same tools.
     pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
-        self.subagents.parent_role().or_else(|| {
-            if self
-                .environment
+        resolve_subagent_mcp_role(
+            &self.subagents,
+            self.environment
                 .get(SESSION_MANAGED_SUBAGENT_ENV)
-                .is_some_and(|value| value == "1")
-            {
-                self.handback_tool
-                    .then_some(crate::subagent::SubagentMcpRole::Child)
-            } else {
-                (self.agent_mailboxes_enabled
-                    && self
-                        .environment
-                        .get(SESSION_MESSAGE_MCP_ENV)
-                        .is_some_and(|value| value == "1"))
-                .then_some(crate::subagent::SubagentMcpRole::MessageOnly)
-            }
-        })
+                .is_some_and(|value| value == "1"),
+            self.handback_tool,
+            self.agent_mailboxes_enabled,
+            self.environment
+                .get(SESSION_MESSAGE_MCP_ENV)
+                .is_some_and(|value| value == "1"),
+        )
     }
 
     /// Downloads must finish before startup or an upgrade's idle reservation.
