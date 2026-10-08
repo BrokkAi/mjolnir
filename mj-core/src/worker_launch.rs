@@ -129,6 +129,12 @@ pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE
 /// compatible while a new worker can distinguish a managed child whose
 /// historical handback tool is disabled.
 pub const SESSION_MANAGED_SUBAGENT_ENV: &str = "MJ_SESSION_MANAGED_SUBAGENT";
+/// Controller-authored environment marker: the controller staged the
+/// message-only `mj-agents` registration for this top-level session. A worker
+/// grants that role only with this marker, so a newer worker resuming a launch
+/// written by an older controller does not demand a registration that was
+/// never staged.
+pub const SESSION_MESSAGE_MCP_ENV: &str = "MJ_SESSION_MESSAGE_MCP";
 
 /// Whether this worker executes the harness or only preserves recovered state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,8 +407,12 @@ impl WorkerLaunchConfig {
                 self.handback_tool
                     .then_some(crate::subagent::SubagentMcpRole::Child)
             } else {
-                self.agent_mailboxes_enabled
-                    .then_some(crate::subagent::SubagentMcpRole::MessageOnly)
+                (self.agent_mailboxes_enabled
+                    && self
+                        .environment
+                        .get(SESSION_MESSAGE_MCP_ENV)
+                        .is_some_and(|value| value == "1"))
+                .then_some(crate::subagent::SubagentMcpRole::MessageOnly)
             }
         })
     }
@@ -613,6 +623,24 @@ mod tests {
         disabled["agent_mailboxes_enabled"] = serde_json::json!(false);
         let launch: WorkerLaunchConfig = serde_json::from_value(disabled).unwrap();
         assert!(!launch.agent_mailboxes_enabled);
+    }
+
+    // Hard-won: f9a3130c: upgraded workers on older launches demanded an unstaged Claude registration.
+    #[test]
+    fn a_launch_from_an_older_controller_gets_no_message_only_server() {
+        // An older controller staged no `mj-agents` server for a top-level
+        // session and wrote no marker; mailboxes alone must not imply one.
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        assert!(launch.agent_mailboxes_enabled);
+        assert_eq!(launch.subagent_mcp_role(), None);
+
+        let mut staged = launch_json();
+        staged["environment"][SESSION_MESSAGE_MCP_ENV] = serde_json::json!("1");
+        let launch: WorkerLaunchConfig = serde_json::from_value(staged).unwrap();
+        assert_eq!(
+            launch.subagent_mcp_role(),
+            Some(crate::subagent::SubagentMcpRole::MessageOnly)
+        );
     }
 
     #[test]

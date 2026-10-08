@@ -428,10 +428,19 @@ impl Controller {
                 mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV.into(),
                 "1".into(),
             );
+            launch
+                .environment
+                .remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
         } else {
             launch
                 .environment
                 .remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+            // This controller stages the message-only registration for every
+            // top-level session; the worker trusts only this marker.
+            launch.environment.insert(
+                mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV.into(),
+                "1".into(),
+            );
         }
         apply_jev_switch(&mut launch, self.config.jev.enabled);
         apply_continuation_switch(&mut launch, self.config.automatic_continuation_enabled());

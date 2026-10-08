@@ -1479,11 +1479,13 @@ async fn prepare_and_start_harness(
     session_environment.extend(config.environment.clone());
     session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
     session_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+    session_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let github_root = root.to_owned();
     let github_home = worker_home.clone();
     let git_config_include = session_git_config_include.clone();
     let mut explicit_environment = config.environment.clone();
     explicit_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
+    explicit_environment.remove(mj_core::worker_launch::SESSION_MESSAGE_MCP_ENV);
     let base_environment_for_filter = base_environment.clone();
     session_environment =
         bounded_blocking_preparation_step(&login_budget, cancel, move |step_cancel| {
