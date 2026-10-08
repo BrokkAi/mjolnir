@@ -204,6 +204,7 @@ impl ViewerSnapshot {
                     capacity_retry: None,
                     retry_assessment_pending: false,
                     quota_recovery: None,
+                    is_subagent_session: state.is_subagent_session(&session.id),
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
@@ -432,6 +433,10 @@ pub(super) fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    /// In-process identity used by `mj sessions`; deliberately not part of the
+    /// viewer or API JSON contract.
+    #[serde(skip, default)]
+    pub(crate) is_subagent_session: bool,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.

@@ -386,9 +386,9 @@ pub enum SubagentToolAction {
         child_session_id: String,
         message: String,
     },
-    /// Persisted requests from older parent workers still use this action.
-    /// New MCP calls use SendMessage; cached `send_input` calls keep their old
-    /// action and the daemon routes both identically.
+    /// Persisted requests from older workers use this action and its historical
+    /// `child_session_id` field for the target. New MCP calls expose
+    /// `session_id`, which is mapped here so stored requests remain readable.
     SendMessage {
         child_session_id: String,
         message: String,
@@ -626,14 +626,16 @@ impl SubagentRecord {
 /// harness, so its tools reach the model as `mcp__mj-agents__<tool>`.
 pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 
-/// Which tools a worker's `mj-agents` MCP server offers. A parent delegates;
-/// a child only hands its report back.
+/// Which tools a worker's `mj-agents` MCP server offers. A parent may delegate,
+/// a top-level session without Mjolnir delegation can message sessions, and a
+/// child only hands its report back.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
     #[default]
     Parent,
     FixedParent,
+    MessageOnly,
     Child,
 }
 
@@ -643,6 +645,7 @@ impl SubagentMcpRole {
         match self {
             Self::Parent => "parent",
             Self::FixedParent => "fixed_parent",
+            Self::MessageOnly => "message_only",
             Self::Child => "child",
         }
     }
@@ -661,6 +664,7 @@ impl SubagentMcpRole {
                 "close",
             ],
             Self::FixedParent => &["spawn", "list_agents", "send_message", "wait", "close"],
+            Self::MessageOnly => &["send_message"],
             Self::Child => &["handback"],
         }
     }
@@ -679,6 +683,7 @@ impl std::str::FromStr for SubagentMcpRole {
         match value {
             "parent" => Ok(Self::Parent),
             "fixed_parent" => Ok(Self::FixedParent),
+            "message_only" => Ok(Self::MessageOnly),
             "child" => Ok(Self::Child),
             other => anyhow::bail!("unknown sub-agent MCP role {other:?}"),
         }

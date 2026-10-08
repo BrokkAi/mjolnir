@@ -907,7 +907,8 @@ pub async fn run_daemon_owned(
     // The relay is recovered; accept immediately while harness work runs
     // under its own supervisor.
     let (listener, socket_guard) = publish_control_socket(&root, &socket)?;
-    let has_subagent_tools = config.subagents.parent_role().is_some() || config.handback_tool;
+    let subagent_role = config.subagent_mcp_role();
+    let has_subagent_tools = subagent_role.is_some();
     let mut client_task = tokio::spawn(accept_worker_clients(
         listener,
         socket_guard,
@@ -1386,6 +1387,7 @@ async fn prepare_and_start_harness(
         resume_session,
         native_session_may_have_history,
     } = setup;
+    let subagent_role = config.subagent_mcp_role();
     let root = root_path.as_path();
     // The first capture must precede the primary harness, so pre-existing
     // edits are not reported as this session's turn. A restart retains its
@@ -1476,10 +1478,12 @@ async fn prepare_and_start_harness(
     let mut session_environment = base_environment.clone();
     session_environment.extend(config.environment.clone());
     session_environment.remove(mj_core::worker_launch::SESSION_GIT_CONFIG_INCLUDE_PATH);
+    session_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     let github_root = root.to_owned();
     let github_home = worker_home.clone();
     let git_config_include = session_git_config_include.clone();
-    let explicit_environment = config.environment.clone();
+    let mut explicit_environment = config.environment.clone();
+    explicit_environment.remove(mj_core::worker_launch::SESSION_MANAGED_SUBAGENT_ENV);
     let base_environment_for_filter = base_environment.clone();
     session_environment =
         bounded_blocking_preparation_step(&login_budget, cancel, move |step_cancel| {
@@ -1502,11 +1506,6 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
-    let subagent_role = config.subagents.parent_role().or_else(|| {
-        config
-            .handback_tool
-            .then_some(mj_core::subagent::SubagentMcpRole::Child)
-    });
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
             let budget = preparation_step(

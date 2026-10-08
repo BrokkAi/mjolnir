@@ -4600,7 +4600,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child, true).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Child), true)
+        .unwrap();
     let (settings, allow) = allowed(stage.path());
     assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
     assert_eq!(
@@ -4611,7 +4612,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
 
     // A profile with no settings file gets one.
     let stage = tempfile::tempdir().unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child, true).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Child), true)
+        .unwrap();
     assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
 
     // A parent delegates without asking; a rule the person already has is
@@ -4622,7 +4624,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent, true).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Parent), true)
+        .unwrap();
     let (_, allow) = allowed(stage.path());
     assert_eq!(allow[0], "mcp__mj-agents__wait");
     assert_eq!(
@@ -4650,6 +4653,21 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         !allow.iter().any(|rule| rule.ends_with("__handback")),
         "a parent has no handback: {allow:?}"
     );
+
+    // A top-level session without Mjolnir-managed delegation gets only the
+    // peer-messaging server and tool permission.
+    let stage = tempfile::tempdir().unwrap();
+    configure_claude_subagent_mcp(
+        stage.path(),
+        "/worker",
+        Some(SubagentMcpRole::MessageOnly),
+        true,
+    )
+    .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["mj-agents"]["args"][7], "message_only");
+    assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__send_message"]);
 }
 
 #[test]

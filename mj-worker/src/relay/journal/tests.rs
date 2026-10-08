@@ -113,7 +113,7 @@ fn revision_16_snapshot_and_journal_replay_legacy_mailbox_text() {
     )
     .unwrap();
     let snapshot_relay = DurableRelay::open(snapshot_root.path(), SESSION, "test").unwrap();
-    assert_eq!(snapshot_relay.snapshot.format_version, 17);
+    assert_eq!(snapshot_relay.snapshot.format_version, 18);
     assert_eq!(
         snapshot_relay.snapshot.pending_mailbox_events[0].body,
         mj_core::mailbox::MailboxEventBody::PlainText {
@@ -205,7 +205,7 @@ fn revision_16_snapshot_and_journal_replay_legacy_mailbox_text() {
 
     let journal_relay = DurableRelay::open(journal_root.path(), SESSION, "test").unwrap();
     assert!(journal_relay.latest_ordinal() >= 1);
-    assert_eq!(journal_relay.snapshot.format_version, 17);
+    assert_eq!(journal_relay.snapshot.format_version, 18);
     assert!(
         journal_relay
             .snapshot

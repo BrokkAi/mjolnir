@@ -127,6 +127,8 @@ enum Command {
     ClearQueue(api_commands::ClearQueueArgs),
     /// Queue an external event in a session's durable mailbox.
     Event(api_commands::EventArgs),
+    /// Send a message to a top-level session or one of your sub-agents.
+    Message(api_commands::MessageArgs),
     /// Block until a turn ends and print how it ended.
     Wait(api_commands::WaitArgs),
     /// Page through a session's transcript.
@@ -534,6 +536,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Prompt(_)) => "prompt",
         Some(Command::ClearQueue(_)) => "clear-queue",
         Some(Command::Event(_)) => "event",
+        Some(Command::Message(_)) => "message",
         Some(Command::Wait(_)) => "wait",
         Some(Command::Transcript(_)) => "transcript",
         Some(Command::Usage(_)) => "usage",
@@ -722,6 +725,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Event(args)) => api_commands::event(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Message(args)) => api_commands::message(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Wait(args)) => api_commands::wait(args)

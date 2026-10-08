@@ -278,7 +278,7 @@ fn golden_session_title_projection() {
 fn golden_mailbox_delivery_transcript() {
     let mut session = MaterializedSession::empty("session-mailbox");
     use mj_core::github_item::GithubItemKind;
-    use mj_core::mailbox::{MailboxEvent, MailboxEventBody, MailboxPullRequestChange};
+    use mj_core::mailbox::{MailboxEvent, MailboxEventBody, MailboxPullRequestChange, Sender};
 
     let mailbox_event =
         |key: &str, source: &str, wake: bool, created_at_ms: u64, body: MailboxEventBody| {
@@ -487,10 +487,33 @@ fn golden_mailbox_delivery_transcript() {
             },
         ),
         mailbox_event(
+            "session-message:peer",
+            "session_message",
+            true,
+            509,
+            MailboxEventBody::SessionMessage {
+                from: Sender::Session {
+                    id: "b6932a80-1234-5678-9abc-def012345678".into(),
+                    title: "Fix cache race".into(),
+                },
+                text: "The lock is fixed; please verify it.".into(),
+            },
+        ),
+        mailbox_event(
+            "session-message:user",
+            "session_message",
+            true,
+            510,
+            MailboxEventBody::SessionMessage {
+                from: Sender::User,
+                text: "Please check the final result.".into(),
+            },
+        ),
+        mailbox_event(
             "api:plain-1",
             "api",
             true,
-            509,
+            511,
             MailboxEventBody::PlainText {
                 text: "A plain event from the CLI.".into(),
             },

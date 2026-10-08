@@ -125,6 +125,10 @@ fn default_agent_mailboxes_enabled() -> bool {
 /// Internal launch directive: include this absolute Git config file in the
 /// worker-owned session global config, then remove the key before harness use.
 pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH";
+/// Controller-authored environment marker so old launch.json readers remain
+/// compatible while a new worker can distinguish a managed child whose
+/// historical handback tool is disabled.
+pub const SESSION_MANAGED_SUBAGENT_ENV: &str = "MJ_SESSION_MANAGED_SUBAGENT";
 
 /// Whether this worker executes the harness or only preserves recovered state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +389,24 @@ impl ReviewerLaunchConfig {
 }
 
 impl WorkerLaunchConfig {
+    /// The `mj-agents` role is derived once from the launch's ownership and
+    /// policy so Codex and Claude expose the same tools.
+    pub fn subagent_mcp_role(&self) -> Option<crate::subagent::SubagentMcpRole> {
+        self.subagents.parent_role().or_else(|| {
+            if self
+                .environment
+                .get(SESSION_MANAGED_SUBAGENT_ENV)
+                .is_some_and(|value| value == "1")
+            {
+                self.handback_tool
+                    .then_some(crate::subagent::SubagentMcpRole::Child)
+            } else {
+                self.agent_mailboxes_enabled
+                    .then_some(crate::subagent::SubagentMcpRole::MessageOnly)
+            }
+        })
+    }
+
     /// Downloads must finish before startup or an upgrade's idle reservation.
     pub fn requires_harness_preparation(&self) -> bool {
         self.harness_runtime == HarnessRuntimePolicy::Managed

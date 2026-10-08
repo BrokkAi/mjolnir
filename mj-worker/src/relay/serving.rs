@@ -109,9 +109,30 @@ mod tests {
                 },
             },
         };
-        assert_eq!(mailbox_event.minimum_protocol(), 33);
-        assert!(!mailbox_event.supported_at(32));
-        assert!(mailbox_event.supported_at(33));
+        assert_eq!(mailbox_event.minimum_protocol(), 34);
+        assert!(!mailbox_event.supported_at(33));
+        assert!(mailbox_event.supported_at(34));
+        let session_message = RelayRequest::Submit {
+            command_id: "session-message".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: mj_core::mailbox::MailboxEvent {
+                    key: "session-message:1".into(),
+                    source: "session_message".into(),
+                    wake: true,
+                    created_at_ms: 1,
+                    body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                        from: mj_core::mailbox::Sender::Session {
+                            id: "sender".into(),
+                            title: "Sender".into(),
+                        },
+                        text: "message".into(),
+                    },
+                },
+            },
+        };
+        assert_eq!(session_message.minimum_protocol(), 35);
+        assert!(!session_message.supported_at(34));
+        assert!(session_message.supported_at(35));
     }
 
     #[test]

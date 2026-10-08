@@ -15,6 +15,7 @@ use crate::daemon::RuntimeState;
 use crate::session_manager::SessionManagerControl;
 
 const TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR: &str = "This queued parent message reached an older mj worker that cannot receive structured mailbox events; it was not delivered.";
+const SESSION_MESSAGE_PROTOCOL_ERROR: &str = "This queued session message reached an older mj worker that cannot receive its sender information; it was not delivered.";
 const PENDING_BATCH: usize = 256;
 const SESSION_CONCURRENCY: usize = 8;
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -234,6 +235,12 @@ pub(crate) fn trusted_parent_message_protocol_error(protocol: Option<u32>) -> Op
         .map(|_| TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR)
 }
 
+pub(crate) fn session_message_protocol_error(protocol: Option<u32>) -> Option<&'static str> {
+    protocol
+        .filter(|version| *version < mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL)
+        .map(|_| SESSION_MESSAGE_PROTOCOL_ERROR)
+}
+
 /// Submit one durable event through the existing session actor. Callers may
 /// opt into unpark for deliberate parent-to-child messages; GitHub and the
 /// public events API always pass `false`.
@@ -266,11 +273,16 @@ pub(crate) async fn deliver_mailbox_event(
     };
     let view = handle.view();
     let protocol = published_worker_relay_protocol(&view);
-    if matches!(
-        &event.body,
-        mj_core::mailbox::MailboxEventBody::ParentMessage { .. }
-    ) && let Some(reason) = trusted_parent_message_protocol_error(protocol)
-    {
+    let protocol_error = match &event.body {
+        mj_core::mailbox::MailboxEventBody::ParentMessage { .. } => {
+            trusted_parent_message_protocol_error(protocol)
+        }
+        mj_core::mailbox::MailboxEventBody::SessionMessage { .. } => {
+            session_message_protocol_error(protocol)
+        }
+        _ => None,
+    };
+    if let Some(reason) = protocol_error {
         return Ok(MailboxEventDelivery::Failed(reason.to_owned()));
     }
     if !view.connected

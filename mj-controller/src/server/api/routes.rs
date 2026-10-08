@@ -27,6 +27,10 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route("/sessions/{session_id}/prompt", post(prompt))
         .route(
+            "/sessions/{session_id}/message",
+            post(mailbox::send_message),
+        )
+        .route(
             "/sessions/{session_id}/queued-prompts/clear",
             post(clear_queue),
         )
@@ -141,10 +145,26 @@ pub(super) async fn api_response_headers(
 // Handlers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionListQuery {
     pub workspace_id: Option<String>,
+    /// Older API clients omit this and retain the historical all-sessions list.
+    #[serde(default = "default_all_sessions")]
+    pub all: bool,
+}
+
+fn default_all_sessions() -> bool {
+    true
+}
+
+impl Default for SessionListQuery {
+    fn default() -> Self {
+        Self {
+            workspace_id: None,
+            all: true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
