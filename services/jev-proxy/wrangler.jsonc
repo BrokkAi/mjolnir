@@ -6,6 +6,7 @@
   "workers_dev": true,
   "preview_urls": false,
   "ratelimits": [
+    { "name": "EFFORT_RATE_LIMITER", "namespace_id": "1938471205", "simple": { "limit": 120, "period": 60 } },
     { "name": "CONTINUATION_RATE_LIMITER", "namespace_id": "1938471203", "simple": { "limit": 120, "period": 60 } },
     { "name": "GITHUB_ITEM_RATE_LIMITER", "namespace_id": "1938471204", "simple": { "limit": 120, "period": 60 } },
     {
