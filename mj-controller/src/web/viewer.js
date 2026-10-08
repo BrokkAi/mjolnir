@@ -1647,7 +1647,11 @@ function subagentSelectionError(draft) {
   if (discovery.error) return discovery.error;
   if (!discovery.options.models.some(choice => choice.value === draft.subagents.model)) return `Select an available subagent model${draft.subagents.model ? ` (${draft.subagents.model} is unavailable)` : ''}.`;
   const efforts = discovery.options.efforts;
-  if (efforts.length && !efforts.some(choice => choice.value === draft.subagents.effort)) return 'Select an available effort for this model.';
+  if (
+    efforts.length &&
+    draft.subagents.effort !== 'adaptive' &&
+    !efforts.some(choice => choice.value === draft.subagents.effort)
+  ) return 'Select an available effort for this model.';
   if (!efforts.length && draft.subagents.effort != null) return 'The selected effort is unavailable for this model.';
   return '';
 }
@@ -1718,7 +1722,11 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
     rerender();
   }, !discovery.modelsReady);
   const efforts = options?.efforts || [];
-  const choices = [['', efforts.length ? 'Select effort' : 'Harness default'], ...efforts.map(choice => [choice.value, choice.name])];
+  const choices = [['', efforts.length ? 'Select effort' : 'Harness default']];
+  if (efforts.length && !efforts.some(choice => choice.value === 'adaptive')) {
+    choices.push(['adaptive', 'Adaptive (Jev chooses per task)']);
+  }
+  choices.push(...efforts.map(choice => [choice.value, choice.name]));
   if (draft.subagents.effort && !choices.some(([value]) => value === draft.subagents.effort)) choices.push([draft.subagents.effort, `${draft.subagents.effort} (unavailable)`]);
   subagentSelect(body, 'Effort', `${prefix}-subagent-effort`, choices, draft.subagents.effort || '', effort => {
     draft.subagents.effort = effort || null;
