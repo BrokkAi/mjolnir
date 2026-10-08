@@ -666,7 +666,7 @@ Enter op
 │         │  Enter / e                Target actions                                                                                                                                         │   ▁   ▪ ╮
 │         │    Test or rename the selected target.                                                                                                                                           │         │
 │         │  d                        Show disks                                                                                                                                             │  ───────╯
-│         │    Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.                                                     │   ▁   ▪ ╮
+│         │    Open the selected target's filesystems, free space, and status. Clicking the Disks cell does the same.                                                                        │   ▁   ▪ ╮
 │         │  Enter / e                Rename profile                                                                                                                                         │         │
 │         │    Rename the selected profile's configuration id.                                                                                                                               │         │
 │         │  —                        Manage agent profiles                                                                                                                                  │         │
@@ -708,7 +708,7 @@ Enter op
 │         │  Enter / e                Target actions                                                                                                                                         │         │
 │         │    Test or rename the selected target.                                                                                                                                           │         │
 │         │  d                        Show disks                                                                                                                                             │         │
-│         │    Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.                                                     │         │
+│         │    Open the selected target's filesystems, free space, and status. Clicking the Disks cell does the same.                                                                        │         │
 │         │  Enter / e                Rename profile                                                                                                                                         │         │
 │         │    Rename the selected profile's configuration id.                                                                                                                               │  ───────╯
 │         │  —                        Manage agent profiles                                                                                                                                  │  ───────╮
@@ -751,7 +751,7 @@ Enter op
 │         │  Enter / e                Target actions                                                                                                                                         │         │
 │         │    Test or rename the selected target.                                                                                                                                           │         │
 │         │  d                        Show disks                                                                                                                                             │         │
-│         │    Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.                                                     │         │
+│         │    Open the selected target's filesystems, free space, and status. Clicking the Disks cell does the same.                                                                        │         │
 │         │  Enter / e                Rename profile                                                                                                                                         │         │
 │         │    Rename the selected profile's configuration id.                                                                                                                               │         │
 │         │  —                        Manage agent profiles                                                                                                                                  │         │

@@ -64,6 +64,222 @@ pub(super) fn ensure_subagent_child_can_receive_work(
 }
 
 impl ApiBackend {
+    /// One authorization and routing operation shared by MCP and the
+    /// authenticated HTTP/CLI surface. Sender identity is supplied by the
+    /// caller context, never by MCP tool arguments.
+    pub(super) async fn deliver_session_message(
+        &self,
+        sender_session_id: Option<String>,
+        target_session_id: String,
+        text: String,
+        request_id: String,
+        created_at_ms: i64,
+    ) -> Result<crate::server::api::SessionMessageResponse> {
+        let target_id = target_session_id.clone();
+        let sender_for_auth = sender_session_id.clone();
+        let (own_child, sender_record) = blocking("authorize session message", move || {
+            let state = Controller::load()?.state;
+            let sender = match sender_for_auth.as_deref() {
+                Some(sender_id) => {
+                    let sender = state.sessions.get(sender_id).ok_or_else(|| {
+                        anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
+                            "sender session {sender_id} does not exist"
+                        )))
+                    })?;
+                    if state.is_subagent_session(sender_id) {
+                        anyhow::bail!(mj_core::refusal::Refusal::unusable(
+                            "only a top-level session can send messages"
+                        ));
+                    }
+                    Some(sender)
+                }
+                None => None,
+            };
+            let target = state.sessions.get(&target_id).cloned().ok_or_else(|| {
+                anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
+                    "target session {target_id} does not exist or was destroyed"
+                )))
+            })?;
+            if sender_for_auth.as_deref() == Some(target_id.as_str()) {
+                anyhow::bail!(mj_core::refusal::Refusal::unusable(
+                    "a session cannot send a message to itself"
+                ));
+            }
+            let own_child = state.is_subagent_session(&target_id)
+                && sender_for_auth.as_deref().is_some_and(|sender_id| {
+                    state
+                        .subagents
+                        .get(&target_id)
+                        .is_some_and(|relation| relation.parent_session_id == sender_id)
+                });
+            if state.is_subagent_session(&target_id) && !own_child {
+                anyhow::bail!(mj_core::refusal::Refusal::unusable(
+                    "a session cannot message another session's sub-agent"
+                ));
+            }
+            if target.state == SessionState::DestroyedWithDataLoss {
+                anyhow::bail!(mj_core::refusal::Refusal::precondition(
+                    "target session was destroyed and cannot receive messages"
+                ));
+            }
+            if !own_child {
+                if target.state == SessionState::Stopped {
+                    anyhow::bail!(mj_core::refusal::Refusal::precondition(
+                        "target session is stopped (suspended); resume it before sending a message"
+                    ));
+                }
+                if matches!(
+                    target.state,
+                    SessionState::Closing
+                        | SessionState::Destroying
+                        | SessionState::StartupCleanup
+                        | SessionState::Lost
+                        | SessionState::Error
+                        | SessionState::Parked
+                ) {
+                    anyhow::bail!(mj_core::refusal::Refusal::precondition(format!(
+                        "target session is {:?} and cannot receive messages",
+                        target.state
+                    )));
+                }
+            }
+            Ok((own_child, sender.cloned()))
+        })
+        .await?;
+
+        if own_child {
+            let parent = sender_session_id
+                .as_deref()
+                .context("an owned child message requires its parent session")?;
+            let request = SubagentToolRequest {
+                originating_command_id: None,
+                request_id: request_id.clone(),
+                created_at_ms,
+                action: SubagentToolAction::SendMessage {
+                    child_session_id: target_session_id.clone(),
+                    message: text.clone(),
+                },
+            };
+            let delivery = self
+                .deliver_subagent_input(parent, &target_session_id, &text, &request)
+                .await?;
+            let (via, turn_id) = match delivery {
+                SubagentInputDelivery::Mailbox => ("mailbox", None),
+                SubagentInputDelivery::Turn { ordinal } => ("turn", Some(ordinal)),
+            };
+            return Ok(crate::server::api::SessionMessageResponse {
+                session_id: target_session_id,
+                via: via.into(),
+                turn_id,
+                managed_child: true,
+            });
+        }
+
+        let sender = match (sender_session_id, sender_record.as_ref()) {
+            (Some(id), Some(record)) => mj_core::mailbox::Sender::Session {
+                id,
+                title: record.title.clone(),
+            },
+            (None, _) => mj_core::mailbox::Sender::User,
+            _ => unreachable!("sender record accompanies every session sender id"),
+        };
+        let event_key = format!("session-message-{request_id}");
+        let event = mj_core::mailbox::MailboxEvent {
+            key: event_key.clone(),
+            source: "session_message".into(),
+            wake: true,
+            created_at_ms: created_at_ms.max(0) as u64,
+            body: mj_core::mailbox::MailboxEventBody::SessionMessage { from: sender, text },
+        };
+
+        let mailbox_route_exists = {
+            let event_key = event_key.clone();
+            blocking("check existing session-message route", move || {
+                crate::database::mailbox_event_exists(&event_key)
+            })
+            .await?
+        };
+        if mailbox_route_exists {
+            self.enqueue_session_message(&target_session_id, &event, &event_key)
+                .await?;
+            return Ok(crate::server::api::SessionMessageResponse {
+                session_id: target_session_id,
+                via: "mailbox".into(),
+                turn_id: None,
+                managed_child: false,
+            });
+        }
+
+        let command_id = format!("session-message-turn-{request_id}");
+        if let Some(ordinal) = prompt_acceptance(&target_session_id, &command_id).await? {
+            return Ok(crate::server::api::SessionMessageResponse {
+                session_id: target_session_id,
+                via: "turn".into(),
+                turn_id: Some(ordinal),
+                managed_child: false,
+            });
+        }
+
+        let protocol = if self.exports.agent_mailboxes_enabled() {
+            match self.sessions.session(target_session_id.clone()).await {
+                Ok(handle) => {
+                    crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target_session_id,
+                        error = %format!("{error:#}"),
+                        "target worker protocol is not published; session message will use a turn"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mailbox_supported = protocol
+            .is_some_and(|protocol| protocol >= mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL);
+        if mailbox_supported {
+            self.enqueue_session_message(&target_session_id, &event, &event_key)
+                .await?;
+            return Ok(crate::server::api::SessionMessageResponse {
+                session_id: target_session_id,
+                via: "mailbox".into(),
+                turn_id: None,
+                managed_child: false,
+            });
+        }
+
+        let text = mj_core::mailbox::render_mailbox_event(&event);
+        let turn_id = self
+            .prompt_with_id(target_session_id.clone(), text, Some(command_id))
+            .await?;
+        Ok(crate::server::api::SessionMessageResponse {
+            session_id: target_session_id,
+            via: "turn".into(),
+            turn_id: Some(turn_id),
+            managed_child: false,
+        })
+    }
+
+    async fn enqueue_session_message(
+        &self,
+        target: &str,
+        event: &mj_core::mailbox::MailboxEvent,
+        event_key: &str,
+    ) -> Result<()> {
+        let event_json = serde_json::to_string(event)?;
+        let event_key = event_key.to_owned();
+        let target = target.to_owned();
+        let admission = crate::upgrade::activity_unless_draining("session message outbox write")?;
+        blocking("enqueue session message", move || {
+            let _admission = admission;
+            crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, false)
+        })
+        .await
+        .map(|_| ())
+    }
+
     pub(super) async fn subagent_input_progress(&self, parent: &str) -> Result<InputProgress> {
         let snapshot = self
             .session_handle(parent.to_owned())
@@ -310,7 +526,14 @@ impl ApiBackend {
         })?;
         let event_key = event_key.to_owned();
         let target = child.to_owned();
+        let admission =
+            crate::upgrade::activity_unless_draining("subagent parent-message outbox write")
+                .map_err(|source| InputDeliveryFailure {
+                    via: "mailbox",
+                    source,
+                })?;
         blocking("enqueue parent message for child", move || {
+            let _admission = admission;
             crate::database::enqueue_mailbox_event(&event_key, &target, &event_json, true, true)
         })
         .await

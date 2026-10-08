@@ -111,13 +111,14 @@ fn provider_credential_from(
     provider: Option<&mj_core::codex_provider::CodexProvider>,
 ) -> Option<ProviderCredential> {
     let provider = provider?;
-    let custom = provider.custom()?;
-    let env_key = custom.env_key.as_deref()?;
-    let api_key = profile.environment.get(env_key)?;
+    // Only a custom provider has a key of its own; the built-in OpenAI
+    // provider uses Codex's ChatGPT login, which this never reads.
+    provider.custom()?;
+    let api_key = profile.codex_provider_api_key()?;
     Some(ProviderCredential {
         id: provider.id().to_owned(),
         host: provider.host()?,
-        api_key: api_key.clone(),
+        api_key,
     })
 }
 

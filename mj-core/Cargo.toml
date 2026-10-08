@@ -17,6 +17,7 @@ include = [
     "src/activity/verdict_questions.json",
     "src/help_search/question.json",
     "src/continuation/questions.json",
+    "src/effort_verdict/questions.json",
     "src/github_item/questions.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",

@@ -2319,6 +2319,19 @@ fn parking_backend_with_protocol(
     Arc<ApiBackend>,
     mpsc::UnboundedReceiver<(String, RelayCommand)>,
 ) {
+    message_backend_for_session("child-1", exports, failures, on_failure, protocol)
+}
+
+fn message_backend_for_session(
+    session_id: &str,
+    exports: Arc<ParkingExports>,
+    failures: &[bool],
+    on_failure: Arc<dyn Fn() + Send + Sync>,
+    protocol: u32,
+) -> (
+    Arc<ApiBackend>,
+    mpsc::UnboundedReceiver<(String, RelayCommand)>,
+) {
     let (submitted, delivered) = mpsc::unbounded_channel();
     let mut view = ready_view("model");
     view.snapshot
@@ -2328,7 +2341,7 @@ fn parking_backend_with_protocol(
         .relay_protocol_version = Some(protocol);
     let session = ScriptedSession {
         inner: FakeSession {
-            session_id: "child-1".into(),
+            session_id: session_id.into(),
             accepted_ordinal: 9,
             submitted,
             view: Some(view),
@@ -2408,6 +2421,10 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
             serde_json::from_str::<serde_json::Value>(&answer.message).unwrap()["via"],
             "mailbox"
         );
+        let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+        assert_eq!(result["child_session_id"], "child-1");
+        assert!(result.get("session_id").is_none());
+        assert!(result.get("turn_id").is_none());
     }
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert_eq!(pending.len(), 1, "a request retry inserts one outbox event");
@@ -2596,6 +2613,187 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
     remote.shutdown.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sender() {
+    if !isolated_parked_test(
+        "send_message_to_peer_queues_typed_event_with_the_calling_session_as_sender",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    crate::database::save_session(&parent_record("peer-1", "peer")).unwrap();
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let (backend, _) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "peer-message-1".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "peer-1".into(),
+            message: "Please check the retry path.".into(),
+        },
+    };
+
+    let answer = backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(result["via"], "mailbox");
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].target_session_id, "peer-1");
+    assert!(!pending[0].unpark);
+    let event: mj_core::mailbox::MailboxEvent =
+        serde_json::from_str(&pending[0].event_json).unwrap();
+    assert_eq!(event.source, "session_message");
+    assert!(event.wake, "peer messages wake idle recipients");
+    assert_eq!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::SessionMessage {
+            from: mj_core::mailbox::Sender::Session {
+                id: "parent-1".into(),
+                title: "parent".into(),
+            },
+            text: "Please check the retry path.".into(),
+        }
+    );
+    let rendered = mj_core::mailbox::render_mailbox_event(&event);
+    assert!(rendered.contains("Message from session \"parent\" (parent-1):"));
+    assert!(rendered.contains("session_id parent-1"));
+    assert!(rendered.contains("Please check the retry path."));
+}
+
+#[tokio::test]
+async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender() {
+    if !isolated_parked_test(
+        "send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut stopped = parent_record("stopped-peer", "peer");
+    stopped.state = SessionState::Stopped;
+    crate::database::save_session(&stopped).unwrap();
+    crate::database::save_session(&parent_record("peer-1", "peer")).unwrap();
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let (backend, mut delivered) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+    );
+    let send = |target: &str| mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: format!("refused-{target}"),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: target.into(),
+            message: "hello".into(),
+        },
+    };
+
+    for (sender, target, expected) in [
+        ("parent-1", "stopped-peer", "stopped (suspended)"),
+        ("parent-1", "parent-1", "itself"),
+        ("peer-1", "child-1", "another session's sub-agent"),
+        (
+            "parent-1",
+            "missing-peer",
+            "does not exist or was destroyed",
+        ),
+    ] {
+        let answer = backend
+            .execute_subagent_tool(sender.into(), send(target))
+            .await;
+        assert!(answer.is_error, "{sender} -> {target}: {}", answer.message);
+        assert!(answer.message.contains(expected), "{}", answer.message);
+    }
+    let claimed_child_sender = backend
+        .deliver_message(
+            Some("child-1".into()),
+            "peer-1".into(),
+            "hello".into(),
+            "claimed-child-sender".into(),
+            mj_core::clock::epoch_millis(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{claimed_child_sender:#}").contains("only a top-level session can send messages"),
+        "{claimed_child_sender:#}"
+    );
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(delivered.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn send_message_to_protocol_34_peer_queues_a_labeled_turn() {
+    if !isolated_parked_test("send_message_to_protocol_34_peer_queues_a_labeled_turn") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    crate::database::save_session(&parent_record("peer-1", "peer")).unwrap();
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    let (backend, mut delivered) = message_backend_for_session(
+        "peer-1",
+        exports,
+        &[],
+        Arc::new(|| {}),
+        mj_core::relay::RELAY_STRUCTURED_MAILBOX_PROTOCOL,
+    );
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "old-peer-worker".into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: "peer-1".into(),
+            message: "check this compatibility path".into(),
+        },
+    };
+
+    let answer = backend
+        .execute_subagent_tool("parent-1".into(), request)
+        .await;
+    assert!(!answer.is_error, "{}", answer.message);
+    let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
+    assert_eq!(result["via"], "turn");
+    let (command_id, command) = delivered.try_recv().unwrap();
+    assert_eq!(command_id, "session-message-turn-old-peer-worker");
+    let RelayCommand::Prompt { prompt } = command else {
+        panic!("an older worker receives a turn prompt")
+    };
+    let ContentBlock::Text(text) = &prompt[0] else {
+        panic!("the fallback carries rendered text")
+    };
+    assert!(
+        text.text
+            .contains("Message from session \"parent\" (parent-1):")
+    );
+    assert!(text.text.contains("session_id parent-1"));
+    assert!(text.text.contains("does not carry the user's authority"));
+    assert!(text.text.contains("check this compatibility path"));
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 // Hard-won: 193f015e: a stopped child was reported queued although it could never receive the message.
 #[tokio::test]
 async fn send_message_refuses_a_stopped_child_without_queueing() {
@@ -2667,6 +2865,8 @@ async fn send_message_uses_a_turn_for_a_protocol_33_child() {
     let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
     assert_eq!(result["status"], "submitted");
     assert_eq!(result["via"], "turn");
+    assert_eq!(result["child_session_id"], "child-1");
+    assert!(result.get("session_id").is_none());
     assert_eq!(
         delivered.try_recv().unwrap(),
         (
@@ -2710,6 +2910,8 @@ async fn send_message_uses_a_turn_when_mailboxes_are_disabled() {
     let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
     assert_eq!(result["status"], "submitted");
     assert_eq!(result["via"], "turn");
+    assert_eq!(result["child_session_id"], "child-1");
+    assert!(result.get("session_id").is_none());
     assert!(matches!(
         delivered.try_recv().unwrap().1,
         RelayCommand::Prompt { .. }

@@ -65,9 +65,12 @@ pub const RELAY_RETRY_ID_RETENTION: usize = 512;
 /// structured mailbox bodies; controllers keep the old text representation
 /// when they submit to a protocol-33 worker.
 /// 35 records rendered elicitation replies in resolution events.
+/// 36 adds typed peer-message senders, which older workers receive as
+/// queued turns.
 pub const RELAY_LEGACY_MAILBOX_PROTOCOL: u32 = 33;
 pub const RELAY_STRUCTURED_MAILBOX_PROTOCOL: u32 = 34;
-pub const RELAY_PROTOCOL_VERSION: u32 = 35;
+pub const RELAY_SESSION_MESSAGE_PROTOCOL: u32 = 36;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SESSION_MESSAGE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -95,7 +98,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 15 is breaking: unified assessment state and events must not be lost by an older writer.
 // Revision 16 is breaking: mailbox state and journal events must not be lost by an older writer.
 // Revision 17 is breaking: revision-16 readers require mailbox text fields and cannot preserve structured bodies.
-pub const RELAY_STATE_VERSION: u32 = 17;
+// Revision 18 is breaking: revision-17 readers cannot preserve session-message sender bodies.
+pub const RELAY_STATE_VERSION: u32 = 18;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

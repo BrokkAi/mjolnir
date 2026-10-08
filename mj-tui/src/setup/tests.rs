@@ -3856,6 +3856,21 @@ fn profile_subagent_comboboxes_open_on_one_click_select_and_dismiss_after_redraw
         let (x, y) = point(&lines, "Select effort");
         setup_click(&mut dashboard, width, height, x + 1, y);
         let lines = drawn(&mut dashboard, width, height);
+        if width == 140 {
+            let adaptive_label = mj_core::subagent::ADAPTIVE_EFFORT_LABEL;
+            assert!(lines.join("\n").contains(adaptive_label), "{lines:#?}");
+            let (x, y) = point(&lines, adaptive_label);
+            setup_click(&mut dashboard, width, height, x + 1, y);
+            assert_eq!(
+                setup_dialog_mut(&mut dashboard.mode).unwrap().draft["profiles"]["claude-1"]["subagents"]
+                    ["effort"],
+                mj_core::subagent::ADAPTIVE_EFFORT
+            );
+            let lines = drawn(&mut dashboard, width, height);
+            let (x, y) = point(&lines, adaptive_label);
+            setup_click(&mut dashboard, width, height, x + 1, y);
+        }
+        let lines = drawn(&mut dashboard, width, height);
         let (x, y) = point(&lines, "high");
         setup_click(&mut dashboard, width, height, x + 1, y);
         assert_eq!(
@@ -3981,7 +3996,8 @@ fn the_profile_subagents_page_shows_its_whole_hint() {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            page.contains("selected model and effort."),
+            page.contains("selected model and effort; Adaptive")
+                && page.contains("choose an effort for each child task."),
             "{width}x{height}: hint cut off: {page}"
         );
     }

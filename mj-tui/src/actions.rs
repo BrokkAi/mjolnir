@@ -1076,7 +1076,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::TargetDisks,
         label: "Show disks",
-        description: "Expand or collapse the selected target's list of filesystems and their free space. Clicking the Disks cell does the same.",
+        description: "Open the selected target's filesystems, free space, and status. Clicking the Disks cell does the same.",
         scope: Scope::Targets,
         pane_keys: &[KeyHint::plain(KeyCode::Char('d'), "d")],
         action: None,
@@ -1888,7 +1888,7 @@ impl DashboardState {
                 if self.pane_size(crate::SupportPane::Targets) == crate::PaneSize::Minimized {
                     return DashboardAction::None;
                 }
-                self.toggle_selected_disks();
+                self.begin_capacity_disks_menu(self.capacity_index);
                 DashboardAction::None
             }
             CommandId::EditProfile => {

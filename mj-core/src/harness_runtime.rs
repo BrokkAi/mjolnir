@@ -262,19 +262,23 @@ mod tests {
 
     #[test]
     fn managed_cache_root_prefers_xdg_and_falls_back_when_it_is_empty() {
-        let xdg_root = managed_harness_cache_root(
-            Some(OsStr::new("/custom-cache")),
-            Some(OsStr::new("/home/user")),
-        )
-        .expect("absolute XDG cache root");
-        assert_eq!(xdg_root, PathBuf::from("/custom-cache/mjolnir/harnesses"));
+        // `temp_dir` is absolute on every target; a hardcoded Unix-style
+        // `/custom-cache` is relative on Windows and trips the absolute-path
+        // guard the function promises on all platforms.
+        let xdg = std::env::temp_dir().join("mj-xdg-cache");
+        let home = std::env::temp_dir().join("mj-home");
+        let xdg_root = managed_harness_cache_root(Some(xdg.as_os_str()), Some(home.as_os_str()))
+            .expect("absolute XDG cache root");
+        assert_eq!(xdg_root, xdg.join(MANAGED_HARNESSES_DIR));
 
-        let home_root =
-            managed_harness_cache_root(Some(OsStr::new("")), Some(OsStr::new("/home/user")))
-                .expect("HOME fallback");
-        assert_eq!(
-            home_root,
-            PathBuf::from("/home/user/.cache/mjolnir/harnesses")
+        let home_root = managed_harness_cache_root(Some(OsStr::new("")), Some(home.as_os_str()))
+            .expect("HOME fallback");
+        assert_eq!(home_root, home.join(".cache").join(MANAGED_HARNESSES_DIR));
+
+        assert!(
+            managed_harness_cache_root(Some(OsStr::new("relative-cache")), Some(home.as_os_str()))
+                .is_err(),
+            "a relative XDG cache root stays rejected on every target"
         );
     }
 

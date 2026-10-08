@@ -32,8 +32,8 @@ pub(crate) enum SurfaceControl {
     PinHere(PaneId),
     SessionPin(usize),
     WorkspaceMenu,
-    /// The Disks summary on one Targets row, by row index; a click expands
-    /// or collapses that row's filesystem list.
+    /// The Disks summary on one Targets row, by row index; a click opens its
+    /// filesystem details dropdown.
     CapacityDisks(usize),
 }
 
@@ -206,10 +206,7 @@ impl DashboardState {
                 }
                 SurfaceControl::CapacityDisks(index) => {
                     if index < self.capacity_details.len() {
-                        self.focus = Focus::Targets;
-                        self.set_session_action_focus(None);
-                        self.capacity_index = index;
-                        self.toggle_selected_disks();
+                        self.begin_capacity_disks_menu(index);
                     }
                     DashboardAction::None
                 }

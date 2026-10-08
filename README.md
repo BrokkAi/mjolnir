@@ -8,7 +8,7 @@ keeps them running after you close the terminal. You can move a session to
 another account, another harness, or a compatible target without starting over.
 Bare SSH sessions stay on their original host.
 
-By default Mjolnir sends recent prompt and reply text, and help-search text, to TypeSafe's hosted Jev classifier through a public proxy, and `[jev] enabled = false` in `config.toml` stops all of it ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
+By default Mjolnir sends recent prompt and reply text and help-search text to TypeSafe's hosted Jev classifier through a public proxy. When a sub-agent uses adaptive effort, it also sends the clipped task name and instructions plus the child model ID. `[jev] enabled = false` in `config.toml` stops all Jev requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·

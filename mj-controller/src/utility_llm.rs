@@ -591,7 +591,7 @@ fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
                 Some(UtilityFamily::Codex)
             }
             CodexProviderDefinition::BuiltIn(_) => None,
-            CodexProviderDefinition::Custom(custom) if custom.env_key.is_some() => {
+            CodexProviderDefinition::Custom(custom) if custom.key().is_some() => {
                 match provider.kind() {
                     CodexProviderKind::DeepSeek => Some(UtilityFamily::DeepSeek),
                     CodexProviderKind::Zai | CodexProviderKind::Other => None,
@@ -655,10 +655,8 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         && provider.kind() == CodexProviderKind::DeepSeek
         && let Some(custom) = provider.custom()
     {
-        let key = custom
-            .env_key
-            .as_deref()
-            .and_then(|env_key| profile.environment.get(env_key))
+        let key = profile
+            .codex_provider_api_key()
             .map(|key| key.trim().to_owned())
             .filter(|key| !key.is_empty());
         return Ok(key.map(|key| {
@@ -890,6 +888,32 @@ mod tests {
                 .map(|candidate| candidate.profile_id.as_str())
                 .collect::<Vec<_>>(),
             ["codex", "muse", "deepseek", "grok-reserve"]
+        );
+    }
+
+    #[test]
+    fn an_inline_token_deepseek_profile_serves_utility_inference() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model_provider = \"deepseek\"\n[model_providers.deepseek]\n\
+             base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\n\
+             experimental_bearer_token = \"inline-key\"\n",
+        )
+        .unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Codex,
+            home: home.path().to_path_buf(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        };
+        assert_eq!(utility_family(&profile), Some(UtilityFamily::DeepSeek));
+        assert!(
+            backend_for_profile(&profile).unwrap().is_some(),
+            "the inline token builds a chat-completions backend"
         );
     }
 

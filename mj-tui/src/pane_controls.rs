@@ -5,7 +5,13 @@ use crate::surface_controls::SurfaceControl;
 use crate::tile_layout::PaneId;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, ListActivation};
 use mj_chat::theme;
-use ratatui::{Frame, layout::Direction, style::Style, text::Line, widgets::Paragraph};
+use ratatui::{
+    Frame,
+    layout::Direction,
+    style::{Modifier, Style},
+    text::Line,
+    widgets::Paragraph,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PaneOperation {
@@ -19,6 +25,8 @@ enum PaneOperation {
     Close(PaneId),
     /// Runs one registry command, exactly as its key or palette row does.
     Command(CommandId),
+    /// An informational row in the read-only capacity dropdown.
+    Information,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +42,10 @@ pub(crate) struct PaneMenu {
     popup: std::cell::Cell<Rect>,
     /// The title a dropdown hangs from. `None` centres the menu.
     anchor: Option<Rect>,
+    /// Styled, non-command rows used by the capacity details dropdown.
+    display_rows: Option<Vec<Line<'static>>>,
+    /// Target whose Disks cell opened this menu, if any.
+    capacity_target: Option<String>,
 }
 
 impl DashboardState {
@@ -65,7 +77,53 @@ impl DashboardState {
             pressed_destination: None,
             popup: std::cell::Cell::new(Rect::default()),
             anchor: None,
+            display_rows: None,
+            capacity_target: None,
         });
+    }
+
+    /// Opens the selected capacity row's filesystem details beneath its
+    /// Disks cell, using the rendered button geometry as the anchor.
+    pub(crate) fn begin_capacity_disks_menu(&mut self, index: usize) {
+        let Some(anchor) = self
+            .capacity_disks_areas
+            .borrow()
+            .get(index)
+            .copied()
+            .flatten()
+        else {
+            return;
+        };
+        let Some((target_id, rows)) = self.capacity_details.values().nth(index).map(|detail| {
+            (
+                detail.target.id.clone(),
+                crate::render::capacity_disks_menu_lines(self, detail),
+            )
+        }) else {
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let entries = rows
+            .iter()
+            .map(|line| (line.to_string(), PaneOperation::Information))
+            .collect();
+        self.show_pane_menu("Disks", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(anchor);
+            menu.display_rows = Some(rows);
+            menu.capacity_target = Some(target_id);
+        }
+        self.focus = Focus::Targets;
+        self.set_session_action_focus(None);
+        self.capacity_index = index;
+    }
+
+    pub(crate) fn capacity_disks_menu_open(&self, target_id: &str) -> bool {
+        self.pane_menu
+            .as_ref()
+            .is_some_and(|menu| menu.capacity_target.as_deref() == Some(target_id))
     }
 
     /// Opens the small menu that hangs from a support pane's title: Refresh,
@@ -188,6 +246,22 @@ impl DashboardState {
 
     pub(crate) fn handle_pane_menu_event(&mut self, event: Event) -> DashboardAction {
         self.last_event_consumed.set(true);
+        if let Some(menu) = self.pane_menu.as_ref()
+            && menu.capacity_target.is_some()
+            && (matches!(
+                &event,
+                Event::Key(key)
+                    if key.kind != KeyEventKind::Release && key.code == KeyCode::Char('d')
+            ) || matches!(
+                (&event, menu.anchor),
+                (Event::Mouse(mouse), Some(anchor))
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && anchor.contains((mouse.column, mouse.row).into())
+            ))
+        {
+            self.pane_menu = None;
+            return DashboardAction::None;
+        }
         let Some(menu) = self.pane_menu.as_mut() else {
             return DashboardAction::None;
         };
@@ -286,6 +360,7 @@ impl DashboardState {
             }
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
             PaneOperation::Command(id) => self.run_available_command(id),
+            PaneOperation::Information => DashboardAction::None,
         }
     }
 }
@@ -486,12 +561,18 @@ fn dropdown_popup(
         .unwrap_or(u16::MAX)
         .max(16)
         .min(area.width);
-    let height = (entries.len() as u16 + 2).min(area.height);
+    let wanted_height = (entries.len() as u16 + 2).min(area.height);
+    let below = area.bottom().saturating_sub(anchor.bottom());
+    let above = anchor.y.saturating_sub(area.y);
+    let open_below = below >= wanted_height || below >= above;
+    let height = wanted_height
+        .min(if open_below { below } else { above })
+        .max(1);
     let x = anchor.x.min(area.right().saturating_sub(width)).max(area.x);
-    let y = if anchor.bottom().saturating_add(height) <= area.bottom() {
+    let y = if open_below {
         anchor.bottom()
     } else {
-        anchor.y.saturating_sub(height).max(area.y)
+        anchor.y.saturating_sub(height)
     };
     Rect::new(x, y, width, height)
 }
@@ -569,23 +650,61 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
     let inner = block.inner(popup);
     frame.render_widget(ratatui::widgets::Clear, popup);
     frame.render_widget(block, popup);
-    let items: Vec<Line> = menu
-        .entries
-        .iter()
-        .map(|(label, _)| Line::raw(label))
-        .collect();
-    ChoiceList::render_with_rows(
-        frame,
-        inner,
-        &items,
-        selected,
-        &(0..items.len()).map(Some).collect::<Vec<_>>(),
-        &vec![true; items.len()],
-        &mut form,
-        0,
-    );
-    form.set_menu(true);
-    form.set_list_activation(0, ListActivation::SingleClick);
+    if let Some(items) = &menu.display_rows {
+        let selected = selected.min(items.len().saturating_sub(1));
+        ChoiceList::render_with_rows(
+            frame,
+            inner,
+            items,
+            selected,
+            &(0..items.len()).map(Some).collect::<Vec<_>>(),
+            &vec![true; items.len()],
+            &mut form,
+            0,
+        );
+        form.set_menu(true);
+        form.set_list_activation(0, ListActivation::DoubleClick);
+        let offset = form.list_offset(0);
+        let rows = items
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, mut line)| {
+                if index == selected {
+                    line.style = line.style.patch(if theme::reverse_video() {
+                        Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .bg(theme::palette().selection)
+                            .add_modifier(Modifier::BOLD)
+                    });
+                }
+                line
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(rows).scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+            inner,
+        );
+    } else {
+        let items: Vec<Line> = menu
+            .entries
+            .iter()
+            .map(|(label, _)| Line::raw(label))
+            .collect();
+        ChoiceList::render_with_rows(
+            frame,
+            inner,
+            &items,
+            selected,
+            &(0..items.len()).map(Some).collect::<Vec<_>>(),
+            &vec![true; items.len()],
+            &mut form,
+            0,
+        );
+        form.set_menu(true);
+        form.set_list_activation(0, ListActivation::SingleClick);
+    }
     form.end_frame(0);
 }
 

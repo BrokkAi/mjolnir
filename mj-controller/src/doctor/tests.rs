@@ -1519,6 +1519,31 @@ fn doctor_reports_a_profile_or_target_that_cannot_start_with_the_fix() {
 }
 
 #[test]
+fn doctor_reports_an_inline_token_provider_as_usage_priced() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = \"deepseek\"\n[model_providers.deepseek]\n\
+         base_url = \"https://api.deepseek.com/v1\"\nwire_api = \"responses\"\n\
+         experimental_bearer_token = \"inline-key\"\n",
+    )
+    .unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+    assert_eq!(
+        profile_quota_source(&profile),
+        "pay-per-use through api.deepseek.com, counted as 100% left when choosing a sub-agent's profile"
+    );
+}
+
+#[test]
 fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode() {
     use mj_core::config::{Environment, EnvironmentValue, SecretResolver, with_secret_resolver};
 

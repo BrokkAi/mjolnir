@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import proxy from "../src/index.ts";
 import questions from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
+import { effortQuestions } from "../src/effort.ts";
 
 const base = {
   harness: "claude", phase: "running", silent_for_s: 60,
@@ -20,6 +21,17 @@ function environment(success = true) {
   return {
     TYPESAFE_API_KEY: "private-test-key",
     TURN_RATE_LIMITER: { async limit({ key }: { key: string }) {
+      assert.equal(key, "192.0.2.1");
+      return { success };
+    } },
+  };
+}
+
+function effortEnvironment(success = true) {
+  return {
+    TYPESAFE_API_KEY: "private-test-key",
+    TURN_RATE_LIMITER: { async limit() { throw new Error("effort must not consume turn capacity"); } },
+    EFFORT_RATE_LIMITER: { async limit({ key }: { key: string }) {
       assert.equal(key, "192.0.2.1");
       return { success };
     } },
@@ -66,6 +78,57 @@ test("forwards fixed questions and server key and returns only typed answers", a
   assert.deepEqual(await response.json(), answer);
   assert.equal(response.headers.get("Cache-Control"), "no-store");
   assert.equal(calls.callCount(), 1);
+});
+
+test("effort verdict forwards the assignment and returns the bounded four-rung judgment", async t => {
+  const state = {
+    task_name: "Fix the cache race",
+    instructions: "Trace ownership across the worker cache, fix the race, and verify cancellation and retry behavior.",
+    model: "selected-model",
+    instructions_truncated: false,
+  };
+  const upstreamAnswer = { answers: { effort: {
+    type: "choice", choice: "xhigh", confidence: 0.91,
+    probabilities: { medium: 0.01, high: 0.04, xhigh: 0.91, max: 0.04 },
+  } } };
+  const calls = upstream(t, async (url, options) => {
+    assert.equal(url, "https://api.typesafe.ai/v1/systemone");
+    const forwarded = JSON.parse(options!.body as string);
+    assert.deepEqual(forwarded, { model: "jev-latest", state, questions: effortQuestions });
+    assert.deepEqual(Object.keys(forwarded.questions), ["effort"]);
+    assert.deepEqual(Object.keys(forwarded.questions.effort.criteria), ["medium", "high", "xhigh", "max"]);
+    return Response.json({ ...upstreamAnswer, debug: "private-test-key" });
+  });
+  const incoming = new Request("https://proxy.example/v1/effort-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
+  });
+  const response = await proxy.fetch(incoming, effortEnvironment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { answers: { effort: {
+    choice: "xhigh", confidence: 0.91,
+    probabilities: { medium: 0.01, high: 0.04, xhigh: 0.91, max: 0.04 },
+  } } });
+  assert.equal(calls.callCount(), 1);
+  calls.restore();
+
+  upstream(t, async () => Response.json({ answers: { effort: {
+    type: "choice", choice: "xhigh", confidence: 0.91,
+    probabilities: { medium: 0.01, high: 0.94, xhigh: 0.01, max: 0.04 },
+  } } }));
+  const malformed = await proxy.fetch(new Request("https://proxy.example/v1/effort-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(state),
+  }), effortEnvironment());
+  await expectError(malformed, 502, "invalid_upstream_response");
+});
+
+test("effort verdict rejects an invalid hosted request before calling upstream", async t => {
+  const calls = upstream(t);
+  const incoming = new Request("https://proxy.example/v1/effort-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" },
+    body: JSON.stringify({ task_name: "", instructions: "Implement the change", model: "selected-model", instructions_truncated: false }),
+  });
+  await expectError(await proxy.fetch(incoming, effortEnvironment()), 400, "invalid_effort_request");
+  assert.equal(calls.callCount(), 0);
 });
 
 test("rejects malformed evidence and arbitrary proxy controls before fetching", async t => {

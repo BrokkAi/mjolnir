@@ -186,7 +186,12 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
-            Self::DeliverMailboxEvent { .. } | Self::MailboxWake { .. } => 33,
+            Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
+            Self::MailboxWake { events } => events
+                .iter()
+                .map(|event| event.body.minimum_relay_protocol())
+                .max()
+                .unwrap_or(super::RELAY_LEGACY_MAILBOX_PROTOCOL),
             Self::RestoreExecutionMode => 28,
             Self::HandbackReminder { .. } | Self::InstallPromptContext { .. } => 26,
             Self::SeedAssessmentContext { .. } => crate::assessment::PROTOCOL,

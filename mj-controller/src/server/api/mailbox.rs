@@ -56,3 +56,27 @@ pub(super) async fn enqueue_event(
         Json(MailboxEventResponse { key, inserted }),
     ))
 }
+
+pub(super) async fn send_message(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SessionMessageRequest>,
+) -> Result<(StatusCode, Json<SessionMessageResponse>), ApiFailure> {
+    super::super::validate_public_id(&request.request_id)?;
+    if request.text.trim().is_empty() || request.text.len() > MAX_EVENT_TEXT_BYTES {
+        return Err(ApiFailure::bad_request(format!(
+            "message text must contain 1 to {MAX_EVENT_TEXT_BYTES} bytes"
+        )));
+    }
+    let response = backend(&state)?
+        .clone()
+        .deliver_message(
+            request.sender_session_id,
+            session_id,
+            request.text,
+            request.request_id,
+            mj_core::clock::epoch_millis(),
+        )
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}

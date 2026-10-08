@@ -20,6 +20,34 @@ pub struct MailboxEventResponse {
     pub inserted: bool,
 }
 
+/// Result of delivering one message to a session, either through its mailbox
+/// or as a queued prompt for an older worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMessageResponse {
+    pub session_id: String,
+    pub via: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
+    /// Internal routing detail used to preserve the shipped child-tool result
+    /// shape. It is not part of the HTTP response contract.
+    #[serde(skip)]
+    pub(crate) managed_child: bool,
+}
+
+/// A message sent by the CLI or another authenticated API client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionMessageRequest {
+    /// Stable identity across retries after an uncertain response.
+    pub request_id: String,
+    pub text: String,
+    /// Session asserted by the local caller, when this process runs inside a
+    /// session worker. The daemon verifies that it exists and is top-level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_session_id: Option<String>,
+}
+
 /// Query selecting the GitHub App installation whose token should be returned.
 #[derive(Debug, Default)]
 pub struct GithubTokenQuery {

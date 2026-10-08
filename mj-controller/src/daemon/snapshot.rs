@@ -314,9 +314,18 @@ impl RuntimeState {
                         "an idle worker is not replaced"
                     );
                 }
+                // A worker whose harness preparation failed has no harness,
+                // turn or tool to lose, and only a replacement on the current
+                // build can get it past the failure. It never reports quiet,
+                // so without this an upgrade that fixes it never starts.
+                let preparation_failed = matches!(
+                    snapshot.operational.harness_preparation,
+                    Some(mj_core::relay::HarnessPreparation::Failed { .. })
+                );
                 let policy = BackgroundPolicyState {
                     idle_replacement_blockers,
-                    quiet: snapshot.operational.safe_to_replace(session.harness_kind),
+                    quiet: preparation_failed
+                        || snapshot.operational.safe_to_replace(session.harness_kind),
                     checkpoint_wait: snapshot
                         .operational
                         .routine_checkpoint_wait(session.harness_kind),

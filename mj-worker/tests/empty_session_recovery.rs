@@ -174,6 +174,23 @@ for line in sys.stdin:
     // Codex worker registers its delegation tools there before starting.
     let harness_home = temp.path().join("harness-home");
     std::fs::create_dir_all(&harness_home).unwrap();
+    // Controller staging registers the top-level session's message-only
+    // server in Claude's private profile before the worker resolves its
+    // target-local socket path.
+    std::fs::write(
+        harness_home.join(".claude.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "mcpServers": {
+                "mj-agents": {
+                    "type": "stdio",
+                    "command": "hel",
+                    "args": ["worker", "subagent-mcp", "--socket", "placeholder"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut launch = serde_json::json!({
         "session_id": SESSION_ID, "harness": harness,
         "bridge_command": "python3", "bridge_args": [script],

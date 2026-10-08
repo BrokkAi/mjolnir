@@ -99,7 +99,8 @@ Sessions and workspaces:
 - `mj workspaces list` — the workspaces a session can be created in.
 - `mj workspaces create` — create a workspace, or select the existing one with
   that name.
-- `mj sessions` — the sessions the daemon holds; add `--session` for one.
+- `mj sessions` — top-level sessions; add `--all` to include sub-agents or
+  `--session` to show one session.
 - `mj new` — create a session with a first prompt and print its id.
 - `mj suspend` — save a recovery copy and release the environment for Resume.
 - `mj destroy` — permanently remove a session, its environment, and recovery archive; `--delete-branch` also removes its managed branch.
@@ -108,6 +109,9 @@ Sessions and workspaces:
 
 Running a turn:
 
+- `mj message --session <id> <text>` — message another top-level session or
+  one of your own sub-agents. A session sender's ID is carried into the
+  recipient's message so it can reply.
 - `mj prompt` — send a prompt; `--wait` also waits for the turn to end.
 - `mj wait` — block until the turn ends and print the outcome, the turn number,
   the elapsed time, and the agent's final message.

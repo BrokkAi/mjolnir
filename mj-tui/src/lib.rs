@@ -902,9 +902,6 @@ pub struct DashboardState {
     /// The daemon storage owner's verdict per target host. The daemon is the
     /// only judge of a full disk; this surface shows what it says.
     pub(crate) target_storage: Vec<mj_core::targets::storage::TargetStorageView>,
-    /// Capacity rows, by deployment capacity target id, whose Disks cell is
-    /// expanded to list every filesystem instead of the one-line verdict.
-    pub(crate) expanded_disks: BTreeSet<String>,
     /// The build stamped on the workspace pane, as `v2.11.0`. Tests render
     /// [`TEST_VERSION_LABEL`] instead.
     pub(crate) version_label: String,
@@ -935,6 +932,9 @@ pub struct DashboardState {
     /// This is consumed by that pane's renderer after the movement.
     pub(crate) recenter_on_selection: Cell<Option<Focus>>,
     pub(crate) capacity_index: usize,
+    /// Last rendered Disks button bounds, indexed like `capacity_details`.
+    /// Keyboard commands use this geometry to anchor the details dropdown.
+    pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_index: usize,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
@@ -1205,7 +1205,7 @@ impl DashboardState {
             move_operations: Default::default(),
             capacity_details: BTreeMap::new(),
             target_storage: Vec::new(),
-            expanded_disks: BTreeSet::new(),
+            capacity_disks_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {

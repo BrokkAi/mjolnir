@@ -2285,6 +2285,76 @@ fn a_plain_model_list_becomes_a_catalog_the_profiles_overrides_refine() {
     );
 }
 
+// Hard-won: #1267: an inline `experimental_bearer_token` provider was skipped
+// for catalog staging, so no models.json and no guardian reviewer were staged.
+#[test]
+fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
+    let home = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model = \"deepseek-flash\"\n\
+         model_provider = \"deepseek\"\n\
+         \n\
+         [model_providers.deepseek]\n\
+         base_url = \"https://api.deepseek.com/v1\"\n\
+         experimental_bearer_token = \"inline-deepseek-key\"\n\
+         wire_api = \"responses\"\n",
+    )
+    .unwrap();
+    // No `env_key` and an empty environment: the key is only in `config.toml`.
+    let profile = mj_core::config::HarnessProfile {
+        enabled: true,
+        kind: mj_core::config::HarnessKind::Codex,
+        home: home.path().to_path_buf(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        subagents: Default::default(),
+        guardian_review_model: None,
+    };
+    let asked = std::cell::RefCell::new(Vec::new());
+
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_codex_catalog(
+        "deepseek-inline",
+        &profile,
+        staged.path(),
+        &|url, key| {
+            asked.borrow_mut().push((url.to_owned(), key.to_owned()));
+            Ok(DEEPSEEK_LIST.as_bytes().to_vec())
+        },
+        &IsolatedCatalogCache(store.path().join("cache.sqlite3")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        asked.into_inner(),
+        vec![(
+            "https://api.deepseek.com/v1/models".to_owned(),
+            "inline-deepseek-key".to_owned()
+        )],
+        "the provider's own catalog is fetched with the inline key"
+    );
+    let catalog =
+        mj_core::codex_catalog::parse(&std::fs::read(staged.path().join("models.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        catalog.models[0]["auto_review_model_override"],
+        serde_json::Value::from("deepseek-flash"),
+        "the guardian reviewer is stamped for an inline-token profile too"
+    );
+    let staged_config = std::fs::read_to_string(staged.path().join("config.toml")).unwrap();
+    assert!(
+        staged_config.contains("model_catalog_json = \"models.json\""),
+        "the staged configuration points at the staged catalog: {staged_config}"
+    );
+    assert!(
+        staged_config.contains("experimental_bearer_token = \"inline-deepseek-key\""),
+        "the staged home still carries the key the session authenticates with: {staged_config}"
+    );
+}
+
 #[test]
 fn stage_grok_profile_copies_authentication_and_agent_identity() {
     let home = tempfile::tempdir().unwrap();
@@ -4600,7 +4670,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child, true).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Child), true)
+        .unwrap();
     let (settings, allow) = allowed(stage.path());
     assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
     assert_eq!(
@@ -4611,7 +4682,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
 
     // A profile with no settings file gets one.
     let stage = tempfile::tempdir().unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Child, true).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Child), true)
+        .unwrap();
     assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
 
     // A parent delegates without asking; a rule the person already has is
@@ -4622,7 +4694,8 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", SubagentMcpRole::Parent, true).unwrap();
+    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Parent), true)
+        .unwrap();
     let (_, allow) = allowed(stage.path());
     assert_eq!(allow[0], "mcp__mj-agents__wait");
     assert_eq!(
@@ -4650,6 +4723,21 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         !allow.iter().any(|rule| rule.ends_with("__handback")),
         "a parent has no handback: {allow:?}"
     );
+
+    // A top-level session without Mjolnir-managed delegation gets only the
+    // peer-messaging server and tool permission.
+    let stage = tempfile::tempdir().unwrap();
+    configure_claude_subagent_mcp(
+        stage.path(),
+        "/worker",
+        Some(SubagentMcpRole::MessageOnly),
+        true,
+    )
+    .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(config["mcpServers"]["mj-agents"]["args"][7], "message_only");
+    assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__send_message"]);
 }
 
 #[test]

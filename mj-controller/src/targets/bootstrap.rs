@@ -145,6 +145,30 @@ pub(super) fn clone_commands(
     commands
 }
 
+/// Run one `git clone` from [`clone_commands`] with a GitHub token that only
+/// that process sees. Bare hosts have no GitHub CLI login before the worker's
+/// credential sync, so a private HTTPS clone would otherwise prompt and fail.
+/// The token arrives on stdin, so it stays out of argv and Git configuration.
+pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<String>, Vec<u8>) {
+    let mut wrapped = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "IFS= read -r GH_TOKEN || exit 1; export GH_TOKEN GIT_TERMINAL_PROMPT=0; exec \"$@\""
+            .to_owned(),
+        "mj-github-token".to_owned(),
+        "git".to_owned(),
+        "-c".to_owned(),
+        "credential.helper=".to_owned(),
+        "-c".to_owned(),
+        "credential.helper=!f() { if [ \"$1\" = get ]; then printf '%s\\n' username=x-access-token \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
+    ];
+    debug_assert_eq!(args.first().map(String::as_str), Some("git"));
+    wrapped.extend(args.into_iter().skip(1));
+    let mut input = token.as_bytes().to_vec();
+    input.push(b'\n');
+    (wrapped, input)
+}
+
 /// Install Move transport on newly provisioned Linux instances.
 pub fn install_rsync_plan(boundary: ExecutionBoundary<'_>) -> CommandPlan {
     let script = "set -eu; if rsync --protect-args --version >/dev/null 2>&1; then exit 0; fi; SUDO=''; if [ \"$(id -u)\" != 0 ]; then command -v sudo >/dev/null 2>&1 && sudo -n true || { echo 'rsync installation requires root or passwordless sudo' >&2; exit 1; }; SUDO='sudo -n'; fi; if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update; $SUDO apt-get install -y rsync; elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y rsync; elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y rsync; elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache rsync; else echo 'Unsupported package manager; install rsync 3.0 or newer in the image' >&2; exit 1; fi; rsync --protect-args --version >/dev/null";

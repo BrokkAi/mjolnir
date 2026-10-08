@@ -829,12 +829,16 @@ impl ApiBackend {
                     let backend: Arc<dyn crate::server::api::SubagentBackend> = self.clone();
                     let selection = crate::server::api::resolve_subagent_policy_selection(
                         &backend,
-                        parent_session_id,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
                         profile_id.as_deref(),
                         model.as_deref(),
                         effort.as_deref(),
+                        crate::server::api::AdaptiveEffortContext {
+                            parent_session_id,
+                            task_name,
+                            instructions,
+                        },
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -918,6 +922,7 @@ impl ApiBackend {
                     "task_name":relation.task_name,
                     "profile_id":relation.profile_id,
                     "model":relation.model,
+                    "effort":relation.effort,
                     "report_dir":report_dir,
                 }))
             }
@@ -969,6 +974,7 @@ impl ApiBackend {
                             "child_session_id":relation.child_session_id,
                             "task_name":relation.task_name,
                             "profile_id":relation.profile_id,
+                            "effort":relation.effort,
                             "state":state,
                         });
                         inputs.annotate(&relation.child_session_id, &mut entry);
@@ -979,10 +985,6 @@ impl ApiBackend {
                 Ok(serde_json::json!({"agents":agents}))
             }
             SubagentToolAction::SendInput {
-                child_session_id,
-                message,
-            }
-            | SubagentToolAction::SendMessage {
                 child_session_id,
                 message,
             } => {
@@ -1011,6 +1013,43 @@ impl ApiBackend {
                             "via":via
                         }))
                     }
+                }
+            }
+            SubagentToolAction::SendMessage {
+                child_session_id,
+                message,
+            } => {
+                let delivery = self
+                    .deliver_session_message(
+                        Some(parent_session_id.to_owned()),
+                        child_session_id.clone(),
+                        message.clone(),
+                        request.request_id.clone(),
+                        request_created_at_ms,
+                    )
+                    .await?;
+                let status = if delivery.via == "mailbox" {
+                    "queued"
+                } else {
+                    "submitted"
+                };
+                if delivery.managed_child {
+                    let mut result = serde_json::json!({
+                        "child_session_id": delivery.session_id,
+                        "status": status,
+                        "via": delivery.via,
+                    });
+                    if let Some(turn_id) = delivery.turn_id {
+                        result["turn_id"] = turn_id.into();
+                    }
+                    Ok(result)
+                } else {
+                    Ok(serde_json::json!({
+                        "session_id": delivery.session_id,
+                        "status": status,
+                        "via": delivery.via,
+                        "turn_id": delivery.turn_id,
+                    }))
                 }
             }
             SubagentToolAction::WaitAgents => {
@@ -2799,6 +2838,26 @@ impl SubagentBackend for ApiBackend {
                 .dismiss_startup_status(session_id, group_id)
                 .await?;
             Ok(turn)
+        })
+    }
+
+    fn deliver_message(
+        &self,
+        sender_session_id: Option<String>,
+        target_session_id: String,
+        text: String,
+        request_id: String,
+        created_at_ms: i64,
+    ) -> BoxFuture<'_, Result<crate::server::api::SessionMessageResponse>> {
+        Box::pin(async move {
+            self.deliver_session_message(
+                sender_session_id,
+                target_session_id,
+                text,
+                request_id,
+                created_at_ms,
+            )
+            .await
         })
     }
 

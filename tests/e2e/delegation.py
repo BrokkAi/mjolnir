@@ -91,6 +91,7 @@ def main():
         env.update(
             MJ_INSTANCE=args.instance, MJ_WORKER_BINARY=str(args.worker.resolve())
         )
+        env.pop("MJ_SESSION_ID", None)
 
         def cli(*command):
             result = subprocess.run(
@@ -243,6 +244,11 @@ def main():
         )
         child = spawned["child_session_id"]
 
+        def listed_session_ids(*options):
+            response = json.loads(cli("sessions", *options, "--json"))
+            rows = response if isinstance(response, list) else response["sessions"]
+            return {row.get("id", row.get("session_id")) for row in rows}
+
         def wait_prompt(session, text):
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
@@ -361,6 +367,16 @@ def main():
         # command, so enable its API for the accounting checks below.
         config.write_text(config.read_text().replace("[phone]\nenabled = false", "[phone]\nenabled = true"))
         cli("daemon", "restart")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            all_session_ids = listed_session_ids("--all")
+            if child in all_session_ids:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"mj sessions --all did not list child {child}")
+        assert child not in listed_session_ids(), "mj sessions hides sub-agents by default"
+
         usage = json.loads(cli("usage", "--parent", parent, "--json"))
         child_usage = json.loads(cli("usage", "--session", child, "--json"))
         assert child_usage["coverage"]["full_turn_reports"] >= 2, child_usage
@@ -425,6 +441,30 @@ def main():
             time.sleep(0.1)
         else:
             raise RuntimeError("parent wait prompt did not finish before accounting checks")
+
+        message_text = "check the last change from the user"
+        message = json.loads(
+            cli("message", "--session", parent, "--json", message_text)
+        )
+        assert message["session_id"] == parent, message
+        assert message["via"] in ("mailbox", "turn"), message
+        wait_prompt(parent, "Message from the user:")
+        wait_prompt(parent, message_text)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                unfinished = database.execute(
+                    "SELECT COUNT(*) FROM session_turn_selections s "
+                    "WHERE session_id=? AND NOT EXISTS("
+                    "SELECT 1 FROM session_turn_usage u "
+                    "WHERE u.session_id=s.session_id AND u.command_id=s.command_id)",
+                    (parent,),
+                ).fetchone()[0]
+            if unfinished == 0:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("mj message prompt did not finish before teardown")
 
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
         for session in [child, legacy, parent]:

@@ -127,6 +127,8 @@ enum Command {
     ClearQueue(api_commands::ClearQueueArgs),
     /// Queue an external event in a session's durable mailbox.
     Event(api_commands::EventArgs),
+    /// Send a message to a top-level session or one of your sub-agents.
+    Message(api_commands::MessageArgs),
     /// Block until a turn ends and print how it ended.
     Wait(api_commands::WaitArgs),
     /// Page through a session's transcript.
@@ -269,7 +271,8 @@ struct MoveArgs {
     /// Fixed child model, required with --subagents single-model.
     #[arg(long, requires = "subagents")]
     subagent_model: Option<String>,
-    /// Fixed child reasoning effort.
+    /// Fixed child reasoning effort, or `adaptive` for a per-task Jev choice
+    /// when available.
     #[arg(long, requires = "subagents")]
     subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
@@ -534,6 +537,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Prompt(_)) => "prompt",
         Some(Command::ClearQueue(_)) => "clear-queue",
         Some(Command::Event(_)) => "event",
+        Some(Command::Message(_)) => "message",
         Some(Command::Wait(_)) => "wait",
         Some(Command::Transcript(_)) => "transcript",
         Some(Command::Usage(_)) => "usage",
@@ -722,6 +726,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Event(args)) => api_commands::event(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Message(args)) => api_commands::message(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::Wait(args)) => api_commands::wait(args)
