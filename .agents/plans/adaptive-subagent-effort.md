@@ -17,7 +17,7 @@ The complete feature also needs a hosted Jev proxy contract and user-facing labe
 - [x] (2026-10-08 06:02Z) Validate adaptive effort in core and expose resolved effort through MCP spawn and `list_agents` results.
 - [x] (2026-10-08 06:02Z) Confirm the proxy and user-facing slices are committed with the matching endpoint, question, label, and documentation; do not edit their owned files.
 - [x] (2026-10-08 06:02Z) Run focused core/controller/worker checks, final core and controller suites, and workspace clippy; record outcomes below.
-- [ ] Stage and commit only this slice's changed files on the current branch; do not push.
+- [x] (2026-10-08 06:02Z) Stage and commit only this slice's changed files on the current branch; do not push.
 
 ## Surprises & Discoveries
 
@@ -54,7 +54,7 @@ The complete feature also needs a hosted Jev proxy contract and user-facing labe
 
 ## Outcomes & Retrospective
 
-The daemon resolves adaptive effort before child registration and prepared-spawn persistence, records the outcome, and returns only an advertised concrete effort or `None`. An empty effort list skips Jev; disabled, unavailable, invalid, or failed Jev requests warn and map the `high` rung. The direct and hosted questions agree, and proxy/UI commits are present on the current branch. Full core tests and workspace clippy pass. The full controller suite has two repeatable unrelated cache-release assertion failures; adaptive selection, options, and MCP focused checks pass. The remaining work is to commit only this daemon/core/worker slice.
+The daemon resolves adaptive effort before child registration and prepared-spawn persistence, records the outcome, and returns only an advertised concrete effort or `None`. An empty effort list skips Jev; disabled, unavailable, invalid, or failed Jev requests warn and map the `high` rung. The direct and hosted questions agree, and proxy/UI commits are present on the current branch. Full core tests and workspace clippy pass. The full controller suite has two repeatable unrelated cache-release assertion failures; adaptive selection, options, and MCP focused checks pass. Commit `4fd3d4084` contains this daemon/core/worker slice.
 
 ## Context and Orientation
 
@@ -98,4 +98,4 @@ Final evidence is in `.mj/agents/7c091ccc399af27d2b5a874bb911b8c2/mj-core-full-f
 
 ### Current revision note
 
-This revision records the implementation and its final validation, including environment-level Jev disable handling, shared direct/hosted question wording, concrete-effort validation after mapping, the two repeatable unrelated controller failures, and the completed proxy and user-facing commits. The daemon implementation commit remains to be made.
+This revision records that commit `4fd3d4084` completed the daemon implementation described in the preceding validation. It marks the final progress item done and preserves the two repeatable unrelated controller failures as known suite results.
