@@ -858,7 +858,7 @@ permissions = "guardian"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables approval and sandbox checks. It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks (and approval checks, except Muse keeps its auto-review on). It has no meaning on `local`, where the harness keeps its configured approvals, or on an EC2 machine. |
 
 The new-session wizard asks for an existing absolute Git project directory on
 the runtime's machine. On `local` supported harnesses retain configured

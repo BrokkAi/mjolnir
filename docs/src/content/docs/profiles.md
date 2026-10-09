@@ -726,8 +726,10 @@ approvals, and turns on muse-acp's auto-review for every session: a second,
 read-only Muse model reviews each approval request with a Codex-style safety
 policy, and a failed or unusable review denies the action. Muse's own
 `:auto-review` profile is never staged, because `muse serve` refuses it.
-Unconstrained sessions stage `:unrestricted` and use `allowAll` approvals and
-`--disable-sandbox`.
+Unconstrained sessions stage `:ask-me` as well, keep `promptUnmatched`
+approvals and auto-review on, and disable only the sandbox
+(`--disable-sandbox`): `allowAll` would emit no permission requests, leaving
+the reviewer nothing to decide.
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session

@@ -749,11 +749,17 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
     let muse = HarnessKind::Muse
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .unwrap();
-    assert_eq!(muse.acp_mode(), Some("allowAll"));
-    assert_eq!(muse.label(), "allowAll / sandbox-off / :unrestricted");
+    // allowAll emits no permission requests, so the adapter's client-side
+    // auto-review would never fire. Unconstrained Muse reviews instead.
+    assert_eq!(muse.acp_mode(), Some("promptUnmatched"));
+    assert_eq!(
+        muse.label(),
+        "promptUnmatched / auto-review / sandbox-off / :ask-me"
+    );
+    assert_eq!(muse.acp_setting(), Some(("auto_review", "on")));
     assert_eq!(
         muse.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "allowAll"))
+        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
     );
     assert_eq!(
         muse.launch_argument(),
@@ -761,7 +767,7 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
     );
     assert_eq!(
         muse.staged_setting().map(|setting| setting.value),
-        Some(":unrestricted")
+        Some(":ask-me")
     );
 }
 
@@ -782,6 +788,21 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
     assert_eq!(claude.label(), "auto / guardian");
     assert_eq!(claude.session_sandbox(), None);
     assert_eq!(claude.staged_setting(), None);
+    let muse = HarnessKind::Muse
+        .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+        .expect("Muse selects promptUnmatched + auto-review as guardian");
+    assert_eq!(muse.acp_mode(), Some("promptUnmatched"));
+    assert_eq!(muse.acp_setting(), Some(("auto_review", "on")));
+    assert_eq!(muse.label(), "promptUnmatched / auto-review / :ask-me");
+    assert_eq!(
+        muse.launch_environment(),
+        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
+    );
+    assert_eq!(muse.launch_argument(), None);
+    assert_eq!(
+        muse.staged_setting().map(|setting| setting.value),
+        Some(":ask-me")
+    );
 
     for kind in [HarnessKind::Kimi, HarnessKind::Grok] {
         assert_eq!(
