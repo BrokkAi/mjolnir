@@ -148,4 +148,41 @@ env_key = "FIXTURE_KEY"
         assert!(cache.refresh(&config));
         assert!(cache.files.is_empty());
     }
+
+    #[test]
+    fn an_inline_key_provider_skips_login_file_sync_like_its_auth_scheme() {
+        // Hard-won: 4b4e1e27c: an inline-`experimental_bearer_token` provider
+        // kept syncing the login file, so the daemon read the staged
+        // `config.toml` as if it were `auth.json` and reported it as an
+        // unusable credential file.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "model = \"deepseek-flash\"\n\
+             model_provider = \"deepseek\"\n\
+             [model_providers.deepseek]\n\
+             base_url = \"https://api.deepseek.com/v1\"\n\
+             experimental_bearer_token = \"inline-deepseek-key\"\n\
+             wire_api = \"responses\"\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        let profile: mj_core::config::HarnessProfile = serde_json::from_value(serde_json::json!({
+            "kind": "codex", "home": home.path(),
+        }))
+        .unwrap();
+        config.profiles.insert("codex".into(), profile.clone());
+
+        let mut cache = ProviderAuthCache::default();
+        assert!(cache.refresh(&config));
+        assert!(
+            cache.schemes["codex"],
+            "an inline-key provider has no Codex login file to converge"
+        );
+        assert_eq!(
+            cache.schemes["codex"],
+            !profile.auth_scheme().uses_native_login_file(),
+            "the cached skip must agree with the profile's own auth scheme"
+        );
+    }
 }
