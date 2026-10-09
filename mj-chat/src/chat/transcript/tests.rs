@@ -1073,7 +1073,7 @@ fn kimi_shell_tool_run_collapses_to_command_names() {
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ rg, cargo test, npm run",
+            "│ rg, cargo test, npm run preview",
             "",
             "❯ You",
             "│ continue",
