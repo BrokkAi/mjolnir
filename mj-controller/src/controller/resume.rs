@@ -33,7 +33,9 @@ use super::provisioning::{
     ProvisioningFailureDisposition, StagedExecutor, execute_concurrent_lanes,
     install_attached_resources,
 };
-use super::readiness::{connect_started_worker, wait_for_native_session_in_stage};
+use super::readiness::{
+    connect_started_worker, wait_for_harness_prepared_in_stage, wait_for_native_session_in_stage,
+};
 use super::worker_binary::{bridge_readiness_stage, start_worker_durably, worker_probe_diagnosis};
 use super::worktree::{
     PrimaryCheckoutRequirement, ResumeConversion, ResumePlan, apply_raw_to_workspace,
@@ -909,6 +911,17 @@ impl Controller {
                         .await?
                 };
                 if reopen_move_subagents {
+                    // The worker builds its sub-agent queue while it prepares the
+                    // harness and refuses admission changes until then. Reopen
+                    // before the native session exists, so a prompt the restored
+                    // relay starts on its own cannot find admission closed.
+                    wait_for_harness_prepared_in_stage(
+                        &mut relay,
+                        executor,
+                        readiness_stage.clone(),
+                        profile.kind,
+                    )
+                    .await?;
                     relay
                         .set_subagent_admission(true)
                         .await

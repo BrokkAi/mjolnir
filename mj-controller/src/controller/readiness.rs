@@ -216,6 +216,39 @@ async fn wait_for_native_session_with_stage(
     harness: HarnessKind,
     fallback_stage: ProvisionStage,
 ) -> Result<String> {
+    wait_for_startup(relay, executor, harness, fallback_stage, false)
+        .await
+        .map(|native_session_id| native_session_id.expect("waited for the native session"))
+}
+
+/// Wait until the worker has finished preparing its harness, with the same
+/// stage display, failure reporting and cancellation as the full wait.
+///
+/// Worker services that preparation builds, such as the sub-agent queue,
+/// refuse requests until then. A caller that must change one of them before
+/// the harness can start a prompt waits here first, then waits for the native
+/// session. A worker that predates preparation reporting serves only after
+/// preparing, so its first answer already counts.
+pub(super) async fn wait_for_harness_prepared_in_stage(
+    relay: &mut impl NativeSessionProbe,
+    executor: &impl CommandExecutor,
+    stage: ProvisionStage,
+    harness: HarnessKind,
+) -> Result<()> {
+    wait_for_startup(relay, executor, harness, stage, true)
+        .await
+        .map(drop)
+}
+
+/// The shared startup wait. `None` means preparation finished and the caller
+/// asked to stop there; otherwise the native session id.
+async fn wait_for_startup(
+    relay: &mut impl NativeSessionProbe,
+    executor: &impl CommandExecutor,
+    harness: HarnessKind,
+    fallback_stage: ProvisionStage,
+    until_prepared: bool,
+) -> Result<Option<String>> {
     let mut deadline = NativeStartupDeadline::Unobserved;
     let mut stage = NativeReadinessStage::new(executor, harness, fallback_stage);
     loop {
@@ -254,7 +287,12 @@ async fn wait_for_native_session_with_stage(
         deadline.observe(&readiness, tokio::time::Instant::now());
         stage.observe(&readiness);
         match readiness {
-            NativeSessionReadiness::Ready(native_session_id) => return Ok(native_session_id),
+            NativeSessionReadiness::Ready(native_session_id) => {
+                return Ok(Some(native_session_id));
+            }
+            NativeSessionReadiness::Started | NativeSessionReadiness::Waiting if until_prepared => {
+                return Ok(None);
+            }
             NativeSessionReadiness::PreparationFailed { step, error } => {
                 return Err(anyhow::Error::new(HarnessPreparationFailure {
                     step,
@@ -782,6 +820,88 @@ mod tests {
         tokio::task::yield_now().await;
         let error = wait.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("did not report session startup"));
+    }
+
+    // A Move reopened sub-agent admission while the worker was still at
+    // "review-baseline" and failed; the prepared wait must hold until Started.
+    #[tokio::test(start_paused = true)]
+    async fn harness_prepared_wait_holds_while_preparing_and_returns_at_started() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        struct StepsProbe(std::sync::Arc<AtomicU8>);
+
+        impl NativeSessionProbe for StepsProbe {
+            async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
+                Ok(match self.0.load(Ordering::Acquire) {
+                    0 => NativeSessionReadiness::Preparing {
+                        step: "review-baseline".into(),
+                        since_ms: 1_000,
+                    },
+                    1 => NativeSessionReadiness::Started,
+                    _ => NativeSessionReadiness::Ready("native-1".into()),
+                })
+            }
+        }
+
+        let state = std::sync::Arc::new(AtomicU8::new(0));
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor = CancellableProcessExecutor::new(cancelled);
+        let mut probe = StepsProbe(state.clone());
+        let wait = tokio::spawn(async move {
+            wait_for_harness_prepared_in_stage(
+                &mut probe,
+                &executor,
+                ProvisionStage::Starting,
+                HarnessKind::Claude,
+            )
+            .await
+        });
+        tokio::time::advance(NATIVE_SESSION_STARTUP_TIMEOUT * 2).await;
+        tokio::task::yield_now().await;
+        assert!(!wait.is_finished(), "preparing must hold the wait");
+
+        state.store(1, Ordering::Release);
+        tokio::time::advance(Duration::from_millis(200)).await;
+        wait.await.unwrap().unwrap();
+
+        // A worker that predates preparation reporting is already prepared.
+        struct Legacy;
+        impl NativeSessionProbe for Legacy {
+            async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
+                Ok(NativeSessionReadiness::Waiting)
+            }
+        }
+        let executor = CancellableProcessExecutor::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(false),
+        ));
+        wait_for_harness_prepared_in_stage(
+            &mut Legacy,
+            &executor,
+            ProvisionStage::Starting,
+            HarnessKind::Claude,
+        )
+        .await
+        .unwrap();
+
+        // A preparation failure still surfaces as the typed failure.
+        struct Failed;
+        impl NativeSessionProbe for Failed {
+            async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
+                Ok(NativeSessionReadiness::PreparationFailed {
+                    step: "review-baseline".into(),
+                    error: "boom".into(),
+                })
+            }
+        }
+        let error = wait_for_harness_prepared_in_stage(
+            &mut Failed,
+            &executor,
+            ProvisionStage::Starting,
+            HarnessKind::Claude,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<HarnessPreparationFailure>().is_some());
     }
 
     #[tokio::test(start_paused = true)]
