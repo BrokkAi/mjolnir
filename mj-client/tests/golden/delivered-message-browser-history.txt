@@ -1,0 +1,52 @@
+{
+  "live": {
+    "latest_seq": 10,
+    "presentation_key": "ace38fc96afe09945e0114da8cfe161a6feec9650be615c23d4b43021889d15a",
+    "window_start_seq": 10,
+    "reset": false,
+    "entries": [
+      {
+        "stable_id": "message:first",
+        "id": 10,
+        "updated_seq": 10,
+        "role": "message",
+        "label": "Message from Reviewer",
+        "recorded_at_ms": 1000,
+        "lines": [
+          "One finding.",
+          "The complete **second line**."
+        ],
+        "glyph": "←",
+        "tone": "message"
+      },
+      {
+        "stable_id": "message:second",
+        "id": 10,
+        "updated_seq": 10,
+        "role": "message",
+        "label": "Message from Builder",
+        "recorded_at_ms": 1000,
+        "lines": [
+          "Build passed.",
+          "支持 Unicode."
+        ],
+        "glyph": "←",
+        "tone": "message"
+      }
+    ]
+  },
+  "earlier": [
+    {
+      "role": "message",
+      "text": "One finding.\nThe complete **second line**.",
+      "label": "Message from Reviewer",
+      "recorded_at_ms": 1000
+    },
+    {
+      "role": "message",
+      "text": "Build passed.\n支持 Unicode.",
+      "label": "Message from Builder",
+      "recorded_at_ms": 1000
+    }
+  ]
+}

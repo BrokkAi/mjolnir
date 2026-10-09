@@ -1400,6 +1400,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older readers cannot decode the typed `message` transcript
+    // body. Preserve all history and advance both read/write compatibility.
+    if version < 78 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 78 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (78, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 78;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1905,7 +1918,7 @@ mod reader_tests {
         let upgraded = open_writer(&path).unwrap();
         let state = read_schema_state(&upgraded).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(74));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(70).is_err());
         let preserved: String = upgraded
             .query_row(
@@ -2072,7 +2085,10 @@ mod reader_tests {
 
             let writer =
                 open_writer(&path).unwrap_or_else(|error| panic!("revision {revision}: {error:#}"));
-            assert_eq!(read_schema_state(&writer).unwrap().revision, SCHEMA_VERSION);
+            let schema = read_schema_state(&writer).unwrap();
+            assert_eq!(schema.revision, SCHEMA_VERSION);
+            assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+            assert!(schema.ensure_supported_by(77).is_err());
             assert_eq!(
                 writer
                     .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
@@ -2146,7 +2162,8 @@ mod reader_tests {
                  CREATE INDEX prompt_history_session_recent
                      ON prompt_history(session_id, history_id DESC);
                  CREATE INDEX prompt_history_recent ON prompt_history(history_id DESC);
-                 DELETE FROM schema_migrations WHERE version = 77;
+                 DELETE FROM schema_migrations WHERE version >= 77;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 74;
                  PRAGMA user_version = 76;",
             )
             .unwrap();
@@ -2154,7 +2171,10 @@ mod reader_tests {
         forget_verified_schema(&path);
 
         let migrated = open_writer(&path).unwrap();
-        assert_eq!(read_schema_state(&migrated).unwrap().revision, 77);
+        assert_eq!(
+            read_schema_state(&migrated).unwrap().revision,
+            SCHEMA_VERSION
+        );
         let preserved: (i64, i64, String) = migrated
             .query_row(
                 "SELECT history_id, event_ordinal, text FROM prompt_history",
@@ -2240,9 +2260,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 74 adds the OpenCode harness kind and 76
-    /// adds compatible mailbox failure reporting.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 74;
+    /// `SCHEMA_VERSION`. Migration 78 adds typed incoming messages.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 78;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

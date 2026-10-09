@@ -134,12 +134,13 @@ impl<'a, B: CompactionBackend> Requests<'a, B> {
 
 #[derive(Debug, Clone)]
 struct Turn {
-    user: String,
+    user: Option<String>,
     events: Vec<TurnEvent>,
 }
 
 #[derive(Debug, Clone)]
 enum TurnEvent {
+    Message(String),
     Assistant(String),
     Tool(Value),
     Plan(Value),
@@ -282,11 +283,7 @@ async fn summarize_pages<B: CompactionBackend>(
 }
 
 fn render_oversize_turn(turn: &Turn, index: usize, limit: usize) -> Vec<String> {
-    let mut segments = vec![format!(
-        "<turn number=\"{}\">\n<user>\n{}\n</user>\n",
-        index + 1,
-        turn.user
-    )];
+    let mut segments = vec![turn_opening(turn, index)];
     let mut tool_exchange = String::new();
     for event in &turn.events {
         match event {
@@ -297,6 +294,12 @@ fn render_oversize_turn(turn: &Turn, index: usize, limit: usize) -> Vec<String> 
                 if tool_event_finished(value) {
                     segments.push(std::mem::take(&mut tool_exchange));
                 }
+            }
+            TurnEvent::Message(text) => {
+                if !tool_exchange.is_empty() {
+                    segments.push(std::mem::take(&mut tool_exchange));
+                }
+                segments.push(format!("<message>\n{text}\n</message>\n"));
             }
             TurnEvent::Assistant(text) => {
                 if !tool_exchange.is_empty() {
@@ -390,9 +393,18 @@ fn turns_from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Result<Vec<Turn>>
     for entry in TranscriptSummary::from_snapshot(snapshot).entries {
         match entry.role {
             SummaryRole::User => turns.push(Turn {
-                user: entry.text,
+                user: Some(entry.text),
                 events: Vec::new(),
             }),
+            SummaryRole::Message => {
+                if turns.is_empty() {
+                    turns.push(Turn {
+                        user: None,
+                        events: Vec::new(),
+                    });
+                }
+                push_turn_event(&mut turns, TurnEvent::Message(entry.text))?;
+            }
             SummaryRole::Assistant => {
                 push_turn_event(&mut turns, TurnEvent::Assistant(entry.text))?
             }
@@ -467,12 +479,25 @@ fn render_turns(turns: &[Turn], offset: usize) -> String {
     output
 }
 
+fn turn_opening(turn: &Turn, index: usize) -> String {
+    let mut opening = format!("<turn number=\"{}\">\n", index + 1);
+    if let Some(user) = &turn.user {
+        opening.push_str("<user>\n");
+        opening.push_str(user);
+        opening.push_str("\n</user>\n");
+    }
+    opening
+}
+
 fn render_turn(output: &mut String, turn: &Turn, index: usize) {
-    output.push_str(&format!("<turn number=\"{}\">\n<user>\n", index + 1));
-    output.push_str(&turn.user);
-    output.push_str("\n</user>\n");
+    output.push_str(&turn_opening(turn, index));
     for event in &turn.events {
         match event {
+            TurnEvent::Message(text) => {
+                output.push_str("<message>\n");
+                output.push_str(text);
+                output.push_str("\n</message>\n");
+            }
             TurnEvent::Assistant(text) => {
                 output.push_str("<assistant>\n");
                 output.push_str(text);

@@ -46,7 +46,7 @@ fn user_text(text: String) -> String {
 
 pub const FULL_TOOL_CALLS: usize = 8;
 /// Change when derived indexing content changes, even without a source update.
-pub const SUMMARY_VERSION: u32 = 1;
+pub const SUMMARY_VERSION: u32 = 2;
 pub const DEFAULT_SUMMARY_BYTES: usize = 256 * 1024;
 const LIVE_ITEMS: usize = 512;
 const LIVE_ITEM_BYTES: usize = 64 * 1024;
@@ -55,6 +55,7 @@ const LIVE_ITEM_BYTES: usize = 64 * 1024;
 pub enum SummaryRole {
     User,
     Assistant,
+    Message,
     Tool,
     Plan,
 }
@@ -82,6 +83,7 @@ impl SummaryEntry {
         let role = match self.role {
             SummaryRole::User => "user",
             SummaryRole::Assistant => "assistant",
+            SummaryRole::Message => "message",
             SummaryRole::Tool => "tool",
             SummaryRole::Plan => "plan",
         };
@@ -247,6 +249,11 @@ impl TranscriptSummary {
                     user_text(materialized_content_text(content)),
                     None,
                 ),
+                CanonicalTranscriptBody::Message { event } => (
+                    SummaryRole::Message,
+                    mj_core::mailbox::render_mailbox_event(event),
+                    None,
+                ),
                 CanonicalTranscriptBody::Agent { chunks, .. } => (
                     SummaryRole::Assistant,
                     materialized_chunks_text(chunks),
@@ -325,6 +332,11 @@ impl TranscriptSummary {
                 TranscriptBody::User { content } => (
                     SummaryRole::User,
                     user_text(materialized_content_text(content)),
+                    None,
+                ),
+                TranscriptBody::Message { event } => (
+                    SummaryRole::Message,
+                    mj_core::mailbox::render_mailbox_event(event),
                     None,
                 ),
                 TranscriptBody::Agent { chunks, .. } => (
@@ -627,7 +639,7 @@ impl TranscriptSummary {
                 .iter()
                 .enumerate()
                 .filter(|(i, e)| {
-                    e.role == SummaryRole::User
+                    matches!(e.role, SummaryRole::User | SummaryRole::Message)
                         || Some(*i) == last_assistant
                         || e.tool.as_ref().is_some_and(|v| v.get("call").is_some())
                 })
@@ -668,7 +680,11 @@ impl TranscriptSummary {
         }
 
         let mut selected = std::collections::BTreeSet::new();
-        for role in [SummaryRole::User, SummaryRole::Assistant] {
+        for role in [
+            SummaryRole::User,
+            SummaryRole::Message,
+            SummaryRole::Assistant,
+        ] {
             if let Some(index) = self.entries.iter().rposition(|e| e.role == role) {
                 selected.insert(index);
             }
@@ -689,10 +705,12 @@ impl TranscriptSummary {
         // Reserve enough room for both coverage markers before adding optional items.
         let available = limit.saturating_sub(history_marker.len() + 64);
         if used < available {
-            // Codex-style retention: recent user messages take precedence over old activity.
+            // Recent requests and received messages take precedence over old activity.
             for users in [true, false] {
                 for (index, entry) in self.entries.iter().enumerate().rev() {
-                    if selected.contains(&index) || (entry.role == SummaryRole::User) != users {
+                    if selected.contains(&index)
+                        || matches!(entry.role, SummaryRole::User | SummaryRole::Message) != users
+                    {
                         continue;
                     }
                     let size = entry.render(usize::MAX).len();

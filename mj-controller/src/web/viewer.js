@@ -744,6 +744,15 @@ function renderNativeSubagents(parent) {
   });
 }
 
+function historyEntryRow(item) {
+  const row = el('section');
+  const heading = el('h3', '', item.label || item.role);
+  const time = entryTimestamp(item);
+  if (time) heading.append(' · ', time);
+  row.append(heading, renderMarkdown(item.text));
+  return row;
+}
+
 async function openNativeHistory(owner, agent) {
   const modal = el('dialog', 'native-agent-history');
   const title = el('h2', '', agent.name);
@@ -772,9 +781,7 @@ async function openNativeHistory(owner, agent) {
         return;
       }
       generation = page.generation;
-      const rows = page.items.map(item => {
-        const row = el('section'); row.append(el('h3', '', item.role), renderMarkdown(item.text)); return row;
-      });
+      const rows = page.items.map(historyEntryRow);
       content.prepend(...rows);
       before = page.items[0] || before;
       earlier.hidden = !page.has_more;
@@ -851,9 +858,7 @@ function openConversationHistory(sessionId) {
         if (modal.open) modal.close();
         return;
       }
-      content.replaceChildren(...page.items.map(item => {
-        const row = el('section'); row.append(el('h3', '', item.role), renderMarkdown(item.text)); return row;
-      }));
+      content.replaceChildren(...page.items.map(historyEntryRow));
       before = page.before;
       earlier.textContent = 'Load earlier page';
       earlier.hidden = !before;
@@ -7027,7 +7032,7 @@ async function submitPrompt() {
   }
 }
 
-const PROSE_ROLES = new Set(['user', 'agent', 'thought']);
+const PROSE_ROLES = new Set(['user', 'agent', 'thought', 'message']);
 
 // The marker the worker puts on a turn the harness ended without answering
 // (#970). The row carries the prompt so it can go back in the composer without
@@ -7147,11 +7152,12 @@ function renderEntries(entries, replace) {
   for (const entry of entries) {
     if (entry.role === 'user') lastUserText = (entry.lines || []).join('\n');
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
-    let node = entryNodes.get(entry.id);
+    const identity = entry.stable_id || entry.id;
+    let node = entryNodes.get(identity);
     if (!node) {
       node = el('article');
-      node.dataset.entryId = entry.id;
-      entryNodes.set(entry.id, node);
+      node.dataset.entryId = identity;
+      entryNodes.set(identity, node);
       feed.append(node);
       appended = true;
     }

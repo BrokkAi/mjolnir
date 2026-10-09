@@ -757,7 +757,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        74
+        78
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -839,7 +839,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        74
+        78
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
@@ -1949,7 +1949,31 @@ fn materialized_session_round_trip_preserves_typed_projection() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     save_session_to(&database, &session("session-1", "project-1")).unwrap();
-    let materialized = materialized_session("session-1");
+    let mut materialized = materialized_session("session-1");
+    for key in ["delivery-one", "delivery-two"] {
+        materialized.transcript.push(Arc::new(TranscriptItem {
+            stable_id: mj_core::transcript::message_item_id(key),
+            position: 7,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1_500,
+            last_changed_at_ms: 1_500,
+            body: TranscriptBody::Message {
+                event: Box::new(mj_core::mailbox::MailboxEvent {
+                    key: key.into(),
+                    source: "session_message".into(),
+                    wake: true,
+                    created_at_ms: 1_450,
+                    body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                        from: mj_core::mailbox::Sender::Session {
+                            id: "sender-session".into(),
+                            title: "Reviewer".into(),
+                        },
+                        text: format!("{key}\nFull delivered text 支持 Unicode"),
+                    },
+                }),
+            },
+        }));
+    }
 
     save_materialized_session_to(&database, &materialized).unwrap();
 
@@ -5726,6 +5750,26 @@ fn history_pages_have_no_gaps_across_position_ties_and_concurrent_appends() {
             item.latest_content_event_ordinal = Some(2500);
         }
     }
+    for key in ["history-one", "history-two"] {
+        full.transcript.push(Arc::new(TranscriptItem {
+            stable_id: mj_core::transcript::message_item_id(key),
+            position: 624,
+            latest_content_event_ordinal: None,
+            created_at_ms: 1000,
+            last_changed_at_ms: 1000,
+            body: TranscriptBody::Message {
+                event: Box::new(mj_core::mailbox::MailboxEvent {
+                    key: key.into(),
+                    source: "session_message".into(),
+                    wake: false,
+                    created_at_ms: 900,
+                    body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                        text: format!("{key}\nComplete historical text"),
+                    },
+                }),
+            },
+        }));
+    }
     full.transcript
         .sort_by(|a, b| (a.position, &a.stable_id).cmp(&(b.position, &b.stable_id)));
     save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
@@ -5775,6 +5819,99 @@ fn history_pages_have_no_gaps_across_position_ties_and_concurrent_appends() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn history_window_deduplicates_deliveries_after_the_message_leaves_the_live_tail() {
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayCommand, RelayEvent, RelayObservation};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("message-history.sqlite3");
+    let mut full = long_conversation();
+    let message = mj_core::mailbox::MailboxEvent {
+        key: "old-delivery".into(),
+        source: "session_message".into(),
+        wake: true,
+        created_at_ms: 200,
+        body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: "The original message.\nStill complete.".into(),
+        },
+    };
+    let original = Arc::new(TranscriptItem {
+        stable_id: mj_core::transcript::message_item_id(&message.key),
+        position: 3,
+        latest_content_event_ordinal: None,
+        created_at_ms: 300,
+        last_changed_at_ms: 300,
+        body: TranscriptBody::Message {
+            event: Box::new(message.clone()),
+        },
+    });
+    full.transcript[2] = original.clone();
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    save_materialized_session_to(&path, &full).unwrap();
+    let (mut live, mut window) = load_materialized_actor_projection_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    for observation in [
+        RelayObservation::MailboxEventsDelivered {
+            event_keys: vec![message.key.clone()],
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            prompt_command_id: None,
+            hook_event: Some("PostToolUse".into()),
+            events: vec![message.clone()],
+            lease_id: Some("replayed-lease".into()),
+        },
+        RelayObservation::CommandQueued {
+            command_id: "mailbox-wake-replayed".into(),
+            command: RelayCommand::MailboxWake {
+                events: vec![message.clone()],
+            },
+            created_at_ms: 5000,
+        },
+    ] {
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == original.stable_id)
+        );
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V1,
+            ordinal: live.applied_event_ordinal + 1,
+            previous_digest: live.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: 5000,
+            command_id: None,
+            observation,
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let restored =
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+        assert_eq!(restored, vec![original.clone()]);
+        window.omitted_items -= restored.len();
+        live.transcript.splice(0..0, restored);
+        let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+            .unwrap()
+            .mutation;
+        assert!(mutation.transcript.is_empty());
+        apply_projection_page_to(&path, &full.session_id, |page| {
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )
+        })
+        .unwrap();
+        mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+            .unwrap();
+        window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        let saved = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.transcript.len(), full.transcript.len());
+        assert_eq!(saved.transcript[2], original);
+    }
 }
 
 #[test]

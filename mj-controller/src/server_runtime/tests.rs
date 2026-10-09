@@ -951,6 +951,7 @@ fn golden_phone_session_snapshot() {
     controller.state.sessions.insert(record.id.clone(), record);
     let entry = |id: u64, role: &'static str, recorded_at_ms: Option<i64>| {
         crate::server::BrowserTranscriptEntry {
+            stable_id: None,
             command_id: None,
             id,
             updated_seq: id,
