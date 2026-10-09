@@ -188,14 +188,13 @@ impl CodexProvider {
             .is_some_and(BuiltInCodexProvider::needs_no_authentication)
     }
 
-    /// Whether the provider has no harness login file to synchronize. This
-    /// includes providers that use an external credential chain, local
-    /// providers without authentication, and custom API-key providers.
+    /// Whether the provider has no harness login file to synchronize. Only the
+    /// built-in `openai` provider uses Codex's own login; every other provider
+    /// (Bedrock, the local providers, and any custom provider, whose key is
+    /// named by `env_key` or written inline as `experimental_bearer_token`)
+    /// authenticates another way, so it has no `auth.json` to converge.
     pub fn skips_login_file_sync(&self) -> bool {
-        match &self.definition {
-            CodexProviderDefinition::BuiltIn(provider) => !provider.uses_codex_login(),
-            CodexProviderDefinition::Custom(provider) => provider.env_key.is_some(),
-        }
+        !self.uses_codex_login()
     }
 
     /// Host component of a custom provider's `base_url`, lowercased, when the
