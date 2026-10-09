@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { viewerWireSnapshot, viewerDetailResponse } = require('./lab-env');
 
 test.use({
   viewport: { width: 390, height: 844 },
@@ -163,7 +164,12 @@ async function mount(page, taskCount = 1, options = {}) {
     });
     if (pathname === '/api/snapshot') {
       state.snapshots += 1;
-      return json(state.snapshot);
+      return json(viewerWireSnapshot(state.snapshot));
+    }
+    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    if (detailPath) {
+      const detail = viewerDetailResponse(state.snapshot, decodeURIComponent(detailPath[1]));
+      return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
     if (pathname === '/api/events') {
       return route.fulfill({

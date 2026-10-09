@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
+const { viewerWireSnapshot, viewerDetailResponse, viewerDelta, dispatchRuntimeFrame } = require('./lab-env');
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block', timezoneId: 'UTC' });
 
@@ -93,6 +94,7 @@ function stateWith(sessions) {
       review_config: { enabled: false, profile: null },
     },
     snapshots: 0,
+    detailRequests: [],
     actions: [],
     conversationRequests: 0,
     conversationResponses: 0,
@@ -103,8 +105,9 @@ function stateWith(sessions) {
   };
 }
 
-async function mount(page, sessions) {
+async function mount(page, sessions, holdDetail = null) {
   const state = stateWith(sessions);
+  state.holdDetail = holdDetail;
   await page.addInitScript(() => {
     window.fixtureEventSources = [];
     window.EventSource = class extends EventTarget {
@@ -127,7 +130,18 @@ async function mount(page, sessions) {
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/api/snapshot') {
       state.snapshots += 1;
-      return json(state.snapshot);
+      const wire = viewerWireSnapshot(state.snapshot);
+      state.lastWireSnapshot = wire;
+      state.streamInternedKeys = new Set(Object.keys(wire.interned));
+      return json(wire);
+    }
+    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    if (detailPath) {
+      const id = decodeURIComponent(detailPath[1]);
+      state.detailRequests.push(id);
+      if (state.holdDetail) await state.holdDetail;
+      const detail = viewerDetailResponse(state.snapshot, id);
+      return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
     if (pathname === '/api/events') {
       return route.fulfill({
@@ -189,23 +203,24 @@ async function renderAfterFrame(page) {
 }
 
 async function refresh(page, state) {
-  const previous = state.snapshots;
   state.snapshot.revision += 1;
-  // The viewer reconciles a changed daemon by reconnecting and reloading the
-  // whole snapshot; the changes stream itself carries deltas this fixture
-  // does not model.
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshots).toBeGreaterThan(previous);
+  const update = viewerDelta(state.lastWireSnapshot, state.snapshot, state.streamInternedKeys);
+  state.lastWireSnapshot = update.wire;
+  state.streamInternedKeys = update.knownInternedKeys;
+  await dispatchRuntimeFrame(page, update.frame);
   await renderAfterFrame(page);
 }
 
 async function reconnect(page, state) {
-  const previous = state.snapshots;
+  state.snapshot.revision += 1;
+  const update = viewerDelta(state.lastWireSnapshot, state.snapshot, state.streamInternedKeys);
+  state.lastWireSnapshot = update.wire;
+  state.streamInternedKeys = update.knownInternedKeys;
   await page.evaluate(() => {
     window.fixtureEvents.dispatchEvent(new Event('error'));
     window.dispatchEvent(new Event('online'));
   });
-  await expect.poll(() => state.snapshots).toBeGreaterThan(previous);
+  await dispatchRuntimeFrame(page, update.frame);
   await renderAfterFrame(page);
 }
 
@@ -486,6 +501,73 @@ test('golden_viewer_dashboard', async ({ context }) => {
   await subagentPage.close();
 
   assertGolden('viewer_dashboard', output.join('\n'));
+});
+
+test('virtual subagent workspace fetches a summary child row before rendering its card', async ({ page }) => {
+  let releaseDetail;
+  const heldDetail = new Promise(resolve => { releaseDetail = resolve; });
+  const parent = session('parent', 'project', 'Project', { subagentSessionIds: ['child'] });
+  const child = session('child', 'project', 'Project', {
+    title: 'Stopped helper',
+    lifecycle: 'suspended',
+    subagentParentId: 'parent',
+    capabilities: { open: false, resume: true },
+  });
+  child.detail = false;
+  const state = await mount(page, [parent, child], heldDetail);
+  await card(page, 'parent').click();
+  await expect(page).toHaveURL(/#conversation\/parent$/);
+  await page.locator('#subagents-button').click();
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await expect(page.locator('#sessions')).toContainText('Loading session details…');
+  await expect.poll(() => state.detailRequests).toEqual(['child']);
+  releaseDetail();
+  await expect(card(page, 'child')).toBeVisible();
+  await expect(card(page, 'child')).not.toContainText('Loading session details');
+});
+
+test('a direct conversation link fetches a summary child before checking whether it can open', async ({ page }) => {
+  let releaseDetail;
+  const heldDetail = new Promise(resolve => { releaseDetail = resolve; });
+  const parent = session('parent', 'project', 'Project', { subagentSessionIds: ['child'] });
+  const child = session('child', 'project', 'Project', {
+    title: 'Stopped helper',
+    lifecycle: 'suspended',
+    subagentParentId: 'parent',
+    capabilities: { open: false, resume: true },
+  });
+  child.detail = false;
+  const state = await mount(page, [parent, child], heldDetail);
+  await page.evaluate(() => { location.hash = '#subagents/parent/child'; });
+  await expect(page).toHaveURL(/#subagents\/parent\/child$/);
+  await expect(page.locator('#conversation-error')).toHaveText('Loading session details…');
+  await expect.poll(() => state.detailRequests).toEqual(['child']);
+  releaseDetail();
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  expect(state.conversationRequests).toBe(0);
+});
+
+test('virtual subagent workspace fetches a summary parent before reading native history', async ({ page }) => {
+  let releaseDetail;
+  const heldDetail = new Promise(resolve => { releaseDetail = resolve; });
+  const parent = session('parent', 'project', 'Project');
+  parent.native_subagents = [{ stable_id: 'helper', name: 'Retained helper', state: 'completed', availability: 'unknown' }];
+  const state = await mount(page, [parent], heldDetail);
+  Object.assign(parent, {
+    detail: false,
+    lifecycle: 'suspended',
+    state: 'suspended',
+    capabilities: { ...parent.capabilities, open: false },
+    conversation_available: false,
+  });
+  await refresh(page, state);
+  await page.evaluate(() => { location.hash = '#subagents/parent'; });
+  await expect(page).toHaveURL(/#subagents\/parent$/);
+  await expect(page.locator('#sessions')).toContainText('Loading session details…');
+  await expect.poll(() => state.detailRequests).toEqual(['parent']);
+  releaseDetail();
+  await expect(page.locator('#sessions')).toContainText('Retained helper');
+  await expect(page.getByRole('button', { name: 'View history' })).toBeVisible();
 });
 
 test('transition cards show compact stages and suppress a late transcript response', async ({ page }) => {

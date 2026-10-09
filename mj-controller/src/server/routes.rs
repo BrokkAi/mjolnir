@@ -1,8 +1,10 @@
 use super::*;
+use tower_http::compression::{CompressionLayer, CompressionLevel};
 
 #[derive(Clone)]
 pub(super) struct ServerState {
     pub(super) snapshot_rx: watch::Receiver<ViewerSnapshot>,
+    pub(super) viewer_history: viewer_feed::ViewerHistoryHandle,
     pub(super) conversation_rx:
         watch::Receiver<mj_core::snapshot_map::SnapshotMap<String, BrowserTranscript>>,
     pub(super) action_tx: mpsc::Sender<ControllerRequest>,
@@ -97,6 +99,7 @@ pub(super) fn code_lockout(lockouts: u32) -> Duration {
 pub(super) fn router(options: ServerOptions) -> Router {
     let state = ServerState {
         snapshot_rx: options.snapshot_rx,
+        viewer_history: options.viewer_history,
         conversation_rx: options.conversation_rx,
         action_tx: options.action_tx,
         bundle_tx: options.bundle_tx,
@@ -124,6 +127,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
     let upgrade_gate = state.upgrade_gate.clone();
     let protected = Router::new()
         .route("/api/snapshot", get(snapshot))
+        .route("/api/sessions/{session_id}/row", get(session_row))
         .route("/api/conversations/{session_id}", get(conversation))
         .route(
             "/api/conversations/{session_id}/read",
@@ -192,6 +196,8 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .merge(protected)
         .nest("/api/v1", api::router(state.clone()))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
+        .layer(axum::middleware::from_fn(finalize_static_etag))
         .layer(axum::middleware::from_fn(security_headers))
         .layer(axum::middleware::from_fn_with_state(
             upgrade_gate,

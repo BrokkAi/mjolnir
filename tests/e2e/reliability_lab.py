@@ -31,6 +31,13 @@ import urllib.request
 
 
 TIMEOUT = 20.0
+INTERNED_VIEWER_FIELDS = (
+    "available_commands",
+    "capabilities",
+    "config_options",
+    "compatible_resume_targets",
+    "incompatible_resume_targets",
+)
 # The worker validates a seeded managed Codex install by the install id in the
 # compiler's pin, so the fixture derives it from that same source instead of
 # repeating the version. A repeated literal silently stops matching when the
@@ -878,6 +885,23 @@ pull_policy = "never"
         status, value = self.request("GET", "/api/snapshot")
         if status != 200 or not isinstance(value, dict):
             raise ScenarioFailure(f"invalid snapshot response: {status} {value!r}")
+        cursor = value.get("cursor")
+        interned = value.get("interned")
+        sessions = value.get("sessions")
+        if not isinstance(cursor, dict) or not isinstance(interned, dict) or not isinstance(sessions, list):
+            raise ScenarioFailure("snapshot is missing its cursor, interned table or session rows")
+        if not isinstance(cursor.get("incarnation"), str) or not isinstance(cursor.get("sequence"), int):
+            raise ScenarioFailure(f"snapshot has invalid cursor: {cursor!r}")
+        for row in sessions:
+            if not isinstance(row, dict):
+                raise ScenarioFailure(f"snapshot has invalid session row: {row!r}")
+            for field in INTERNED_VIEWER_FIELDS:
+                reference = row.pop(f"{field}_ref", None)
+                if reference is None:
+                    continue
+                if field in row or not isinstance(reference, str) or reference not in interned:
+                    raise ScenarioFailure(f"snapshot has invalid interned reference for {field}")
+                row[field] = interned[reference]
         revision = value.get("revision")
         if not isinstance(revision, int):
             raise ScenarioFailure(f"snapshot has invalid revision: {revision!r}")

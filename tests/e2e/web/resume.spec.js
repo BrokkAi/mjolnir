@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
+const { viewerWireSnapshot, viewerDetailResponse, viewerDelta, dispatchRuntimeFrame } = require('./lab-env');
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block', timezoneId: 'UTC' });
 
@@ -28,6 +29,7 @@ async function mount(page, {
   ],
   holdAction = null,
   rejectAction = false,
+  holdDetail = null,
   // A ready index with nothing in it, which is what most of these tests want:
   // search works, and there is nothing archived. Pass `wiki: null` for a
   // daemon that has no wiki routes at all.
@@ -51,16 +53,22 @@ async function mount(page, {
     wiki,
     wikiQueries: [],
     wikiRestores: [],
+    detailRequests: [],
+    holdDetail,
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   await page.addInitScript(() => {
+    window.fixtureEventSources = [];
     window.EventSource = class extends EventTarget {
-      constructor() {
+      constructor(url) {
         super();
+        this.url = url;
+        this.closed = false;
         window.fixtureEvents = this;
+        window.fixtureEventSources.push(this);
         queueMicrotask(() => this.dispatchEvent(new Event('open')));
       }
-      close() {}
+      close() { this.closed = true; }
     };
   });
   await page.route('**/*', async route => {
@@ -68,7 +76,17 @@ async function mount(page, {
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/api/snapshot') {
       state.snapshots += 1;
-      return json(state.snapshot);
+      const wire = viewerWireSnapshot(state.snapshot);
+      state.lastWireSnapshot = wire;
+      state.streamInternedKeys = new Set(Object.keys(wire.interned));
+      return json(wire);
+    }
+    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    if (detailPath) {
+      state.detailRequests.push(decodeURIComponent(detailPath[1]));
+      if (state.holdDetail) await state.holdDetail;
+      const detail = viewerDetailResponse(state.snapshot, decodeURIComponent(detailPath[1]));
+      return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
     if (pathname === '/api/actions') {
@@ -118,13 +136,12 @@ async function mount(page, {
 }
 
 async function refresh(page, state) {
-  const previous = state.snapshots;
+  if (!state.lastWireSnapshot) throw new Error('the fixture has not served its initial snapshot');
   state.snapshot.revision += 1;
-  // The viewer reconciles a changed daemon by reconnecting and reloading the
-  // whole snapshot; the changes stream itself carries deltas this fixture
-  // does not model.
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshots).toBeGreaterThan(previous);
+  const update = viewerDelta(state.lastWireSnapshot, state.snapshot, state.streamInternedKeys);
+  state.lastWireSnapshot = update.wire;
+  state.streamInternedKeys = update.knownInternedKeys;
+  await dispatchRuntimeFrame(page, update.frame);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
@@ -136,6 +153,55 @@ async function openSession(page, id) {
   await expect(page.locator('#resume-detail-view')).toBeVisible();
   return row;
 }
+
+test('resume detail loads a summary row before rendering its controls', async ({ page }) => {
+  let releaseDetail;
+  const heldDetail = new Promise(resolve => { releaseDetail = resolve; });
+  const state = await mount(page, {
+    sessions: [session('summary', {
+      detail: false,
+      compatible_resume_targets: ['local', 'remote'],
+    })],
+    holdDetail: heldDetail,
+  });
+
+  await openSession(page, 'summary');
+  await expect(page.locator('#resume-detail')).toContainText('Loading session details…');
+  await expect.poll(() => state.detailRequests).toEqual(['summary']);
+  releaseDetail();
+  await expect(page.locator('#resume-detail [data-role="resume-target"]')).toBeVisible();
+  await expect(page.locator('#resume-detail').getByRole('button', { name: 'Resume', exact: true })).toBeEnabled();
+});
+
+test('Move loads a summary row before rendering destination controls', async ({ page }) => {
+  let releaseDetail;
+  const heldDetail = new Promise(resolve => { releaseDetail = resolve; });
+  const state = await mount(page, {
+    sessions: [session('move-summary', {
+      detail: false,
+      capabilities: { resume: true, move_session: true },
+    })],
+    holdDetail: heldDetail,
+  });
+
+  await page.evaluate(() => { location.hash = '#workspace/test/move/move-summary'; });
+  await expect(page).toHaveURL(/#workspace\/test\/move\/move-summary$/);
+  await expect(page.locator('#move-step')).toContainText('Loading session details…');
+  await expect.poll(() => state.detailRequests).toEqual(['move-summary']);
+  releaseDetail();
+  await expect(page.locator('#move-step select').last()).toBeVisible();
+  await expect(page.locator('#move-next')).toHaveText('Prepare move');
+});
+
+test('resume detail keeps a visible retry when the summary row disappears before fetch', async ({ page }) => {
+  const state = await mount(page, {
+    sessions: [session('vanishing', { detail: false })],
+  });
+  state.snapshot.sessions = [];
+  await openSession(page, 'vanishing');
+  await expect(page.locator('#resume-detail')).toContainText('Could not load session details: session not found');
+  await expect(page.locator('#resume-detail').getByRole('button', { name: 'Retry' })).toBeVisible();
+});
 
 function picker(detail, role) {
   return detail.locator(`[data-role="${role}"]`);

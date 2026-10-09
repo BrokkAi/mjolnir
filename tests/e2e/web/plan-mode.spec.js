@@ -1,6 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { viewerWireSnapshot, viewerDelta, dispatchRuntimeFrame } = require('./lab-env');
 
 test.use({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block', timezoneId: 'UTC' });
 
@@ -184,6 +185,20 @@ function conversation() {
 async function mockViewerApi(page, initialPending = [], configOptions = [], sessionOverrides = {}) {
   const viewerUrl = 'https://viewer.test/';
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
+  await page.addInitScript(() => {
+    window.fixtureEventSources = [];
+    window.EventSource = class extends EventTarget {
+      constructor(url) {
+        super();
+        this.url = url;
+        this.closed = false;
+        window.fixtureEvents = this;
+        window.fixtureEventSources.push(this);
+        queueMicrotask(() => this.dispatchEvent(new Event('open')));
+      }
+      close() { this.closed = true; }
+    };
+  });
   // Serve the shipped assets without a daemon. Any unhandled API request is
   // refused, so this suite can never fall through to live auth or providers.
   await page.route('**/*', route => {
@@ -201,6 +216,7 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
     snapshotRequests: 0,
     readRequests: 0,
     conversationRequests: 0,
+    runtimeUpdates: 0,
     rejectNextPlanMode: false,
     rejectNextAnswer: false,
   };
@@ -208,15 +224,17 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
 
   await page.route('**/api/snapshot', route => {
     state.snapshotRequests += 1;
+    const wire = viewerWireSnapshot(state.snapshot);
+    state.lastWireSnapshot = wire;
+    state.streamInternedKeys = new Set(Object.keys(wire.interned));
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(state.snapshot),
+      body: JSON.stringify(wire),
     });
   });
-  // Keep the viewer's EventSource from reaching the daemon. A completed SSE
-  // response is enough for the shell to become online; no revision events are
-  // needed because tests explicitly trigger the refreshes they assert.
+  // Keep the viewer's EventSource from reaching the daemon; tests publish
+  // recorded-shape deltas directly to the fixture stream.
   await page.route('**/api/events', route =>
     route.fulfill({
       status: 200,
@@ -300,6 +318,16 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
   await expect(page).toHaveURL(/#conversation\/plan-session$/);
   await expect(page.locator('#conversation-title')).toHaveText('Plan mode browser test');
   return state;
+}
+
+async function publishSnapshotDelta(page, state) {
+  state.snapshot.revision += 1;
+  const update = viewerDelta(state.lastWireSnapshot, state.snapshot, state.streamInternedKeys);
+  state.lastWireSnapshot = update.wire;
+  state.streamInternedKeys = update.knownInternedKeys;
+  state.runtimeUpdates += 1;
+  await dispatchRuntimeFrame(page, update.frame);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
 async function waitForActionCount(state, count) {
@@ -389,20 +417,14 @@ test('golden_viewer_conversation', async ({ context }) => {
     { key: 'model', label: 'Model', current: 'gpt-5-mini', choices: [{ value: 'gpt-5-mini', name: 'GPT-5 mini' }] },
     { key: 'effort', label: 'Effort', current: 'high', choices: [{ value: 'high', name: 'High' }] },
   ];
-  let revision = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await publishSnapshotDelta(page, state);
   await expect(page.locator('#prompt-settings')).toContainText('GPT-5 mini');
   await captureConversationState(output, page, 'updated model and effort settings', state, await conversationLayout(page));
   state.snapshot.sessions[0].config_options = [
     { key: 'model', label: 'Model', current: null, choices: [] },
     { key: 'effort', label: 'Effort', current: '', choices: [] },
   ];
-  revision = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await publishSnapshotDelta(page, state);
   await expect(page.locator('#prompt-settings')).toBeHidden();
   await expect(page.locator('#prompt-settings')).toHaveAttribute('aria-label', 'Current session settings');
   await captureConversationState(output, page, 'settings removed by refresh', state, await conversationLayout(page));
@@ -414,10 +436,7 @@ test('golden_viewer_conversation', async ({ context }) => {
 
   state.snapshot.review_config = { enabled: true, profile: 'reviewer' };
   state.snapshot.sessions[0].turn_review = null;
-  revision = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await publishSnapshotDelta(page, state);
   await page.locator('#prompt-text').fill('/review status');
   await page.locator('#send-button').click();
   await expect(page.locator('#conversation-error')).toHaveText(
@@ -576,10 +595,7 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   await expect(card).toContainText('Name the custom architecture.');
   const custom = page.locator('#elicitations .elicitation');
   await custom.locator('input[type="text"]').fill('Canary');
-  const beforeAnswerRefresh = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeAnswerRefresh);
+  await publishSnapshotDelta(page, state);
   await expect(custom.locator('input[type="text"]')).toHaveValue('Canary');
   await expect(custom.locator('input[type="text"]')).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
@@ -607,10 +623,7 @@ test('elicitation enum and custom answers submit exact content and survive snaps
   const draft = 'keep this request while the snapshot changes';
   await page.locator('#prompt-text').fill(draft);
   await expect.poll(() => state.drafts.get(SESSION_ID)).toBe(draft);
-  const snapshotsBefore = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(snapshotsBefore);
+  await publishSnapshotDelta(page, state);
   await expect(page.locator('#prompt-text')).toHaveText(draft);
 
   await page.reload();
@@ -817,10 +830,7 @@ test('multi-select choices use full-row phone taps, survive refresh, and retry a
   await expect(options.nth(1).locator('input')).toBeChecked();
 
   // A snapshot refresh must not reconstruct a live card or lose either check.
-  const beforeRefresh = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(beforeRefresh);
+  await publishSnapshotDelta(page, state);
   await expect(options.nth(0).locator('input')).toBeChecked();
   await expect(options.nth(1).locator('input')).toBeChecked();
 
@@ -878,7 +888,7 @@ test('custom multi-select answers bypass owner constraints until cleared', async
 });
 
 test('submitted content appears while the request is held and a newer draft survives acceptance', async ({ page }) => {
-  await mockViewerApi(page);
+  const state = await mockViewerApi(page);
   let held;
   await page.route('**/api/actions', route => { held = route; });
   const prompt = page.locator('#prompt-text');
@@ -903,7 +913,7 @@ test('submitted content appears while the request is held and a newer draft surv
     projected.entries.push({ id: 2, updated_seq: 2, command_id: body.command_id, role: 'user', tone: 'user', label: 'You', glyph: '›', lines: [body.text] });
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(projected) });
   });
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await publishSnapshotDelta(page, state);
   await expect(pending.locator('article')).toHaveCount(0);
   await expect(page.locator('#conversation-feed')).toContainText('show this immediately');
   await expect(page.locator('#conversation-feed [data-entry-id="2"]')).toHaveCount(1);
@@ -925,7 +935,7 @@ test('projection before a lost acknowledgement reconciles only the matching iden
   expect(first.command_id).not.toBe(second.command_id);
   await expect(page.locator('#pending-submissions article')).toHaveCount(2);
   state.snapshot.sessions[0].queued_prompts = [{ id: first.command_id, text: first.text }];
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await publishSnapshotDelta(page, state);
   await expect(page.locator('#pending-submissions article')).toHaveCount(1);
   await held[0].abort('connectionclosed');
   await expect(page.locator('#pending-submissions')).not.toContainText('Delivery unconfirmed');
@@ -1022,10 +1032,7 @@ test('confirmed answers survive backtracking and refresh but edits require confi
   await expect(progress).toHaveText('Question 1/2 · 1 unanswered');
   await card.getByRole('radio', { name: /^Green/ }).check();
   await expect(progress).toHaveText('Question 1/2 · 2 unanswered');
-  const revision = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await publishSnapshotDelta(page, state);
   await expect(card.getByRole('radio', { name: /^Green/ })).toBeChecked();
   await expect(progress).toHaveText('Question 1/2 · 2 unanswered');
   await card.getByRole('button', { name: 'Next', exact: true }).click();
@@ -1055,10 +1062,7 @@ test('question replacement resets confirmation even when the request id is reuse
   const card = page.locator('#elicitations .elicitation');
   await card.getByRole('button', { name: 'Answer and next', exact: true }).click();
   state.snapshot.sessions[0].pending_elicitations[0].fields[0].title = 'Replacement decision';
-  const revision = state.snapshotRequests;
-  state.snapshot.revision += 1;
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshotRequests).toBeGreaterThan(revision);
+  await publishSnapshotDelta(page, state);
   await expect(card.locator('.elicitation-progress')).toHaveText('Question 1/2 · 2 unanswered');
   await expect(card.getByRole('group')).toHaveAccessibleName('Replacement decision');
   expect(state.actions).toHaveLength(0);

@@ -8,15 +8,16 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Component, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result as AnyResult};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY as CONTENT_SECURITY_POLICY_HEADER, CONTENT_TYPE, COOKIE,
-    HeaderValue, LOCATION, REFERRER_POLICY, SET_COOKIE, X_CONTENT_TYPE_OPTIONS,
+    CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH,
+    CONTENT_SECURITY_POLICY as CONTENT_SECURITY_POLICY_HEADER, CONTENT_TYPE, COOKIE, ETAG,
+    HeaderValue, IF_NONE_MATCH, LOCATION, REFERRER_POLICY, SET_COOKIE, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::middleware::Next;
@@ -27,7 +28,7 @@ use axum::{Json, Router};
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -183,6 +184,7 @@ pub struct ServerOptions {
     login_token: String,
     cookie_key: Vec<u8>,
     viewer_revocations: Arc<ViewerRevocations>,
+    viewer_history: viewer_feed::ViewerHistoryHandle,
     api_token: String,
     subagent: Option<Arc<dyn api::SubagentBackend>>,
     /// Where the remembered fast-start preferences live. Injected rather than
@@ -231,6 +233,7 @@ impl ServerOptions {
         requests: ServerRequests,
     ) -> AnyResult<Self> {
         let cookie_key = generate_cookie_key()?.to_vec();
+        let viewer_history = viewer_feed::ViewerHistoryHandle::new()?;
         Ok(Self {
             bind,
             snapshot_rx,
@@ -250,6 +253,7 @@ impl ServerOptions {
             login_token: derive_login_token(&cookie_key),
             cookie_key,
             viewer_revocations: Arc::new(ViewerRevocations::default()),
+            viewer_history,
             // An empty token authenticates nothing: the daemon installs the
             // persisted one, and a server without it serves the viewer only.
             api_token: String::new(),
@@ -409,6 +413,7 @@ pub async fn run_server_on_listener(
 
 mod viewer_feed;
 mod viewer_types;
+pub(crate) mod viewer_wire;
 pub use viewer_types::*;
 mod actions;
 pub use actions::*;

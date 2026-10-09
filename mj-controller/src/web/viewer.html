@@ -44,7 +44,12 @@
       </div>
     </header>
 
-    <main id="login" class="card">
+    <main id="boot-status" class="card" role="status" aria-live="polite">
+      <h2>Connecting to Mjolnir</h2>
+      <p id="boot-message" class="dim">Loading the viewer…</p>
+    </main>
+
+    <main id="login" class="card hidden">
       <h2>Unlock viewer</h2>
       <p class="dim">Enter the six-digit code shown by <code>mj daemon status</code>.</p>
       <form id="login-form" class="row">

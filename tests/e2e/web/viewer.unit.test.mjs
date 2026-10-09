@@ -96,6 +96,200 @@ test('conversation deltas carry the last presentation key and accept older respo
   assert.deepEqual(renders[1], { entries: [{ id: 2 }], replace: false });
 });
 
+test('runtime rows resolve interned values, merge metadata and reject gaps without partial updates', () => {
+  const source = sourceBetween('class ViewerRuntimeState', 'const viewerState =');
+  const result = vm.runInContext(`${source}
+(() => {
+  const values = {
+    commands: [{ name: 'open' }],
+    caps: { open: true, resume: false },
+    options: [{ key: 'model', current: 'small' }],
+    compatible: ['local'],
+    incompatible: ['remote'],
+  };
+  const state = new ViewerRuntimeState(row => row.live === true, row => row.resume === true, () => 0);
+  state.install({
+    revision: 1,
+    server_time_ms: 10,
+    profiles: [{ id: 'kept' }],
+    cursor: { incarnation: 'daemon', sequence: 1 },
+    interned: values,
+    sessions: [{
+      id: 'summary', workspace_id: 'workspace', detail: false, resume: true,
+      available_commands_ref: 'commands', capabilities_ref: 'caps',
+      config_options_ref: 'options', compatible_resume_targets_ref: 'compatible',
+      incompatible_resume_targets_ref: 'incompatible',
+    }],
+  });
+  const before = state.rows.get('summary');
+  const sameValues = before.available_commands === state.interned.get('commands')
+    && before.capabilities === state.interned.get('caps')
+    && before.config_options === state.interned.get('options')
+    && before.compatible_resume_targets === state.interned.get('compatible')
+    && before.incompatible_resume_targets === state.interned.get('incompatible');
+  state.apply({
+    kind: 'delta',
+    from: { incarnation: 'daemon', sequence: 1 },
+    cursor: { incarnation: 'daemon', sequence: 2 },
+    metadata: { revision: 2, server_time_ms: 20 },
+    sessions: [['summary', {
+      id: 'summary', workspace_id: 'workspace', detail: false, resume: true,
+      available_commands: [], capabilities_ref: 'next-caps',
+      config_options_ref: 'options', compatible_resume_targets_ref: 'compatible',
+      incompatible_resume_targets_ref: 'incompatible',
+    }]],
+    interned: { 'next-caps': { open: false, resume: true } },
+  });
+  const updated = state.rows.get('summary');
+  const mergedMetadata = state.metadata.profiles[0].id === 'kept'
+    && state.metadata.revision === 2 && state.metadata.server_time_ms === 20;
+  const cursorAdvanced = state.cursor.sequence === 2;
+  let unknown;
+  try {
+    state.apply({
+      kind: 'delta', from: state.cursor, cursor: { incarnation: 'daemon', sequence: 3 },
+      metadata: {}, sessions: [['summary', { id: 'summary', workspace_id: 'workspace', capabilities_ref: 'missing' }]],
+      interned: {},
+    });
+  } catch (error) { unknown = error; }
+  const unknownWasAtomic = unknown?.freshSnapshot === true
+    && state.cursor.sequence === 2 && state.rows.get('summary') === updated;
+  let gapRefused = false;
+  try {
+    state.apply({
+      kind: 'delta', from: { incarnation: 'other', sequence: 2 },
+      cursor: { incarnation: 'other', sequence: 3 }, metadata: {}, sessions: [], interned: {},
+    });
+  } catch { gapRefused = true; }
+  return JSON.stringify({
+    sameValues, inlineAccepted: Array.isArray(updated.available_commands) && updated.available_commands.length === 0,
+    mergedMetadata, cursorAdvanced, duplicateIgnored: state.apply({
+      kind: 'delta', from: { incarnation: 'daemon', sequence: 1 },
+      cursor: { incarnation: 'daemon', sequence: 2 }, metadata: {}, sessions: [], interned: {},
+    }) === false,
+    unknownWasAtomic, gapRefused, metadataHasNoInterned: !Object.hasOwn(state.metadata, 'interned'),
+  });
+})()` , vm.createContext({}));
+  assert.deepEqual(JSON.parse(result), {
+    sameValues: true,
+    inlineAccepted: true,
+    mergedMetadata: true,
+    cursorAdvanced: true,
+    duplicateIgnored: true,
+    unknownWasAtomic: true,
+    gapRefused: true,
+    metadataHasNoInterned: true,
+  });
+});
+
+test('detail changes drop attached rows and an open detail view fetches the row again', async () => {
+  const runtime = sourceBetween('class ViewerRuntimeState', 'const viewerState =');
+  const detailLoader = sourceBetween('const sessionDetailRequests = new Map();', '\nfunction detailFailure');
+  const requests = [];
+  let finishStaleRequest;
+  const context = vm.createContext({
+    encodeURIComponent,
+    releaseStaleRequest: () => finishStaleRequest({ revision: 2, row: {
+      id: 'summary', workspace_id: 'workspace', resume: true, detail_only: 'stale-version-2',
+    } }),
+    request: url => {
+      requests.push(url);
+      if (requests.length === 2) {
+        return new Promise(resolve => { finishStaleRequest = resolve; });
+      }
+      return Promise.resolve({ revision: requests.length, row: {
+        id: 'summary', workspace_id: 'workspace', resume: true,
+        detail_only: `version-${requests.length}`,
+      } });
+    },
+  });
+  const result = await vm.runInContext(`${runtime}
+const viewerState = new ViewerRuntimeState(() => false, row => row.resume === true, () => 0);
+function sessionById(id) { return viewerState.rows.get(id); }
+${detailLoader}
+(async () => {
+  viewerState.install({ cursor: { incarnation: 'daemon', sequence: 1 }, sessions: [{
+    id: 'summary', workspace_id: 'workspace', detail: false, resume: true,
+  }] });
+  await ensureSessionDetail('summary');
+  const first = viewerState.rows.get('summary');
+  const applied = viewerState.apply({
+    kind: 'delta', from: { incarnation: 'daemon', sequence: 1 },
+    cursor: { incarnation: 'daemon', sequence: 2 }, metadata: {}, sessions: [],
+    detail_changed: ['summary'], interned: {},
+  });
+  const dropped = viewerState.rows.get('summary').detail === false
+    && !Object.hasOwn(viewerState.rows.get('summary'), 'detail_only');
+  const refetching = ensureSessionDetail('summary');
+  const invalidatedAgain = viewerState.apply({
+    kind: 'delta', from: { incarnation: 'daemon', sequence: 2 },
+    cursor: { incarnation: 'daemon', sequence: 3 }, metadata: {}, sessions: [],
+    detail_changed: ['summary'], interned: {},
+  });
+  releaseStaleRequest();
+  await refetching;
+  return JSON.stringify({
+    applied, dropped, invalidatedAgain, firstDetail: first.detail_only,
+    refreshedDetail: viewerState.rows.get('summary').detail_only,
+  });
+})()`, context);
+
+  assert.deepEqual(JSON.parse(result), {
+    applied: true,
+    dropped: true,
+    invalidatedAgain: true,
+    firstDetail: 'version-1',
+    refreshedDetail: 'version-3',
+  });
+  assert.deepEqual(requests, [
+    '/api/sessions/summary/row',
+    '/api/sessions/summary/row',
+    '/api/sessions/summary/row',
+  ]);
+});
+
+test('SSE open does not reset retry backoff until a runtime frame applies', () => {
+  const eventSourceCode = sourceBetween('function scheduleEventReconnect(', '\nfunction showLogin(');
+  const timers = [];
+  const sources = [];
+  const context = vm.createContext({
+    URLSearchParams,
+    navigator: { onLine: true },
+    signedOut: false,
+    eventReconnectDelayMs: 1000,
+    eventReconnectTimer: undefined,
+    eventSource: undefined,
+    currentSession: null,
+    viewerState: { cursor: null, apply: () => true },
+    runtimeCursorText: () => null,
+    setConnection: () => {},
+    presentSnapshot: () => {},
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+    EventSource: class {
+      constructor(url) { this.url = url; this.listeners = new Map(); sources.push(this); }
+      addEventListener(type, listener) { this.listeners.set(type, listener); }
+      close() { this.closed = true; }
+      emit(type, event = {}) { this.listeners.get(type)(event); }
+    },
+  });
+  vm.runInContext(`${eventSourceCode}
+startEvents();
+eventSource.emit('open');
+eventSource.emit('error');
+`, context);
+  assert.equal(timers[0].delay, 1000, 'an accepted connection that closes keeps the grown delay');
+
+  timers[0].callback();
+  sources[1].emit('open');
+  sources[1].emit('runtime', { data: '{}' });
+  sources[1].emit('error');
+  assert.equal(timers[1].delay, 250, 'an applied runtime frame restores the initial delay');
+});
+
 test('session titles stay blue while truly idle and clear blue when activity resumes', () => {
   const classes = new Set();
   const node = {
@@ -899,6 +1093,8 @@ test('a signed-out load shows the login form without requesting the snapshot', a
       refresh: async () => { calls.push('refresh'); return true; },
       applyRoute: () => calls.push('applyRoute'),
       showLogin: () => calls.push('showLogin'),
+      showConnecting: () => {},
+      signedOut: false,
     });
     vm.runInContext(
       sourceBetween('async function knownSignedOut()', 'function renderQueue('),

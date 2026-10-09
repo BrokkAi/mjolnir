@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
+const { viewerWireSnapshot, viewerDelta, dispatchRuntimeFrame } = require('./lab-env');
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block' });
 
@@ -49,13 +50,17 @@ async function mount(page, {
   };
   const webRoot = path.resolve(__dirname, '../../../mj-controller/src/web');
   await page.addInitScript(() => {
+    window.fixtureEventSources = [];
     window.EventSource = class extends EventTarget {
-      constructor() {
+      constructor(url) {
         super();
+        this.url = url;
+        this.closed = false;
         window.fixtureEvents = this;
+        window.fixtureEventSources.push(this);
         queueMicrotask(() => this.dispatchEvent(new Event('open')));
       }
-      close() {}
+      close() { this.closed = true; }
     };
   });
   page.on('requestfailed', request => {
@@ -65,7 +70,13 @@ async function mount(page, {
   await page.route('**/*', async route => {
     const pathname = new URL(route.request().url()).pathname;
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
-    if (pathname === '/api/snapshot') { state.snapshots++; return json(state.snapshot); }
+    if (pathname === '/api/snapshot') {
+      state.snapshots++;
+      const wire = viewerWireSnapshot(state.snapshot);
+      state.lastWireSnapshot = wire;
+      state.streamInternedKeys = new Set(Object.keys(wire.interned));
+      return json(wire);
+    }
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
     const resourceOptionsMatch = /^\/api\/targets\/([^/]+)\/resource-options$/.exec(pathname);
     if (resourceOptionsMatch) {
@@ -136,13 +147,11 @@ async function mount(page, {
 }
 
 async function refresh(page, state) {
-  const previous = state.snapshots;
   state.snapshot.revision++;
-  // The viewer reconciles a changed daemon by reconnecting and reloading the
-  // whole snapshot; the changes stream itself carries deltas this fixture
-  // does not model.
-  await page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect.poll(() => state.snapshots).toBeGreaterThan(previous);
+  const update = viewerDelta(state.lastWireSnapshot, state.snapshot, state.streamInternedKeys);
+  state.lastWireSnapshot = update.wire;
+  state.streamInternedKeys = update.knownInternedKeys;
+  await dispatchRuntimeFrame(page, update.frame);
   // Wait for the render associated with the completed response, not just its request.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }

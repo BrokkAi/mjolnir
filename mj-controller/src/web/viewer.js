@@ -18,7 +18,9 @@ function button(label, className, data) {
   return node;
 }
 
-const login = document.querySelector('#login'),
+const bootStatus = document.querySelector('#boot-status'),
+  bootMessage = document.querySelector('#boot-message'),
+  login = document.querySelector('#login'),
   app = document.querySelector('#app'),
   header = document.querySelector('#shell-header'),
   shellTitle = document.querySelector('#shell-title'),
@@ -118,6 +120,8 @@ let snapshot,
   presentationKey = null,
   acknowledged = 0,
   eventSource,
+  eventReconnectTimer,
+  eventReconnectDelayMs = 250,
   conversationMode = null;
 
 /// Actions the browser has asked for and not yet heard back about.
@@ -346,7 +350,8 @@ function applyRoute() {
       : null;
     if (!session
       || (route.subagentParentId && !virtualParent?.subagent_session_ids?.includes(session.id))
-      || (!session.capabilities?.open
+      || (session.detail !== false
+        && !session.capabilities?.open
         && !isTransitioningSession(session)
         && !isLoadingConversationSession(session))) {
       navigate(route.subagentParentId
@@ -620,7 +625,40 @@ function renderSessions() {
     closeSessionMenu();
   }
   const parent = sessionById(route.subagentParentId);
-  const nativeGroups = renderNativeSubagents(parent);
+  let nativeGroups;
+  if (route.subagentParentId && parent?.detail === false) {
+    const group = el('section', 'project');
+    group.append(el('h2', '', 'Sub-agent history'));
+    const failure = subagentDetailFailures.get(parent);
+    if (failure) {
+      const error = el('p', 'error', `Could not load session details: ${failure.message}`);
+      error.setAttribute('role', 'alert');
+      const retry = button('Retry');
+      retry.onclick = () => {
+        subagentDetailFailures.delete(parent);
+        subagentDetailLoads.delete(parent);
+        renderSessions();
+      };
+      group.append(error, retry);
+    } else {
+      const status = el('p', 'dim', 'Loading session details…');
+      status.setAttribute('role', 'status');
+      group.append(status);
+      if (!subagentDetailLoads.has(parent)) {
+        subagentDetailLoads.add(parent);
+        const parentId = route.subagentParentId;
+        ensureSessionDetail(parent.id).then(() => {
+          if (route.name === 'dashboard' && route.subagentParentId === parentId) renderSessions();
+        }, error => {
+          subagentDetailFailures.set(parent, error);
+          if (route.name === 'dashboard' && route.subagentParentId === parentId) renderSessions();
+        });
+      }
+    }
+    nativeGroups = [group];
+  } else {
+    nativeGroups = renderNativeSubagents(parent);
+  }
   if (!ordered.length && !nativeGroups.length) {
     sessions.replaceChildren(el(
       'p',
@@ -632,18 +670,48 @@ function renderSessions() {
     return;
   }
   const items = ordered.map(session => {
+    let item = sessionItems.get(session.id);
+    if (!item) {
+      item = el('div');
+      item.setAttribute('role', 'listitem');
+      sessionItems.set(session.id, item);
+    }
+    if (route.subagentParentId && session.detail === false) {
+      const placeholder = el('div', 'session-card');
+      placeholder.append(el('strong', '', session.title || session.id));
+      const failure = subagentDetailFailures.get(session);
+      if (failure) {
+        const error = el('p', 'error', `Could not load session details: ${failure.message}`);
+        error.setAttribute('role', 'alert');
+        const retry = button('Retry');
+        retry.onclick = () => {
+          subagentDetailFailures.delete(session);
+          subagentDetailLoads.delete(session);
+          renderSessions();
+        };
+        placeholder.append(error, retry);
+      } else {
+        placeholder.append(el('p', 'dim', 'Loading session details…'));
+        if (!subagentDetailLoads.has(session)) {
+          subagentDetailLoads.add(session);
+          const parentId = route.subagentParentId;
+          ensureSessionDetail(session.id).then(() => {
+            if (route.name === 'dashboard' && route.subagentParentId === parentId) renderSessions();
+          }, error => {
+            subagentDetailFailures.set(session, error);
+            if (route.name === 'dashboard' && route.subagentParentId === parentId) renderSessions();
+          });
+        }
+      }
+      if (item.firstChild !== placeholder) item.replaceChildren(placeholder);
+      return item;
+    }
     let card = sessionCards.get(session.id);
     if (!card) {
       card = sessionCard(session);
       sessionCards.set(session.id, card);
     } else {
       updateSessionCard(card, session);
-    }
-    let item = sessionItems.get(session.id);
-    if (!item) {
-      item = el('div');
-      item.setAttribute('role', 'listitem');
-      sessionItems.set(session.id, item);
     }
     if (item.firstChild !== card) item.replaceChildren(card);
     return item;
@@ -653,7 +721,7 @@ function renderSessions() {
 }
 
 function renderNativeSubagents(parent) {
-  if (!parent) return [];
+  if (!parent || parent.detail === false) return [];
   const agents = parent.native_subagents || [];
   return [
     ['Working', a => a.state === 'running'],
@@ -678,12 +746,18 @@ function renderNativeSubagents(parent) {
 
 async function openNativeHistory(owner, agent) {
   const modal = el('dialog', 'native-agent-history');
+  const title = el('h2', '', agent.name);
   const close = button('Close'); close.onclick = () => modal.close();
   const earlier = button('Load earlier');
   const content = el('div');
   const error = el('p', 'error');
-  modal.append(el('h2', '', agent.name), close, earlier, error, content);
-  document.body.append(modal); modal.addEventListener('close', () => modal.remove()); modal.showModal();
+  modal.append(title, close, earlier, error, content);
+  document.body.append(modal);
+  modal.addEventListener('close', () => {
+    if (nativeHistoryViews.get(owner) === refreshFromSession) nativeHistoryViews.delete(owner);
+    modal.remove();
+  });
+  modal.showModal();
   let before = null;
   let generation = null;
   async function load() {
@@ -708,6 +782,29 @@ async function openNativeHistory(owner, agent) {
     } catch (failure) { if (modal.open) error.textContent = failure.message; }
     finally { earlier.disabled = false; }
   }
+  async function refreshFromSession(session, failure) {
+    if (!modal.open) return;
+    if (failure) {
+      error.textContent = `Could not refresh sub-agent details: ${failure.message}`;
+      return;
+    }
+    const updated = session?.native_subagents?.find(item => item.session_id === agent.session_id);
+    if (!updated) {
+      title.textContent = 'Sub-agent history';
+      error.textContent = 'This native sub-agent is no longer available.';
+      content.replaceChildren();
+      earlier.hidden = true;
+      return;
+    }
+    agent = updated;
+    title.textContent = agent.name;
+    error.textContent = '';
+    content.replaceChildren();
+    before = null;
+    generation = null;
+    await load();
+  }
+  nativeHistoryViews.set(owner, refreshFromSession);
   earlier.onclick = load;
   await load();
 }
@@ -824,8 +921,13 @@ function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   if (session.has_error) parts.push(['!', 'Error']);
-  if (session.pending_elicitations?.length) parts.push(['?', 'Input needed']);
-  const queued = (session.queued_prompts || []).length;
+  const pending = session.detail === false
+    ? session.pending_elicitation_count || 0
+    : (session.pending_elicitations || []).length;
+  if (pending) parts.push(['?', 'Input needed']);
+  const queued = session.detail === false
+    ? session.queued_prompt_count || 0
+    : (session.queued_prompts || []).length;
   if (queued) parts.push([String(queued), `${queued} queued prompt${queued === 1 ? '' : 's'}`]);
   return parts;
 }
@@ -3690,6 +3792,16 @@ function renderResumeDetail() {
     resumeDetail?.replaceChildren(el('p', 'dim', 'This session is no longer available. Return to the session list.'));
     return;
   }
+  if (session.detail === false) {
+    resumeDetail?.replaceChildren(el('p', 'dim', 'Loading session details…'));
+    ensureSessionDetail(session.id).then(() => {
+      if (route.name === 'resume' && route.sessionId === session.id) renderResumeDetail();
+    }, error => {
+      if (route.name !== 'resume' || route.sessionId !== session.id) return;
+      detailFailure(resumeDetail, error, () => renderResumeDetail());
+    });
+    return;
+  }
   let cached = resumeCards.get(session.id);
   if (!cached) {
     cached = resumeCard(session);
@@ -3862,6 +3974,16 @@ function renderMoveForm() {
   if (!moveStep || route.name !== 'move') return;
   const session = sessionById(route.sessionId);
   if (!session) return;
+  if (session.detail === false) {
+    moveStep.replaceChildren(el('p', 'dim', 'Loading session details…'));
+    ensureSessionDetail(session.id).then(() => {
+      if (route.name === 'move' && route.sessionId === session.id) renderMoveForm();
+    }, error => {
+      if (route.name !== 'move' || route.sessionId !== session.id) return;
+      detailFailure(moveStep, error, () => renderMoveForm());
+    });
+    return;
+  }
   const recoveryTarget = session.move_recovery?.destination_target_template_id;
   if (!moveDraft || moveDraft.sessionId !== session.id) moveDraft = freshMoveDraft(session);
   const draft = moveDraft;
@@ -4447,10 +4569,43 @@ class ViewerRuntimeState {
     this.sortedResume = new Map();
     this.cursor = null;
     this.metadata = undefined;
+    this.interned = new Map();
+    this.attachedDetails = new Map();
+    this.detailEpochs = new Map();
+  }
+
+  resolveRow(row, interned) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('Invalid runtime session row');
+    }
+    const resolved = { ...row };
+    for (const field of [
+      'available_commands',
+      'capabilities',
+      'config_options',
+      'compatible_resume_targets',
+      'incompatible_resume_targets',
+    ]) {
+      const refField = `${field}_ref`;
+      if (!Object.hasOwn(resolved, refField)) continue;
+      const key = resolved[refField];
+      if (typeof key !== 'string' || !interned.has(key)) {
+        const error = new Error(`Unknown runtime interned reference for ${field}`);
+        error.freshSnapshot = true;
+        throw error;
+      }
+      if (Object.hasOwn(resolved, field)) {
+        throw new Error(`Runtime row contains both ${field} and ${refField}`);
+      }
+      resolved[field] = interned.get(key);
+      delete resolved[refField];
+    }
+    return resolved;
   }
 
   update(id, row) {
     const previous = this.rows.get(id);
+    this.attachedDetails.delete(id);
     const remove = groups => {
       const members = groups.get(previous.workspace_id);
       members?.delete(id);
@@ -4477,16 +4632,47 @@ class ViewerRuntimeState {
     }
   }
 
-  install(value, cursor = null) {
+  install(value, cursor = value?.cursor || null) {
+    const interned = new Map(Object.entries(value?.interned || {}));
+    const rows = (value.sessions || []).map(row => this.resolveRow(row, interned));
     this.rows.clear();
     this.workspaces.clear();
     this.live.clear();
     this.resumable.clear();
     this.sortedResume.clear();
-    for (const row of value.sessions || []) this.update(row.id, row);
+    this.interned = interned;
+    this.attachedDetails.clear();
+    this.detailEpochs.clear();
+    for (const row of rows) this.update(row.id, row);
     this.metadata = { ...value };
     delete this.metadata.sessions;
+    delete this.metadata.cursor;
+    delete this.metadata.interned;
     this.cursor = cursor;
+  }
+
+  attachDetail(id, previous, row) {
+    if (this.rows.get(id) !== previous) return false;
+    if (!row || row.id !== id || row.detail === false) {
+      throw new Error('Invalid runtime session detail row');
+    }
+    this.update(id, row);
+    this.attachedDetails.set(id, { summary: previous, detail: row });
+    return true;
+  }
+
+  detailVersion(id) {
+    return this.detailEpochs.get(id) || 0;
+  }
+
+  invalidateDetail(id) {
+    this.detailEpochs.set(id, this.detailVersion(id) + 1);
+    const attached = this.attachedDetails.get(id);
+    if (!attached) return false;
+    this.attachedDetails.delete(id);
+    if (this.rows.get(id) !== attached.detail) return false;
+    this.update(id, attached.summary);
+    return true;
   }
 
   apply(frame) {
@@ -4501,15 +4687,37 @@ class ViewerRuntimeState {
     }
     if (frame.kind !== 'delta') throw new Error('Unknown runtime publication');
     if (same(this.cursor, frame.cursor)) return false;
-    if (!same(this.cursor, frame.from)
+    if (!same(this.cursor, frame.from)) throw new Error('Runtime cursor gap');
+    if (!frame.cursor
       || frame.cursor.incarnation !== frame.from.incarnation
-      || frame.cursor.sequence <= frame.from.sequence) throw new Error('Runtime cursor gap');
-    if (!Array.isArray(frame.sessions) || frame.sessions.some(([id, row]) => row && row.id !== id)) {
+      || frame.cursor.sequence <= frame.from.sequence) throw new Error('Invalid runtime cursor');
+    if (!Array.isArray(frame.sessions) || frame.sessions.some(change =>
+      !Array.isArray(change)
+      || change.length !== 2
+      || typeof change[0] !== 'string'
+      || (change[1] && change[1].id !== change[0]))) {
       throw new Error('Invalid runtime session changes');
     }
-    for (const [id, row] of frame.sessions) this.update(id, row);
-    this.metadata = { ...frame.metadata };
+    const detailChanged = frame.detail_changed ?? [];
+    if (!Array.isArray(detailChanged) || detailChanged.some(id => typeof id !== 'string')) {
+      throw new Error('Invalid runtime detail changes');
+    }
+    if (!frame.interned || typeof frame.interned !== 'object' || Array.isArray(frame.interned)) {
+      throw new Error('Invalid runtime interned table');
+    }
+    const interned = new Map(this.interned);
+    for (const [key, value] of Object.entries(frame.interned)) interned.set(key, value);
+    const changes = frame.sessions.map(([id, row]) => [id, row && this.resolveRow(row, interned)]);
+    if (!frame.metadata || typeof frame.metadata !== 'object' || Array.isArray(frame.metadata)) {
+      throw new Error('Invalid runtime metadata changes');
+    }
+    for (const [id, row] of changes) this.update(id, row);
+    for (const id of detailChanged) this.invalidateDetail(id);
+    this.interned = interned;
+    this.metadata = { ...this.metadata, ...frame.metadata };
     delete this.metadata.sessions;
+    delete this.metadata.cursor;
+    delete this.metadata.interned;
     this.cursor = frame.cursor;
     return true;
   }
@@ -4528,8 +4736,56 @@ const viewerState = new ViewerRuntimeState(
   session => !isSubagentSession(session) && isResumeSession(session),
   resumeActivityMs,
 );
+const sessionDetailRequests = new Map();
+const subagentDetailLoads = new WeakSet();
+const subagentDetailFailures = new WeakMap();
+const nativeHistoryViews = new Map();
 
 function sessionById(id) { return viewerState.rows.get(id); }
+
+async function ensureSessionDetail(id) {
+  for (;;) {
+    const current = sessionById(id);
+    if (!current || current.detail !== false) return current;
+    const active = sessionDetailRequests.get(id);
+    if (active) {
+      await active.promise;
+      continue;
+    }
+    const detailVersion = viewerState.detailVersion(id);
+    const promise = (async () => {
+      let result;
+      try {
+        result = await request(`/api/sessions/${encodeURIComponent(id)}/row`);
+      } catch (error) {
+        if (sessionById(id) !== current) return;
+        throw error;
+      }
+      if (sessionById(id) !== current) return;
+      if (viewerState.detailVersion(id) !== detailVersion) return;
+      if (!result || !Number.isInteger(result.revision) || !result.row || result.row.id !== id) {
+        throw new Error('The server returned an invalid session detail row');
+      }
+      viewerState.attachDetail(id, current, result.row);
+    })();
+    const requestState = { promise };
+    sessionDetailRequests.set(id, requestState);
+    try {
+      await promise;
+    } finally {
+      if (sessionDetailRequests.get(id) === requestState) sessionDetailRequests.delete(id);
+    }
+  }
+}
+
+function detailFailure(container, error, retry) {
+  const message = el('p', 'error', `Could not load session details: ${error.message}`);
+  message.setAttribute('role', 'alert');
+  const again = button('Retry');
+  again.onclick = retry;
+  container.replaceChildren(message, again);
+}
+
 /// Children still at their task, which a suspend or a Move stops and loses.
 /// An idle child has handed back and is stopped without a word.
 function workingChildCount(session) {
@@ -4544,17 +4800,67 @@ function sessionInWorkspace(id, workspace) {
   return session?.workspace_id === workspace ? session : undefined;
 }
 
-function startEvents() {
+function runtimeCursorText(cursor) {
+  return cursor && typeof cursor.incarnation === 'string' && Number.isInteger(cursor.sequence)
+    ? `${cursor.incarnation}:${cursor.sequence}`
+    : null;
+}
+
+function scheduleEventReconnect(freshSnapshot = false) {
+  if (eventReconnectTimer || signedOut || !navigator.onLine) return;
+  const delay = eventReconnectDelayMs;
+  eventReconnectDelayMs = Math.min(eventReconnectDelayMs * 2, 30_000);
+  eventReconnectTimer = setTimeout(() => {
+    eventReconnectTimer = undefined;
+    if (!eventSource && !signedOut) startEvents(freshSnapshot ? null : viewerState.cursor);
+  }, delay);
+}
+
+function startEvents(since = viewerState.cursor) {
+  clearTimeout(eventReconnectTimer);
+  eventReconnectTimer = undefined;
   if (eventSource) eventSource.close();
-  eventSource = new EventSource('/api/events?format=changes');
+  const query = new URLSearchParams({ format: 'changes' });
+  const cursor = runtimeCursorText(since);
+  if (cursor) query.set('since', cursor);
+  eventSource = new EventSource(`/api/events?${query}`);
   const source = eventSource;
-  eventSource.addEventListener('open', () => setConnection('online'));
+  let runtimeFrameApplied = false;
+  eventSource.addEventListener('open', () => {
+    if (eventSource !== source) return;
+    setConnection('online');
+  });
   eventSource.addEventListener('runtime', event => {
     if (eventSource !== source) return;
     setConnection('online');
     try {
-      if (!viewerState.apply(JSON.parse(event.data))) return;
-      presentSnapshot();
+      const frame = JSON.parse(event.data);
+      if (!viewerState.apply(frame)) return;
+      if (!runtimeFrameApplied) {
+        eventReconnectDelayMs = 250;
+        runtimeFrameApplied = true;
+      }
+      const detailChanged = frame.kind === 'delta' ? (frame.detail_changed || []) : [];
+      for (const id of detailChanged) {
+        const row = sessionById(id);
+        if (row) {
+          subagentDetailLoads.delete(row);
+          subagentDetailFailures.delete(row);
+        }
+      }
+      presentSnapshot(detailChanged);
+      for (const id of detailChanged) {
+        const refreshHistory = nativeHistoryViews.get(id);
+        if (refreshHistory) {
+          ensureSessionDetail(id).then(
+            session => refreshHistory(session),
+            error => refreshHistory(undefined, error),
+          );
+        }
+        if (route.name === 'conversation' && route.subagentParentId === id) {
+          refreshOpenSubagentContext(id);
+        }
+      }
       if (!currentSession) return;
       const session = sessionById(currentSession);
       if (session?.capabilities?.open && !isTransitioningSession(session)) {
@@ -4565,14 +4871,18 @@ function startEvents() {
       setConnection('reconnecting');
       source.close();
       eventSource = undefined;
-      setTimeout(() => { if (!eventSource && !signedOut) startEvents(); }, 250);
+      scheduleEventReconnect(error.freshSnapshot === true);
     }
   });
-  // The browser reconnects a stream on its own; saying so is what stops the
-  // page looking current while it is not.
+  // Close EventSource on errors so each retry can use the cursor that the
+  // viewer has actually applied; its built-in retry would keep a stale query.
   eventSource.addEventListener('error', () => {
+    if (eventSource !== source) return;
     if (navigator.onLine) setConnection('reconnecting');
     else setConnection('offline');
+    source.close();
+    eventSource = undefined;
+    scheduleEventReconnect();
   });
 }
 
@@ -4588,6 +4898,8 @@ function showLogin() {
     eventSource.close();
     eventSource = undefined;
   }
+  clearTimeout(eventReconnectTimer);
+  eventReconnectTimer = undefined;
   // Nothing from the previous viewer may survive a sign-out in this tab.
   pendingActions.clear();
   pendingLifecycleActions.clear();
@@ -4601,11 +4913,22 @@ function showLogin() {
   elicitationCards.clear();
   sentElicitations.clear();
   clearPromptImages();
+  bootStatus.classList.add('hidden');
   login.classList.remove('hidden');
   app.classList.add('hidden');
   menuButton.classList.add('hidden');
   backButton.classList.add('hidden');
   closeMenu();
+}
+
+function showConnecting(message = 'Loading the viewer…') {
+  signedOut = false;
+  bootMessage.textContent = message;
+  bootStatus.classList.remove('hidden');
+  login.classList.add('hidden');
+  app.classList.add('hidden');
+  menuButton.classList.add('hidden');
+  backButton.classList.add('hidden');
 }
 
 // Acceptance hands ownership to the daemon. Keep pending feedback until a
@@ -4923,17 +5246,66 @@ function copySessionId(sessionId) {
   }
 }
 
-function presentSnapshot() {
+function refreshOpenConversationDetail(id) {
+  const errorNode = document.querySelector('#conversation-error');
+  errorNode.className = 'dim';
+  errorNode.textContent = 'Refreshing session details…';
+  ensureSessionDetail(id).then(session => {
+    if (route.name !== 'conversation' || route.sessionId !== id || currentSession !== id) return;
+    if (!session?.capabilities?.open && !isTransitioningSession(session)) {
+      navigate({ name: 'dashboard', workspaceId: selectedWorkspaceId() });
+      return;
+    }
+    errorNode.className = '';
+    errorNode.textContent = '';
+    presentSnapshot();
+    loadConversation(true);
+  }, error => {
+    if (route.name !== 'conversation' || route.sessionId !== id || currentSession !== id) return;
+    errorNode.className = 'error';
+    const retry = button('Retry');
+    retry.onclick = () => refreshOpenConversationDetail(id);
+    errorNode.replaceChildren(document.createTextNode(`Could not refresh session details: ${error.message} `), retry);
+  });
+}
+
+function refreshOpenSubagentContext(id) {
+  const errorNode = document.querySelector('#conversation-error');
+  errorNode.className = 'dim';
+  errorNode.textContent = 'Refreshing sub-agent details…';
+  ensureSessionDetail(id).then(() => {
+    if (route.name !== 'conversation' || route.subagentParentId !== id) return;
+    errorNode.className = '';
+    errorNode.textContent = '';
+    renderRoute();
+  }, error => {
+    if (route.name !== 'conversation' || route.subagentParentId !== id) return;
+    errorNode.className = 'error';
+    const retry = button('Retry');
+    retry.onclick = () => refreshOpenSubagentContext(id);
+    errorNode.replaceChildren(document.createTextNode(`Could not refresh sub-agent details: ${error.message} `), retry);
+  });
+}
+
+function presentSnapshot(detailChangedIds = []) {
   snapshot = viewerState.metadata;
   signedOut = false;
   snapshotReceivedAtMs = Date.now();
   reconcileLifecycleActions();
   renderMenuVersion();
+  bootStatus.classList.add('hidden');
   login.classList.add('hidden');
   app.classList.remove('hidden');
   menuButton.classList.remove('hidden');
   if (currentSession) {
     const session = sessionById(currentSession);
+    if (detailChangedIds.includes(currentSession)
+      && route.name === 'conversation'
+      && route.sessionId === currentSession
+      && session?.detail === false) {
+      refreshOpenConversationDetail(currentSession);
+      return true;
+    }
     if (!session
       || (!session.capabilities?.open
         && !isTransitioningSession(session)
@@ -4958,7 +5330,9 @@ async function refresh() {
     const value = await request('/api/snapshot');
     if (eventSource) eventSource.close();
     eventSource = undefined;
-    viewerState.install(value);
+    clearTimeout(eventReconnectTimer);
+    eventReconnectTimer = undefined;
+    viewerState.install(value, value.cursor);
     await loadLaunchDefault();
     return presentSnapshot();
   } catch (e) {
@@ -4988,13 +5362,50 @@ async function knownSignedOut() {
 /// A protected route must stay a login page while the snapshot request is
 /// unauthorized: rendering it first would dereference a snapshot that is not
 /// there.
-async function restoreRoute() {
+let routeRestorePromise,
+  wakeRouteRestore;
+
+function restoreRoute() {
+  if (routeRestorePromise) {
+    wakeRouteRestore?.();
+    return routeRestorePromise;
+  }
+  routeRestorePromise = restoreRouteUntilReady().finally(() => {
+    routeRestorePromise = undefined;
+    wakeRouteRestore = undefined;
+  });
+  return routeRestorePromise;
+}
+
+async function restoreRouteUntilReady() {
+  showConnecting();
   if (await knownSignedOut()) {
     showLogin();
     return;
   }
-  if (!(await refresh())) return;
-  applyRoute();
+  let retryMs = 1000;
+  while (!signedOut) {
+    if (await refresh()) {
+      applyRoute();
+      return;
+    }
+    if (signedOut) return;
+    showConnecting("Mjolnir can't be reached. Retrying…");
+    setConnection(navigator.onLine ? 'reconnecting' : 'offline');
+    await new Promise(resolve => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        wakeRouteRestore = undefined;
+        resolve();
+      };
+      const timer = setTimeout(finish, retryMs);
+      wakeRouteRestore = finish;
+    });
+    retryMs = Math.min(retryMs * 2, 30_000);
+  }
 }
 
 function renderQueue(session) {
@@ -6920,8 +7331,37 @@ async function loadConversation(delta = false) {
 
 async function openConversation(id) {
   if (currentSession === id) return;
-  const session = sessionById(id);
-  if (!session || (!session.capabilities?.open && !isTransitioningSession(session))) return;
+  let session = sessionById(id);
+  if (!session) return;
+  if (session.detail === false) {
+    const errorNode = document.querySelector('#conversation-error');
+    errorNode.className = 'dim';
+    errorNode.textContent = 'Loading session details…';
+    try {
+      session = await ensureSessionDetail(id);
+    } catch (error) {
+      if (route.name === 'conversation' && route.sessionId === id) {
+        errorNode.className = 'error';
+        const retry = button('Retry');
+        retry.onclick = () => openConversation(id);
+        errorNode.replaceChildren(
+          document.createTextNode(`Could not load session details: ${error.message} `),
+          retry,
+        );
+      }
+      return;
+    }
+    if (route.name !== 'conversation' || route.sessionId !== id || currentSession === id) return;
+    errorNode.textContent = '';
+  }
+  if (!session) return;
+  if (!session.capabilities?.open && !isTransitioningSession(session)) {
+    navigate(route.subagentParentId
+      ? { name: 'dashboard', subagentParentId: route.subagentParentId }
+      : { name: 'dashboard', workspaceId: selectedWorkspaceId() });
+    return;
+  }
+  if (currentSession === id) return;
   saveDraft();
   setComposerText('');
   draftComposerBaseline = composerGeneration;
@@ -7936,19 +8376,17 @@ function setConnection(next) {
 
 function reconnect() {
   if (signedOut) return;
+  if (!snapshot) {
+    setConnection(navigator.onLine ? 'reconnecting' : 'offline');
+    wakeRouteRestore?.();
+    return;
+  }
   setConnection('reconnecting');
   startEvents();
-  // A reconnect reconciles by full snapshot rather than assuming the deltas
-  // missed while offline line up with the cursor.
   cursor = 0;
   presentationKey = null;
-  refresh().then(ok => {
-    if (ok) setConnection('online');
-    const session = sessionById(currentSession);
-    if (ok && session?.capabilities?.open && !isTransitioningSession(session)) {
-      loadConversation(false);
-    }
-  });
+  const session = sessionById(currentSession);
+  if (session?.capabilities?.open && !isTransitioningSession(session)) loadConversation(false);
 }
 
 window.addEventListener('online', reconnect);

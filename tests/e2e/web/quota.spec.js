@@ -15,7 +15,7 @@ function between(start, end) {
   return source.slice(from, to);
 }
 const renderSource = [
-  between('function el(', '\nconst login'),
+  between('function el(', '\nconst bootStatus'),
   between('function band(', '\n/// The freshness'),
   between('function formatQuotaReset(', '\nasync function runRefresh('),
   between('async function runRefresh(', '\n// ---------------------------------------------------------------------------\n// Data'),
@@ -40,6 +40,7 @@ async function mount(page, data) {
   await page.setContent(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link\b[^>]*>/g, ''));
   await page.addStyleTag({ content: css });
   await page.evaluate(() => {
+    document.querySelector('#boot-status').classList.add('hidden');
     document.querySelector('#login').classList.add('hidden');
     document.querySelector('#app').classList.remove('hidden');
     document.querySelector('#connection').classList.add('hidden');

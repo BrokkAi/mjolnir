@@ -70,6 +70,22 @@
     "mode": "native"
   },
   "targeted_turn_control_supported": false,
+  "native_subagents": [
+    {
+      "availability": "unknown",
+      "stable_id": "agent-1",
+      "owner_session_id": "session-1",
+      "session_id": "provider-session-1",
+      "parent_session_id": null,
+      "name": "Research helper",
+      "task": "private task text",
+      "capabilities": {
+        "cancel": false,
+        "close": false
+      },
+      "state": "running"
+    }
+  ],
   "retry_assessment_pending": false,
   "id": "session-1",
   "publication_state": "unknown",
@@ -144,6 +160,110 @@
     "container_settings": true,
     "restart": true,
     "interrupt_all": false
+  }
+}
+=== wire detail row for a live session (1 session row and intern table) ===
+{
+  "row": {
+    "subagents": {
+      "mode": "native"
+    },
+    "targeted_turn_control_supported": false,
+    "native_subagents": [
+      {
+        "availability": "unknown",
+        "stable_id": "agent-1",
+        "owner_session_id": "session-1",
+        "session_id": "provider-session-1",
+        "parent_session_id": null,
+        "name": "Research helper",
+        "state": "running",
+        "capabilities": {
+          "cancel": false,
+          "close": false
+        }
+      }
+    ],
+    "retry_assessment_pending": false,
+    "id": "session-1",
+    "publication_state": "unknown",
+    "workspace_id": "default",
+    "title": "Phone launch",
+    "subagent_session_ids": [
+      "child-1"
+    ],
+    "harness_kind": "codex",
+    "profile_id": "codex",
+    "bundle_id": "project",
+    "target_id": "podman",
+    "state": "running",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T00:00:00Z",
+    "has_error": true,
+    "has_checkpoint": false,
+    "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
+    "conversation_available": false,
+    "prompt_images_supported": false,
+    "capabilities_ref": "c3ab2fdf6f887d5c",
+    "project_label": "project",
+    "project_key": "1c8e6dc679624037",
+    "display_location": "podman",
+    "lifecycle": "live",
+    "transitioning": false,
+    "latest_event_ordinal": 0,
+    "activity_details": {
+      "kind": "idle"
+    },
+    "chat_phase": "idle",
+    "is_idle": true,
+    "activity_state": {
+      "state": "idle"
+    },
+    "activity": "<relative activity clock>",
+    "available_commands_ref": "20ccb1ff18326783",
+    "compatible_resume_targets_ref": "be0135ab881b9218"
+  },
+  "interned": {
+    "20ccb1ff18326783": [
+      {
+        "name": "help",
+        "description": "show available Mjolnir and agent commands",
+        "source": "mj"
+      },
+      {
+        "name": "detach",
+        "description": "leave the conversation without stopping the worker",
+        "source": "mj"
+      },
+      {
+        "name": "review",
+        "description": "review the finished turn now, or report how review is configured",
+        "source": "mj",
+        "argument": "status"
+      }
+    ],
+    "be0135ab881b9218": [
+      "podman"
+    ],
+    "c3ab2fdf6f887d5c": {
+      "clear_context": false,
+      "open": false,
+      "prompt": true,
+      "run_shell": true,
+      "interrupt_turn": false,
+      "cancel_operation": false,
+      "suspend": true,
+      "destroy": true,
+      "rename": true,
+      "resume": false,
+      "move_session": true,
+      "set_config": true,
+      "set_plan_mode": false,
+      "change_workspace": true,
+      "container_settings": true,
+      "restart": true,
+      "interrupt_all": false
+    }
   }
 }
 === only workspace (1 session card) ===
@@ -483,6 +603,22 @@
     "mode": "native"
   },
   "targeted_turn_control_supported": false,
+  "native_subagents": [
+    {
+      "availability": "unknown",
+      "stable_id": "agent-1",
+      "owner_session_id": "session-1",
+      "session_id": "provider-session-1",
+      "parent_session_id": null,
+      "name": "Research helper",
+      "task": "private task text",
+      "capabilities": {
+        "cancel": false,
+        "close": false
+      },
+      "state": "completed"
+    }
+  ],
   "retry_assessment_pending": false,
   "id": "session-1",
   "publication_state": "unknown",
@@ -550,6 +686,61 @@
     "container_settings": false,
     "restart": false,
     "interrupt_all": false
+  }
+}
+=== wire summary row for a settled suspended session (1 session row and intern table) ===
+{
+  "row": {
+    "retry_assessment_pending": false,
+    "id": "session-1",
+    "publication_state": "unknown",
+    "workspace_id": "default",
+    "title": "Phone launch",
+    "subagent_session_ids": [
+      "child-1"
+    ],
+    "profile_id": "codex",
+    "bundle_id": "project",
+    "target_id": "podman",
+    "state": "suspended",
+    "created_at": "2026-08-14T00:00:00Z",
+    "updated_at": "2026-08-14T00:00:00Z",
+    "has_error": false,
+    "project_label": "project",
+    "display_location": "podman",
+    "lifecycle": "suspended",
+    "transitioning": false,
+    "activity_details": {
+      "kind": "idle"
+    },
+    "chat_phase": "idle",
+    "is_idle": false,
+    "activity": "<relative activity clock>",
+    "pending_elicitation_count": 0,
+    "detail": false,
+    "queued_prompt_count": 0,
+    "capabilities_ref": "d04f8ed13d81a1cb"
+  },
+  "interned": {
+    "d04f8ed13d81a1cb": {
+      "clear_context": false,
+      "open": false,
+      "prompt": false,
+      "run_shell": false,
+      "interrupt_turn": false,
+      "cancel_operation": false,
+      "suspend": false,
+      "destroy": true,
+      "rename": true,
+      "resume": true,
+      "move_session": false,
+      "set_config": false,
+      "set_plan_mode": false,
+      "change_workspace": true,
+      "container_settings": false,
+      "restart": false,
+      "interrupt_all": false
+    }
   }
 }
 === last top-level message time (1 session card) ===

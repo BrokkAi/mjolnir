@@ -91,8 +91,20 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
       ]);
       const reused = await create('https://github.com/example/browser-fixture.git');
       const snapshot = await fetch('/api/snapshot').then(response => response.json());
-      return { first, parallel, reused, ids: snapshot.bundles.map(bundle => bundle.id) };
+      const sessions = snapshot.sessions.map(row => {
+        const resolved = { ...row };
+        for (const field of ['available_commands', 'capabilities', 'config_options', 'compatible_resume_targets', 'incompatible_resume_targets']) {
+          const ref = resolved[`${field}_ref`];
+          if (ref === undefined) continue;
+          if (!Object.hasOwn(snapshot.interned, ref)) throw new Error(`missing interned ${field}`);
+          resolved[field] = snapshot.interned[ref];
+          delete resolved[`${field}_ref`];
+        }
+        return resolved;
+      });
+      return { first, parallel, reused, ids: snapshot.bundles.map(bundle => bundle.id), cursor: snapshot.cursor, sessions };
     });
+    expect(bundles.cursor).toEqual(expect.objectContaining({ incarnation: expect.any(String), sequence: expect.any(Number) }));
     expect(bundles.reused.bundle_id).toBe(bundles.first.bundle_id);
     expect(bundles.ids).toContain(bundles.first.bundle_id);
     expect(bundles.ids).toContain(bundles.parallel.bundle_id);

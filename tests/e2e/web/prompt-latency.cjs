@@ -17,7 +17,17 @@ const { chromium } = require('@playwright/test');
     for (let index = 0; index < Number(count); index++) {
       await page.waitForFunction(async ({ baseUrl, sessionId }) => {
         const snapshot = await (await fetch(`${baseUrl}/api/snapshot`)).json();
-        return snapshot.sessions.some(s => s.id === sessionId && s.chat_phase === 'idle');
+        if (!snapshot.cursor || !snapshot.interned) throw new Error('snapshot is missing its wire cursor or interned table');
+        const session = snapshot.sessions.find(row => row.id === sessionId);
+        if (!session) return false;
+        for (const field of ['available_commands', 'capabilities', 'config_options', 'compatible_resume_targets', 'incompatible_resume_targets']) {
+          const ref = session[`${field}_ref`];
+          if (ref === undefined) continue;
+          if (!Object.hasOwn(snapshot.interned, ref)) throw new Error(`snapshot is missing interned ${field}`);
+          session[field] = snapshot.interned[ref];
+          delete session[`${field}_ref`];
+        }
+        return session.chat_phase === 'idle';
       }, { baseUrl, sessionId });
       const text = `browser-latency-${Date.now()}-${index}`;
       await prompt.fill(text);

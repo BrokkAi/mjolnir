@@ -1012,7 +1012,7 @@ for (const count of [100, 10000, 100000]) {
   state.apply({kind:'snapshot', cursor:{incarnation:'a',sequence:1}, snapshot:{sessions:rows}});
   const histories = state.resume('w');
   visits = 0;
-  const frame = {kind:'delta', from:{incarnation:'a',sequence:1}, cursor:{incarnation:'a',sequence:2}, metadata:{revision:2}, sessions:[['active',{id:'active',workspace_id:'w',live:true,title:'changed'}]]};
+  const frame = {kind:'delta', from:{incarnation:'a',sequence:1}, cursor:{incarnation:'a',sequence:2}, metadata:{revision:2}, sessions:[['active',{id:'active',workspace_id:'w',live:true,title:'changed'}]], interned:{}};
   assert(state.apply(frame), 'delta was not accepted');
   assert(visits <= 4, 'a live update visited history');
   assert(state.resume('w') === histories, 'unchanged history was rebuilt');
@@ -1021,7 +1021,7 @@ for (const count of [100, 10000, 100000]) {
   let refused = false;
   try { state.apply({...frame, from:{incarnation:'other',sequence:2}, cursor:{incarnation:'other',sequence:3}, sessions:[['active',null]]}); } catch (_) { refused = true; }
   assert(refused && state.rows.get('active') === previous, 'a gap partly applied');
-  state.apply({kind:'delta', from:frame.cursor, cursor:{incarnation:'a',sequence:3}, metadata:{}, sessions:[['active',null]]});
+  state.apply({kind:'delta', from:frame.cursor, cursor:{incarnation:'a',sequence:3}, metadata:{}, sessions:[['active',null]], interned:{}});
   assert(!state.rows.has('active') && !state.live.has('w'), 'deleted membership survived');
   state.apply({kind:'reset_required'});
   assert(state.cursor === null, 'reset retained the cursor');
@@ -3013,10 +3013,81 @@ async fn snapshot_clock_anchor_is_fresh_even_when_the_projection_has_not_changed
             .await
             .unwrap();
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let snapshot: ViewerSnapshot = serde_json::from_slice(&body).unwrap();
-        assert!(snapshot.server_time_ms >= before);
-        assert!(snapshot.server_time_ms <= mj_core::clock::epoch_millis());
+        let snapshot: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let server_time_ms = snapshot["server_time_ms"].as_i64().unwrap();
+        assert!(server_time_ms >= before);
+        assert!(server_time_ms <= mj_core::clock::epoch_millis());
     }
+}
+
+#[tokio::test]
+async fn snapshot_wire_cursor_and_detail_route_share_revision_and_resolve_interned_fields() {
+    let (app, _, _, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    let snapshot_response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    assert_eq!(snapshot_response.headers()[CACHE_CONTROL], "no-store");
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &snapshot_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(snapshot["cursor"]["sequence"], 1);
+    assert!(snapshot["cursor"]["incarnation"].as_str().is_some());
+    let snapshot_row = &snapshot["sessions"][0];
+    let capabilities_key = snapshot_row["capabilities_ref"].as_str().unwrap();
+    assert!(snapshot["interned"].get(capabilities_key).is_some());
+
+    let detail_response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/sessions/session-1/row")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    assert_eq!(detail_response.headers()[CACHE_CONTROL], "no-store");
+    let detail: serde_json::Value = serde_json::from_slice(
+        &detail_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(detail["revision"], snapshot["cursor"]["sequence"]);
+    assert_eq!(detail["row"]["id"], "session-1");
+    assert!(detail["row"]["capabilities"].is_object());
+    assert!(detail["row"].get("capabilities_ref").is_none());
+    assert!(detail["row"].get("detail").is_none());
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/sessions/unknown-session/row")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -3370,7 +3441,7 @@ async fn the_page_carries_no_inline_script_or_style() {
 /// service worker is what keeps a phone on a superseded application.
 #[tokio::test]
 async fn live_state_and_the_service_worker_are_never_stored() {
-    for path in ["/", "/service-worker.js", "/api/snapshot"] {
+    for path in ["/service-worker.js", "/api/snapshot"] {
         let (app, _, _, _, _) = app();
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
@@ -3382,6 +3453,175 @@ async fn live_state_and_the_service_worker_are_never_stored() {
             "{path} may be stored"
         );
     }
+}
+
+#[tokio::test]
+async fn shell_assets_revalidate_with_strong_content_etags() {
+    for path in [
+        "/",
+        "/viewer.css",
+        "/viewer.js",
+        "/markdown.js",
+        "/tool-output.js",
+        "/manifest.webmanifest",
+        "/service-worker.js",
+        "/icon.svg",
+        "/icon-192.png",
+        "/icon-512.png",
+        "/maskable-512.png",
+        "/apple-touch-icon.png",
+        "/fonts/jetbrains-mono.woff2",
+    ] {
+        let (app, _, _, _, _) = app();
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let etag = response.headers()["etag"].clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let digest = Sha256::digest(&body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let expected = format!("\"{digest}\"");
+        assert_eq!(etag, expected, "{path} has a non-content ETag");
+
+        let response = app
+            .oneshot(
+                Request::get(path)
+                    .header("if-none-match", etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{path}");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn viewer_responses_negotiate_fast_compression() {
+    let (app, _, _, _, _) = app();
+    for (encoding, expected) in [("gzip", "gzip"), ("br", "br")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/viewer.js")
+                    .header("accept-encoding", encoding)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-encoding"], expected);
+        assert!(
+            response.headers()["vary"]
+                .to_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("accept-encoding")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            body.len() < VIEWER_JS.len(),
+            "{encoding} did not reduce the asset"
+        );
+        let digest = Sha256::digest(&body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let etag = format!("\"{digest}\"");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/viewer.js")
+                    .header("accept-encoding", encoding)
+                    .header("if-none-match", &etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()["etag"], etag);
+        assert!(!response.headers().contains_key(CONTENT_ENCODING));
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+    }
+
+    let cookie = login_cookie(&app).await;
+    let raw = app
+        .clone()
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let compressed = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .header("accept-encoding", "br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(compressed.headers()["content-encoding"], "br");
+    let compressed_body = compressed.into_body().collect().await.unwrap().to_bytes();
+    assert!(compressed_body.len() < raw.len());
+}
+
+#[tokio::test]
+async fn server_sent_events_stay_uncompressed_and_yield_the_first_event() {
+    let (app, _, _, _, _) = app();
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/events")
+                .header(COOKIE, cookie)
+                .header("accept-encoding", "gzip, br")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+    assert!(response.headers().get("content-encoding").is_none());
+    let first = tokio::time::timeout(Duration::from_secs(1), response.into_body().frame())
+        .await
+        .expect("the first SSE event was buffered")
+        .expect("the SSE stream ended before its first event")
+        .expect("the first SSE frame failed");
+    let data = first.data_ref().expect("the first SSE frame has no data");
+    assert!(data.starts_with(b"event: revision\ndata: "));
 }
 
 /// The worker must leave live state alone entirely rather than caching it
@@ -4054,11 +4294,17 @@ async fn idle_event_stream_releases_snapshot_on_disconnect_or_shutdown() {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let mut body = response.into_body();
-            tokio::time::timeout(Duration::from_secs(2), body.frame())
+            let initial = tokio::time::timeout(Duration::from_secs(2), body.frame())
                 .await
                 .expect("stream starts")
                 .expect("initial frame")
                 .unwrap();
+            if format == "changes" {
+                let bytes = initial.into_data().expect("SSE event is a data frame");
+                let event = String::from_utf8_lossy(&bytes);
+                assert!(event.lines().any(|line| line.starts_with("id: ")));
+                assert!(event.lines().any(|line| line == "event: runtime"));
+            }
             if shutdown {
                 cancellation.cancel();
             } else {

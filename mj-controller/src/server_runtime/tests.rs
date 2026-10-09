@@ -693,6 +693,15 @@ fn golden_phone_session_snapshot() {
         value
     }
 
+    fn wire_row(session: &crate::server::ViewerSession) -> serde_json::Value {
+        let projected = crate::server::viewer_wire::row(session).unwrap();
+        let mut row = projected.row;
+        if row.get("activity").is_some() {
+            row["activity"] = "<relative activity clock>".into();
+        }
+        serde_json::json!({"row": row, "interned": projected.interned})
+    }
+
     let mut out = String::new();
 
     let make_options = |model, effort| {
@@ -803,16 +812,42 @@ fn golden_phone_session_snapshot() {
         ("session-1".to_owned(), operational_state("session-1")),
         ("child-1".to_owned(), operational_state("child-1")),
     ]);
+    let native_agent = |state| mj_core::native_agent::NativeAgent {
+        availability: Default::default(),
+        availability_reason: None,
+        stable_id: Some("agent-1".into()),
+        owner_session_id: "session-1".into(),
+        session_id: "provider-session-1".into(),
+        parent_session_id: None,
+        name: "Research helper".into(),
+        task: "private task text".into(),
+        capabilities: Default::default(),
+        state,
+    };
+    let live_native_agents = BTreeMap::from([(
+        "session-1".to_owned(),
+        vec![native_agent(
+            mj_core::native_agent::NativeAgentState::Running,
+        )],
+    )]);
+    let stopped_native_agents = BTreeMap::from([(
+        "session-1".to_owned(),
+        vec![native_agent(
+            mj_core::native_agent::NativeAgentState::Completed,
+        )],
+    )]);
+    let no_native_agents = BTreeMap::new();
     let project =
         |controller: &Controller,
          workspaces: &[mj_core::workspace::WorkspaceRecord],
-         operational: &BTreeMap<String, mj_core::relay::RelayOperationalState>| {
+         operational: &BTreeMap<String, mj_core::relay::RelayOperationalState>,
+         native_agents: &BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>| {
             viewer_snapshot(
                 controller,
                 workspaces,
                 &BTreeMap::new(),
                 &PhoneSessionViews {
-                    native_agents: &Default::default(),
+                    native_agents,
                     conversations: &Default::default(),
                     queued_prompts: &Default::default(),
                     active_user_shells: &Default::default(),
@@ -830,14 +865,25 @@ fn golden_phone_session_snapshot() {
                 1,
             )
         };
-    let eligible = project(&controller, &two_workspaces, &operational);
+    let eligible = project(
+        &controller,
+        &two_workspaces,
+        &operational,
+        &live_native_agents,
+    );
     section(
         &mut out,
         "live container session with a second workspace",
         "1 session card",
         &session_card(&eligible.sessions.0["session-1"]),
     );
-    let one = project(&controller, &one_workspace, &operational);
+    section(
+        &mut out,
+        "wire detail row for a live session",
+        "1 session row and intern table",
+        &wire_row(&eligible.sessions.0["session-1"]),
+    );
+    let one = project(&controller, &one_workspace, &operational, &no_native_agents);
     section(
         &mut out,
         "only workspace",
@@ -848,7 +894,7 @@ fn golden_phone_session_snapshot() {
     busy.get_mut("child-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
         started_at_ms: 1_000,
     });
-    let child_busy = project(&controller, &two_workspaces, &busy);
+    let child_busy = project(&controller, &two_workspaces, &busy, &no_native_agents);
     section(
         &mut out,
         "turn running in child session",
@@ -862,7 +908,12 @@ fn golden_phone_session_snapshot() {
         .config
         .targets
         .insert("podman".into(), TargetTemplate::LocalBare);
-    let bare = project(&controller, &two_workspaces, &operational);
+    let bare = project(
+        &controller,
+        &two_workspaces,
+        &operational,
+        &no_native_agents,
+    );
     section(
         &mut out,
         "bare target",
@@ -875,12 +926,23 @@ fn golden_phone_session_snapshot() {
         .get_mut("session-1")
         .unwrap()
         .state = SessionState::Stopped;
-    let stopped = project(&controller, &two_workspaces, &operational);
+    let stopped = project(
+        &controller,
+        &two_workspaces,
+        &operational,
+        &stopped_native_agents,
+    );
     section(
         &mut out,
         "stopped session without recovery copy",
         "1 session card",
         &session_card(&stopped.sessions.0["session-1"]),
+    );
+    section(
+        &mut out,
+        "wire summary row for a settled suspended session",
+        "1 session row and intern table",
+        &wire_row(&stopped.sessions.0["session-1"]),
     );
 
     let mut controller = controller_with_profiles(&["codex"]);

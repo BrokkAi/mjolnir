@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
+const { viewerWireSnapshot, viewerDetailResponse } = require('./lab-env');
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, serviceWorkers: 'block' });
 
@@ -34,6 +35,7 @@ function session(overrides = {}) {
     capabilities: { resume: true },
     compatible_resume_targets: ['local', 'container'],
     last_activity_at_ms: 1_000,
+    detail: false,
     ...overrides,
   };
 }
@@ -75,7 +77,12 @@ async function mount(page, { answer = { kind: 'converting-raw-checkout', preview
     const json = value => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) });
     if (pathname === '/api/snapshot') {
       state.snapshots += 1;
-      return json(state.snapshot);
+      return json(viewerWireSnapshot(state.snapshot));
+    }
+    const detailPath = pathname.match(/^\/api\/sessions\/([^/]+)\/row$/);
+    if (detailPath) {
+      const detail = viewerDetailResponse(state.snapshot, decodeURIComponent(detailPath[1]));
+      return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
     if (pathname === '/api/preflight/resume') {

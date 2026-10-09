@@ -1,5 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const path = require('node:path');
+const { viewerWireSnapshot } = require('./lab-env');
 
 test.use({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
 
@@ -107,7 +108,7 @@ async function mockViewer(page, uploadHandler) {
   await page.route('**/api/snapshot', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify(state.snapshot),
+    body: JSON.stringify(viewerWireSnapshot(state.snapshot)),
   }));
   await page.route('**/api/events', route => route.fulfill({
     status: 200,

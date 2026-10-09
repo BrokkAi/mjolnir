@@ -95,16 +95,66 @@ pub(super) async fn clear_session(
     response
 }
 
-pub(super) async fn snapshot(State(state): State<ServerState>) -> Response<Body> {
-    let mut projection = state.snapshot_rx.borrow().clone();
-    // A quiet session can keep the same projection for hours. Clock anchors
-    // describe response time, not the last time that projection changed.
-    projection.server_time_ms = mj_core::clock::epoch_millis();
+pub(super) async fn snapshot(State(state): State<ServerState>) -> Result<Response<Body>, ApiError> {
+    let (snapshot, cursor) = state
+        .viewer_history
+        .record_snapshot(|| state.snapshot_rx.borrow().clone())
+        .map_err(|error| {
+            tracing::error!(error = %format!("{error:#}"), "could not record browser snapshot");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create viewer snapshot",
+            )
+        })?;
+    let projection = viewer_wire::snapshot(&snapshot, &cursor, mj_core::clock::epoch_millis())
+        .map_err(|error| {
+            tracing::error!(error = %format!("{error:#}"), "could not project browser snapshot");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create viewer snapshot",
+            )
+        })?;
     let mut response = Json(projection).into_response();
     response
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+pub(super) async fn session_row(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+) -> Result<Response<Body>, ApiError> {
+    validate_public_id(&session_id)?;
+    let (snapshot, _) = state
+        .viewer_history
+        .record_snapshot(|| state.snapshot_rx.borrow().clone())
+        .map_err(|error| {
+            tracing::error!(error = %format!("{error:#}"), "could not record browser detail row");
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read viewer session",
+            )
+        })?;
+    let Some(session) = snapshot.sessions.0.get(&session_id) else {
+        return Err(ApiError::not_found("session not found"));
+    };
+    let row = viewer_wire::detail_row(session).map_err(|error| {
+        tracing::error!(error = %format!("{error:#}"), session_id, "could not project browser detail row");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read viewer session",
+        )
+    })?;
+    let mut response = Json(serde_json::json!({
+        "revision": snapshot.revision,
+        "row": row,
+    }))
+    .into_response();
     response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// Resolve the configured EC2 launch-template sizes off the request task.
@@ -894,28 +944,66 @@ pub(super) async fn prompt_history(
 #[derive(Default, Deserialize)]
 pub(super) struct EventsQuery {
     format: Option<String>,
+    since: Option<String>,
 }
 
 pub(super) async fn events(
     State(state): State<ServerState>,
     Query(query): Query<EventsQuery>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let mut snapshots = state.snapshot_rx.clone();
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(1);
     if query.format.as_deref() == Some("changes") {
+        let requested_cursor = query
+            .since
+            .as_deref()
+            .or_else(|| {
+                headers
+                    .get("last-event-id")
+                    .and_then(|value| value.to_str().ok())
+            })
+            .and_then(viewer_feed::parse_cursor);
+        let history = state.viewer_history.clone();
         tokio::spawn(async move {
             let publish = async {
-                let mut feed = match viewer_feed::ViewerFeed::new() {
-                    Ok(feed) => feed,
-                    Err(error) => {
+                let mut feed = viewer_feed::ViewerFeed::new(history);
+                let current = snapshots.borrow_and_update().clone();
+                let encoded = tokio::task::spawn_blocking(move || {
+                    let result = feed.start(current, requested_cursor);
+                    (feed, result)
+                })
+                .await;
+                let (mut feed, initial_frames) = match encoded {
+                    Ok((feed, Ok(frames))) => (feed, frames),
+                    Ok((_, Err(error))) => {
                         tracing::error!(%error, "could not start browser publication stream");
                         return;
                     }
+                    Err(error) => {
+                        tracing::error!(%error, "browser publication initializer failed");
+                        return;
+                    }
                 };
+                for frame in initial_frames {
+                    if tx
+                        .send(Ok(Event::default()
+                            .event("runtime")
+                            .id(frame.id)
+                            .data(frame.data)))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 loop {
+                    if snapshots.changed().await.is_err() {
+                        return;
+                    }
                     let current = snapshots.borrow_and_update().clone();
                     let encoded = tokio::task::spawn_blocking(move || {
-                        let result = feed.encode(current);
+                        let result = feed.update(current);
                         (feed, result)
                     })
                     .await;
@@ -935,15 +1023,15 @@ pub(super) async fn events(
                     };
                     for frame in frames {
                         if tx
-                            .send(Ok(Event::default().event("runtime").data(frame)))
+                            .send(Ok(Event::default()
+                                .event("runtime")
+                                .id(frame.id)
+                                .data(frame.data)))
                             .await
                             .is_err()
                         {
                             return;
                         }
-                    }
-                    if snapshots.changed().await.is_err() {
-                        return;
                     }
                 }
             };
