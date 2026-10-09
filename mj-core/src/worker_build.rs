@@ -248,9 +248,14 @@ mod tests {
     fn worker_input_paths_cover_the_normal_and_build_dependency_closure() {
         let workspace = workspace_root();
         let mut command = Command::new("cargo");
+        // Resolving the whole workspace needs every dependency manifest, and a
+        // CI lane has only downloaded the crates its own earlier steps built.
+        // An offline resolve therefore cannot see the full graph; ask cargo to
+        // fetch what it needs, while `--locked` keeps this test from editing
+        // Cargo.lock as a side effect.
         command
             .current_dir(&workspace)
-            .args(["metadata", "--offline", "--format-version", "1"]);
+            .args(["metadata", "--locked", "--format-version", "1"]);
         let output = run_capturing_stdout(&mut command).unwrap();
         assert!(
             output.status.success(),
