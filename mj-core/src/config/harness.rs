@@ -48,7 +48,8 @@ impl HarnessHost {
 pub enum ExecutionPolicy {
     /// Preserve the harness and profile's configured approval behavior.
     ConfiguredApprovals,
-    /// Run every action without sandboxing or approval checks.
+    /// Run without sandboxing. Most harnesses also skip approval checks;
+    /// Muse keeps its auto-review, with only the sandbox disabled.
     Unconstrained,
 }
 
@@ -58,7 +59,8 @@ pub enum ExecutionPolicy {
 pub enum PermissionMode {
     /// Preserve the selected harness profile's approval behavior.
     Guardian,
-    /// Run every action without sandboxing or approval checks.
+    /// Run without sandboxing. Most harnesses also skip approval checks;
+    /// Muse keeps its auto-review, with only the sandbox disabled.
     Yolo,
 }
 
@@ -430,29 +432,35 @@ impl HarnessKind {
     }
 
     /// How this harness realizes a target-level execution policy. Configured
-    /// approvals preserve harness configuration, except that Codex and Claude
-    /// select their guardian mode explicitly.
+    /// approvals preserve harness configuration, except that Codex, Claude,
+    /// and Muse select their guardian mode explicitly. Muse also reviews in
+    /// unconstrained targets, where only the sandbox is disabled.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
-                label: "allowAll / sandbox-off / :unrestricted",
-                acp_mode: Some("allowAll"),
+                // muse-acp's client-side auto-review only sees permission
+                // requests, and `allowAll` emits none ("giving up review
+                // entirely"). Unconstrained Muse keeps autonomy through the
+                // reviewer instead of blind approval; the container remains
+                // the isolation boundary, so only the sandbox is off.
+                label: "promptUnmatched / auto-review / sandbox-off / :ask-me",
                 // muse-acp 0.10 puts Default, Read-only, and Plan on `mode`
                 // and the approval policy on `approval_mode`. Container images
                 // built before it keep the approval policy on `mode`.
+                acp_mode: Some("promptUnmatched"),
                 acp_mode_selector: Some("approval_mode"),
-                acp_setting: None,
+                acp_setting: Some(("auto_review", "on")),
                 launch_flag: None,
-                launch_environment: Some(("MUSE_APPROVAL_MODE", "allowAll")),
+                launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
                 launch_argument: Some(("MUSE_SERVE_ARGS", "--disable-sandbox")),
                 session_sandbox: None,
                 staged_setting: Some(StagedSetting {
                     file: "settings.json",
                     path: &["permissions", "default_profile"],
-                    value: ":unrestricted",
+                    value: ":ask-me",
                     object_version: Some(("schema_version", 1)),
                 }),
             }),

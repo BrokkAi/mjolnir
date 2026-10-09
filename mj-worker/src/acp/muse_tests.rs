@@ -489,18 +489,15 @@ async fn real_muse_adapter_chat_selectors_images_permissions_questions_and_resum
         let trace = std::fs::read_to_string(log).unwrap();
         assert!(trace.contains("QUJDQUJD"));
         // muse-acp 0.10 keeps the approval policy on `approval_mode`, apart
-        // from its session modes.
+        // from its session modes. Both policies review: `allowAll` emits no
+        // permission requests, so the adapter's auto-review would never fire.
         let approval_modes: Vec<serde_json::Value> = trace
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .filter(|message| message["method"] == "session/setApprovalMode")
             .map(|message| message["params"]["mode"].clone())
             .collect();
-        let approval_mode = match policy {
-            Unconstrained => "allowAll",
-            ConfiguredApprovals => "promptUnmatched",
-        };
-        assert_eq!(approval_modes, [serde_json::json!(approval_mode)]);
+        assert_eq!(approval_modes, [serde_json::json!("promptUnmatched")]);
         assert!(trace.contains("reasoningEffort"));
         if scenario == "question" {
             let method = if choice == "accept" {

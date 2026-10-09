@@ -14,9 +14,11 @@ selects Mjolnir's `unconstrained` execution policy. The `permissions` setting is
 only available for a bare runtime on an SSH machine. Mjolnir translates the policy into the
 selected harness's own control: Codex `agent-full-access`, Claude Code
 `bypassPermissions`, Kimi Code `auto`, Grok Build's `--always-approve` launch
-flag, or OpenCode's `"permission": "allow"` config setting. Muse uses
-`allowAll`, `--disable-sandbox`, and the staged
-`:unrestricted` profile. Every one of those approves every call. Note that Kimi Code's
+flag, or OpenCode's `"permission": "allow"` config setting. Muse stages
+`:ask-me`, selects `promptUnmatched` approvals, turns muse-acp's auto-review
+on, and disables only the sandbox (`--disable-sandbox`): the reviewer answers
+each approval without prompting you, so critical actions can still be denied.
+Every other harness's control approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 

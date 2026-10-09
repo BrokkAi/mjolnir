@@ -60,7 +60,7 @@ controls:
 | Claude Code | `bypassPermissions` with its sandbox disabled |
 | Kimi Code | `auto` |
 | Grok Build | always approve with its sandbox disabled |
-| Muse Code | the `:unrestricted` permission profile in its staged settings, `allowAll` approvals, and `--disable-sandbox` |
+| Muse Code | the `:ask-me` permission profile in its staged settings, `promptUnmatched` approvals with auto-review on, and `--disable-sandbox` (the reviewer can still deny) |
 | OpenCode | `"permission": "allow"` in the staged `opencode.json` |
 
 Kimi's mode is named `auto`, but in this context it approves every call. It is
@@ -68,10 +68,11 @@ not a low-risk guardian policy.
 
 Codex, Claude Code, Grok Build, OpenCode, and Muse Code can preserve
 guardian-style approvals on a bare runtime. Muse's guardian is muse-acp's auto-review: Mjolnir
-stages the `:ask-me` permission profile, keeps Muse's sandbox on, selects
-`promptUnmatched` approvals, and turns auto-review on, so a read-only Muse
-reviewer answers each approval and a failed review denies the action. Kimi Code
-cannot preserve approvals. Mjolnir warns when a harness without
+stages the `:ask-me` permission profile, selects `promptUnmatched` approvals,
+and turns auto-review on, so a read-only Muse reviewer answers each approval
+and a failed review denies the action. Muse keeps that review in containers
+too and disables only the sandbox there; on a bare runtime the sandbox stays
+on. Kimi Code cannot preserve approvals. Mjolnir warns when a harness without
 guardian support is paired with a raw target, but a warning is not a
 sandbox—choose a container or instance instead.
 

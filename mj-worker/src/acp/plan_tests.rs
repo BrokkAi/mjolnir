@@ -401,12 +401,23 @@ impl PlanProbe {
             "protocolVersion": 1,
             "_meta": {"jetbrains": {"air": {"version": 1, "capabilities": ["nativeSubagentSessions"]}}}
         })).await;
+        let enforcement = harness.execution_enforcement(policy);
+        // Muse advertises its approval policy the way muse-acp does:
+        // `approval_mode` plus the `auto_review` selector. Every other
+        // harness in this probe uses the legacy mode list.
+        let mut options = if harness == HarnessKind::Muse {
+            crate::acp::tests::muse_policy_options()
+        } else if config {
+            mode_config("plan")
+        } else {
+            json!([])
+        };
         let new = probe.message().await;
         assert_eq!(new["method"], "session/new");
         probe
             .result(
                 &new,
-                json!({"sessionId": "plan-session", "configOptions": if config {mode_config("plan")} else {json!([])}, "modes": {
+                json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
                     "currentModeId": "plan", "availableModes": [
                         {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
                         {"id": "bypassPermissions", "name": "Bypass"},
@@ -417,23 +428,51 @@ impl PlanProbe {
                 }}),
             )
             .await;
-        let Some(enforced) = harness
-            .execution_enforcement(policy)
-            .and_then(|mode| mode.acp_mode())
-        else {
+        let Some(enforced) = enforcement.and_then(|mode| mode.acp_mode()) else {
             return probe;
         };
-        let mode = probe.message().await;
-        if config {
+        // A harness that carries its approval policy on a config selector
+        // (Muse on `approval_mode`) is driven through `set_config_option`
+        // whatever the probe's `config` flag says; the rest use the flag.
+        if let Some(selector) = enforcement.and_then(|mode| mode.acp_mode_selector()) {
+            let mode = probe.message().await;
+            assert_eq!(mode["method"], "session/set_config_option");
+            assert_eq!(mode["params"]["configId"], selector);
+            assert_eq!(mode["params"]["value"], enforced);
+            crate::acp::tests::select_option(
+                &mut options,
+                &json!({"configId": selector, "value": enforced}),
+            );
+            probe
+                .result(&mode, json!({"configOptions": options.clone()}))
+                .await;
+        } else if config {
+            let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_config_option");
             assert_eq!(mode["params"]["value"], enforced);
             probe
                 .result(&mode, json!({"configOptions": mode_config(enforced)}))
                 .await;
         } else {
+            let mode = probe.message().await;
             assert_eq!(mode["method"], "session/set_mode");
             assert_eq!(mode["params"]["modeId"], enforced);
             probe.result(&mode, json!({})).await;
+        }
+        // Muse's auto-review is off in every session the bridge opens, so
+        // the worker selects it on every open that enforces it.
+        if let Some((key, value)) = enforcement.and_then(|mode| mode.acp_setting()) {
+            let setting = probe.message().await;
+            assert_eq!(setting["method"], "session/set_config_option");
+            assert_eq!(setting["params"]["configId"], key);
+            assert_eq!(setting["params"]["value"], value);
+            crate::acp::tests::select_option(
+                &mut options,
+                &json!({"configId": key, "value": value}),
+            );
+            probe
+                .result(&setting, json!({"configOptions": options}))
+                .await;
         }
         probe
     }
