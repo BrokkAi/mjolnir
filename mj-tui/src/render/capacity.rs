@@ -1,6 +1,7 @@
 use super::*;
 
 use mj_chat::components::ControlKind;
+use ratatui::layout::{Flex, Layout};
 
 /// How many machines an EC2 fleet is running, as the fleet's answer to the
 /// "In Use" question.
@@ -440,9 +441,8 @@ pub(crate) fn render_capacity(
 }
 
 /// Registers each visible row's Disks summary as the button that opens its
-/// filesystem dropdown. The cell positions repeat the table's own layout:
-/// a border and the two-cell selection marker, then each column and its gap,
-/// and below the border, the header and the rows from the scroll offset.
+/// filesystem dropdown. Use the table's layout constraints so the hit region
+/// follows the rendered text even when columns shrink to fit the pane.
 fn register_disks_buttons(
     dashboard: &DashboardState,
     area: Rect,
@@ -451,25 +451,24 @@ fn register_disks_buttons(
     buttons: &[u16],
     offset: usize,
 ) {
-    let inner_right = area.right().saturating_sub(1);
-    let inner_bottom = area.bottom().saturating_sub(1);
-    let x = column_widths.iter().take(CAPACITY_HEADERS.len() - 1).fold(
-        area.x.saturating_add(3),
-        |x, width| {
-            x.saturating_add(*width)
-                .saturating_add(CAPACITY_COLUMN_SPACING)
-        },
-    );
+    let inner = area.inner(Margin::new(1, 1));
+    let [_, columns_area] =
+        Layout::horizontal([Constraint::Length(2), Constraint::Fill(0)]).areas(inner);
+    let columns = Layout::horizontal(column_widths.iter().copied().map(Constraint::Length))
+        .flex(Flex::Start)
+        .spacing(CAPACITY_COLUMN_SPACING)
+        .split(columns_area);
+    let disks = columns[CAPACITY_HEADERS.len() - 1];
     let mut y = area.y.saturating_add(2);
     let mut areas = vec![None; row_count];
     let mut form = dashboard.surface_form.borrow_mut();
     for (index, width) in buttons.iter().enumerate().skip(offset) {
-        if y >= inner_bottom || x >= inner_right {
+        if y >= inner.bottom() {
             break;
         }
-        let width = (*width).min(inner_right - x);
+        let width = (*width).min(disks.width);
         if width > 0 {
-            let button_area = Rect::new(x, y, width, 1);
+            let button_area = Rect::new(disks.x, y, width, 1);
             form.register(
                 crate::surface_controls::SurfaceControl::CapacityDisks(index),
                 ControlKind::Button,

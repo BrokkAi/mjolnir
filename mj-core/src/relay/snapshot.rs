@@ -910,7 +910,26 @@ impl RelayOperationalState {
     /// Whether a controller may replace this worker without losing work.
     #[must_use]
     pub fn safe_to_replace(&self, harness: HarnessKind) -> bool {
+        if self.harness_preparation_failed() {
+            // This process can never start its harness. Accepted commands stay
+            // in the journal; independently running processes must still settle.
+            return self.checkpoint_barrier.is_none()
+                && self.active_user_shells.is_empty()
+                && self.active_agent_terminals.is_empty()
+                && self.background_commands.is_empty()
+                && self.native_agent_count == 0
+                && self.tools_in_flight.is_empty();
+        }
         crate::activity::safe_to_replace(&self.facts(), harness)
+    }
+
+    /// Terminal startup failure; this worker cannot retry preparation in place.
+    #[must_use]
+    pub fn harness_preparation_failed(&self) -> bool {
+        matches!(
+            self.harness_preparation,
+            Some(HarnessPreparation::Failed { .. })
+        )
     }
 
     /// Why the session is or is not quiet right now, for a log line.

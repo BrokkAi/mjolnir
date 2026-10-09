@@ -1531,6 +1531,11 @@ async fn reopen_subagent_admission_after_move(
     connection: &mut StandaloneSession,
     readiness_owner: Option<&crate::worker_lifecycle::WorkerPermit>,
 ) -> Result<()> {
+    // A failed harness has no delegation service to reopen. Keep its snapshot
+    // attached so background policy can replace the worker that failed startup.
+    if connection.operational().harness_preparation_failed() {
+        return Ok(());
+    }
     let owner = if let Some(owner) = readiness_owner {
         Some(owner.clone())
     } else {
@@ -1605,7 +1610,11 @@ async fn observe_worker_readiness(
         let source_target = recovery.source_target.clone();
         let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            crate::worker_lifecycle::observe_ready_worker(&owner, &source_target, &snapshot)?;
+            crate::worker_lifecycle::observe_worker_restart_outcome(
+                &owner,
+                &source_target,
+                &snapshot,
+            )?;
             Ok(())
         })
         .await

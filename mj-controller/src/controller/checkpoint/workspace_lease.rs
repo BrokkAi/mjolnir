@@ -28,7 +28,11 @@ impl IdleWorkspaceLease {
                 return Ok(None);
             };
             let command_id = new_command_id("worker-upgrade")?;
-            if lease.connection_mut().protocol_version() >= 21 {
+            let preparation_failed = lease
+                .connection_mut()
+                .operational()
+                .harness_preparation_failed();
+            if !preparation_failed && lease.connection_mut().protocol_version() >= 21 {
                 if !lease
                     .connection_mut()
                     .reserve_idle(command_id.clone())
@@ -38,8 +42,11 @@ impl IdleWorkspaceLease {
                     return Ok(None);
                 }
             } else {
-                // Historical workers have the same disconnect-safe barrier.
-                // Never wait behind work or infer idle from a failed probe.
+                // Failed preparation is terminal: no harness can start work,
+                // and old workers cannot include that fact in ReserveIdle.
+                // Their lifecycle dispatcher can still establish this barrier,
+                // which prevents independent shells from starting. Recheck live
+                // processes after it is ready. Historical workers use it too.
                 lease
                     .connection_mut()
                     .submit(

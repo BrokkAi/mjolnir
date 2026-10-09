@@ -3349,6 +3349,7 @@ fn golden_dashboard_resource_panels() {
 
 /// Long disk lists stay in the anchored dropdown and can be navigated without
 /// increasing the Targets table's row height.
+// Hard-won: 371d4652: Disks hit regions drifted from the text when table columns shrank.
 #[test]
 fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
     use mj_core::targets::storage::{FilesystemSpace, TargetStorageView};
@@ -3371,6 +3372,33 @@ fn a_long_disks_dropdown_keeps_the_target_row_one_line_and_scrolls() {
         |_| None,
         None,
     )]);
+    let table_width = capacity_table_width(&dashboard);
+    for width in [table_width - 5, table_width, table_width + 20] {
+        for character in 0.."Disks ▾".chars().count() {
+            let mut terminal = Terminal::new(TestBackend::new(width + 6, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    dashboard.begin_surface_frame();
+                    render_capacity(frame, Rect::new(3, 2, width, 6), &mut dashboard, None);
+                    dashboard.end_surface_frame();
+                })
+                .unwrap();
+            let lines = buffer_lines(terminal.backend().buffer());
+            let (column, row) = point(&lines, "Disks ▾");
+            let position = (column + character as u16, row);
+            dashboard
+                .handle_surface_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), position));
+            dashboard
+                .handle_surface_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), position));
+            assert!(
+                dashboard.capacity_disks_menu_open("ssh:precision-3260"),
+                "Disks character {character} at pane width {width}: {:?}, position {position:?}, regions {:?}",
+                lines[usize::from(row)],
+                dashboard.capacity_disks_areas.borrow()
+            );
+            dashboard.handle_key(key(KeyCode::Esc));
+        }
+    }
     let rendered = drawn_dashboard(&mut dashboard, 160);
     let lines = rendered.lines().map(str::to_owned).collect::<Vec<_>>();
     let disk_cell = point(&lines, "Disks ▾");

@@ -1,0 +1,99 @@
+{
+  "id": "S45",
+  "title": "Provider API connection dropped with ECONNRESET",
+  "category": "transient-provider",
+  "harness": "claude",
+  "source": {
+    "kind": "user-screenshot",
+    "note": "Reported on 2026-10-08: the final agent reply was API Error: Connection dropped (ECONNRESET), followed by prompt failed: Internal error with errorKind server_error. The screenshot did not include the harness, user prompt or runtime facts; Claude and a neutral unfinished request reconstruct the evidence shape, not a recorded session. Completion preserves the JSON-RPC Internal error code (-32603), as TurnDiagnostic::from_acp does; errorKind is not propagated."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "idle",
+    "harness_turn_open": false,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "claude",
+    "phase": "replied",
+    "silent_for_s": 0,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Finish the requested implementation.",
+    "assistant_text_tail": "API Error: Connection dropped (ECONNRESET)",
+    "completion": {
+      "stop_reason": "error",
+      "diagnostic": {
+        "message": "API Error: Connection dropped (ECONNRESET)",
+        "code": "-32603"
+      }
+    }
+  },
+  "recorded_verdict": {
+    "failure": {
+      "choice": "transient_provider",
+      "confidence": 1.0,
+      "probabilities": {
+        "other": 0.0,
+        "none": 0.0,
+        "transient_provider": 1.0,
+        "unclear": 0.0,
+        "quota": 0.0
+      }
+    },
+    "input": {
+      "choice": "none",
+      "confidence": 0.32,
+      "probabilities": {
+        "required": 0.02,
+        "none": 0.49,
+        "unclear": 0.47,
+        "redundant_request": 0.02
+      }
+    },
+    "work": {
+      "choice": "unclear",
+      "confidence": 0.51,
+      "probabilities": {
+        "finished": 0.01,
+        "authorized_unfinished": 0.36,
+        "waiting": 0.0,
+        "unclear": 0.63
+      }
+    },
+    "background": {
+      "choice": "unclear",
+      "confidence": 0.94,
+      "probabilities": {
+        "needed": 0.0,
+        "unneeded": 0.04,
+        "unclear": 0.96
+      }
+    }
+  },
+  "expected": {
+    "failure": "transient_provider",
+    "input": "none",
+    "work": "unclear",
+    "quiet": null,
+    "action": "retry_provider",
+    "wrong_actions": [
+      "continue",
+      "await_input",
+      "finished"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [],
+    "strict_input_scoring": true,
+    "verdict_provenance": "Direct Jev jev-1.13.0 replay of reconstructed screenshot evidence on 2026-10-08 using the updated bundled questions. Work is unknown because the screenshot does not include the user's request or prior conversation. Response 0 in worker-diagnostic-validation.jsonl under /mnt/optane/mj-jev-network-connectivity-20261008/."
+  }
+}

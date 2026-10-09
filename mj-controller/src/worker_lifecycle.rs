@@ -92,8 +92,9 @@ pub(crate) fn require(session_id: &str) -> Result<WorkerPermit> {
         .with_context(|| format!("worker mutation for {session_id} has no lifecycle owner"))
 }
 
-/// A reconnect is an observation, not permission to erase another task's swap.
-pub(crate) fn observe_ready_worker(
+/// Observe a completed boot while holding ownership through the snapshot read.
+/// A live swap retains its owner; an abandoned failed boot can be retried.
+pub(crate) fn observe_worker_restart_outcome(
     owner: &WorkerPermit,
     target: &mj_core::state::TargetLocator,
     snapshot: &mj_core::state::ManagedSessionSnapshot,
@@ -106,15 +107,23 @@ pub(crate) fn observe_ready_worker(
         if &intent.target != target {
             return Ok(());
         }
+        let failed = snapshot.operational.harness_preparation_failed();
         let ready = snapshot.operational.native_session_is_ready()
             || snapshot.operational.checkpoint_only
             || snapshot.operational.execution == mj_core::relay::RelayExecutionState::Closed;
-        if !ready {
+        if !ready && !failed {
             return Ok(());
+        }
+        if failed {
+            tracing::warn!(
+                session_id,
+                preparation = ?snapshot.operational.harness_preparation,
+                "replacement worker failed harness preparation; releasing failed intent"
+            );
         }
         let prepared = crate::database::worker_restart_phase(session_id)?
             == Some(crate::database::WorkerRestartPhase::Prepared);
-        if !prepared && !intent.desired_build.is_empty()
+        if !failed && !prepared && !intent.desired_build.is_empty()
             && snapshot.worker_build.as_ref() != Some(&intent.desired_build) {
             // Handoff can interrupt a swap before the old process stops. A
             // ready old worker is an aborted swap, not a pending boot to kill.

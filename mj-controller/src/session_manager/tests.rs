@@ -1265,6 +1265,31 @@ fn leased_relay_child_serves_stdio() {
                     .unwrap();
                 writeln!(log, "{}", request.request.method_name()).unwrap();
             }
+            let preparation: Option<mj_core::relay::HarnessPreparation> =
+                std::fs::read(PathBuf::from(&root).join("preparation.json"))
+                    .ok()
+                    .map(|body| serde_json::from_slice(&body).unwrap());
+            if preparation.is_some()
+                && matches!(request.request, RelayRequest::SetSubagentAdmission { .. })
+            {
+                mj_core::relay::write_relay_frame(
+                    &mut output,
+                    &RelayResponseEnvelope {
+                        request_id: request.request_id,
+                        protocol_version: request.protocol_version,
+                        body: RelayResponseBody::Error {
+                            error: mj_core::relay::relay_protocol_error(
+                                mj_core::relay::RelayErrorCode::InvalidState,
+                                "harness preparation failed at harness-profile: missing staged Claude delegation server",
+                                false,
+                                None,
+                            ),
+                        },
+                    },
+                )
+                .unwrap();
+                continue;
+            }
             let history = match &request.request {
                 RelayRequest::CpuUsage => {
                     let path = PathBuf::from(&root).join("cpu-usage.json");
@@ -1360,7 +1385,7 @@ fn leased_relay_child_serves_stdio() {
                 .unwrap();
                 continue;
             }
-            let response =
+            let mut response =
                 if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
                     if let Some(marker) = &marker
                         && role.as_deref() == Some("slow")
@@ -1380,6 +1405,22 @@ fn leased_relay_child_serves_stdio() {
                 } else {
                     relay.handle(request)
                 };
+            if let Some(preparation) = preparation {
+                relay.dispatch_preparation_lifecycle().unwrap();
+                if let RelayResponseBody::Ok {
+                    payload:
+                        RelayResponsePayload::Status(state)
+                        | RelayResponsePayload::Attached { state, .. },
+                } = &mut response.body
+                {
+                    state.harness_preparation = Some(preparation);
+                    if let Ok(shell) =
+                        std::fs::read(PathBuf::from(&root).join("active-user-shell.json"))
+                    {
+                        state.active_user_shells = vec![serde_json::from_slice(&shell).unwrap()];
+                    }
+                }
+            }
             mj_core::relay::write_relay_frame(&mut output, &response).unwrap();
         }
     }
@@ -2139,6 +2180,216 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
 }
 
 const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
+
+// Hard-won: c2107d5c: admission repair hid failed startup and prevented automatic worker replacement.
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_retains_failed_preparation_for_worker_replacement() {
+    const CHILD: &str = "MJ_TEST_FAILED_PREPARATION_REPLACEMENT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(exact_test_name(
+            "reconnect_retains_failed_preparation_for_worker_replacement",
+        ))
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "failed-preparation-replacement")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    mj_core::config::Config::update(|config| {
+        config.mailbox.enabled = true;
+        Ok(())
+    })
+    .unwrap();
+    register_leased_relay_session();
+    let relay_directory = tempfile::tempdir().unwrap();
+    let relay_root = relay_directory.path().join(LEASED_RELAY_SESSION);
+    std::fs::create_dir(&relay_root).unwrap();
+    let durable_target = mj_core::state::TargetLocator::LocalBare {
+        worker_root: relay_root.clone(),
+    };
+    let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    session.harness_kind = mj_core::config::HarnessKind::Claude;
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    session.target = Some(durable_target.clone());
+    crate::database::save_session(&session).unwrap();
+
+    let failure = mj_core::relay::HarnessPreparation::Failed {
+        step: "harness-profile".into(),
+        error: "missing staged Claude delegation server".into(),
+        at_ms: 1,
+    };
+    let preparation_path = relay_root.join("preparation.json");
+    std::fs::write(&preparation_path, serde_json::to_vec(&failure).unwrap()).unwrap();
+    let mut target = leased_relay_target(&relay_root);
+    target.worker_recovery = Some(WorkerRecoveryPlan {
+        source_target: durable_target.clone(),
+        target: None,
+        workspace: None,
+        exit_record: None,
+        liveness_probe: CommandSpec::new("printf", ["alive\n"]),
+        binary_refresh: None,
+        launch_refresh: None,
+        restart: crate::targets::CommandPlan {
+            description: "failed preparation is not a dead transport".into(),
+            commands: Vec::new(),
+        },
+    });
+    let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+        LEASED_RELAY_SESSION,
+        "test failed replacement",
+    )
+    .unwrap()
+    .unwrap();
+    owner
+        .scope_blocking(|| {
+            owner.begin_restart(&durable_target, String::new())?;
+            crate::database::advance_worker_restart(
+                LEASED_RELAY_SESSION,
+                owner.operation_id(),
+                crate::database::WorkerRestartPhase::Swapping,
+            )?;
+            crate::database::advance_worker_restart(
+                LEASED_RELAY_SESSION,
+                owner.operation_id(),
+                crate::database::WorkerRestartPhase::AwaitingReadiness,
+            )
+        })
+        .unwrap();
+    let mut connection = None;
+    let snapshot = sync_actor_connection(&target, &mut connection)
+        .await
+        .expect("failed startup must remain observable for automatic replacement")
+        .unwrap();
+    assert_eq!(
+        snapshot.operational.harness_preparation,
+        Some(failure.clone())
+    );
+    assert!(!relay_root.join("subagent-admission.json").exists());
+    assert!(
+        crate::database::load_worker_restart(LEASED_RELAY_SESSION)
+            .unwrap()
+            .is_some(),
+        "an active replacement owner retains its intent"
+    );
+    drop(owner);
+    sync_actor_connection(&target, &mut connection)
+        .await
+        .unwrap();
+    assert!(
+        crate::database::load_worker_restart(LEASED_RELAY_SESSION)
+            .unwrap()
+            .is_none(),
+        "terminal startup failure settles an abandoned replacement intent"
+    );
+    // Old workers refuse the ordinary idle reservation after failed startup.
+    assert!(
+        !connection
+            .as_mut()
+            .unwrap()
+            .reserve_idle("ordinary-idle-reservation".into())
+            .await
+            .unwrap()
+    );
+    drop(connection);
+
+    let manager = spawn_session_manager().unwrap();
+    manager.targets.send_replace(vec![target]);
+    let handle = manager
+        .control
+        .wait_for_session(LEASED_RELAY_SESSION, Duration::from_secs(10))
+        .await
+        .unwrap();
+    handle.sync_now().await.unwrap();
+    assert!(handle.view().connected);
+    handle
+        .enqueue_submit(
+            "durable-prompt-after-failure".into(),
+            RelayCommand::Prompt {
+                prompt: vec![ContentBlock::from("work that must survive replacement")],
+            },
+        )
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let shell_path = relay_root.join("active-user-shell.json");
+    std::fs::write(
+        &shell_path,
+        serde_json::to_vec(&mj_core::relay::ActiveUserShell {
+            command_id: "live-user-shell".into(),
+            command: "sleep 60".into(),
+            created_at_ms: 1,
+            started_at_ms: Some(1),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    handle.sync_now().await.unwrap();
+    assert!(
+        crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
+            &handle,
+            mj_core::config::HarnessKind::Claude,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "failed startup must not authorize stopping a live user shell"
+    );
+    std::fs::remove_file(shell_path).unwrap();
+    let mut lease = crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
+        &handle,
+        mj_core::config::HarnessKind::Claude,
+    )
+    .await
+    .unwrap()
+    .expect("terminal startup failure admits replacement under a checkpoint barrier");
+    lease.verify().await.unwrap();
+    lease.release().await.unwrap();
+    handle.sync_now().await.unwrap();
+    let operational = handle.view().snapshot.unwrap().operational;
+    assert_eq!(operational.harness_preparation, Some(failure));
+    assert!(
+        operational
+            .active_prompt
+            .iter()
+            .map(|prompt| prompt.command_id.as_str())
+            .chain(
+                operational
+                    .queued_prompts
+                    .iter()
+                    .map(|prompt| prompt.command_id.as_str()),
+            )
+            .any(|id| id == "durable-prompt-after-failure")
+    );
+
+    std::fs::write(
+        preparation_path,
+        serde_json::to_vec(&mj_core::relay::HarnessPreparation::Preparing {
+            step: "harness-profile".into(),
+            since_ms: 1,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    handle.sync_now().await.unwrap();
+    assert!(
+        crate::controller::IdleWorkspaceLease::acquire_for_upgrade(
+            &handle,
+            mj_core::config::HarnessKind::Claude,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "preparation still in progress must not be stopped"
+    );
+    manager.shutdown.shutdown().await.unwrap();
+}
 
 #[cfg(unix)]
 #[tokio::test]
@@ -3403,7 +3654,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
         .unwrap()
         .unwrap();
-    crate::worker_lifecycle::observe_ready_worker(
+    crate::worker_lifecycle::observe_worker_restart_outcome(
         &observer,
         &record.target.clone().unwrap(),
         &snapshot,
@@ -3437,7 +3688,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     let observer = crate::worker_lifecycle::WorkerPermit::try_observation(&record.id)
         .unwrap()
         .unwrap();
-    crate::worker_lifecycle::observe_ready_worker(
+    crate::worker_lifecycle::observe_worker_restart_outcome(
         &observer,
         &record.target.clone().unwrap(),
         &snapshot,
