@@ -28,7 +28,10 @@ fn utility(
         binary.to_string_lossy().into_owned()
     } else {
         let root = targets::worker_root(backend, id)?;
-        let helper = format!("{root}/move-helper-{}", mj_core::worker_build::BUILD_ID);
+        let helper = format!(
+            "{root}/move-helper-{}",
+            mj_core::worker_build::WORKER_BUILD_ID
+        );
         let probe = executor.execute(&targets::command_on_locator(
             backend,
             id,

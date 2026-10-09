@@ -34,12 +34,15 @@ triple="${arch}-unknown-linux-musl"
 output="$repo_root/target/worker/$triple/$profile"
 repo_key=$(printf '%s' "$repo_root" | cksum | cut -d ' ' -f 1)
 build_revision=${MJ_BUILD_REVISION:-$(git -C "$repo_root" rev-parse HEAD)}
+worker_inputs_id=$(python3 "$repo_root/mj-core/worker_build_inputs.py" \
+  --package-root "$repo_root/mj-core" --fallback-revision "$build_revision")
 mkdir -p "$output"
 
 # Keep Linux build caches on a container volume, separate from macOS Cargo
 # artifacts. Only the completed executable crosses the host filesystem mount.
 "$engine" run --rm --init --user 0 --entrypoint sh \
   --env "MJ_BUILD_REVISION=$build_revision" \
+  --env "MJ_WORKER_INPUTS_ID=$worker_inputs_id" \
   --mount "type=bind,source=$repo_root,target=/source,readonly" \
   --mount "type=bind,source=$output,target=/output" \
   --mount "type=volume,source=mjolnir-dev-worker-$arch-$repo_key,target=/build" \

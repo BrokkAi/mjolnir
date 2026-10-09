@@ -45,7 +45,7 @@ fn skips_stale_and_unstamped_candidates_and_reports_them_when_none_match() {
         stale.to_str().unwrap(),
         legacy.to_str().unwrap(),
         "2.0.0+",
-        BUILD_ID,
+        WORKER_BUILD_ID,
         "missing worker build stamp",
         "cargo build --target x86_64-unknown-linux-musl",
     ] {
@@ -229,7 +229,7 @@ fn pinning_logs_each_selected_worker_with_its_source_and_build() {
         "beside the mj binary",
         "x86_64-unknown-linux-musl",
         &worker.display().to_string(),
-        BUILD_ID,
+        WORKER_BUILD_ID,
     ] {
         assert!(line.contains(expected), "missing {expected:?} in {line}");
     }
@@ -1611,9 +1611,8 @@ fn stopped_docker_session_recovers_with_the_current_worker_build() {
                 "recovered worker must read the new launch configuration"
             );
             ensure!(
-                connection.worker_build()
-                    == Some(mj_core::worker_launch::worker_executable_digest(&source)?.as_str()),
-                "the recovered process must run the installed build"
+                connection.worker_build() == Some(mj_core::worker_build::WORKER_BUILD_ID),
+                "the recovered process must report the installed worker inputs"
             );
             Ok::<_, anyhow::Error>(())
         })?;

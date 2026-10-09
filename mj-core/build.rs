@@ -85,9 +85,49 @@ fn commit_time(root: &Path, revision: &str) -> Option<i64> {
     String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
+fn worker_inputs_id(root: &Path, fallback_revision: &str) -> String {
+    if let Ok(override_id) = std::env::var("MJ_WORKER_INPUTS_ID") {
+        return validate_worker_inputs_id(&override_id);
+    }
+    if root.join(".cargo_vcs_info.json").exists() || git_revision(root).is_none() {
+        return validate_worker_inputs_id(fallback_revision);
+    }
+    let helper = root.join("worker_build_inputs.py");
+    let _ = tracked_read(&helper).expect("worker input identity helper");
+    let _ = tracked_read(&root.join("worker-build-inputs.txt")).expect("worker input path list");
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    let output = std::process::Command::new(python)
+        .arg(&helper)
+        .args(["--package-root"])
+        .arg(root)
+        .args(["--fallback-revision", fallback_revision])
+        .output()
+        .unwrap_or_else(|error| panic!("run worker input identity helper: {error}"));
+    assert!(
+        output.status.success(),
+        "worker input identity helper failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let identity = String::from_utf8(output.stdout)
+        .expect("worker input identity is UTF-8")
+        .trim()
+        .to_owned();
+    validate_worker_inputs_id(&identity)
+}
+
+fn validate_worker_inputs_id(identity: &str) -> String {
+    let identity = identity.trim();
+    assert!(
+        identity.len() == 40 && identity.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "worker input identity must be a full 40-character digest"
+    );
+    identity.to_ascii_lowercase()
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MJ_BUILD_REVISION");
+    println!("cargo:rerun-if-env-changed=MJ_WORKER_INPUTS_ID");
     println!("cargo:rerun-if-env-changed=MJ_BUILD_COMMIT_TIME");
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let revision = std::env::var("MJ_BUILD_REVISION").ok().or_else(|| {
@@ -105,11 +145,14 @@ fn main() {
         revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "MJ_BUILD_REVISION must be a full 40-character Git commit"
     );
+    let worker_inputs_id = worker_inputs_id(&root, &revision);
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     println!(
         "cargo:rustc-env=MJ_BUILD_ID={}+{}",
-        std::env::var("CARGO_PKG_VERSION").unwrap(),
+        version,
         revision.to_ascii_lowercase()
     );
+    println!("cargo:rustc-env=MJ_WORKER_BUILD_ID={version}+{worker_inputs_id}");
     // Empty when unknown: daemon startup then cannot order this build against
     // a different revision of the same release.
     println!(
@@ -145,8 +188,7 @@ fn main() {
         let script = tracked_read(&fixture).expect("fake command fixture");
         let stamped = format!(
             "{script}\n#\0MJ-WORKER-BUILD:{}+{}\0\n",
-            std::env::var("CARGO_PKG_VERSION").unwrap(),
-            revision.to_ascii_lowercase()
+            version, worker_inputs_id
         );
         let destination =
             PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("fake-worker.sh");

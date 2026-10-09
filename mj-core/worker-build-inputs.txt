@@ -1,0 +1,11 @@
+# Keep this list in sync with the normal/build dependency closure of
+# brokk-mj-worker. Directory entries cover every source and crate-local build
+# input; the root files below control workspace dependency and toolchain choice.
+Cargo.lock
+Cargo.toml
+mj-checkpoint
+mj-core
+mj-review
+mj-transcript
+mj-worker
+rust-toolchain.toml

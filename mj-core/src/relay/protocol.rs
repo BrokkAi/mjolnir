@@ -504,10 +504,9 @@ pub enum RelayResponsePayload {
         negotiated: u32,
         relay_version: String,
         session_id: String,
-        /// Content address of the worker executable that answered. The crate
-        /// version cannot tell two builds apart, so this is what a controller
-        /// compares against the binary it would install. Absent from a worker
-        /// built before the field existed, which counts as outdated.
+        /// Worker-input compatibility identity of the worker that answered.
+        /// Absent from a worker built before the field existed, which counts
+        /// as outdated.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_build: Option<String>,
     },
