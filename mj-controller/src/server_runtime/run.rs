@@ -2,6 +2,33 @@ use super::*;
 
 mod project_discovery;
 
+/// Logs how long each web viewer startup step took, and the total so far.
+struct StartupSteps {
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl StartupSteps {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            last: now,
+        }
+    }
+
+    fn finished(&mut self, step: &'static str) {
+        let now = std::time::Instant::now();
+        tracing::info!(
+            step,
+            step_ms = now.duration_since(self.last).as_millis() as u64,
+            total_ms = now.duration_since(self.started).as_millis() as u64,
+            "web viewer startup step finished"
+        );
+        self.last = now;
+    }
+}
+
 pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
@@ -10,9 +37,14 @@ pub(crate) async fn run_server(
     mut workspace_updates: tokio::sync::watch::Receiver<Vec<WorkspaceRecord>>,
     services: crate::daemon::delegation::Services,
 ) -> Result<()> {
+    // Each step is logged with its duration: the viewer and API stay
+    // "starting" until all of them finish, and startup has taken minutes.
+    let mut startup = StartupSteps::new();
     let resolved = resolve_server_args(args, termination.clone()).await?;
+    startup.finished("resolve server arguments and TLS");
     let bind = resolved.bind;
     let mut controller = Controller::load()?;
+    startup.finished("load controller state");
     let mut daemon_revisions = daemon_runtime.revisions();
     daemon_revisions.borrow_and_update();
     workspace_updates.borrow_and_update();
@@ -22,16 +54,19 @@ pub(crate) async fn run_server(
     let mut revision = daemon_runtime.allocate_revision();
     let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
     let mut queued_prompts = projected_queued_prompts(&controller)?;
+    startup.finished("project queued prompts");
     let mut active_user_shells = std::collections::BTreeMap::new();
     let mut pending_elicitations = std::collections::BTreeMap::new();
     let mut prompt_images = std::collections::BTreeSet::new();
     let mut operational = std::collections::BTreeMap::new();
     let mut native_agents = std::collections::BTreeMap::new();
     let mut materialized_activity = load_materialized_activity(&controller).await?;
+    startup.finished("load materialized activity");
     let mut project_sources = PhoneProjectSources::default();
     let mut move_recoveries = ViewerMoveRecoveries::new();
     let mut publication = publication::ViewerPublication::default();
     let initial = daemon_runtime.runtime_publication()?;
+    startup.finished("capture runtime publication");
     publication.observe_runtime(&initial, &mut native_agents, &mut move_recoveries);
     controller.state.sessions = initial.records;
     controller.state.subagents = initial.subagents;
@@ -82,6 +117,7 @@ pub(crate) async fn run_server(
         },
         revision,
     ));
+    startup.finished("build first viewer snapshot");
     let (conversation_tx, conversation_rx) = tokio::sync::watch::channel(conversations.clone());
     let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(32);
     let (bundle_tx, mut bundle_rx) = tokio::sync::mpsc::channel(16);
@@ -120,6 +156,7 @@ pub(crate) async fn run_server(
     // restarts. Loading the signing key and revocations runs off this loop.
     let cookie_key_path = crate::server::cookie_key_path();
     options.load_cookie_credentials(cookie_key_path).await?;
+    startup.finished("load cookie credentials");
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
     options.set_api_token(crate::server::load_or_create_api_token(
@@ -133,6 +170,7 @@ pub(crate) async fn run_server(
         let template = controller.config.targets.get(target_id)?;
         crate::controller::worker_source_problem(template, &crate::targets::ProcessExecutor)
     }));
+    startup.finished("configure API and source checks");
     let renewal_cancellation = termination.child_token();
     let mut renewal_task = None;
     // Publish a pin only for a certificate the operator configured. A
@@ -173,6 +211,7 @@ pub(crate) async fn run_server(
     } else {
         None
     };
+    startup.finished("load TLS certificate");
     let ready = crate::server::WebViewerAccess::Ready {
         viewer_url: resolved.viewer_url,
         viewer_code: options.viewer_code().to_owned(),
