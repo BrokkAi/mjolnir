@@ -896,6 +896,25 @@ INSTALLER
     }
 
     #[test]
+    fn muse_pin_matches_runtime_metadata() {
+        use mj_core::harness_runtime::{MUSE_ACP_VERSION, MUSE_VERSION};
+        let metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../../assets/muse/runtime.json"))
+                .expect("parse Muse runtime metadata");
+        assert_eq!(metadata["adapter_version"], MUSE_ACP_VERSION);
+        assert_eq!(metadata["muse_version"], MUSE_VERSION);
+        let selected = pin(HarnessKind::Muse);
+        assert_eq!(
+            selected.install_id,
+            format!("muse-acp-{MUSE_ACP_VERSION}_muse-{MUSE_VERSION}")
+        );
+        assert_eq!(
+            selected.display_version,
+            format!("muse-acp {MUSE_ACP_VERSION} + Muse Code {MUSE_VERSION}")
+        );
+    }
+
+    #[test]
     fn muse_download_rejects_corrupt_payload_before_publication() {
         let temp = tempfile::tempdir().unwrap();
         let tools = temp.path().join("tools");

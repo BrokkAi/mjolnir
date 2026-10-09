@@ -103,7 +103,7 @@ pub const CLAUDE_CLI_VERSION: &str = "2.1.293";
 pub const KIMI_VERSION: &str = "2.1.1";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_VERSION: &str = "0.10.0";
-pub const MUSE_VERSION: &str = "1.4.2-R4684.1";
+pub const MUSE_VERSION: &str = "1.4.3-R5018.1";
 pub const OPENCODE_VERSION: &str = "1.18.34";
 
 /// The built-in npm launcher, selected on the worker before ACP startup.
@@ -190,8 +190,8 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.10.0_muse-1.4.2-R4684.1",
-            display_version: "muse-acp 0.10.0 + Muse Code 1.4.2-R4684.1",
+            install_id: "muse-acp-0.10.0_muse-1.4.3-R5018.1",
+            display_version: "muse-acp 0.10.0 + Muse Code 1.4.3-R5018.1",
             entrypoint: "bin/muse-acp",
         },
         HarnessKind::Codex => HarnessPin {
