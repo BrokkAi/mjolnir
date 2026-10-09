@@ -75,6 +75,8 @@ When explicitly asked to push, push to upstream, even when upstream is `master`.
 
 Do not create a branch, change branches, rebase, or open a pull request unless the user gives an explicit instruction.
 
+When a push is rejected because upstream has moved, merge upstream into the current branch (`git fetch` then `git merge origin/<branch>`), resolve any conflicts, and push the merge commit. Do not rebase to avoid the merge commit.
+
 Do not run `git checkout -b`.
 
 The instruction "commit" means that you must commit on the current branch. It does not mean that you must create a branch first. This rule overrides other default branch procedures.
