@@ -3701,6 +3701,7 @@ fn golden_conversation_title() {
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "conversation-title", &output);
 }
 
+// Hard-won: d00682c9: expanded send_message details showed only the receipt, omitting its arguments.
 #[test]
 fn golden_rich_transcript_tool_presentation() {
     let mut output = String::new();
@@ -3865,6 +3866,104 @@ fn golden_rich_transcript_tool_presentation() {
         100,
         24,
         &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 100, 24)),
+        &[],
+    );
+
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.apply_session_update(
+        1,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "message-1",
+            "title": "mcp__mj-agents__send_message",
+            "status": "pending"
+        }),
+    );
+    chat.apply_session_update(
+        2,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "message-1",
+            "status": "in_progress",
+            "rawInput": {
+                "session_id": "peer-session",
+                "message": "Answer on the 48 s reverse queries: yes, that is the expected shape of today's target-scoped reverse design on Vector, not a regression, and two levers exist, one cheap.\nTry a larger reader page cache."
+            }
+        }),
+    );
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28));
+    click_rendered_text(&mut chat, &rows, "mcp__mj-agents__send_message");
+    append_transcript_golden_state(
+        &mut output,
+        "message input arrives while running",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
+        &[],
+    );
+    chat.apply_session_update(
+        3,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "message-1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {
+                "type": "text", "text": "{\"status\":\"queued\",\"via\":\"mailbox\"}"
+            }}]
+        }),
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "message input survives result update",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
+        &[],
+    );
+    chat.render_mode = TranscriptRenderMode::Raw;
+    append_transcript_golden_state(
+        &mut output,
+        "raw message includes arguments and receipt",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
+        &[],
+    );
+    let session = mj_transcript::projection::materialized_session_from_entries(
+        "message-session",
+        &chat.entries,
+        3,
+        mj_core::relay::WorkerPhase::Idle,
+        Default::default(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut restored = ChatState::from_materialized(&session, &[], &[]);
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 28));
+    click_rendered_text(&mut restored, &rows, "mcp__mj-agents__send_message");
+    append_transcript_golden_state(
+        &mut output,
+        "restored message includes original arguments",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut restored, 80, 28)),
+        &[],
+    );
+    chat.render_mode = TranscriptRenderMode::Rich;
+    chat.apply_session_update(
+        4,
+        &serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "message-1",
+            "rawInput": {}
+        }),
+    );
+    append_transcript_golden_state(
+        &mut output,
+        "empty input replaces earlier message arguments",
+        80,
+        28,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut chat, 80, 28)),
         &[],
     );
 
