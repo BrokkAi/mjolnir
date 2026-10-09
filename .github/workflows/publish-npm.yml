@@ -62,8 +62,9 @@ jobs:
           assets="$(gh api "repos/BrokkAi/mjolnir/releases/$release_id/assets?per_page=100")"
           # The release lookup can report no embedded assets even when the
           # dedicated asset endpoint lists all uploaded files: four tarballs,
-          # the Windows zip, and a checksum for each.
-          jq -e 'length == 10' <<< "$assets" > /dev/null
+          # the Windows zip, and a checksum for each, plus the agent-dev
+          # image pointer that npm neither downloads nor publishes.
+          jq -e '[.[] | select(.name != "agent-dev-image.txt")] | length == 10' <<< "$assets" > /dev/null
           mkdir release-assets
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
             for suffix in tar.gz tar.gz.sha256; do

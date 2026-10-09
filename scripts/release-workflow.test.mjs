@@ -174,6 +174,11 @@ test('npm downloads assets when the release lookup omits its embedded asset list
       assets.push({ id, name, size: data.length });
     }
   }
+  // The release also carries the agent-dev image pointer alongside the archives.
+  const pointerData = Buffer.from('ghcr.io/test/mjolnir/agent-dev:v1.2.3\n');
+  const pointerId = assets.length + 1;
+  writeFileSync(join(dir, String(pointerId)), pointerData);
+  assets.push({ id: pointerId, name: 'agent-dev-image.txt', size: pointerData.length });
   writeFileSync(join(dir, 'assets.json'), JSON.stringify(assets));
   writeFileSync(join(dir, 'bin/gh'), `#!/bin/bash
 set -euo pipefail
@@ -190,8 +195,8 @@ esac
   });
   const result = run();
   assert.equal(result.status, 0, result.stderr);
-  // npm ships no Windows package, so it leaves the zip behind.
-  const npmAssets = assets.filter(asset => !asset.name.includes('-windows-msvc.'));
+  // npm ships no Windows package and needs no image pointer, so it leaves both behind.
+  const npmAssets = assets.filter(asset => !asset.name.includes('-windows-msvc.') && asset.name !== 'agent-dev-image.txt');
   assert.deepEqual(readdirSync(join(work, 'release-assets')).sort(), npmAssets.map(asset => asset.name).sort());
   for (const asset of npmAssets) {
     assert.deepEqual(readFileSync(join(work, 'release-assets', asset.name)), readFileSync(join(dir, String(asset.id))));
