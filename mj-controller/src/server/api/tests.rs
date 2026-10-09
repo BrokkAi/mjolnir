@@ -3141,6 +3141,10 @@ fn stop_reasons_map_to_outcomes_and_unknown_ones_stay_visible() {
         map_stop_reason(mj_core::acp::AWAITING_INPUT_STOP_REASON),
         (WaitOutcome::InputRequired, None)
     );
+    assert_eq!(
+        map_stop_reason(mj_core::acp::INFERRED_FINISHED_STOP_REASON),
+        (WaitOutcome::Finished, None)
+    );
     // A prompt the harness ended without answering is an error a script can
     // recognize by name, not a finished turn (#970).
     assert_eq!(

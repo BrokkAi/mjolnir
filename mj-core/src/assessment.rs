@@ -53,6 +53,15 @@ pub enum Background {
     Unclear,
 }
 
+/// Whether the latest reply appears to be closing the turn or continuing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reply {
+    Closing,
+    Continuing,
+    Unclear,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judgment<T> {
     pub choice: T,
@@ -71,6 +80,9 @@ pub struct Verdict {
     /// request listed background commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<Judgment<Background>>,
+    /// Absent from frozen v6 and older answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<Judgment<Reply>>,
 }
 impl Verdict {
     pub fn parse(response: &Value) -> Result<Self> {
@@ -146,6 +158,11 @@ impl Verdict {
                 .get("background")
                 .filter(|answer| !answer.is_null())
                 .map(|_| choice(answers, "background", &["needed", "unneeded", "unclear"]))
+                .transpose()?,
+            reply: answers
+                .get("reply")
+                .filter(|answer| !answer.is_null())
+                .map(|_| choice(answers, "reply", &["closing", "continuing", "unclear"]))
                 .transpose()?,
         })
     }
@@ -562,6 +579,7 @@ mod tests {
                 .into(),
             },
             background: None,
+            reply: None,
         }
     }
     fn scored(failure: (Failure, f32), input: (Input, f32), work: (Work, f32)) -> Verdict {
@@ -598,6 +616,7 @@ mod tests {
                 .into(),
             },
             background: None,
+            reply: None,
         }
     }
 
@@ -714,6 +733,29 @@ mod tests {
     }
 
     #[test]
+    fn reply_answer_is_optional_for_frozen_contracts_and_validated_when_present() {
+        let mut answers = serde_json::json!({"answers": {
+            "failure": {"type": "choice", "choice": "none", "confidence": 0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}},
+            "input": {"type": "choice", "choice": "none", "confidence": 0.99, "probabilities": {"none": 1.0, "redundant_request": 0.0, "required": 0.0, "unclear": 0.0}},
+            "work": {"type": "choice", "choice": "authorized_unfinished", "confidence": 0.99, "probabilities": {"finished": 0.0, "authorized_unfinished": 1.0, "waiting": 0.0, "unclear": 0.0}}
+        }});
+        assert!(Verdict::parse(&answers).unwrap().reply.is_none());
+
+        answers["answers"]["reply"] = serde_json::json!({
+            "type": "choice", "choice": "closing", "confidence": 0.99,
+            "probabilities": {"closing": 1.0, "continuing": 0.0, "unclear": 0.0}
+        });
+        assert_eq!(
+            Verdict::parse(&answers).unwrap().reply.unwrap().choice,
+            Reply::Closing
+        );
+        answers["answers"]["reply"]["probabilities"] = serde_json::json!({
+            "closing": 0.8, "continuing": 0.2
+        });
+        assert!(Verdict::parse(&answers).is_err());
+    }
+
+    #[test]
     fn provider_recovery_is_independent_of_uncertain_remaining_work() {
         let mut v = verdict(Failure::TransientProvider, Input::Unclear, Work::Unclear);
         v.failure.confidence = 0.91;
@@ -760,6 +802,21 @@ mod tests {
         low.failure.confidence = 0.89;
         assert_eq!(low.action(true), Action::AwaitInput);
     }
+
+    #[test]
+    fn generated_subagent_wait_prompt_does_not_enter_authorization_history() {
+        use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
+
+        let mut context = ContextHistory::default();
+        let prompt = [ContentBlock::Text(TextContent::new(
+            crate::continuation::PARENT_WAIT_PROMPT_TEXT,
+        ))];
+        context.user("subagent-wait-123", &prompt);
+        context.user("api-123", &prompt);
+        assert!(context.messages.is_empty());
+        assert!(context.authorization_complete);
+    }
+
     #[test]
     fn authorization_survives_assistant_eviction_without_clipping_user_consent() {
         use agent_client_protocol::schema::v1::{ContentBlock, TextContent};

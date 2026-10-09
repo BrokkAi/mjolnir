@@ -341,6 +341,7 @@
     "failure": "none",
     "input": "unclear",
     "work": "authorized_unfinished",
+    "reply": "closing",
     "quiet": null,
     "action": "uncertain",
     "wrong_actions": []

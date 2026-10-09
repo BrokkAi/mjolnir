@@ -184,4 +184,40 @@ mod tests {
         let json = serde_json::to_value(&events[0]).unwrap();
         assert!(json["data"].get("request").is_none());
     }
+
+    #[test]
+    fn inferred_finished_emits_turn_ended_without_input_required() {
+        let current = MaterializedSession::empty("session");
+        let event = RelayEvent {
+            format: mj_core::relay::RELAY_EVENT_FORMAT_V1,
+            ordinal: 3,
+            previous_digest: String::new(),
+            digest: String::new(),
+            recorded_at_ms: 1000,
+            command_id: None,
+            observation: RelayObservation::HarnessTurnStarted {
+                started_at_ms: 1000,
+            },
+        };
+        let mutation = MaterializedSessionMutation {
+            last_turn_outcome: Some(MaterializedTurnOutcome {
+                diagnostic: None,
+                usage: None,
+                command_id: "prompt".into(),
+                accepted_ordinal: Some(1),
+                turn_start_position: Some(2),
+                completed_ordinal: 3,
+                completed_at_ms: 1000,
+                outcome: TurnOutcomeKind::Completed {
+                    stop_reason: mj_core::acp::INFERRED_FINISHED_STOP_REASON.into(),
+                },
+            }),
+            ..Default::default()
+        };
+        let events = derive(&current, &event, &mutation);
+        assert!(matches!(
+            events.as_slice(),
+            [ApiEventData::TurnEnded { .. }]
+        ));
+    }
 }

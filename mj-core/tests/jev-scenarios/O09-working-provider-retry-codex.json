@@ -1,0 +1,180 @@
+{
+  "id": "O09",
+  "title": "Codex continues after long provider retry silence",
+  "category": "silent-but-working",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "c9c409513af4b11ac9a4e8332aa03116",
+    "session_title": "mjolnir via codex2",
+    "decision": "1093190-1791478923547-00000000000000000013",
+    "contract": "turn-verdict-v6",
+    "captured_at": "2026-10-08T22:08:50.817Z",
+    "assessed_at": "2026-10-08T22:08:54.256Z",
+    "recorded_action": "KeepCurrent",
+    "recorded_status": "unchanged",
+    "recorded_reason": "keep_current"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "final_tool_calls": [
+      {
+        "name": "bash -c sed ; cat ; cat",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; cat ; cat",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; cat ; sed ; rg",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c cat ; sed ; sed",
+        "status": "completed"
+      },
+      {
+        "name": "sed ; sed ; rg | head ; sed ; sed ; cat",
+        "status": "completed"
+      },
+      {
+        "name": "python3 ; sed ; sed ; ls ; rg",
+        "status": "failed"
+      },
+      {
+        "name": "python3 ; sed ; rg ; rg | head ; command ; command ; command",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; sed ; sed ; ls",
+        "status": "failed"
+      },
+      {
+        "name": "mkdir && cp",
+        "status": "completed"
+      },
+      {
+        "name": "Editing",
+        "status": "completed"
+      }
+    ],
+    "harness": "codex",
+    "phase": "running",
+    "silent_for_s": 180,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\n let's make Jev detect network connectivity problems and treat them lik 5xx, i.e. autoretry with backoff\n</user>\n<assistant>\nI’ll find Jev’s retry path, add connection failures to its backoff handling, then validate and commit the change.\n</assistant>\n<assistant>\nJev’s current prompt explicitly excludes network and transport failures from retries. I’m updating that classification so a provider connection drop like `ECONNRESET` uses the existing durable backoff. Errors from commands the agent runs will still be handled by the agent.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": " let's make Jev detect network connectivity problems and treat them lik 5xx, i.e. autoretry with backoff",
+    "assistant_text_tail": "Jev’s current prompt explicitly excludes network and transport failures from retries. I’m updating that classification so a provider connection drop like `ECONNRESET` uses the existing durable backoff. Errors from commands the agent runs will still be handled by the agent.",
+    "authorization": null
+  },
+  "recorded_verdict": {
+    "work_state": "StillWorking",
+    "work_state_confidence": 0.4399999976158142,
+    "needs_user_input": 0.04000002145767212,
+    "retryable_server_error": 0.0,
+    "assessment": {
+      "failure": {
+        "choice": "none",
+        "confidence": 0.7599999904632568,
+        "probabilities": {
+          "none": 0.81,
+          "other": 0.17,
+          "quota": 0.0,
+          "transient_provider": 0.0,
+          "unclear": 0.02
+        }
+      },
+      "input": {
+        "choice": "none",
+        "confidence": 0.9599999785423279,
+        "probabilities": {
+          "none": 0.97,
+          "redundant_request": 0.0,
+          "required": 0.01,
+          "unclear": 0.02
+        }
+      },
+      "work": {
+        "choice": "authorized_unfinished",
+        "confidence": 0.4399999976158142,
+        "probabilities": {
+          "authorized_unfinished": 0.58,
+          "finished": 0.4,
+          "unclear": 0.02,
+          "waiting": 0.0
+        }
+      },
+      "background": {
+        "choice": "unclear",
+        "confidence": 0.8600000143051147,
+        "probabilities": {
+          "needed": 0.0,
+          "unclear": 0.91,
+          "unneeded": 0.09
+        }
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "reply": "continuing",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "finished",
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T22:11:57.622Z",
+        "kind": "system",
+        "text": "warning: Reconnecting... waiting for network"
+      },
+      {
+        "at": "2026-10-08T22:13:52.956Z",
+        "kind": "system",
+        "text": "warning: Reconnecting... 1/5"
+      },
+      {
+        "at": "2026-10-08T22:15:39.656Z",
+        "kind": "agent",
+        "text": "The prompt now classifies provider"
+      },
+      {
+        "at": "2026-10-08T22:16:09.913Z",
+        "kind": "system",
+        "text": "warning: Reconnecting... 1/5"
+      },
+      {
+        "at": "2026-10-08T22:18:00.719Z",
+        "kind": "agent",
+        "text": "The prompt now treats provider connection resets, timeouts, unreachable networks, and temporary DNS failures as retryable. The existing delay is 1, 2, 4, 8, then 16 minutes, capped at 16. I’ve added t"
+      },
+      {
+        "at": "2026-10-08T22:27:14.950Z",
+        "kind": "system",
+        "text": "warning: Reconnecting... 1/5"
+      }
+    ],
+    "note": "The assistant is actively changing the requested retry classification; it has not delivered the fix and later work continues in the turn."
+  }
+}

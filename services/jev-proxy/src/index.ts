@@ -4,6 +4,7 @@ import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json
 import questionsV3 from "../../../mj-core/src/activity/verdict_questions_v3.json" with { type: "json" };
 import questionsV4 from "../../../mj-core/src/activity/verdict_questions_v4.json" with { type: "json" };
 import questionsV5 from "../../../mj-core/src/activity/verdict_questions_v5.json" with { type: "json" };
+import questionsV6 from "../../../mj-core/src/activity/verdict_questions_v6.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 import { githubItemRequest, githubItemAnswers, githubItemQuestions, type GithubItemEvidence } from "./github-item.ts";
@@ -46,8 +47,8 @@ type TurnEvidenceV6 = TurnEvidenceV4 & {
   final_tool_calls?: { name: string; status: string }[];
 };
 
-// v6 adds the background commands behind `background_commands`, so Jev can
-// judge whether anyone still depends on them (the `background` question).
+// v6 adds background process evidence, so Jev can judge whether anyone still
+// depends on those commands (the `background` question).
 function evidenceV6(value: unknown): value is TurnEvidenceV6 {
   if (!object(value)) return false;
   const { background, final_tool_calls, ...ordinary } = value;
@@ -62,12 +63,24 @@ function evidenceV6(value: unknown): value is TurnEvidenceV6 {
 }
 
 function answersV6(value: unknown): Record<string, unknown> | null {
+  return answersWithQuestions(value, questionsV6, ["background"]);
+}
+
+function answersV7(value: unknown): Record<string, unknown> | null {
+  return answersWithQuestions(value, questions, ["background"]);
+}
+
+function answersWithQuestions(
+  value: unknown,
+  questionSet: Record<string, { criteria: Record<string, unknown> }>,
+  optionalAnswers: readonly string[],
+): Record<string, unknown> | null {
   const result = answersV5(value);
   if (!result || !object(value) || !object(value.answers)) return null;
-  // v5 stays frozen; v6 adds the distributions used by current workers.
-  for (const [key, question] of Object.entries(questions)) {
+  // These routes validate only distributions present in their frozen question set.
+  for (const [key, question] of Object.entries(questionSet)) {
     const answer = value.answers[key];
-    if (key === "background" && (answer === undefined || answer === null)) continue;
+    if (optionalAnswers.includes(key) && (answer === undefined || answer === null)) continue;
     const allowed = Object.keys(question.criteria);
     if (!object(answer) || answer.type !== "choice" || typeof answer.choice !== "string"
       || !allowed.includes(answer.choice) || !probability(answer.confidence)
@@ -266,7 +279,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence | EffortRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 = 1, continuationV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence | EffortRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -283,7 +296,8 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           : "item" in state ? githubItemQuestions
           : "entries" in state ? helpQuestions(state)
             : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions)
-              : version === 6 ? questions
+              : version === 7 ? questions
+                : version === 6 ? questionsV6
                 : version === 5 ? questionsV5
                   : version === 4 ? questionsV4
                     : version === 3 ? questionsV3
@@ -306,7 +320,8 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           : "item" in state ? githubItemAnswers(body)
           : "entries" in state ? helpAnswers(body, state)
             : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body))
-              : version === 6 ? answersV6(body)
+              : version === 7 ? answersV7(body)
+                : version === 6 ? answersV6(body)
                 : version === 5 ? answersV5(body)
                   : version === 4 ? answersV4(body)
                     : version === 3 ? answersV3(body) : answers(body);
@@ -330,7 +345,7 @@ export default {
     const effort = url.pathname === "/v1/effort-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!search && !githubItem && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!search && !githubItem && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -357,6 +372,9 @@ export default {
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
     if (search) {
       return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
+    }
+    if (url.pathname === "/v7/turn-verdict") {
+      return evidenceV6(state) ? classify(state, key, 7) : error("invalid_evidence", 400);
     }
     if (url.pathname === "/v6/turn-verdict") {
       return evidenceV6(state) ? classify(state, key, 6) : error("invalid_evidence", 400);

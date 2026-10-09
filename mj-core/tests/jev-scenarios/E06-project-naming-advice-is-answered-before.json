@@ -119,6 +119,7 @@
     "failure": "none",
     "input": "unclear",
     "work": "unclear",
+    "reply": "closing",
     "quiet": null,
     "action": "uncertain",
     "wrong_actions": []

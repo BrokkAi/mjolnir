@@ -16,6 +16,7 @@ use std::time::Duration;
 use agent_client_protocol::schema::v1::{ContentBlock, TextContent};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
+use mj_core::continuation::PARENT_WAIT_PROMPT_TEXT;
 use mj_core::state::{MaterializedExecutionState, SessionState};
 use mj_core::subagent::{ReportState, bounded_report};
 
@@ -378,8 +379,6 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a restarted sub-agent's session actor has to connect to the
 /// worker the restart already proved ready.
 const UNPARK_ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
-pub(crate) const PARENT_WAIT_PROMPT_TEXT: &str =
-    "One or more sub-agents finished. Call wait to collect their reports.";
 /// Clap's exit code for a usage failure, which is what a worker binary too old
 /// to know the export subcommands answers.
 const CLAP_USAGE_EXIT_CODE: i32 = 2;
@@ -1518,7 +1517,12 @@ impl ApiBackend {
         if !has_new_report {
             return Ok(());
         }
-        submit_prompt(&handle, PARENT_WAIT_PROMPT_TEXT.to_owned()).await?;
+        submit_prompt_with_id(
+            &handle,
+            PARENT_WAIT_PROMPT_TEXT.to_owned(),
+            Some(new_command_id("subagent-wait")?),
+        )
+        .await?;
         Ok(())
     }
 
@@ -2202,11 +2206,6 @@ fn startup_context(
         ));
     }
     Ok((group_id, None))
-}
-
-/// Submit one prompt as a single text block, returning its acceptance ordinal.
-async fn submit_prompt(handle: &SessionHandle, text: String) -> Result<u64> {
-    submit_prompt_with_id(handle, text, None).await
 }
 
 async fn submit_prompt_with_id(

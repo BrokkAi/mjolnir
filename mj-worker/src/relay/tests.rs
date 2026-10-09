@@ -162,6 +162,70 @@ fn classifier_input_handoff_preserves_running_children_and_stop_controls() {
 }
 
 #[test]
+fn inferred_finished_handoff_marks_the_tracked_turn_idle() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    submit_relay(
+        &mut relay,
+        "finished-prompt",
+        prompt("Finish the implementation."),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "finished-prompt",
+            RelayCommandOutcome::Prompt {
+                stop_reason: mj_core::acp::INFERRED_FINISHED_STOP_REASON.into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.operational_state().activity_state().is_idle());
+    assert_eq!(
+        relay.operational_state().turn_completion.unwrap().decision,
+        mj_core::activity::verdict::Decision::InferIdle
+    );
+}
+
+#[test]
+fn running_turn_context_tracks_durable_authorization_updates() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    let turn_context = relay.turn_context();
+    submit_relay(
+        &mut relay,
+        "authorization-prompt",
+        prompt("Finish the report and include the test results."),
+    );
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    let authorization = turn_context.authorization_context().unwrap();
+    assert_eq!(authorization.messages.len(), 1);
+    assert_eq!(authorization.messages[0].role, "user");
+    assert_eq!(
+        authorization.messages[0].text,
+        "Finish the report and include the test results."
+    );
+
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text", "text":"The report is complete."}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let authorization = turn_context.authorization_context().unwrap();
+    assert_eq!(authorization.messages.last().unwrap().role, "assistant");
+    assert_eq!(
+        authorization.messages.last().unwrap().text,
+        "The report is complete."
+    );
+}
+
+#[test]
 fn native_replay_does_not_publish_provisional_work_or_lose_retained_agents() {
     use mj_core::native_agent::{NativeAgentEvent, NativeAgentState};
     let temp = tempfile::tempdir().unwrap();

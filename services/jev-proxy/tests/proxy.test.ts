@@ -363,8 +363,9 @@ test("v5 independently assesses an autonomous capacity refusal", async (t) => {
 });
 
 test("v6 lists background commands and returns the background judgment", async (t) => {
-  const { default: currentQuestions } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
-  assert.ok("background" in currentQuestions, "the current question set carries the background question");
+  const { default: frozenQuestions } = await import("../../../mj-core/src/activity/verdict_questions_v6.json", { with: { type: "json" } });
+  assert.ok("background" in frozenQuestions, "the frozen v6 question set carries the background question");
+  assert.ok(!("reply" in frozenQuestions), "the frozen v6 question set has no reply question");
   const { recent_tools: _recent, ...ordinary } = base;
   const state = { ...ordinary, phase: "replied", transcript_summary: "", background_commands: 1,
     assistant_text_tail: "The dev server is up on 8080 for later; the fix is pushed.",
@@ -378,7 +379,7 @@ test("v6 lists background commands and returns the background judgment", async (
     background: { type: "choice", choice: "unneeded", confidence: 0.93, probabilities: { needed: 0, unneeded: 1, unclear: 0 } },
   } };
   const calls = upstream(t, async (_url, options) => {
-    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: currentQuestions });
+    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: frozenQuestions });
     return Response.json(result);
   });
   const v6 = (body: unknown) => new Request("https://proxy.example/v6/turn-verdict", {
@@ -405,6 +406,44 @@ test("v6 lists background commands and returns the background judgment", async (
   await expectError(await proxy.fetch(v5, environment()), 400);
 });
 
+test("v7 asks the reply question and requires its complete probability distribution", async (t) => {
+  const { default: currentQuestions } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  assert.ok("reply" in currentQuestions, "the live question set carries the reply question");
+  const { recent_tools: _recent, ...ordinary } = base;
+  const state = { ...ordinary, phase: "running", transcript_summary: "", authorization: {
+    messages: [{ id: "user:1", role: "user", text: "Finish the implementation and report back." }],
+    authorization_complete: true, assistant_history_omitted: false, open_assistant_id: null, final_reply_omitted: false,
+  } };
+  const result = { answers: {
+    failure: { type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 1, transient_provider: 0, quota: 0, other: 0, unclear: 0 } },
+    input: { type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 1, redundant_request: 0, required: 0, unclear: 0 } },
+    work: { type: "choice", choice: "authorized_unfinished", confidence: 0.99, probabilities: { finished: 0, authorized_unfinished: 1, waiting: 0, unclear: 0 } },
+    background: { type: "choice", choice: "unclear", confidence: 0.99, probabilities: { needed: 0, unneeded: 0, unclear: 1 } },
+    reply: { type: "choice", choice: "closing", confidence: 0.99, probabilities: { closing: 1, continuing: 0, unclear: 0 } },
+  } };
+  const calls = upstream(t, async (_url, options) => {
+    assert.deepEqual(JSON.parse(options!.body as string), { model: "jev-latest", state, questions: currentQuestions });
+    return Response.json(result);
+  });
+  const v7 = (body: unknown) => new Request("https://proxy.example/v7/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(body),
+  });
+  const response = await proxy.fetch(v7(state), environment());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), result);
+  assert.equal(calls.callCount(), 1);
+
+  calls.restore();
+  const { reply: _reply, ...oldAnswers } = result.answers;
+  upstream(t, async () => Response.json({ answers: oldAnswers }));
+  await expectError(await proxy.fetch(v7(state), environment()), 502, "invalid_upstream_response");
+  const invalid = { ...result, answers: { ...result.answers,
+    reply: { ...result.answers.reply, probabilities: { closing: 0.7, continuing: 0.3 } },
+  } };
+  upstream(t, async () => Response.json(invalid));
+  await expectError(await proxy.fetch(v7(state), environment()), 502, "invalid_upstream_response");
+});
+
 test("v5 and v6 accept the whole-message authorization history and bound it", async (t) => {
   const { recent_tools: _recent, ...ordinary } = base;
   const authorization = {
@@ -416,13 +455,16 @@ test("v5 and v6 accept the whole-message authorization history and bound it", as
   };
   const state = { ...ordinary, phase: "replied", transcript_summary: "", authorization,
     completion: { stop_reason: "EndTurn", diagnostic: null } };
+  const runningState = { ...ordinary, phase: "running", transcript_summary: "", authorization };
   const result = { answers: {
     failure: { type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 1, transient_provider: 0, quota: 0, other: 0, unclear: 0 } },
     input: { type: "choice", choice: "none", confidence: 0.99, probabilities: { none: 1, redundant_request: 0, required: 0, unclear: 0 } },
     work: { type: "choice", choice: "finished", confidence: 0.97, probabilities: { finished: 1, authorized_unfinished: 0, waiting: 0, unclear: 0 } },
+    reply: { type: "choice", choice: "closing", confidence: 0.99, probabilities: { closing: 1, continuing: 0, unclear: 0 } },
   } };
   const calls = upstream(t, async (_url, options) => {
-    assert.deepEqual(JSON.parse(options!.body as string).state, state);
+    const submitted = JSON.parse(options!.body as string).state;
+    assert.deepEqual(submitted, submitted.phase === "running" ? runningState : state);
     return Response.json(result);
   });
   for (const version of ["v5", "v6"]) {
@@ -438,6 +480,11 @@ test("v5 and v6 accept the whole-message authorization history and bound it", as
     await expectError(await proxy.fetch(request({ ...state, authorization: { ...authorization, messages: [{ id: "u", role: "user", text: "x".repeat(32 * 1024 + 1) }] } }), environment()), 400);
     assert.equal(calls.callCount(), before);
   }
+  const runningV6 = new Request("https://proxy.example/v6/turn-verdict", {
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" }, body: JSON.stringify(runningState),
+  });
+  assert.equal((await proxy.fetch(runningV6, environment())).status, 200);
+  assert.equal(calls.callCount(), 3);
 });
 
 test("v6 preserves gate evidence and rejects malformed distributions while v5 stays frozen", async (t) => {

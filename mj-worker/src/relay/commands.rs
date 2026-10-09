@@ -1499,8 +1499,10 @@ impl DurableRelay {
         ) {
             bail!("checkpoint barriers complete through record_checkpoint_ready");
         }
-        let awaiting_input = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
-            if stop_reason == mj_core::acp::AWAITING_INPUT_STOP_REASON);
+        let classifier_handoff = matches!(&outcome, RelayCommandOutcome::Prompt { stop_reason, .. }
+            if matches!(stop_reason.as_str(),
+                mj_core::acp::AWAITING_INPUT_STOP_REASON
+                    | mj_core::acp::INFERRED_FINISHED_STOP_REASON));
         let finishes_turn = matches!(outcome, RelayCommandOutcome::Prompt { .. });
         // Report confirmed changes in the conversation on every surface.
         // The command identity makes retries of this append project only once.
@@ -1560,9 +1562,9 @@ impl DurableRelay {
         if finishes_turn && !self.snapshot.goal.running() {
             self.finish_turn_activity()?;
         }
-        if awaiting_input {
-            // The running classifier already established the handoff. Keep independently
-            // tracked children and their controls while making the parent ready for input.
+        if classifier_handoff {
+            // The running classifier ended the tracked turn. Keep independently
+            // tracked children and their controls while making the session ready.
             self.apply_replied_decision(
                 self.turn_context.generation(),
                 mj_core::activity::verdict::Decision::InferIdle,

@@ -539,6 +539,9 @@ impl DurableRelay {
                     .observe_relay(&event.observation, prompt.as_deref());
             }
         }
+        relay
+            .turn_context
+            .set_authorization_context(relay.snapshot.assessment_context.clone());
         // Live-only work cannot be reconstructed on reopen. Nor can replay
         // prove an idle transition that was not yet saved with the snapshot.
         let replayed = relay.snapshot.latest_ordinal > snapshot_ordinal;

@@ -10,6 +10,9 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const CONFIDENCE: f64 = 0.90;
 pub const QUESTIONS: &str = include_str!("continuation/questions.json");
 pub const PROMPT: &str = "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.";
+/// Generated sub-agent reminder; it carries no new user authorization.
+pub const PARENT_WAIT_PROMPT_TEXT: &str =
+    "One or more sub-agents finished. Call wait to collect their reports.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,7 +219,7 @@ pub fn prompt_blocks() -> Vec<agent_client_protocol::schema::v1::ContentBlock> {
 /// These established producers author prompts on the user's behalf. Their
 /// text is never evidence of fresh user authorization or a renewed allowance.
 pub fn is_generated_prompt_text(text: &str) -> bool {
-    crate::second_opinion::is_control_origin_prompt(text)
+    crate::second_opinion::is_control_origin_prompt(text) || text.trim() == PARENT_WAIT_PROMPT_TEXT
 }
 
 pub fn is_generated_prompt(command_id: &str) -> bool {
@@ -237,6 +240,18 @@ pub fn is_generated_prompt(command_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parent_wait_notice_is_generated_prompt_text() {
+        assert!(is_generated_prompt_text(PARENT_WAIT_PROMPT_TEXT));
+        assert!(is_generated_prompt_text(&format!(
+            " {PARENT_WAIT_PROMPT_TEXT}\n"
+        )));
+        assert!(!is_generated_prompt_text(
+            "One or more sub-agents finished."
+        ));
+    }
+
     #[test]
     fn confident_quota_preempts_ordinary_continuation_and_invalid_scores_fail_closed() {
         for (score, quota) in [(0.89, false), (0.90, true), (1.0, true)] {

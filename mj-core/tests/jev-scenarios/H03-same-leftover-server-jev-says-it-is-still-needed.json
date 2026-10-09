@@ -62,6 +62,7 @@
     "failure": "none",
     "input": "none",
     "work": "waiting",
+    "reply": "continuing",
     "background": "needed",
     "quiet": false,
     "action": "wait",

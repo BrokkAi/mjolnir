@@ -316,6 +316,7 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
             probabilities: Default::default(),
         },
         background: None,
+        reply: None,
     };
     assert_eq!(
         relay.apply_turn_assessment(generation, answer).unwrap(),
@@ -375,6 +376,7 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
             probabilities: Default::default(),
         },
         background: None,
+        reply: None,
     };
     assert_eq!(
         relay.apply_turn_assessment(generation, answer).unwrap(),
@@ -417,6 +419,7 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
             probabilities: Default::default(),
         },
         background: None,
+        reply: None,
     };
     relay.apply_turn_assessment(generation, answer).unwrap();
     assert!(relay.pending_replied_verdict().is_none());

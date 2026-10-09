@@ -106,6 +106,7 @@
     "failure": "none",
     "input": "none",
     "work": "waiting",
+    "reply": "continuing",
     "quiet": false,
     "action": "wait",
     "wrong_actions": [

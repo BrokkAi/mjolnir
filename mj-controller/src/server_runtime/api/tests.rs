@@ -3184,7 +3184,9 @@ async fn queued_input_waits_for_initial_prompt_when_mailboxes_are_disabled() {
     );
     assert!(!pending.is_finished());
     let handle = backend.sessions.session("child-1").await.unwrap();
-    let turn = submit_prompt(&handle, "initial".into()).await.unwrap();
+    let turn = submit_prompt_with_id(&handle, "initial".into(), None)
+        .await
+        .unwrap();
     crate::database::set_startup_delivery_phase(&startup_id, "delivering", None).unwrap();
     crate::database::set_startup_delivery_accepted(&startup_id, Some(turn)).unwrap();
     crate::database::set_startup_delivery_phase(&startup_id, "done", None).unwrap();

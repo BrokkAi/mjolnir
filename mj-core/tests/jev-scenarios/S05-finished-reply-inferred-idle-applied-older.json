@@ -50,6 +50,7 @@
     "failure": "none",
     "input": "none",
     "work": "finished",
+    "reply": "closing",
     "quiet": true,
     "action": "finished",
     "wrong_actions": [

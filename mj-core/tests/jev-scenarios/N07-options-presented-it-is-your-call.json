@@ -469,6 +469,7 @@
     "failure": "none",
     "input": "required",
     "work": "waiting",
+    "reply": "closing",
     "quiet": null,
     "action": "await_input",
     "wrong_actions": [

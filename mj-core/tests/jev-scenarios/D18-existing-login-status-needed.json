@@ -124,6 +124,7 @@
     "failure": "none",
     "input": "required",
     "work": "authorized_unfinished",
+    "reply": "closing",
     "quiet": null,
     "action": "await_input",
     "wrong_actions": [

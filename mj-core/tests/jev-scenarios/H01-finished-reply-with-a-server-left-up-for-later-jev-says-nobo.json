@@ -62,6 +62,7 @@
     "failure": "none",
     "input": "none",
     "work": "finished",
+    "reply": "closing",
     "background": "unneeded",
     "quiet": true,
     "action": "finished",

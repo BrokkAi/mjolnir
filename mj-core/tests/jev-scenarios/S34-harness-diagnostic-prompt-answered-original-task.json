@@ -104,6 +104,7 @@
     "failure": "none",
     "input": "none",
     "work": "finished",
+    "reply": "continuing",
     "quiet": null,
     "action": "finished",
     "wrong_actions": [

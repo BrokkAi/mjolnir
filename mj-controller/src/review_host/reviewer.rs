@@ -535,7 +535,7 @@ pub(super) fn seed_from_session(
         if text.is_empty() {
             continue;
         }
-        if mj_core::second_opinion::is_control_origin_prompt(text)
+        if mj_core::continuation::is_generated_prompt_text(text)
             || mj_core::continuation::is_generated_prompt(
                 item.stable_id
                     .strip_prefix("user:")

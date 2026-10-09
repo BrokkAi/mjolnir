@@ -1,0 +1,138 @@
+{
+  "id": "O01",
+  "title": "Claude turn stayed open after complete handback",
+  "category": "stale-open-turn",
+  "harness": "claude",
+  "source": {
+    "kind": "worker-decision",
+    "session": "054dfa0752db439117fe0cd354046caa",
+    "session_title": "bifrost via claude2",
+    "decision": "1175191-1790949293544-00000000000000000205",
+    "contract": "turn-verdict-v6",
+    "captured_at": "2026-10-08T18:15:44.208Z",
+    "assessed_at": "2026-10-08T18:15:44.476Z",
+    "recorded_action": "KeepCurrent",
+    "recorded_status": "unchanged",
+    "recorded_reason": "keep_current",
+    "note": "Positive stale-open-turn (finished): complete answer at 2026-10-08T18:12:42.360Z; no more agent content before the user steered the turn at 2026-10-09T01:20:04.731Z.",
+    "silence_ended_at": "2026-10-09T01:20:04.731Z"
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "claude",
+    "phase": "running",
+    "silent_for_s": 180,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\nOne or more sub-agents finished. Call wait to collect their reports.\n</user>\n<assistant>\nMaster moved, and the merge was clean. I'll open the PR as a draft and mark it ready after the focused tests pass on the merged tree, as the repository's PR rules require.\n</assistant>\n<assistant>\nMy comparison matched the wrong key in the new format. I'll list the PHP summary targets directly.\n</assistant>\n<assistant>\nLast, two notes: the Ruby findings on #3567, and progress on #46.\n</assistant>\n<assistant>\nThe dry run worked: all eight result-use models now compile with the engine's own producer and verify. With them installed, the B4/B5 rules find their positives end to end for C, C++, C#, JS, TS, Python and PHP. Nothing is published yet. The released shards have to come from the next engine release's producer.\n\nSorry about the \"bifrost-next\" detour.\n\n**Open PRs:**\n- **bifrost-dev #4730 (ready, in the merge queue):** a one-line producer fix with a regression test. When measuring a pack, the producer used the model file's own digest instead of the artifact digest the pack's activation pins. That broke the JavaScript model, which pins the exact Node.js 22.11.0 artifact. The child first removed that pin to get generation working; I had it restore the pin and fix the producer instead.\n- **bifrost-packs #68 (stacked on #49, the license PR):** fixes to the model sources.\n  - C: a measurement query used the wrong owner for `fclose`.\n  - PHP: the file wasn't in the format the producer reads. I rewrote it from the engine's reviewed fixture and checked that it covers exactly the same 13 functions and arities.\n  - Python `str`: the model existed only in the engine, so I ported it unchanged.\n  - Ruby: the provenance text now matches its spec.\n  \n  No reviewed fact changed.\n\n**End-to-end results** (released rules, master CLI, generated packs installed): C 16/16, C++ 20/20, C# 20/20, JS 10/10, TS 8/8, Python 18/18, PHP 10/10. Each row checks one fixture: positives must produce a finding, corrected and near-miss cases must stay clean, and unsupported cases must report inconclusive. Each model generated twice with identical output, and the bifrost-packs checks pass.\n\n**Ruby:** the earlier audit's Ruby positives were bad fixtures. Each one made the call the method's last expression, which Ruby returns, so nothing was discarded. With the calls really discarded, the four positives work, and 11 of the 14 rerun rows match. Of the remaining three, `\"text\".send(:strip)` is likely a real gap. The other two use the B5 function `system` under the B4 rule and are probably mislabeled. Details are on #3567.\n\n**Still to do for release:**\n1. Merge #49 (license), #68 (sources) and #4730 (producer).\n2. When the next engine version is set, build its producer, generate the eight models with it, and publish them in a new packs release.\n3. Rerun the B4/B5 rows, then close the eight B tickets that pass.\n\nStep 2 depends on the version bump, so I'll stop here unless you want me to watch for it.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "One or more sub-agents finished. Call wait to collect their reports.",
+    "assistant_text_tail": " regression test. When measuring a pack, the producer used the model file's own digest instead of the artifact digest the pack's activation pins. That broke the JavaScript model, which pins the exact Node.js 22.11.0 artifact. The child first removed that pin to get generation working; I had it restore the pin and fix the producer instead.\n- **bifrost-packs #68 (stacked on #49, the license PR):** fixes to the model sources.\n  - C: a measurement query used the wrong owner for `fclose`.\n  - PHP: the file wasn't in the format the producer reads. I rewrote it from the engine's reviewed fixture and checked that it covers exactly the same 13 functions and arities.\n  - Python `str`: the model existed only in the engine, so I ported it unchanged.\n  - Ruby: the provenance text now matches its spec.\n  \n  No reviewed fact changed.\n\n**End-to-end results** (released rules, master CLI, generated packs installed): C 16/16, C++ 20/20, C# 20/20, JS 10/10, TS 8/8, Python 18/18, PHP 10/10. Each row checks one fixture: positives must produce a finding, corrected and near-miss cases must stay clean, and unsupported cases must report inconclusive. Each model generated twice with identical output, and the bifrost-packs checks pass.\n\n**Ruby:** the earlier audit's Ruby positives were bad fixtures. Each one made the call the method's last expression, which Ruby returns, so nothing was discarded. With the calls really discarded, the four positives work, and 11 of the 14 rerun rows match. Of the remaining three, `\"text\".send(:strip)` is likely a real gap. The other two use the B5 function `system` under the B4 rule and are probably mislabeled. Details are on #3567.\n\n**Still to do for release:**\n1. Merge #49 (license), #68 (sources) and #4730 (producer).\n2. When the next engine version is set, build its producer, generate the eight models with it, and publish them in a new packs release.\n3. Rerun the B4/B5 rows, then close the eight B tickets that pass.\n\nStep 2 depends on the version bump, so I'll stop here unless you want me to watch for it."
+  },
+  "recorded_verdict": {
+    "work_state": "StillWorking",
+    "work_state_confidence": 0.7699999809265137,
+    "needs_user_input": 0.4300000071525574,
+    "retryable_server_error": 0.0,
+    "assessment": {
+      "failure": {
+        "choice": "none",
+        "confidence": 0.9700000286102295,
+        "probabilities": {
+          "none": 0.98,
+          "other": 0.0,
+          "quota": 0.0,
+          "transient_provider": 0.0,
+          "unclear": 0.02
+        }
+      },
+      "input": {
+        "choice": "none",
+        "confidence": 0.5699999928474426,
+        "probabilities": {
+          "none": 0.68,
+          "redundant_request": 0.0,
+          "required": 0.31,
+          "unclear": 0.01
+        }
+      },
+      "work": {
+        "choice": "authorized_unfinished",
+        "confidence": 0.7699999809265137,
+        "probabilities": {
+          "authorized_unfinished": 0.83,
+          "finished": 0.07,
+          "unclear": 0.01,
+          "waiting": 0.09
+        }
+      },
+      "background": {
+        "choice": "unclear",
+        "confidence": 0.8899999856948853,
+        "probabilities": {
+          "needed": 0.01,
+          "unclear": 0.93,
+          "unneeded": 0.06
+        }
+      }
+    }
+  },
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-09T01:20:04.731Z",
+        "kind": "user",
+        "text": "did you comment on the tickets w these steps?"
+      },
+      {
+        "at": "2026-10-09T01:20:09.617Z",
+        "kind": "agent",
+        "text": "Only partly.  - **bifrost-packs#46:** my progress comment says the models now generate, links #68 and #4730, and says the released shards will come from the next engine release's versioned producer. I"
+      },
+      {
+        "at": "2026-10-09T01:25:51.482Z",
+        "kind": "user",
+        "text": "yes"
+      },
+      {
+        "at": "2026-10-09T01:25:59.158Z",
+        "kind": "agent",
+        "text": "All three PRs are still open. I'll post the steps on #46 first."
+      },
+      {
+        "at": "2026-10-09T01:26:09.702Z",
+        "kind": "agent",
+        "text": "Now the per-ticket notes. Each gives that language's dry-run result and what remains before it can close."
+      },
+      {
+        "at": "2026-10-09T01:26:32.086Z",
+        "kind": "agent",
+        "text": "In the #3557 note I named specific libc functions (`fclose`, `fputs`, `remove`) without checking which ones the C fixtures exercise. I'll check against the dry-run table."
+      }
+    ],
+    "note": "Complete handback; after-hours version bump and external merges were the only remaining steps, and the reply explicitly stopped pending that outside change."
+  }
+}

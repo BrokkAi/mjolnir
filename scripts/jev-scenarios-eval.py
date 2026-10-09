@@ -43,10 +43,12 @@ CHOICES = {
     "failure": ("none", "transient_provider", "quota", "other", "unclear"),
     "input": ("none", "redundant_request", "required", "unclear"),
     "work": ("finished", "authorized_unfinished", "waiting", "unclear"),
+    "reply": ("closing", "continuing", "unclear"),
     "background": ("needed", "unneeded", "unclear"),
 }
 ACT_CONFIDENCE = 0.85
 AUTOMATION_CONFIDENCE = 0.90
+REPLY_CLOSING_THRESHOLD = 0.80
 USER_BYTES = 32 * 1024
 ASSISTANT_BYTES = 16 * 1024
 MAX_BODY_BYTES = 64 * 1024
@@ -109,9 +111,10 @@ def authorization_complete(evidence):
     return len(json.dumps(body).encode()) <= MAX_BODY_BYTES
 
 
-def parse_answers(answers):
+def parse_answers(answers, include_reply=False):
     verdict = {}
-    for axis in ("failure", "input", "work", "background"):
+    axes = ("failure", "input", "work") + (("reply",) if include_reply else ()) + ("background",)
+    for axis in axes:
         answer = answers.get(axis)
         if answer is None and axis == "background":
             continue
@@ -197,7 +200,7 @@ def ask(key, questions, evidence):
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         return {"error": str(error), "latency_s": round(time.monotonic() - started, 3)}
     try:
-        verdict = parse_answers(payload["answers"])
+        verdict = parse_answers(payload["answers"], include_reply="reply" in questions)
     except (KeyError, ValueError, TypeError) as error:
         return {"error": f"malformed answer: {error}", "latency_s": round(time.monotonic() - started, 3)}
     return {
@@ -326,6 +329,25 @@ def report(args):
     rows = []
     categories = defaultdict(lambda: {"n": 0, "axes_agree": 0, "above": 0, "action_ok": 0, "wrong_high": 0, "errors": 0})
     inputs = defaultdict(lambda: {"n": 0, "agree": 0, "agree_high": 0, "detected": 0, "missed": 0, "false_required": 0, "errors": 0})
+    reply_stats = defaultdict(lambda: {
+        "requests": 0,
+        "valid": 0,
+        "choice_agree": 0,
+        "closing_detected": 0,
+        "closing_probability_sum": 0.0,
+    })
+    reply_phase_stats = defaultdict(lambda: {
+        "requests": 0,
+        "valid": 0,
+        "closing_detected": 0,
+        "closing_probability_sum": 0.0,
+    })
+    running_closing_requests = 0
+    running_closing_valid = 0
+    running_closing_detected = 0
+    false_closing_requests = 0
+    false_closing_valid = 0
+    false_closing = 0
     input_unscored = 0
     for identity in sorted(by_id):
         fixture = fixtures.get(identity)
@@ -334,6 +356,15 @@ def report(args):
         expected = fixture["expected"]
         stats = categories[fixture["category"]]
         for record in by_id[identity]:
+            expected_reply = expected.get("reply")
+            if expected_reply is not None:
+                reply_stats[expected_reply]["requests"] += 1
+                phase = fixture["evidence"].get("phase", "unknown")
+                reply_phase_stats[(phase, expected_reply)]["requests"] += 1
+                if fixture["evidence"].get("phase") == "running" and expected_reply == "closing":
+                    running_closing_requests += 1
+                if expected_reply == "continuing":
+                    false_closing_requests += 1
             stats["n"] += 1
             input_stats = inputs[expected["input"]] if fixture.get("context", {}).get("strict_input_scoring", True) else None
             if input_stats is None:
@@ -347,6 +378,24 @@ def report(args):
                 rows.append((identity, fixture["category"], record["repeat"], "error", record.get("error"), "", "", ""))
                 continue
             verdict = record["verdict"]
+            if expected_reply is not None and "reply" in verdict:
+                reply = verdict["reply"]
+                p_closing = reply["probabilities"].get("closing", 0.0)
+                reply_stats[expected_reply]["valid"] += 1
+                reply_stats[expected_reply]["choice_agree"] += reply["choice"] == expected_reply
+                reply_stats[expected_reply]["closing_probability_sum"] += p_closing
+                is_closing = p_closing + 1e-12 >= REPLY_CLOSING_THRESHOLD
+                reply_stats[expected_reply]["closing_detected"] += is_closing
+                phase = fixture["evidence"].get("phase", "unknown")
+                reply_phase_stats[(phase, expected_reply)]["valid"] += 1
+                reply_phase_stats[(phase, expected_reply)]["closing_probability_sum"] += p_closing
+                reply_phase_stats[(phase, expected_reply)]["closing_detected"] += is_closing
+                if fixture["evidence"].get("phase") == "running" and expected_reply == "closing":
+                    running_closing_valid += 1
+                    running_closing_detected += is_closing
+                if expected_reply == "continuing":
+                    false_closing_valid += 1
+                    false_closing += is_closing
             predicted_input = verdict["input"]
             input_agrees = predicted_input["choice"] == expected["input"]
             required_high = (requires_input(predicted_input) if policy == POLICY else
@@ -389,6 +438,61 @@ def report(args):
         lines.append(f"| {category} | {s['n']} | {s['axes_agree']} | {s['above']} | {s['action_ok']} | {s['wrong_high']} | {s['errors']} |")
     total = {k: sum(s[k] for s in categories.values()) for k in ("n", "axes_agree", "above", "action_ok", "wrong_high", "errors")}
     lines.append(f"| all | {total['n']} | {total['axes_agree']} | {total['above']} | {total['action_ok']} | {total['wrong_high']} | {total['errors']} |")
+    lines += ["", "## Reply axis", ""]
+    if reply_stats:
+        lines += [
+            f"False closing on fixtures labeled `continuing` (`P(closing) >= {REPLY_CLOSING_THRESHOLD:.2f}`): {false_closing}/{false_closing_valid} scored replies ({false_closing_requests} labeled requests attempted).",
+            f"Running-phase closing detections on fixtures labeled `closing`: {running_closing_detected}/{running_closing_valid} scored replies ({running_closing_requests} labeled requests).",
+            "",
+            "| expected.reply | requests | replies scored | choice matches | mean P(closing) | P(closing) >= 0.80 |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for label in ("closing", "continuing", "unclear"):
+            stats = reply_stats.get(label)
+            if not stats:
+                continue
+            mean = stats["closing_probability_sum"] / stats["valid"] if stats["valid"] else None
+            mean_text = f"{mean:.3f}" if mean is not None else "n/a"
+            lines.append(
+                f"| {label} | {stats['requests']} | {stats['valid']} | {stats['choice_agree']} | {mean_text} | {stats['closing_detected']}/{stats['valid']} |"
+            )
+        lines += [
+            "",
+            "| phase | expected.reply | requests | replies scored | P(closing) >= 0.80 | mean P(closing) |",
+            "| --- | --- | ---: | ---: | ---: | ---: |",
+        ]
+        for phase, label in sorted(reply_phase_stats):
+            stats = reply_phase_stats[(phase, label)]
+            mean = stats["closing_probability_sum"] / stats["valid"] if stats["valid"] else None
+            mean_text = f"{mean:.3f}" if mean is not None else "n/a"
+            lines.append(
+                f"| {phase} | {label} | {stats['requests']} | {stats['valid']} | {stats['closing_detected']}/{stats['valid']} | {mean_text} |"
+            )
+        lines += [
+            "",
+            "| id | category | phase | expected.reply | P(closing) by repeat | mean | >= 0.80 |",
+            "| --- | --- | --- | --- | --- | ---: | ---: |",
+        ]
+        for identity in sorted(fixtures):
+            fixture = fixtures[identity]
+            expected_reply = fixture["expected"].get("reply")
+            if expected_reply is None:
+                continue
+            scores = []
+            for record in sorted(by_id.get(identity, []), key=lambda record: record["repeat"]):
+                verdict = record.get("verdict", {})
+                answer = verdict.get("reply")
+                if answer is not None:
+                    scores.append((record["repeat"], answer["probabilities"].get("closing", 0.0)))
+            score_text = ", ".join(f"{repeat}:{score:.2f}" for repeat, score in scores) if scores else "not asked"
+            mean = sum(score for _, score in scores) / len(scores) if scores else None
+            mean_text = f"{mean:.3f}" if mean is not None else "n/a"
+            detected = sum(score + 1e-12 >= REPLY_CLOSING_THRESHOLD for _, score in scores)
+            lines.append(
+                f"| {identity} | {fixture['category']} | {fixture['evidence'].get('phase', 'unknown')} | {expected_reply} | {score_text} | {mean_text} | {detected}/{len(scores)} |"
+            )
+    else:
+        lines.append("No fixtures declare `expected.reply`.")
     lines += ["", "| id | category | repeat | answers | action | expected | axes | wrong |", "| --- | --- | ---: | --- | --- | --- | --- | --- |"]
     for row in rows:
         lines.append("| " + " | ".join(str(cell) for cell in row) + " |")

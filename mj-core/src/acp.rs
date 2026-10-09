@@ -329,6 +329,9 @@ pub const PROMPT_UNANSWERED_STOP_REASON: &str = "prompt_unanswered";
 /// The classifier inferred a user handoff while the harness still held its prompt open.
 pub const AWAITING_INPUT_STOP_REASON: &str = "awaiting_input";
 
+/// The classifier inferred that a silent turn finished while the harness held it open.
+pub const INFERRED_FINISHED_STOP_REASON: &str = "inferred_finished";
+
 /// The progress text an ACP bridge streams while it compacts a session's
 /// context, verbatim from the bridges Mjolnir pins.
 ///

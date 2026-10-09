@@ -147,7 +147,6 @@ impl DurableRelay {
             epoch_millis(),
         );
         evidence.completion = Some(a.completion.clone());
-        evidence.authorization = self.snapshot.assessment_context.clone();
         let now = epoch_millis();
         evidence.background = self
             .background_commands()
@@ -165,44 +164,10 @@ impl DurableRelay {
                 }
             })
             .collect();
-        if let Some(context) = &evidence.authorization
-            && !context.final_reply_omitted
-            && let Some(last) = context
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "assistant")
-        {
-            evidence.assistant_text_tail = last.text.clone();
-            evidence
-                .assistant_text_tail
-                .truncate(evidence.assistant_text_tail.floor_char_boundary(2048));
-        }
-        // Authorization already contains whole messages; don't send a second,
-        // differently clipped interpretation of that same conversation.
-        if evidence.authorization.is_some() {
-            evidence.transcript_summary.clear();
-        }
-        // The wire limit is 64 KiB. A history near its own budgets can pass
-        // it with JSON overhead; old assistant entries go first, and the
-        // whole history is dropped only when even that is not enough.
-        const WIRE_BUDGET: usize = 60 * 1024;
-        if serde_json::to_vec(&evidence)?.len() > WIRE_BUDGET
-            && let Some(mut context) = evidence.authorization.take()
-        {
-            let mut probe = evidence.clone();
-            let fits = context.shrink_until(|c| {
-                probe.authorization = Some(c.clone());
-                serde_json::to_vec(&probe)
-                    .map(|b| b.len() <= WIRE_BUDGET)
-                    .unwrap_or(false)
-            });
-            evidence.authorization = fits.then_some(context);
-        }
-        if serde_json::to_vec(&evidence)?.len() > WIRE_BUDGET {
-            evidence.authorization = None;
-            evidence.transcript_summary.clear();
-        }
+        crate::acp::verdict_client::bound_authorization(
+            &mut evidence,
+            self.snapshot.assessment_context.clone(),
+        )?;
         a.evidence = Some(evidence);
         self.store_assessment(a)
     }
@@ -760,6 +725,7 @@ mod settled_task_tests {
                 confidence: 0.95,
                 probabilities: Default::default(),
             }),
+            reply: None,
         };
         relay
             .apply_turn_assessment(generation, judged(Background::Unneeded))
@@ -811,6 +777,7 @@ mod settled_task_tests {
                 confidence: 0.95,
                 probabilities: Default::default(),
             }),
+            reply: None,
         };
         let restart = |root: &Path| {
             // What the worker records when it starts on an existing root.
@@ -951,6 +918,7 @@ mod settled_task_tests {
                 probabilities: Default::default(),
             },
             background: None,
+            reply: None,
         };
         let reason = relay.apply_turn_assessment(generation, verdict).unwrap();
         assert_eq!(reason, "continuation_disabled");

@@ -293,6 +293,9 @@ pub fn classify_prompt_completion(stop_reason: &str) -> PromptCompletion {
     match normalized.as_str() {
         "endturn" => PromptCompletion::Finished,
         "awaitinginput" => PromptCompletion::InputRequired,
+        // The classifier ended a turn the harness left open after a closing
+        // reply; the agent is done, not asking.
+        "inferredfinished" => PromptCompletion::Finished,
         "cancelled" | "canceled" => PromptCompletion::Cancelled,
         "quotalimit" => PromptCompletion::QuotaLimit,
         _ => PromptCompletion::Error,

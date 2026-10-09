@@ -1,5 +1,6 @@
 //! Bounded turn evidence and conservative decisions for the optional Jev classifier.
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -15,6 +16,14 @@ pub const IN_FLIGHT_TOOLS: usize = 16;
 pub const ACT_CONFIDENCE: f32 = 0.85;
 pub const NO_INPUT_CONFIDENCE: f32 = 0.15;
 pub const SERVER_RETRY_CONFIDENCE: f32 = 0.90;
+/// Silence threshold for ending a turn whose harness never closed it. The
+/// longest verified silent-but-working stretch in the corpus was 1,446 s
+/// (a Codex provider retry); the shortest confirmed stale turn was 3,009 s.
+pub const STALE_FINISHED_SILENCE: Duration = Duration::from_secs(40 * 60);
+/// Minimum probability of no current failure before stale-turn cleanup.
+pub const STALE_FAILURE_PROBABILITY: f64 = 0.90;
+/// Minimum probability that the latest reply is closing before stale-turn cleanup.
+pub const STALE_REPLY_PROBABILITY: f64 = 0.80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -248,6 +257,32 @@ pub fn decide(phase: TurnPhase, verdict: &TurnVerdict) -> Decision {
     }
 }
 
+/// Whether a modern running-phase assessment can safely close a long-silent
+/// tracked turn. Legacy v3/v4 scores are never enough evidence.
+pub fn stale_finished(evidence: &TurnEvidence, verdict: &TurnVerdict) -> bool {
+    let Some(assessment) = verdict.assessment.as_ref() else {
+        return false;
+    };
+    evidence.phase == TurnPhase::Running
+        && evidence.tools_in_flight.is_empty()
+        && evidence.background_commands == 0
+        && evidence.queued_commands == 0
+        && evidence.silent_for_s >= STALE_FINISHED_SILENCE.as_secs()
+        && assessment.failure.choice == crate::assessment::Failure::None
+        && assessment
+            .failure
+            .probabilities
+            .get("none")
+            .is_some_and(|probability| *probability + 1e-12 >= STALE_FAILURE_PROBABILITY)
+        && (assessment.reply.as_ref().is_some_and(|reply| {
+            reply.choice == crate::assessment::Reply::Closing
+                && reply
+                    .probabilities
+                    .get("closing")
+                    .is_some_and(|probability| *probability + 1e-12 >= STALE_REPLY_PROBABILITY)
+        }) || assessment.action(false) == crate::assessment::Action::Finished)
+}
+
 /// Resolve once during startup, outside an event or render loop. Never log this value.
 pub fn api_key() -> Option<String> {
     resolve_key(
@@ -271,7 +306,167 @@ fn resolve_key(environment: Option<&str>, home: Option<&Path>) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assessment::{Failure, Input, Work};
     use serde_json::json;
+
+    fn judgment<T>(
+        choice: T,
+        confidence: f32,
+        probabilities: &[(&str, f64)],
+    ) -> crate::assessment::Judgment<T> {
+        crate::assessment::Judgment {
+            choice,
+            confidence,
+            probabilities: probabilities
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), *value))
+                .collect(),
+        }
+    }
+
+    fn finished_evidence() -> TurnEvidence {
+        TurnEvidence {
+            authorization: None,
+            final_tool_calls: Vec::new(),
+            background: Vec::new(),
+            harness: HarnessKind::Claude,
+            phase: TurnPhase::Running,
+            silent_for_s: STALE_FINISHED_SILENCE.as_secs(),
+            tools_in_flight: Vec::new(),
+            transcript_summary: String::new(),
+            background_commands: 0,
+            queued_commands: 0,
+            user_prompt_tail: String::new(),
+            assistant_text_tail: String::new(),
+            completion: None,
+        }
+    }
+
+    fn finished_verdict() -> TurnVerdict {
+        TurnVerdict {
+            assessment: Some(crate::assessment::Verdict {
+                failure: judgment(
+                    Failure::None,
+                    0.99,
+                    &[
+                        ("none", 1.0),
+                        ("transient_provider", 0.0),
+                        ("quota", 0.0),
+                        ("other", 0.0),
+                        ("unclear", 0.0),
+                    ],
+                ),
+                input: judgment(
+                    Input::None,
+                    0.85,
+                    &[
+                        ("none", 1.0),
+                        ("redundant_request", 0.0),
+                        ("required", 0.0),
+                        ("unclear", 0.0),
+                    ],
+                ),
+                work: judgment(
+                    Work::Finished,
+                    0.80,
+                    &[
+                        ("finished", 0.80),
+                        ("authorized_unfinished", 0.20),
+                        ("waiting", 0.0),
+                        ("unclear", 0.0),
+                    ],
+                ),
+                background: None,
+                reply: None,
+            }),
+            work_state: WorkState::Finished,
+            work_state_confidence: 1.0,
+            needs_user_input: 0.0,
+            retryable_server_error: None,
+        }
+    }
+
+    #[test]
+    fn stale_finished_requires_long_silence_and_unambiguous_idle_facts() {
+        let mut evidence = finished_evidence();
+        let verdict = finished_verdict();
+        assert!(!stale_finished(
+            &evidence,
+            &TurnVerdict {
+                assessment: None,
+                ..verdict.clone()
+            }
+        ));
+
+        evidence.silent_for_s = STALE_FINISHED_SILENCE.as_secs() - 1;
+        assert!(!stale_finished(&evidence, &verdict));
+        evidence.silent_for_s = STALE_FINISHED_SILENCE.as_secs();
+        assert!(stale_finished(&evidence, &verdict));
+        evidence.silent_for_s += 1;
+        assert!(stale_finished(&evidence, &verdict));
+
+        evidence.phase = TurnPhase::Replied;
+        assert!(!stale_finished(&evidence, &verdict));
+        evidence.phase = TurnPhase::Running;
+        evidence.tools_in_flight.push(ToolEvidence {
+            title: "compile".into(),
+            running_s: 2400,
+        });
+        assert!(!stale_finished(&evidence, &verdict));
+        evidence.tools_in_flight.clear();
+        evidence.background_commands = 1;
+        assert!(!stale_finished(&evidence, &verdict));
+        evidence.background_commands = 0;
+        evidence.queued_commands = 1;
+        assert!(!stale_finished(&evidence, &verdict));
+        evidence.queued_commands = 0;
+
+        let mut unqualified = verdict.clone();
+        unqualified.assessment.as_mut().unwrap().failure.choice = Failure::Other;
+        assert!(!stale_finished(&evidence, &unqualified));
+        let mut unqualified = verdict.clone();
+        unqualified.assessment.as_mut().unwrap().input.choice = Input::Required;
+        assert!(!stale_finished(&evidence, &unqualified));
+        let mut unqualified = verdict.clone();
+        unqualified.assessment.as_mut().unwrap().work.choice = Work::AuthorizedUnfinished;
+        assert!(!stale_finished(&evidence, &unqualified));
+
+        let mut continuing = unqualified.clone();
+        continuing.assessment.as_mut().unwrap().reply = Some(judgment(
+            crate::assessment::Reply::Continuing,
+            0.99,
+            &[("closing", 0.0), ("continuing", 1.0), ("unclear", 0.0)],
+        ));
+        assert!(!stale_finished(&evidence, &continuing));
+
+        let mut closing = unqualified;
+        closing.assessment.as_mut().unwrap().reply = Some(judgment(
+            crate::assessment::Reply::Closing,
+            0.80,
+            &[("closing", 0.80), ("continuing", 0.10), ("unclear", 0.10)],
+        ));
+        assert!(stale_finished(&evidence, &closing));
+        closing
+            .assessment
+            .as_mut()
+            .unwrap()
+            .reply
+            .as_mut()
+            .unwrap()
+            .probabilities
+            .insert("closing".into(), 0.79);
+        assert!(!stale_finished(&evidence, &closing));
+
+        let mut uncertain_failure = verdict;
+        uncertain_failure
+            .assessment
+            .as_mut()
+            .unwrap()
+            .failure
+            .probabilities
+            .insert("none".into(), 0.89);
+        assert!(!stale_finished(&evidence, &uncertain_failure));
+    }
 
     #[test]
     fn independent_input_need_takes_precedence_over_background_work() {

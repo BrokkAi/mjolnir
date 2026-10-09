@@ -3026,6 +3026,17 @@ async fn silent_after_prompt_bridge_with_late_reply(
                     child_started = true;
                 }
                 if late_reply && let Some(prior) = prior_prompt.replace(id) {
+                    let update = serde_json::json!({"jsonrpc":"2.0", "method":"session/update", "params":{
+                        "sessionId":"scripted",
+                        "update":{"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Late harness content remains visible."}}
+                    }});
+                    if write
+                        .write_all(format!("{update}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     let reply = serde_json::json!({"jsonrpc":"2.0", "id":prior, "result":{"stopReason":"end_turn"}});
                     if write
                         .write_all(format!("{reply}\n").as_bytes())
@@ -6253,6 +6264,222 @@ async fn classifier_marks_silent_parent_awaiting_input_despite_continuous_native
     }
     bridge.abort();
     server.await.unwrap();
+}
+
+async fn running_classifier_finished_reply_case(silence: Duration, should_end: bool) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        let evidence: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(evidence["state"]["phase"], "running");
+        assert_eq!(
+            evidence["state"]["authorization"]["messages"][0]["text"],
+            "Finish the implementation and report back."
+        );
+        assert_eq!(evidence["state"]["transcript_summary"], "");
+        assert_eq!(evidence["state"]["background_commands"], 0);
+        assert_eq!(evidence["state"]["queued_commands"], 0);
+        assert_eq!(
+            evidence["state"]["silent_for_s"].as_u64().unwrap() >= 40 * 60,
+            should_end
+        );
+        let answer = serde_json::json!({"answers": {
+            "work": {"type":"choice","choice":"authorized_unfinished","confidence":0.99, "probabilities": {"finished": 0.0, "authorized_unfinished": 1.0, "waiting": 0.0, "unclear": 0.0}},
+            "input": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "redundant_request": 0.0, "required": 0.0, "unclear": 0.0}},
+            "failure": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}},
+            "reply": {"type":"choice","choice":"closing","confidence":0.99, "probabilities": {"closing": 1.0, "continuing": 0.0, "unclear": 0.0}}
+        }})
+        .to_string();
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(silent_after_prompt_bridge_with_late_reply(
+        bridge_stream,
+        observed_tx,
+        false,
+        true,
+        true,
+    ));
+    let (client_read, client_write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
+    let (request_tx, mut request_rx) = mpsc::channel(4);
+    let (event_tx, mut event_rx) = mpsc::channel(64);
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.harness = HarnessKind::Claude;
+    spec.verdict = Some(VerdictSource::Direct {
+        key: "test-key".into(),
+        endpoint,
+    });
+    spec.turn_context
+        .set_authorization_context(Some(mj_core::assessment::ContextHistory {
+            messages: vec![mj_core::continuation::EvidenceMessage {
+                id: "user:task".into(),
+                role: "user".into(),
+                text: "Finish the implementation and report back.".into(),
+            }],
+            ..Default::default()
+        }));
+    let parent_activity = spec.turn_context.clone();
+    let mut driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            event_tx,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    request_tx
+        .send(CommandRequest::Prompt {
+            request_id: "prompt-1".into(),
+            prompt: vec![ContentBlock::from(
+                "Finish the implementation and report back.",
+            )],
+        })
+        .await
+        .unwrap();
+    loop {
+        let method = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut driver => panic!("drive exited before prompting: {result:?}"),
+                method = observed_rx.recv() => method,
+            }
+        })
+        .await
+        .expect("prompt setup should complete");
+        let Some(method) = method else {
+            let driver_result = if driver.is_finished() {
+                Some((&mut driver).await)
+            } else {
+                None
+            };
+            panic!("bridge exited before prompting; driver={driver_result:?}");
+        };
+        if method == "session/prompt" {
+            break;
+        }
+    }
+    parent_activity.mark_parent_activity_at(std::time::Instant::now() - silence);
+
+    if should_end {
+        let (notice, stop_reason) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut notice = None;
+            loop {
+                match event_rx.recv().await.unwrap() {
+                    RuntimeEvent::Notice { message } => notice = Some(message),
+                    RuntimeEvent::PromptFinished { stop_reason, .. } => {
+                        break (notice.unwrap(), stop_reason);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(notice.contains("wrapping up 41 minutes ago"));
+        assert!(notice.contains("harness may still be running"));
+        assert_eq!(stop_reason, mj_core::acp::INFERRED_FINISHED_STOP_REASON);
+
+        request_tx
+            .send(CommandRequest::Prompt {
+                request_id: "prompt-2".into(),
+                prompt: vec![ContentBlock::from("Continue the requested work.")],
+            })
+            .await
+            .unwrap();
+        let mut methods = Vec::new();
+        wait_for_bridge_prompt(&mut observed_rx, &mut methods).await;
+        let late_update = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let RuntimeEvent::SessionUpdate { update } = event_rx.recv().await.unwrap()
+                    && update["content"]["text"] == "Late harness content remains visible."
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            late_update.is_ok(),
+            "late session/update content is forwarded"
+        );
+        let late_completion = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                if let RuntimeEvent::PromptFinished { .. } = event_rx.recv().await.unwrap() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            late_completion.is_err(),
+            "the old prompt reply does not end the new turn"
+        );
+    } else {
+        let completed = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                if let RuntimeEvent::PromptFinished { stop_reason, .. } =
+                    event_rx.recv().await.unwrap()
+                {
+                    break Some(stop_reason);
+                }
+            }
+        })
+        .await;
+        assert!(
+            completed.is_err(),
+            "a 39-minute verdict must leave the turn open"
+        );
+    }
+    server.await.unwrap();
+    drop(request_tx);
+    if tokio::time::timeout(Duration::from_secs(5), &mut driver)
+        .await
+        .is_err()
+    {
+        driver.abort();
+    }
+    bridge.abort();
+}
+
+/// A confidently closing reply closes an idle tracked turn only after 40 minutes.
+#[tokio::test(flavor = "current_thread")]
+async fn running_classifier_only_infers_finished_after_forty_minutes() {
+    running_classifier_finished_reply_case(Duration::from_secs(41 * 60), true).await;
+    running_classifier_finished_reply_case(Duration::from_secs(39 * 60), false).await;
 }
 
 #[tokio::test]

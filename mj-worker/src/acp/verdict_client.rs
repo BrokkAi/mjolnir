@@ -4,7 +4,7 @@ use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
 const HOSTED_VERDICT_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v6/turn-verdict";
+    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v7/turn-verdict";
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone)]
@@ -56,6 +56,8 @@ pub(crate) struct VerdictClient {
 pub(crate) struct VerdictAttempt {
     pub(crate) diagnostic: Option<mj_core::jev::Attempt>,
     decision: Option<mj_core::activity::verdict::Decision>,
+    pub(crate) running_outcome: Option<RunningVerdictOutcome>,
+    pub(crate) silent_for_s: Option<u64>,
     uncertain: bool,
     id: u64,
     session: String,
@@ -64,6 +66,12 @@ pub(crate) struct VerdictAttempt {
     started: std::time::Instant,
     finished: bool,
     dispatch: tracing::Dispatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunningVerdictOutcome {
+    AwaitingInput,
+    InferredFinished,
 }
 
 impl VerdictAttempt {
@@ -96,7 +104,9 @@ impl VerdictAttempt {
                 ),
                 ("applied", _) => (
                     "applied",
-                    if reason == "server_retry_armed" {
+                    if reason == "inferred_finished" {
+                        "Mj marked the session ready."
+                    } else if reason == "server_retry_armed" {
                         "Mj scheduled a retry for a transient provider failure."
                     } else {
                     match self.decision {
@@ -128,10 +138,19 @@ impl VerdictAttempt {
                     format!("Mj kept the runtime status: {}.", reason.replace('_', " ")),
                 ),
             };
-            diagnostic.update(None, serde_json::json!({
-                "outcome": outcome, "reason": reason,
-                "applied_decision": if outcome == "applied" { self.decision.map(|d| format!("{d:?}")) } else { None }
-            }));
+            diagnostic.update(
+                None,
+                serde_json::json!({
+                    "outcome": outcome, "reason": reason,
+                    "applied_decision": if outcome == "applied" && reason == "inferred_finished" {
+                        Some("InferredFinished".to_owned())
+                    } else if outcome == "applied" {
+                        self.decision.map(|d| format!("{d:?}"))
+                    } else {
+                        None
+                    }
+                }),
+            );
             diagnostic.finish(status, &action);
         }
         self.finished = true;
@@ -236,11 +255,13 @@ impl VerdictClient {
                 )
             });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v6", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v7", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
             decision: None,
+            running_outcome: None,
+            silent_for_s: None,
             uncertain: false,
             id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
             session: session.into(),
@@ -341,6 +362,49 @@ impl VerdictClient {
     }
 }
 
+/// Add the relay owner's authorization history and keep it inside the proxy's
+/// 64 KiB request limit. This is shared by running and completed-turn checks.
+pub(crate) fn bound_authorization(
+    evidence: &mut TurnEvidence,
+    authorization: Option<mj_core::assessment::ContextHistory>,
+) -> Result<()> {
+    const WIRE_BUDGET: usize = 60 * 1024;
+    evidence.authorization = authorization;
+    if let Some(context) = &evidence.authorization
+        && !context.final_reply_omitted
+        && let Some(last) = context
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+    {
+        evidence.assistant_text_tail = last.text.clone();
+        evidence
+            .assistant_text_tail
+            .truncate(evidence.assistant_text_tail.floor_char_boundary(2048));
+    }
+    if evidence.authorization.is_some() {
+        evidence.transcript_summary.clear();
+    }
+    if serde_json::to_vec(evidence)?.len() > WIRE_BUDGET
+        && let Some(mut context) = evidence.authorization.take()
+    {
+        let mut probe = evidence.clone();
+        let fits = context.shrink_until(|candidate| {
+            probe.authorization = Some(candidate.clone());
+            serde_json::to_vec(&probe)
+                .map(|serialized| serialized.len() <= WIRE_BUDGET)
+                .unwrap_or(false)
+        });
+        evidence.authorization = fits.then_some(context);
+    }
+    if serde_json::to_vec(evidence)?.len() > WIRE_BUDGET {
+        evidence.authorization = None;
+        evidence.transcript_summary.clear();
+    }
+    Ok(())
+}
+
 /// Lives beside the prompt future, so cancellation and shutdown can always win
 /// while HTTP is pending. Dropping the turn drops the request and its schedule.
 ///
@@ -409,6 +473,15 @@ async fn await_input_verdict_with_cadence(
             spec.turn_context
                 .evidence(spec.harness, TurnPhase::Running, &facts, now);
         evidence.silent_for_s = silent.as_secs();
+        if let Err(error) =
+            bound_authorization(&mut evidence, spec.turn_context.authorization_context())
+        {
+            tracing::warn!(session = %spec.turn_context.session_id(), %error,
+                "could not bound running verdict evidence");
+            gap = (gap * 2).min(Duration::from_secs(300));
+            next_silence = silent + gap;
+            continue;
+        }
         let (mut attempt, answer) = client
             .ask_logged(&spec.turn_context.session_id(), generation, &evidence)
             .await;
@@ -426,6 +499,13 @@ async fn await_input_verdict_with_cadence(
         }
         match answer {
             Ok(verdict) if decide(TurnPhase::Running, &verdict) == Decision::AwaitingInput => {
+                attempt.running_outcome = Some(RunningVerdictOutcome::AwaitingInput);
+                attempt.silent_for_s = Some(evidence.silent_for_s);
+                return attempt;
+            }
+            Ok(verdict) if mj_core::activity::verdict::stale_finished(&evidence, &verdict) => {
+                attempt.running_outcome = Some(RunningVerdictOutcome::InferredFinished);
+                attempt.silent_for_s = Some(evidence.silent_for_s);
                 return attempt;
             }
             Ok(_) => attempt.finish("unchanged", "keep_current"),
@@ -440,6 +520,8 @@ async fn await_input_verdict_with_cadence(
 mod tests {
     use super::*;
     use mj_core::activity::verdict::{TurnPhase, WorkState};
+    use mj_core::assessment::ContextHistory;
+    use mj_core::continuation::EvidenceMessage;
     use mj_transcript::turn_context::TurnContext;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -529,6 +611,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn running_verdict_sends_authorization_and_applies_shared_wire_budget() {
+        let (client, server) = server(response("user")).await;
+        let spec = super::super::tests::silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.turn_context
+            .reset("Finish the report and summarize the result.");
+        let authorization = ContextHistory {
+            messages: vec![
+                EvidenceMessage {
+                    id: "user:task".into(),
+                    role: "user".into(),
+                    text: "Finish the report and summarize the result.".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:reply".into(),
+                    role: "assistant".into(),
+                    text: "The report is complete.".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        spec.turn_context
+            .set_authorization_context(Some(authorization.clone()));
+        let mut attempt = tokio::time::timeout(
+            MUST_FINISH,
+            await_input_verdict_with_cadence(
+                &spec,
+                &client,
+                &Default::default(),
+                Duration::from_millis(5),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            attempt.running_outcome,
+            Some(RunningVerdictOutcome::AwaitingInput)
+        );
+        attempt.finish("applied", "awaiting_input");
+        let request = server.await.unwrap();
+        assert_eq!(
+            request["state"]["authorization"],
+            serde_json::to_value(&authorization).unwrap()
+        );
+        assert_eq!(request["state"]["transcript_summary"], "");
+        assert_eq!(
+            request["state"]["assistant_text_tail"],
+            "The report is complete."
+        );
+
+        let mut large = ContextHistory {
+            messages: vec![EvidenceMessage {
+                id: "user:large".into(),
+                role: "user".into(),
+                text: "Do the requested work.".into(),
+            }],
+            ..Default::default()
+        };
+        large.messages.extend((0..255).map(|index| EvidenceMessage {
+            id: format!("{}-{index}", "a".repeat(240)),
+            role: "assistant".into(),
+            text: "done".into(),
+        }));
+        let mut bounded = evidence();
+        bounded.transcript_summary = "duplicate summary".into();
+        bound_authorization(&mut bounded, Some(large)).unwrap();
+        let retained = bounded.authorization.as_ref().unwrap();
+        assert!(retained.assistant_history_omitted);
+        assert_eq!(retained.messages.last().unwrap().role, "assistant");
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= 60 * 1024);
+        assert!(bounded.transcript_summary.is_empty());
+
+        let oversized_users = ContextHistory {
+            messages: vec![EvidenceMessage {
+                id: "user:escaped".into(),
+                role: "user".into(),
+                text: "\n".repeat(32 * 1024),
+            }],
+            ..Default::default()
+        };
+        let mut fallback = evidence();
+        fallback.transcript_summary = "duplicate summary".into();
+        bound_authorization(&mut fallback, Some(oversized_users)).unwrap();
+        assert!(fallback.authorization.is_none());
+        assert!(fallback.transcript_summary.is_empty());
+    }
+
+    #[tokio::test]
     async fn decision_log_records_submitted_body_and_application_without_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let log = mj_core::jev::DecisionLog::open(directory.path().into()).unwrap();
@@ -583,7 +755,7 @@ mod tests {
         let record = &page.decisions[0];
         assert_eq!(record.status, "applied");
         let technical = record.technical.as_ref().unwrap();
-        assert_eq!(technical["contract"], "turn-verdict-v6");
+        assert_eq!(technical["contract"], "turn-verdict-v7");
         assert_eq!(
             technical["confidence_threshold"],
             serde_json::json!(mj_core::activity::verdict::ACT_CONFIDENCE)
@@ -697,7 +869,7 @@ mod tests {
     async fn hosted_requests_send_only_evidence_without_authorization() {
         for status in [200, 429, 502] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v6/turn-verdict", listener.local_addr().unwrap());
+            let endpoint = format!("http://{}/v7/turn-verdict", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);

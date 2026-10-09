@@ -765,6 +765,31 @@ impl DurableRelay {
         }
         self.turn_context
             .observe_relay(&event.observation, summary_prompt.as_deref());
+        let authorization_changed = match &event.observation {
+            RelayObservation::CommandStarted { .. } => true,
+            RelayObservation::CommandQueued { command, .. } => {
+                matches!(command, RelayCommand::SeedAssessmentContext { .. })
+            }
+            RelayObservation::CommandCompleted { outcome, .. } => matches!(
+                outcome,
+                RelayCommandOutcome::Steered { .. }
+                    | RelayCommandOutcome::Prompt { .. }
+                    | RelayCommandOutcome::ContextCleared { .. }
+            ),
+            RelayObservation::SessionUpdate { update } => matches!(
+                update.as_ref(),
+                agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(_)
+            ),
+            RelayObservation::HarnessTurnSettled {
+                prompt_in_flight: false,
+                ..
+            } => true,
+            _ => false,
+        };
+        if authorization_changed {
+            self.turn_context
+                .set_authorization_context(self.snapshot.assessment_context.clone());
+        }
         if matches!(
             event.observation,
             RelayObservation::HarnessTurnStarted { .. }

@@ -1,0 +1,157 @@
+{
+  "id": "O14",
+  "title": "Codex continues after a confident boundary summary",
+  "category": "silent-but-working",
+  "harness": "codex",
+  "source": {
+    "kind": "worker-decision",
+    "session": "ef95f9bd05c9b32daa7ee14cc04ad9ba",
+    "session_title": "macro-derived-call-shapes-resolved-sinks",
+    "decision": "4058296-1791494454768-00000000000000000025",
+    "contract": "turn-verdict-v6",
+    "captured_at": "2026-10-08T22:27:01.723Z",
+    "assessed_at": "2026-10-08T22:27:11.726Z",
+    "recorded_action": null,
+    "recorded_status": "discarded",
+    "recorded_reason": "activity_or_generation_changed"
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "final_tool_calls": [
+      {
+        "name": "bash -c sed ; sed",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; rg | call_shape_expansions_for_input | call_shape_for_call | call_bindings\\\"",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c rg ; rg | 14 | known | known-gap | println\\\"",
+        "status": "failed"
+      },
+      {
+        "name": "bash -c sed ; sed ; rg | head",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; rg | macro_dispatch | macro_derived_callees | macro_invocation\\\" | head",
+        "status": "completed"
+      },
+      {
+        "name": "git log ; rg",
+        "status": "failed"
+      },
+      {
+        "name": "bash -c",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c rg | fn | fn | CallShapeCoverage\\\" ; sed ; sed",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c rg | rg | head ; rg | sensitive.*cleartext | std.io.stdio._print | cleartext-logging | log::\\\" | head",
+        "status": "completed"
+      },
+      {
+        "name": "git show ; git show | head",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c rg | format_macro\\\" ; sed ; rg",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; sed ; sed ; sed",
+        "status": "completed"
+      },
+      {
+        "name": "git status && ls ; rg | head",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c git ls-files | rg | head",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c sed ; sed ; sed",
+        "status": "completed"
+      },
+      {
+        "name": "bash -c rg | CallBinding | call_binding | format_macro\\\" | tail ; sed",
+        "status": "completed"
+      }
+    ],
+    "harness": "codex",
+    "phase": "running",
+    "silent_for_s": 180,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\nYou are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is /home/jonathan/Projects/bifrost3/.mj/agents/ef95f9bd05c9b32daa7ee14cc04ad9ba. Your report is what the parent reads, and it is at most 4,000 characters: outcome, changed files, evidence paths, mechanical fixes, what needs a decision, and failures. For each failing test give its name, a one-line reason and the path of its log. Write anything longer (logs, tables, full findings) to files in your report directory and list their paths in the report; never put it in the report itself. Fix mechanical errors yourself (compile errors, lint and format findings, test failures your own change caused) and list each fix in one line of your report. Complete the assigned outcome within the parent's agreed design and constraints. Resolve routine implementation details and perform necessary supporting work, including edits and tests in files or artifacts not named explicitly. Named files are starting pointers unless explicitly declared an ownership boundary. Respect read-only assignments, explicit exclusions, and other agents' ownership; do not overwrite concurrent changes. Ask the parent before changing agreed behavior or design, introducing an unapproved public or persisted contract change, crossing an ownership boundary, or taking an action outside delegated authority. Changes already required by the assignment, including contract or epoch changes, need no duplicate approval. Report unrelated baseline failures and continue independent assigned work. When a parent decision blocks further progress, hand back the question with the evidence needed to decide. The parent owns consequential design decisions and final acceptance.\n\nEngine fix in Bifrost (BrokkAi/bifrost-dev), top priority for the Vector head-to-head. Read CLAUDE.md first (no spelling-based structure: once structure selects a node, matching its resolved identity is the intended tool; no regex over source text).\n\nProblem: the Rust cleartext-logging sinks for print macros are selected by spelling: `(call :receiver (name \"std\") :callee (name/regex \"^(print|println)$\"))` in tests/fixtures/rust-codeql-parity/log-injection/app/policies/log-injection.rqlp and in the Vector policy /tmp/h2h-targets/vector-rql-demand/.bifrost/policies/vector-cleartext-logging.rqlp (also kept under /home/jonathan/Projects/bifrost3/.mj/agents/f20b5a894af85903aa86ec3288aa8bd9/). The CQ06 fixture spells `std::println!` so it matches; Vector spells `println!` unqualified, so the selector returns zero rows and the whole-workspace run binds no sink endpoint. Dispatch already resolves the unqualified macro call exactly to the external target `std.io.stdio._print` (evidence: /home/jonathan/Projects/bifrost3/.mj/agents/c3b1c46742c4a1bb0ea0a85a5280ede7/diagnose-new-sink/diagnosis.md item 3 and print-targets/). But the resolved-identity form of the selector, `(call-argument :formal-index 0 (resolved-call :resolves-to \"std.io.stdio._print\" :proof declared (call-bindings (call-shape (call :callee ...)))))`, cannot be used because call-bindings reports the macro-derived call shape as `shape_unreadable` / `unsupported` with `coverage=unknown_macro_derived` (same diagnosis, local-call-bindings/).\n\nRequired outcome:\n1. Call-binding selectors (`call-bindings`, `call-shape`, `resolved-call`) read macro-derived call shapes produced by the std macro lowering (#4518 print/eprint/log macros; #4623 panic/assert/dbg): callee identity, arity, argument ordinals mapped from the format-macro token tree, exactly as they do for ordinary calls, with the macro boundary recorded as evidence rather than as unsupported. Find where the call shape is derived for selectors (crates/bifrost-rql structural search call_binding.rs / call_shape.rs and the analyzer's structural call-shape rows) and extend the shared path; no Rust-only special case beyond the Rust macro hook that already exists.\n2. Update the sink selectors in both policies (fixture and Vector copy; keep the Vector copy in the report dir too) to the resolved-identity form for `std.io.stdio._print` / `_eprint` (and the `log` crate macros' resolved targets per the CQ06 model), so qualified and unqualified spellings both bind. The CQ06 test (tests/suite_bench_policy/epic_4304_cq06_log_injection.rs) must keep its 14 findings and known-gap assertions; add an unqualified `println!` case to the fixture with its own expected finding (a #[hardwon] regression: \"unqualified println! was not selected as a sink\").\n3. Validate: CQ06 and the Rust CQ parity suite, RQL/policy suites, Clippy, fmt (nextest --max-fail 100, BIFROST_PARALLELISM=1, RAYON_NUM_THREADS=1, host cache access, nice 10, normal cargo/mbx, never redirect target/ or bypass mbx). Then run ONE whole-workspace Vector new-sink case with the updated Vector policy on a release build of your branch merged with origin/master (edit: /home/jonathan/Projects/bifrost3/.mj/agents/3f69867455b9082f16415a16e4d72369/leak-edit.patch applied to a private copy of /tmp/h2h-targets/vector; invocation per /home/jonathan/Projects/bifrost3/.mj/agents/c3b1c46742c4a1bb0ea0a85a5280ede7/cli-m0-20261008/results.md; ~20 min) and report whether the sink endpoint now binds (diagnostics should no longer say zero sink endpoints) and whether the Honeycomb finding appears. The source-to-sink path may still stop at the unproven `SensitiveString::inner` call, which another lane owns; report that separately.\nWorkflow: worktree from origin/master (use /mnt/optane/... if /home remounts read-only), branch `rust-macro-call-shape-selectors` without tracking; commits ending `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; merge master before PR and before ready; explicit-refspec push; draft PR then ready; never push to a ready PR without `gh pr ready --undo`. Known unrelated CI red: quick policy fails on master (hourly workflow input, #4613). Network/gh may need to run outside the sandbox. Handback in 8 lines.\n</user>\n<assistant>\nI’ll read `CLAUDE.md` first, then inspect the current checkout and the selector implementation before making changes. I’ll keep the Vector policy copy and run evidence in the requested report area, and follow the specified branch and validation workflow.\n</assistant>\n<assistant>\n`CLAUDE.md` confirms this is a shared selector path, and the current checkout has unrelated untracked planning files, so I’ll leave it untouched and work in the specified isolated worktree. I’m checking the complete RQL/testing guidance and the current call-shape implementation before choosing the edit points.\n</assistant>\n<assistant>\nThe shared `.git` metadata under `/home` is read-only, so fetching or adding a worktree there fails. `/mnt/optane` has ample space; I’m isolating the work in a local clone there, where branch metadata and Cargo’s normal cache can remain writable, then I’ll refresh `origin/master` from that clone.\n</assistant>\n<assistant>\nThe current Rust hook marks every `macro_invocation` as `unknown_macro_derived`, and the shared call-shape builder suppresses all argument rows for that coverage. That is the failure point: ordinary structural arguments are available, but the selector pipeline treats the whole macro boundary as unusable. I’m tracing how Rust has already lowered each standard macro into a target and how its token-tree children are represented, so the shared fix preserves the boundary while publishing only the supported argument mapping.\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "867455b9082f16415a16e4d72369/leak-edit.patch applied to a private copy of /tmp/h2h-targets/vector; invocation per /home/jonathan/Projects/bifrost3/.mj/agents/c3b1c46742c4a1bb0ea0a85a5280ede7/cli-m0-20261008/results.md; ~20 min) and report whether the sink endpoint now binds (diagnostics should no longer say zero sink endpoints) and whether the Honeycomb finding appears. The source-to-sink path may still stop at the unproven `SensitiveString::inner` call, which another lane owns; report that separately.\nWorkflow: worktree from origin/master (use /mnt/optane/... if /home remounts read-only), branch `rust-macro-call-shape-selectors` without tracking; commits ending `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; merge master before PR and before ready; explicit-refspec push; draft PR then ready; never push to a ready PR without `gh pr ready --undo`. Known unrelated CI red: quick policy fails on master (hourly workflow input, #4613). Network/gh may need to run outside the sandbox. Handback in 8 lines.",
+    "assistant_text_tail": "The current Rust hook marks every `macro_invocation` as `unknown_macro_derived`, and the shared call-shape builder suppresses all argument rows for that coverage. That is the failure point: ordinary structural arguments are available, but the selector pipeline treats the whole macro boundary as unusable. I’m tracing how Rust has already lowered each standard macro into a target and how its token-tree children are represented, so the shared fix preserves the boundary while publishing only the supported argument mapping.",
+    "authorization": null
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "reply": "continuing",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "finished",
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-10-08T22:28:20.927Z",
+        "kind": "system",
+        "text": "External events:   - Message from your parent agent: continue if you were interrupted by the network outage; otherwise ignore this. Resume from your …"
+      },
+      {
+        "at": "2026-10-08T22:34:35.236Z",
+        "kind": "agent",
+        "text": "There’s a snapshot mismatch to account for: current `origin/master` has a direct-write CQ06 fixture with 3 findings and no macro selectors, while the `origin/4310-cq06-log-injection` reference contain"
+      },
+      {
+        "at": "2026-10-08T22:36:16.456Z",
+        "kind": "agent",
+        "text": "The isolated branch is ready from `origin/master`. I’m tracing the shared call-shape and selector path now, then I’ll bring over only the CQ06 fixture baseline that carries the 14 expected findings an"
+      },
+      {
+        "at": "2026-10-08T22:41:01.698Z",
+        "kind": "agent",
+        "text": "The shared code confirms the failure: Rust treats every macro call as unreadable, and both call-shape and call-binding stop before emitting arguments unless coverage is exact. The existing Rust format"
+      },
+      {
+        "at": "2026-10-08T22:43:59.628Z",
+        "kind": "system",
+        "text": "warning: Reconnecting... 1/5"
+      },
+      {
+        "at": "2026-10-08T22:48:23.001Z",
+        "kind": "agent",
+        "text": "The CQ06 runtime baseline also carries the actual taint lowering for print and `log` macros, which master did not yet contain. I’ve ported only that runtime path and the six CQ06 fixture artifacts, le"
+      }
+    ],
+    "note": "The reply identifies a suspected implementation gap and says it is tracing the code; same-turn investigation continues."
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "id": "O17",
+  "title": "Kimi continues after 142 seconds of silence during epoch investigation",
+  "category": "silent-but-working",
+  "harness": "kimi",
+  "source": {
+    "kind": "daemon-events-plus-transcript",
+    "session": "7acb03f28d045ebf163e87de4ed7e643",
+    "session_title": "eval20 3513 k3",
+    "command_id": "api-2cdc98d8e5f98946d2b8f623cd6a59cf",
+    "turn_started_at": "2026-09-22T17:25:36.689Z",
+    "turn_start_position": 24,
+    "reply_position": 6746,
+    "captured_at": "2026-09-22T17:44:36.320Z",
+    "last_activity_at": "2026-09-22T17:42:27.349Z",
+    "last_agent_text_at": "2026-09-22T17:42:36.320Z",
+    "silence_ended_at": "2026-09-22T17:44:58.035Z",
+    "silence_ended_by": "agent",
+    "assistant_text_silence_seconds": 141.715,
+    "note": "Manually adapted from Mjolnir api_events and materialized transcript because the extractor transcript mode emits replied-phase evidence. At capture, the API still reported a running turn; Mjolnir transcript contained no in-flight tool or active background command. No matching Jev decision record was found."
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "kimi",
+    "phase": "running",
+    "silent_for_s": 128,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\nI want you to solve GitHub issue #3513: implement the fix, validate it,\ncommit it, and report. Read this entire brief, then the repository AGENTS.md\nand its relevant routed guidance. Do not stop at a survey or plan. If the issue\nand repository genuinely leave a decision open, ask the judge one specific\nquestion and wait for the answer, then continue.\n\n# Working agreement\n\nYour repository is the `bifrost` checkout under /workspace in your own container\n(mj 2.10.0 places it at /workspace/<workspace id>/bifrost; `ls /workspace/*/bifrost`\nfinds it). The judge is Claude Fable.\nAll competing lanes receive this identical brief. Do not inspect other lanes,\ntheir sessions, the judge's private files, or evaluation results about this issue.\nBefore investigation, verify your checkout has no tracked or untracked changes,\nfetch origin, and check out this exact commit detached: 18fa60ee98f92a8dca58ffbd3a5d949adb30ee19\nThe detached checkout is explicitly authorized for this evaluation. Report its\nfull hash. Do not merge newer master or change the base during your initial run.\n\nWork only in your container. Commit your changes on the detached HEAD, with\nreal messages. Do not push, create branches or PRs, edit issue labels, or post\nGitHub comments. The judge exports your commits. Commit all intended work before\nyour final report; never stage unrelated files or use git add -A.\nDo not write to any memory directory or MEMORY.md: that pool is shared across\nsessions and harnesses. Keep discoveries in your report. Do not read other\nevaluation sessions or their reports. Do not launch subagents; do the entire\nsolution in this lane, so every configuration has the same delegation policy.\n\nUse plain cargo and the repository testing guidance. Clear JAVA_HOME and set\nBIFROST_PARALLELISM=1 and RAYON_NUM_THREADS=1. Let nextest own concurrency;\npass --max-fail 100. Run relevant crate and integration suites. Changes under a\nlanguage's graph code or analysis usages require that language's usage and issue\nsuites plus cargo nextest run --max-fail 100 -p brokk-bifrost-analysis --lib.\nRun cargo clippy --workspace --all-targets --all-features -- -D warnings and\nformat changed files. Do not reduce nextest concurrency without measured resource\nexhaustion. Report pre-existing failures only after checking the same base.\nThe harness fails a turn after 10 minutes without activity, so never block on\none command for longer than 5 minutes: run long builds and suites in the\nbackground or with a timeout of at most 300000 ms and poll their output.\nNo notification arrives between turns: never end your turn to wait for a\nbackground command, because nothing will wake you. Poll it yourself in the\nforeground, in waits of at most 5 minutes, and keep the turn running until the\nFINAL REPORT is written.\nNever run shared-cache GC or delete another session's build targets. If disk\npressure requires isolated storage, use the repository's managed target helper.\n\nFix causes with tree-sitter and analyzer structures, not source-text parsing or\nregex fallbacks. Use assertions for construction invariants, iterative traversal\nfor deep trees, plain ASCII, and the existing shared helpers. Demonstrate a\nproduction-shaped regression failing before and passing after the fix.\nRead relevant architecture chapters before changing identities, cache, usage,\ndataflow, semantic models or results. Bump the language extraction epoch when\nthe persisted language facts change; do not bump it for query-only changes.\nUse an ExecPlan under .agents/plans only when the repository requires one.\n\nExternal evidence repositories are not preinstalled: fetch the issue's pinned\ncommits under /workspace/evidence, outside this checkout. Use a fresh analyzer\ncache at /workspace/cache when needed. Validate the actual witnesses and census\ncoverage, not merely a lower finding count caused by sampling or suppression.\n\n# Reporting\n\nAn ordinary end of turn is not completion. When finished, commit your solution\nand send a message with FINAL REPORT on its own line within the first five lines,\nfollowed by these six sections:\n1. Confirmed cause with structured evidence.\n2. Changes and reasons, including full base and final commit hashes.\n3. Exact validation commands and results.\n4. Before/after evidence on the issue's named repositories or witnesses.\n5. git status --short, limitations, and any separately actionable findings.\n6. A draft GitHub approach comment, 5 to 12 plain-language sentences.\n\n# Judge notes\n\nAn RQL intersection of two declaration projections loses a declaration that both contain, because `PipelineKey::Declaration(DeclarationValue)` includes optional structural-kind evidence in equality and the member and enclosing-declaration projections carry different kind metadata for the same CodeUnit and range. Exposed during #3490 (landed 7a055fe20 with its own acceptance; this ticket is not a substitute for it). Row identity must be the declaration (CodeUnit and range); kind evidence is presentation metadata to merge, not identity.\n\n# Issue\n\nIssue #3513: RQL: declaration intersection depends on optional structural-kind metadata\n\nRQL declaration-set intersection can lose the same declaration when two projections carry different optional kind metadata. This is a separate defect exposed while investigating #3490; it is not a request to substitute members/owner for that issue's inside-decl acceptance.\n\nAt base `a6cb9de6cd8e432dd2f670eb8fd31f70828d56eb`, use:\n\n```rust\npub struct PriceCalculator;\nimpl PriceCalculator { pub fn total() -> u64 { 42 } }\npub struct OtherCalculator;\nimpl OtherCalculator { pub fn total() -> u64 { 0 } }\n```\n\nThe member projection identifies PriceCalculator.total, but intersecting it with an enclosing-declaration method selection returns no row:\n\n```lisp\n(intersect\n  (members (enclosing-decl (class :name \"PriceCalculator\")))\n  (enclosing-decl (method :name \"total\")))\n```\n\n`PipelineKey::Declaration(DeclarationValue)` includes optional structural-kind evidence in equality. The member and structural projections therefore receive different keys despite sharing the CodeUnit and range. Candidate `aa78bf416dd7c27bd837f500899dfe5704032405` keys declaration identity by CodeUnit/range and merges kind evidence. Its `tests/suite_issues/issue_3490_rust_member_selection.rs` asserts both intersection orders produce exactly the PriceCalculator method and preserve the method label. The candidate is archived as `eval19-3490-astra`; it is not yet landed.\n\nAcceptance: both intersection orders select the same declaration, different declarations remain distinct, and stable row identities do not depend on optional presentation metadata. Preserve owner/member ambiguity and incomplete boundaries.\n\n\n</user>\n<assistant>\nI'll start by setting up the environment per the working agreement: verify a clean checkout, fetch origin, and check out the pinned commit.\n</assistant>\n<assistant>\nThe candidate commit isn't in this repo — I'll implement the fix myself. Let me examine the intersect implementation and how keys are used.\n</assistant>\n<assistant>\nNow let me see where `structural_kind` is set and how declarations flow through the pipeline.\n</assistant>\n<assistant>\nNow let me see `insert_pipeline_row` and `pipeline_trace_value`, which handle row dedup/merge.\n</assistant>\n<assistant>\nLet me check `units.rs` where `structural_kind` is used for row identity:\n</assistant>\n<assistant>\nNow let me look at the `Members` step implementation in pipeline.rs:\n</assistant>\n<assistant>\nMy Read calls had duplicated `path` keys which broke pagination. Retrying with a clean call for the Members/Owner step region:\n</assistant>\n<assistant>\nLet me check whether any stable-id digest incorporates `DeclarationValue` (which would carry the kind into other row families' identities):\n</assistant>\n<assistant>\nNow let me check for any persisted/golden fixtures that pin the current UnitRowKey declaration shape (the optional kind renders as `=<label>`):\n</assistant>\n<assistant>\nThe substrate epoch's doc says to bump it when the engine stops minting an older key shape — dropping the kind part from `UnitRowKey` is such a change. Now let me check the detailed-evidence key for declarations (`detailed_evidence_for_pipeline_value`):\n</assistant>\n<assistant>\n`DetailedCodeQueryKey::Declaration.kind` is a rendered label computed after the executor merge — but let me verify nothing downstream joins on it as identity:\n</assistant>\n<assistant>\nThis change alters minted `UnitRowKey` shapes, which the substrate epoch doc says requires a bump. Let me read the architecture guidance on analyzer-store/epochs before deciding:\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "ntersecting it with an enclosing-declaration method selection returns no row:\n\n```lisp\n(intersect\n  (members (enclosing-decl (class :name \"PriceCalculator\")))\n  (enclosing-decl (method :name \"total\")))\n```\n\n`PipelineKey::Declaration(DeclarationValue)` includes optional structural-kind evidence in equality. The member and structural projections therefore receive different keys despite sharing the CodeUnit and range. Candidate `aa78bf416dd7c27bd837f500899dfe5704032405` keys declaration identity by CodeUnit/range and merges kind evidence. Its `tests/suite_issues/issue_3490_rust_member_selection.rs` asserts both intersection orders produce exactly the PriceCalculator method and preserve the method label. The candidate is archived as `eval19-3490-astra`; it is not yet landed.\n\nAcceptance: both intersection orders select the same declaration, different declarations remain distinct, and stable row identities do not depend on optional presentation metadata. Preserve owner/member ambiguity and incomplete boundaries.\n\n",
+    "assistant_text_tail": "This change alters minted `UnitRowKey` shapes, which the substrate epoch doc says requires a bump. Let me read the architecture guidance on analyzer-store/epochs before deciding:"
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "reply": "continuing",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "finished",
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-22T17:42:36.320Z",
+        "kind": "tool",
+        "text": "Reading /workspace/7acb03f28d045ebf163e87de4ed7e643/bifrost/.agents/docs/architecture-and-analyzer-store.md"
+      },
+      {
+        "at": "2026-09-22T17:43:24.438Z",
+        "kind": "thought",
+        "text": "The architecture guidance doesn't govern `POLICY_SUBSTRATE_EPOCH` directly; the epoch's own doc comment does (\"Bump this whenever a change makes either something this engine would no longer mint\"). Th"
+      },
+      {
+        "at": "2026-09-22T17:43:30.095Z",
+        "kind": "tool",
+        "text": "Running: cd /workspace/7acb03f28d045ebf163e87de4ed7e643/bif…"
+      },
+      {
+        "at": "2026-09-22T17:44:00.957Z",
+        "kind": "thought",
+        "text": "Good — the existing merge_evidence pattern uses `debug_assert_eq!` on the identity parts. I'll follow that: in the Declaration merge arm, `debug_assert!(value.unit == other.unit && value.range == othe"
+      },
+      {
+        "at": "2026-09-22T17:44:58.035Z",
+        "kind": "agent",
+        "text": "Let me check `analysis_epoch_digest` and how the epoch test coverage looks:"
+      },
+      {
+        "at": "2026-09-22T17:44:58.036Z",
+        "kind": "tool",
+        "text": "Running: cd /workspace/7acb03f28d045ebf163e87de4ed7e643/bif…"
+      }
+    ],
+    "note": "The assistant says it needs architecture guidance before deciding and then resumes the same turn without user input."
+  }
+}

@@ -461,6 +461,7 @@
     "failure": "none",
     "input": "none",
     "work": "finished",
+    "reply": "closing",
     "quiet": null,
     "action": "finished",
     "wrong_actions": [

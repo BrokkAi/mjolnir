@@ -10,6 +10,7 @@ struct TurnContextState {
     generation: u64,
     parent_activity: Option<std::time::Instant>,
     decision_log: Option<mj_core::jev::DecisionLog>,
+    authorization: Option<mj_core::assessment::ContextHistory>,
     user_prompt_tail: String,
     message_id: Option<String>,
     assistant_text_tail: String,
@@ -43,10 +44,15 @@ pub struct TurnContext(Arc<Mutex<TurnContextState>>);
 impl TurnContext {
     /// Process-local parent clock; child traffic and inventory updates never mark it.
     pub fn mark_parent_activity(&self) {
+        self.mark_parent_activity_at(std::time::Instant::now());
+    }
+
+    /// Record the monotonic time at which parent activity was observed.
+    pub fn mark_parent_activity_at(&self, at: std::time::Instant) {
         self.0
             .lock()
             .expect("turn context lock poisoned")
-            .parent_activity = Some(std::time::Instant::now());
+            .parent_activity = Some(at);
     }
 
     pub fn parent_activity(&self) -> Option<std::time::Instant> {
@@ -76,6 +82,7 @@ impl TurnContext {
             generation,
             parent_activity: Some(std::time::Instant::now()),
             decision_log: state.decision_log.clone(),
+            authorization: state.authorization.clone(),
             user_prompt_tail: tail(prompt, USER_PROMPT_BYTES),
             background_commands: state.background_commands,
             queued_commands: state.queued_commands,
@@ -177,6 +184,27 @@ impl TurnContext {
             .clone()
     }
 
+    /// Publish the relay owner's durable user-instruction history to the ACP
+    /// classifier. A change invalidates any request built from older context.
+    pub fn set_authorization_context(
+        &self,
+        authorization: Option<mj_core::assessment::ContextHistory>,
+    ) {
+        let mut state = self.0.lock().expect("turn context lock poisoned");
+        if state.authorization != authorization {
+            state.authorization = authorization;
+            state.generation = state.generation.wrapping_add(1);
+        }
+    }
+
+    pub fn authorization_context(&self) -> Option<mj_core::assessment::ContextHistory> {
+        self.0
+            .lock()
+            .expect("turn context lock poisoned")
+            .authorization
+            .clone()
+    }
+
     /// Compare identities as well as counts; identical level reports are not activity.
     pub fn set_background_inventory(
         &self,
@@ -253,6 +281,7 @@ impl TurnContext {
         state.assistant_text_tail.clear();
         state.last_completed_message.clear();
         state.message_id = None;
+        state.authorization = None;
         state.generation = state.generation.wrapping_add(1);
     }
 

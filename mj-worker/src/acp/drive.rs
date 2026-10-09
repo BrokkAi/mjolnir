@@ -1869,14 +1869,13 @@ pub(super) async fn settle_steer_at_turn_end(
     }
 }
 
-/// Keep the adapter's `session/prompt` request alive after the prompt ended at
-/// Claude Code's result, and discard the reply when it comes.
+/// Keep the harness's `session/prompt` request alive after Mj ends its tracked
+/// turn, and discard the reply when it comes.
 ///
 /// Dropping the reply future before the reply arrives makes the ACP crate send
-/// `$/cancel_request`, which the adapter handles as a cancel of the live turn.
-/// The adapter holds the reply while background work the turn started runs,
-/// and answers it at the next prompt or when that work ends. The task belongs
-/// to the connection, so it ends with the connection.
+/// `$/cancel_request`, which can cancel a still-running harness turn. The
+/// connection-scoped task keeps that response tied to its original request, so
+/// it cannot complete a later tracked prompt. The task ends with the connection.
 pub(super) fn detach_prompt_reply(
     connection: &ConnectionTo<Agent>,
     reply: ActivePrompt,

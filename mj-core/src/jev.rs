@@ -172,7 +172,7 @@ impl DecisionLog {
             action: assessment.reason.replace('_', " "),
             scope: "Whole retained authorization messages and current completion evidence; omitted context is explicit.".into(),
             owner: owner().into(),
-            technical: Some(serde_json::json!({"contract":"turn-verdict-v6", "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE, "required_input_probability":crate::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":crate::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":crate::assessment::FINISHED_WORK_PROBABILITY})),
+            technical: Some(serde_json::json!({"contract":"turn-verdict-v7", "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE, "required_input_probability":crate::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":crate::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":crate::assessment::FINISHED_WORK_PROBABILITY})),
         });
     }
 

@@ -88,6 +88,7 @@
     "failure": "none",
     "input": "none",
     "work": "finished",
+    "reply": "continuing",
     "quiet": true,
     "action": "finished",
     "wrong_actions": [

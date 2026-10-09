@@ -1,0 +1,94 @@
+{
+  "id": "O20",
+  "title": "Kimi continues after 282 seconds of silence during method-query probing",
+  "category": "silent-but-working",
+  "harness": "kimi",
+  "source": {
+    "kind": "daemon-events-plus-transcript",
+    "session": "71406e2c1302ca3ca901e0ee068212ca",
+    "session_title": "eval20 3508 k3",
+    "command_id": "api-d3e8db8b29439dabdd1691edd2eedd0a",
+    "turn_started_at": "2026-09-23T01:24:14.633Z",
+    "turn_start_position": 48237,
+    "reply_position": 57457,
+    "captured_at": "2026-09-23T01:56:49.585Z",
+    "last_activity_at": "2026-09-23T01:54:49.585Z",
+    "last_agent_text_at": "2026-09-23T01:52:21.703Z",
+    "silence_ended_at": "2026-09-23T01:57:03.372Z",
+    "silence_ended_by": "thought",
+    "assistant_text_silence_seconds": 281.669,
+    "note": "Manually adapted from Mjolnir api_events and materialized transcript because the extractor transcript mode emits replied-phase evidence. At capture, the API still reported a running turn; Mjolnir transcript contained no in-flight tool or active background command. No matching Jev decision record was found."
+  },
+  "facts_known": true,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "harness": "kimi",
+    "phase": "running",
+    "silent_for_s": 120,
+    "tools_in_flight": [],
+    "transcript_summary": "<user>\nYour turn ended because the model provider's five-hour account usage window was exhausted, not because of anything in your work; the scheduled window has now reset. The workspace and any running or finished jobs are still intact. First check whether the job you were waiting on finished and read its result before rerunning anything. Continue from where you were under the same original brief: finish the solution, validate, commit, and give the complete six-section FINAL REPORT. Keep every command wait under five minutes. No new judge feedback is being provided.\n</user>\n<assistant>\nResuming after the usage-window interruption. The last probe showed: `audited` (namespace function) matches by name, but `record` (member defined out of line) doesn't. The 3493 tests only ever matched namespace functions by name. Let me check how member procedures are queried elsewhere:\n</assistant>\n<assistant>\nThat edit duplicated the probe — let me fix it by removing the old copy:\n</assistant>\n<assistant>\nThe member query needs `kind: \"method\"`. Also the header-only arm needs inspection. Let me re-probe with the right shapes:\n</assistant>\n<assistant>\nNow I need `definition_for_locator` and `locator_exactly_names_unit` — the arm's `target_unit` came back empty despite a named target:\n</assistant>\n<assistant>\nLet me check how `target_declaration` is rendered — via `target_unit` or via the unmaterialized identity:\n</assistant>\n<assistant>\n`target_unit` is present on the boundary arm — good. The remaining question: why is the boundary \"unmaterialized\" (procedure not found) when the merged unit has a body? Let me find where the C++ semantic dispatch builds the target locator:\n</assistant>\n<assistant>\nLet me see the group-matching structure around the `matched_any` branch:\n</assistant>\n<assistant>\nFound the suspect: `selected_callable_range` narrows multi-range units to one range. Let me read it:\n</assistant>\n<assistant>\n`selected_callable_layout` picks the min range whose arity matches — for a decl+def pair both match, so it picks the prototype's range and the definition's procedure gets filtered out. Let me confirm how groups are built upstream, then fix. First, the initial target-group production:\n</assistant>\n<assistant>\nThe member-call resolution drops prototype-only candidates at the navigation layer — adjacent but distinct from keying. Let me check the other `modeled_procedure_key_for_unit` consumers to map the real binding paths:\n</assistant>\n<assistant>\nLet me probe get_definition on the header-only member call to see what the resolver names:\n</assistant>\n<assistant>\nThe navigation layer needs checking: which operation does call resolution use, and does it drop prototype-only declarations? Let me look:\n</assistant>\n<assistant>\nLet me probe what the header-only member match domain contains at all:\n</assistant>\n",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Your turn ended because the model provider's five-hour account usage window was exhausted, not because of anything in your work; the scheduled window has now reset. The workspace and any running or finished jobs are still intact. First check whether the job you were waiting on finished and read its result before rerunning anything. Continue from where you were under the same original brief: finish the solution, validate, commit, and give the complete six-section FINAL REPORT. Keep every command wait under five minutes. No new judge feedback is being provided.",
+    "assistant_text_tail": "Let me probe what the header-only member match domain contains at all:"
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "authorized_unfinished",
+    "reply": "continuing",
+    "quiet": false,
+    "action": "uncertain",
+    "wrong_actions": [
+      "finished",
+      "await_input",
+      "continue"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-23T01:52:21.703Z",
+        "kind": "tool",
+        "text": "Running: cd /workspace/71406e2c1302ca3ca901e0ee068212ca/bif…"
+      },
+      {
+        "at": "2026-09-23T01:53:51.401Z",
+        "kind": "thought",
+        "text": "The header produces NO structural matches at all — not even `kind: callable` — because a header file's declarations... wait, the header is analyzed (its units are in get_all_declarations — the parity "
+      },
+      {
+        "at": "2026-09-23T01:54:03.735Z",
+        "kind": "tool",
+        "text": "Running: env -u JAVA_HOME -u HOST_CC CC=cc HOST_CC=cc CXX=c…"
+      },
+      {
+        "at": "2026-09-23T01:55:24.799Z",
+        "kind": "thought",
+        "text": "The call match works. The header produces no structural matches at all for method/function/callable. Let me probe `kind: \"class\"` in client.h to see if ANY match works there. Actually — let me look at"
+      },
+      {
+        "at": "2026-09-23T01:55:38.877Z",
+        "kind": "tool",
+        "text": "Running: cd /workspace/71406e2c1302ca3ca901e0ee068212ca/bif…"
+      },
+      {
+        "at": "2026-09-23T01:57:03.372Z",
+        "kind": "thought",
+        "text": "`kind: \"class\"` in client.h MATCHES (the class declaration), but `kind: \"method\"` does not match the in-class prototype. So the structural match domain for methods doesn't include the in-class prototy"
+      }
+    ],
+    "note": "The assistant is still probing the method-match domain; thought/tool activity and later agent output show the turn was working."
+  }
+}

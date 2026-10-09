@@ -939,6 +939,7 @@
     "failure": "none",
     "input": "none",
     "work": "authorized_unfinished",
+    "reply": "continuing",
     "quiet": null,
     "action": "uncertain",
     "wrong_actions": [

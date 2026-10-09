@@ -1,0 +1,93 @@
+{
+  "id": "O03",
+  "title": "Codex completed handback left turn open",
+  "category": "stale-open-turn",
+  "harness": "codex",
+  "source": {
+    "kind": "controller-db-reconstruction",
+    "session": "8560eb7a954919e1978091ce20713098",
+    "session_title": "eval17 3455 opus",
+    "turn_command_id": "api-0c9ad459fff8713b1b10af5863a9e931",
+    "turn_started_at": "2026-09-20T01:55:33.136Z",
+    "last_agent_text_at": "2026-09-20T01:55:33.138Z",
+    "captured_at": "2026-09-20T01:57:33.138Z",
+    "ended_by": {
+      "kind": "user-message",
+      "at": "2026-09-20T02:59:41.251Z"
+    },
+    "silence_seconds_to_end": 3848,
+    "note": "completed handback; no request to user Synthetic running evidence at 120s is reconstructed; historical worker Jev evidence and exact tools/background counts were unavailable."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": null,
+    "harness": "codex",
+    "phase": "running",
+    "silent_for_s": 120,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "Your previous turn ended with \"You've hit your session limit\" before the work was complete. The limit has reset. Continue the task exactly as the brief in this session states: if you had not started, start now from the pinned base; if you had partial work, verify the checkout state first (git status, git log -1) and continue from it. All rules of the brief still apply, including no sub-agents, committing on the detached HEAD, polling long commands in waits of at most 5 minutes, and ending with FINAL REPORT and the six sections.\n",
+    "assistant_text_tail": "The clippy monitor confirms what I already reported: `CLIPPY_EXIT=0`. No new information, and no work remains.\n\nThe task is complete as delivered in the FINAL REPORT above:\n\n- Base `0e6a57f4b8264c6541ff3358cd615048efc6a08e` → final `21871cd62aec5df058fdf06978f84d884df70843`, three commits on the detached HEAD, working tree clean.\n- All validation gates green, including `cargo clippy --workspace --all-targets --all-features -- -D warnings`."
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "none",
+    "work": "finished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "finished",
+    "wrong_actions": [
+      "continue",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-20T02:59:26.791Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-20T02:59:28.596Z",
+        "kind": "system",
+        "text": "harness session started"
+      },
+      {
+        "at": "2026-09-20T02:59:29.013Z",
+        "kind": "system",
+        "text": "Switched from claude / morannon-podman to codex4 / morannon-podman in place; the workspace and environment were kept. Queued work was discarded; ready and idle. The interrupted prompt was not replayed"
+      },
+      {
+        "at": "2026-09-20T02:59:40.041Z",
+        "kind": "system",
+        "text": "model set to gpt-6-astra"
+      },
+      {
+        "at": "2026-09-20T02:59:40.854Z",
+        "kind": "system",
+        "text": "effort set to low"
+      },
+      {
+        "at": "2026-09-20T02:59:41.251Z",
+        "kind": "user",
+        "text": "Your solution for #3455 won the evaluation. Land it on master from this container. (This session has been moved to a different model for the landing; the repository state and your commits are unchange"
+      }
+    ],
+    "note": "Reconstructed complete handback; no agent, thought, or tool output occurred before the user sent a new message 3,848 seconds later."
+  }
+}

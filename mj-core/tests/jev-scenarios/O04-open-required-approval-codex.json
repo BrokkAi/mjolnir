@@ -1,0 +1,94 @@
+{
+  "id": "O04",
+  "title": "Codex asks for required approval then waits",
+  "category": "stale-open-turn",
+  "harness": "codex",
+  "source": {
+    "kind": "controller-db-reconstruction",
+    "session": "81b21c67199a48f8cfad7ddc7076683b",
+    "session_title": "autocull via codex2",
+    "turn_command_id": "prompt-6cf875a145390a1113b91b460cb58497",
+    "turn_started_at": "2026-09-27T22:39:28.509Z",
+    "last_agent_text_at": "2026-09-27T22:59:31.446Z",
+    "captured_at": "2026-09-27T23:01:31.446Z",
+    "ended_by": {
+      "kind": "user-message",
+      "at": "2026-09-27T23:50:10.695Z"
+    },
+    "silence_seconds_to_end": 3039,
+    "note": "explicit approval question Synthetic running evidence at 120s is reconstructed; historical worker Jev evidence and exact tools/background counts were unavailable."
+  },
+  "facts_known": false,
+  "facts": {
+    "execution": "running",
+    "harness_turn_open": true,
+    "goal_active": false,
+    "active_user_shells": 0,
+    "active_agent_terminals": 0,
+    "task_settled_s_ago": null,
+    "background_needed": null
+  },
+  "evidence": {
+    "authorization": null,
+    "harness": "codex",
+    "phase": "running",
+    "silent_for_s": 120,
+    "tools_in_flight": [],
+    "transcript_summary": "",
+    "background_commands": 0,
+    "queued_commands": 0,
+    "user_prompt_tail": "(and on the other end of the scale, we do want to run on 8GB GPUs that are even smaller, but i don't have one to test here)",
+    "assistant_text_tail": "Implemented and pushed concurrent panorama processing.\n\n- 488 tests, strict Clippy, and workspace compilation pass.\n- A4000 geometry: 122.9 seconds, 2.2 GB peak; all 536 pairs match exactly.\n\nThe goal is **blocked on live accuracy validation**. Approve the 544-photo Flash/Gemini retest using 1280-pixel JPEGs?\n\nAutomatic approval review requires fresh approval for this exact payload despite your earlier authorization."
+  },
+  "recorded_verdict": null,
+  "expected": {
+    "failure": "none",
+    "input": "required",
+    "work": "authorized_unfinished",
+    "reply": "closing",
+    "quiet": null,
+    "action": "await_input",
+    "wrong_actions": [
+      "continue",
+      "finished",
+      "wait"
+    ]
+  },
+  "known_failure": [],
+  "outcome": null,
+  "context": {
+    "after": [
+      {
+        "at": "2026-09-27T22:59:36.448Z",
+        "kind": "system",
+        "text": "[session restarted]"
+      },
+      {
+        "at": "2026-09-27T23:50:10.695Z",
+        "kind": "user",
+        "text": "approved"
+      },
+      {
+        "at": "2026-09-27T23:50:15.636Z",
+        "kind": "agent",
+        "text": "I’ll run the approved 544-photo Flash retest on the headless A4000, then score it against the frozen labels and check the ordinary-photo controls."
+      },
+      {
+        "at": "2026-09-27T23:51:57.404Z",
+        "kind": "agent",
+        "text": "The approved run has started on the A4000 with the 8 GB ceiling. It’s reusing cached local preparation and geometry, but requesting fresh Flash membership decisions with the corrected motion descripti"
+      },
+      {
+        "at": "2026-09-27T23:53:35.808Z",
+        "kind": "agent",
+        "text": "The run has uploaded 507 images and completed six Flash requests so far, with no service failures reported. I’ll score the completed catalog, including any remaining uncertainty, rather than treating "
+      },
+      {
+        "at": "2026-09-27T23:57:29.204Z",
+        "kind": "agent",
+        "text": "The approved run finished successfully, and the embedding session reopened correctly afterward. I’m now checking its panorama decisions against the frozen labels and measuring runtime and GPU memory u"
+      }
+    ],
+    "note": "Reconstructed final reply explicitly asks approval for the exact remaining validation payload; the user approved much later."
+  }
+}
