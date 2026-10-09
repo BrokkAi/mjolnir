@@ -218,10 +218,10 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 ╭ Conversation · raw source ───────────────────────────────────────────────────────────────────────╮
 │ ✓ Tool · done                                                                                   ▐│
 │ │ Bash                                                                                          ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
+│ │ Input arguments                                                                               ▐│
+│ │ {                                                                                             ▐│
+│ │   "command": "git add src && cargo test --workspace | cat"                                    ▐│
+│ │ }                                                                                             ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
@@ -239,6 +239,156 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
+
+=== message input arrives while running (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ● Tool · running                                                            ▐│
+│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ session_id:                                                               ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Answer on the 48 s reverse queries: yes, that is the expected shape of    ▐│
+│ │ today's target-scoped reverse design on Vector, not a regression, and two ▐│
+│ │ levers exist, one cheap.                                                  ▐│
+│ │ Try a larger reader page cache.                                           ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== message input survives result update (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ session_id:                                                               ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Answer on the 48 s reverse queries: yes, that is the expected shape of    ▐│
+│ │ today's target-scoped reverse design on Vector, not a regression, and two ▐│
+│ │ levers exist, one cheap.                                                  ▐│
+│ │ Try a larger reader page cache.                                           ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== raw message includes arguments and receipt (80x28) ===
+╭ Conversation · raw source ───────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {                                                                         ▐│
+│ │   "session_id": "peer-session",                                           ▐│
+│ │   "message": "Answer on the 48 s reverse queries: yes, that is the        ▐│
+│ │   expected shape of today's target-scoped reverse design on Vector, not a ▐│
+│ │   regression, and two levers exist, one cheap.\nTry a larger reader page  ▐│
+│ │   cache."                                                                 ▐│
+│ │ }                                                                         ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== restored message includes original arguments (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ session_id:                                                               ▐│
+│ │ peer-session                                                              ▐│
+│ │                                                                           ▐│
+│ │ message:                                                                  ▐│
+│ │ Answer on the 48 s reverse queries: yes, that is the expected shape of    ▐│
+│ │ today's target-scoped reverse design on Vector, not a regression, and two ▐│
+│ │ levers exist, one cheap.                                                  ▐│
+│ │ Try a larger reader page cache.                                           ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
+
+=== empty input replaces earlier message arguments (80x28) ===
+╭ Conversation ────────────────────────────────────────────────────────────────╮
+│ ✓ Tool · done                                                               ▐│
+│ │ mcp__mj-agents__send_message                                              ▐│
+│ │ Input arguments                                                           ▐│
+│ │ {}                                                                        ▐│
+│ │ {"status":"queued","via":"mailbox"}                                       ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+│                                                                             ▐│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                                        │
+│                                                                              │
+╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 
 === clean fallback terminal in rich mode (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮

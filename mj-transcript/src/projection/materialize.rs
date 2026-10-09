@@ -100,6 +100,9 @@ pub fn materialized_session_from_entries(
                             ToolStatus::Failed => ToolCallStatus::Failed,
                         })
                         .content(content);
+                    if let Some(input) = &entry.tool_input {
+                        call = call.raw_input(input.clone());
+                    }
                     if !entry.tool_diffstats.is_empty() || !entry.tool_locations.is_empty() {
                         call = call.raw_output(serde_json::json!({
                             "legacyDiffstats": entry.tool_diffstats,

@@ -959,6 +959,28 @@ fn join_shell_tokens(tokens: Vec<String>) -> String {
     output
 }
 
+/// Read string arguments as text, including their real line breaks. Other
+/// values keep their JSON structure; the renderer wraps rather than clips it.
+pub fn tool_input_text(input: &Value) -> String {
+    fn value_text(value: &Value) -> String {
+        match value {
+            Value::String(text) => text.clone(),
+            _ => serde_json::to_string_pretty(value)
+                .expect("tool arguments are serializable JSON values"),
+        }
+    }
+
+    let text = match input {
+        Value::Object(fields) if !fields.is_empty() => fields
+            .iter()
+            .map(|(name, value)| format!("{name}:\n{}", value_text(value)))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => value_text(input),
+    };
+    sanitize_terminal_text(&text)
+}
+
 pub fn tool_content_details(
     content: &[ToolCallContent],
     terminal_outputs: &[TerminalOutputRecord],
@@ -1158,6 +1180,7 @@ pub fn apply_session_update_to_entries(
             );
             entry.tool_summary = Some(presentation.summary.clone());
             entry.tool_presentation = Some(presentation);
+            entry.tool_input = call.raw_input;
             entry.tool_content = tool_content_details(&call.content, &[], call.raw_output.as_ref());
             entry.tool_diffstats = tool_diff_paths(&call.content);
             entry.tool_locations = tool_location_details(&call.locations);
@@ -1173,6 +1196,9 @@ pub fn apply_session_update_to_entries(
             let kind = update.fields.kind;
             let raw_input = update.fields.raw_input.clone();
             let raw_output = update.fields.raw_output.clone();
+            if let Some(input) = &raw_input {
+                entry.tool_input = Some(input.clone());
+            }
             if let Some(title) = update.fields.title {
                 entry.text = sanitize_terminal_text(&title);
             }

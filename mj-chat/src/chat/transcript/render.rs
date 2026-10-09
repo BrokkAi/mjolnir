@@ -684,13 +684,44 @@ pub(super) fn entry_logical_lines(
             .collect();
     }
 
-    let details = entry
+    let mut details = entry
         .tool_content
         .iter()
         .chain(&entry.tool_diffstats)
         .chain(&entry.tool_locations)
         .cloned()
         .collect::<Vec<_>>();
+    if expanded_tool
+        && mode == TranscriptRenderMode::Rich
+        && let Some(input) = &entry.tool_input
+    {
+        let title = if entry.leading_omitted {
+            format!("[… earlier content omitted …]\n{}", entry.text)
+        } else {
+            entry.text.clone()
+        };
+        let mut lines = markdown_lines(&title, visual.body_style, visual.header_style, width);
+        let input = format!(
+            "Input arguments\n{}",
+            mj_transcript::transcript::tool_input_text(input)
+        );
+        lines.extend(raw_lines(&input, visual.body_style));
+        lines.extend(markdown_lines(
+            &details.join("\n"),
+            visual.body_style,
+            visual.header_style,
+            width,
+        ));
+        return lines;
+    }
+    if mode == TranscriptRenderMode::Raw
+        && let Some(input) = &entry.tool_input
+    {
+        let input = serde_json::to_string_pretty(input)
+            .expect("tool arguments are serializable JSON values");
+        let input = mj_core::transcript::sanitize_terminal_text(&input);
+        details.insert(0, format!("Input arguments\n{input}"));
+    }
     let mut source = match mode {
         TranscriptRenderMode::Rich if expanded_tool && entry.role == ChatRole::Tool => {
             if details.is_empty() {

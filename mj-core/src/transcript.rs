@@ -415,6 +415,9 @@ pub struct ChatEntry {
     /// raw-command-derived summary without retaining arbitrary raw JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_presentation: Option<ToolCallPresentation>,
+    /// ACP arguments, kept separately so result updates cannot erase them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<serde_json::Value>,
     pub tool_content: Vec<String>,
     pub tool_diffstats: Vec<String>,
     pub tool_locations: Vec<String>,
@@ -489,6 +492,7 @@ impl ChatEntry {
             tool_status: None,
             tool_summary: None,
             tool_presentation: None,
+            tool_input: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -522,6 +526,8 @@ impl ChatEntry {
         const DETAIL_COUNT: usize = 8;
 
         self.leading_omitted |= truncate_string_start(&mut self.text, TEXT_BYTES);
+        // Dashboard summaries do not expand tool arguments.
+        self.tool_input = None;
         for values in [
             &mut self.tool_content,
             &mut self.tool_diffstats,
@@ -567,6 +573,7 @@ impl ChatEntry {
             tool_status: None,
             tool_summary: None,
             tool_presentation: None,
+            tool_input: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
@@ -596,6 +603,7 @@ impl ChatEntry {
             tool_status: Some(tool_status),
             tool_summary: None,
             tool_presentation: None,
+            tool_input: None,
             tool_content: Vec::new(),
             tool_diffstats: Vec::new(),
             tool_locations: Vec::new(),
