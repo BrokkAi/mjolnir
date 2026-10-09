@@ -15,11 +15,11 @@
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -42,11 +42,11 @@ action: OpenLink("https://example.com/inline")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -69,11 +69,11 @@ action: OpenLink("https://example.com/block")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -96,11 +96,11 @@ action: None
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -123,11 +123,11 @@ action: OpenLink("https://example.com/1")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -150,11 +150,11 @@ action: OpenLink("https://example.com/2")
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -177,12 +177,12 @@ action: None
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭ 🎙︎ ─────────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
+│                            │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
 action: OpenLink("https://example.com/1")
@@ -204,12 +204,12 @@ action: OpenLink("https://example.com/1")
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭ 🎙︎ ─────────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
+│                            │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
 action: None

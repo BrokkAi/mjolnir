@@ -15,11 +15,11 @@
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -45,11 +45,11 @@ failed command style: header=Some(Rgb(244, 154, 165)), body=None
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -72,11 +72,11 @@ tool click targets: {1, 2, 3}
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -99,11 +99,11 @@ expanded tools: {2}
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -126,11 +126,11 @@ expanded tools: {1, 2}
 │                                                         ▐│
 │                                                         ▐│
 │                                                         ▐│
-│                                                         ▐│
-│                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
@@ -153,11 +153,11 @@ expanded tools: {}
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -179,11 +179,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -205,11 +205,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -231,11 +231,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -257,11 +257,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -283,11 +283,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -309,11 +309,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -335,11 +335,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -385,12 +385,12 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                 ▐│
 │                                 ▐│
 │                                 ▐│
-│                                 ▐│
-│                                 ▐│
 ╰──────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────╮
 │> Message the agent, or / for     │
 │  commands                        │
+│                                  │
+│                                  │
 ╰──────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
@@ -435,12 +435,12 @@ ctrl+b then : palette · ? keys
 │                                 ▐│
 │                                 ▐│
 │                                 ▐│
-│                                 ▐│
-│                                 ▐│
 ╰──────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────╮
 │> Message the agent, or / for     │
 │  commands                        │
+│                                  │
+│                                  │
 ╰──────────────────────────────────╯
 ctrl+b then : palette · ? keys
 expanded tools: {2}
@@ -486,12 +486,12 @@ expanded tools: {2}
 │                                 ▐│
 │                                 ▐│
 │                                 ▐│
-│                                 ▐│
-│                                 ▐│
 ╰──────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────╮
 │> Message the agent, or / for     │
 │  commands                        │
+│                                  │
+│                                  │
 ╰──────────────────────────────────╯
 ctrl+b then : palette · ? keys
 expanded tools: {}
@@ -537,12 +537,12 @@ expanded tools: {}
 │                                 ▐│
 │                                 ▐│
 │                                 ▐│
-│                                 ▐│
-│                                 ▐│
 ╰──────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────╮
 │> Message the agent, or / for     │
 │  commands                        │
+│                                  │
+│                                  │
 ╰──────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
@@ -587,12 +587,12 @@ ctrl+b then : palette · ? keys
 │                                 ▐│
 │                                 ▐│
 │                                 ▐│
-│                                 ▐│
-│                                 ▐│
 ╰──────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────╮
 │> Message the agent, or / for     │
 │  commands                        │
+│                                  │
+│                                  │
 ╰──────────────────────────────────╯
 ctrl+b then : palette · ? keys
 expanded tools: {6}
@@ -638,12 +638,12 @@ expanded tools: {6}
 │                                 ▐│
 │                                 ▐│
 │                                 ▐│
-│                                 ▐│
-│                                 ▐│
 ╰──────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────╮
 │> Message the agent, or / for     │
 │  commands                        │
+│                                  │
+│                                  │
 ╰──────────────────────────────────╯
 ctrl+b then : palette · ? keys
 expanded tools: {}
@@ -665,12 +665,12 @@ expanded tools: {}
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭ 🎙︎ ─────────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
+│                            │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
 second member hitboxes: 3
@@ -693,11 +693,11 @@ expanded tools: {2}
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -719,12 +719,12 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                           ▐│
 │                           ▐│
 │                           ▐│
-│                           ▐│
-│                           ▐│
 ╰────────────────────────────╯
 ╭ 🎙︎ ─────────────────────────╮
 │> Message the agent, or /   │
 │  for commands              │
+│                            │
+│                            │
 ╰────────────────────────────╯
 ctrl+b then : palette · ? keys
 
@@ -757,26 +757,24 @@ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 
 === inline call expanded (80x36) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
-│ │ running 12 tests                                                          ││
-│ │ test case_1 ... ok                                                        ││
 │ │ test case_2 ... ok                                                        ││
 │ │ test case_3 ... ok                                                        ││
 │ │ test case_4 ... ok                                                        ││
-│ │ test case_5 ... ok                                                        ▐│
-│ │ test case_6 ... ok                                                        ▐│
-│ │ test case_7 ... ok                                                        ▐│
-│ │ test case_8 ... ok                                                        ▐│
+│ │ test case_5 ... ok                                                        ││
+│ │ test case_6 ... ok                                                        ││
+│ │ test case_7 ... ok                                                        ││
+│ │ test case_8 ... ok                                                        ││
 │ │ test case_9 ... ok                                                        ▐│
 │ │ test case_10 ... ok                                                       ▐│
 │ │ test result: ok. 12 passed                                                ▐│
@@ -800,6 +798,8 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                        │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -834,11 +834,11 @@ expanded tools: {2}
 |                                                                             #|
 |                                                                             #|
 |                                                                             #|
-|                                                                             #|
-|                                                                             #|
 +------------------------------------------------------------------------------+
 + mic -------------------------------------------------------------------------+
 |> Message the agent, or / for commands                                        |
+|                                                                              |
+|                                                                              |
 |                                                                              |
 +--------------------------------------------------- Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send | ctrl+b then : palette - ? keys

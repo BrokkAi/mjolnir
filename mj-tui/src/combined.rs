@@ -2006,6 +2006,15 @@ mod tests {
         assert_eq!(prompt_target(50, 60), 20);
     }
 
+    #[test]
+    fn empty_composer_requests_the_raised_minimum() {
+        // The empty guidance band is unchanged; an attached composer asking
+        // for the raised floor keeps it.
+        assert_eq!(PROMPT_MINIMUM, 3);
+        assert_eq!(EMPTY_PROMPT_HEIGHT, 4);
+        assert_eq!(prompt_target(6, 40), 6);
+    }
+
     /// A Starting transition turns the prompt band into the standby composer —
     /// the real chat prompt: the draft is on screen, the cancel chord moved
     /// onto the pane's bottom border, and the old status panel is gone.

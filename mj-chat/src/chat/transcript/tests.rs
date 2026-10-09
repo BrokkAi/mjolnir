@@ -3220,7 +3220,9 @@ fn links_with_the_same_text_open_their_own_destinations() {
         ChatRole::Agent,
         "First [issue](https://example.com/a)\n\nSecond [issue](https://example.com/b)".to_owned(),
     ));
-    let rows = drawn_transcript(&mut chat, 80, 12);
+    // The composer minimum grew, so this keeps the transcript rows the test
+    // had before (14 - 6 - 1 == 12 - 4 - 1).
+    let rows = drawn_transcript(&mut chat, 80, 14);
     let second = rows
         .iter()
         .position(|row| row.contains("Second"))

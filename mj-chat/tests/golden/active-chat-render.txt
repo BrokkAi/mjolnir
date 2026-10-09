@@ -15,11 +15,11 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -41,11 +41,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -67,11 +67,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -93,11 +93,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -119,11 +119,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -131,8 +131,6 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 === autocomplete popup and hit target (80x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────╮
 │ No messages yet — send a prompt to begin.                                   ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
@@ -151,10 +149,12 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> /                                                                           │
 │                                                                              │
+│                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
-Transcript rect=(2, 1, 76, 17)
-PromptInput rect=(3, 20, 75, 2)
+Transcript rect=(2, 1, 76, 15)
+PromptInput rect=(3, 18, 75, 4)
 popup bottom hit=Some(AutocompletePopup)
 
 === transcript and composer registered surfaces (80x24) ===
@@ -174,16 +174,16 @@ popup bottom hit=Some(AutocompletePopup)
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
 │                                                                              │
+│                                                                              │
+│                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
-Transcript rect=(2, 1, 76, 17)
-PromptInput rect=(3, 20, 75, 2)
+Transcript rect=(2, 1, 76, 15)
+PromptInput rect=(3, 18, 75, 4)
 transcript before prompt=true prompt hit=Some(PromptInput)
 
 === elicitation stays inside chat and leaves transcript visible (100x24) ===
@@ -292,11 +292,11 @@ natural question height=26 actual=11 transcript before message=true prompt hidde
 │                                                                                                                     ▐│
 │                                                                                                                     ▐│
 │                                                                                                                     ▐│
-│                                                                                                                     ▐│
-│                                                                                                                     ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                                       │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 ╰─────────────────────────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Background import finished
@@ -319,11 +319,11 @@ footer text fg=Rgb(232, 189, 123)
 │                                                                                                                     ▐│
 │                                                                                                                     ▐│
 │                                                                                                                     ▐│
-│                                                                                                                     ▐│
-│                                                                                                                     ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                                       │
+│                                                                                                                      │
+│                                                                                                                      │
 │                                                                                                                      │
 ╰─────────────────────────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history · Shift-Enter newline │ ctrl+b then b panes · : palette · ? keys
@@ -355,11 +355,11 @@ ctrl+b then : palette · ? keys
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Sol ▾ · High ▾ ───────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -381,11 +381,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -407,11 +407,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Fast ─────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -433,11 +433,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -459,11 +459,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                      │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -485,11 +485,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                      │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰ Esc interrupts──────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -511,11 +511,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  PLAN MODE ────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                      │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -537,11 +537,11 @@ Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Pursuing goal ────────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Esc interrupts──────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -563,11 +563,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                                                            │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -589,11 +589,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -615,11 +615,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -641,11 +641,11 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                               │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰─────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys
@@ -669,11 +669,11 @@ rule style fg=Rgb(62, 74, 78) bg=Rgb(15, 18, 20) modifiers=NONE
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -696,11 +696,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(239, 237, 232) bg=Rgb(42, 58, 57) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -723,11 +723,11 @@ subagents fg=Rgb(15, 18, 20) bg=Rgb(157, 229, 202) modifiers=BOLD tasks fg=Rgb(1
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -750,11 +750,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(38, 51, 46) bg=Rgb(214, 229, 220) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -777,11 +777,11 @@ subagents fg=Rgb(242, 241, 237) bg=Rgb(35, 104, 77) modifiers=BOLD tasks fg=Rgb(
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -804,11 +804,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(169, 183, 198) bg=Rgb(39, 55, 78) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -831,11 +831,11 @@ subagents fg=Rgb(43, 43, 43) bg=Rgb(112, 183, 255) modifiers=BOLD tasks fg=Rgb(4
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -858,11 +858,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(255, 255, 255) bg=Rgb(38, 38, 38) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -885,11 +885,11 @@ subagents fg=Rgb(0, 0, 0) bg=Rgb(26, 235, 255) modifiers=BOLD tasks fg=Rgb(0, 0,
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -912,11 +912,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(204, 204, 204) bg=Rgb(23, 42, 84) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -939,11 +939,11 @@ subagents fg=Rgb(12, 12, 12) bg=Rgb(97, 214, 214) modifiers=BOLD tasks fg=Rgb(12
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -966,11 +966,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(220, 223, 228) bg=Rgb(52, 64, 84) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -993,11 +993,11 @@ subagents fg=Rgb(40, 44, 52) bg=Rgb(94, 186, 197) modifiers=BOLD tasks fg=Rgb(40
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1020,11 +1020,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(56, 58, 66) bg=Rgb(222, 230, 242) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1047,11 +1047,11 @@ subagents fg=Rgb(250, 250, 250) bg=Rgb(1, 108, 154) modifiers=BOLD tasks fg=Rgb(
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1074,11 +1074,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(238, 232, 213) bg=Rgb(12, 66, 80) modi
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1101,11 +1101,11 @@ subagents fg=Rgb(0, 43, 54) bg=Rgb(91, 183, 176) modifiers=BOLD tasks fg=Rgb(0, 
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1128,11 +1128,11 @@ subagents=" Subagents · 0/2 › " fg=Rgb(7, 54, 66) bg=Rgb(229, 222, 196) modif
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1155,11 +1155,11 @@ subagents fg=Rgb(253, 246, 227) bg=Rgb(28, 108, 102) modifiers=BOLD tasks fg=Rgb
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1182,11 +1182,11 @@ subagents=" Subagents · 0/2 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED t
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1209,11 +1209,11 @@ subagents fg=Indexed(6) bg=Reset modifiers=BOLD | REVERSED tasks fg=Indexed(6) b
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1236,11 +1236,11 @@ subagents=" Subagents · 0/2 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED t
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1263,11 +1263,11 @@ subagents fg=Indexed(4) bg=Reset modifiers=BOLD | REVERSED tasks fg=Indexed(4) b
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -1290,11 +1290,11 @@ subagents=" Subagents · 0/2 › " fg=Reset bg=Reset modifiers=BOLD | REVERSED t
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) ›  · Subagents · 0/2 › ───────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys

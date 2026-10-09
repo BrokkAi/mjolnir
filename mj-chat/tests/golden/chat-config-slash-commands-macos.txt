@@ -15,11 +15,11 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  gpt-5.6 ▾ · high ▾ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -42,11 +42,11 @@ action: SetConfig { key: "model", value: "gpt-5.6-luna" }
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  gpt-5.6 ▾ · high ▾ ───────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -69,11 +69,11 @@ action: SetConfig { key: "effort", value: "xhigh" }
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -96,11 +96,11 @@ action: SetConfig { key: "fast-mode", value: "on" }
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Fast ─────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -123,12 +123,12 @@ action: SetConfig { key: "fast-mode", value: "off" }
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 usage: /fast
 ╭ 🎙︎  Fast ─────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -150,12 +150,12 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 /fast: Fast mode is unavailable for the active Codex model
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -177,12 +177,12 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 The agent does not advertise model values; usage: /model <value>
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -204,11 +204,11 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  opus ▾ ───────────────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -232,12 +232,12 @@ draft cleared: true
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 /model: The worker is closing; this configuration change was not sent
 ╭ 🎙︎  opus  Agent shutdown ─────────────────────────────────────────────────────────── ●··········· ╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -259,12 +259,12 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 The agent does not advertise model values; usage: /model <value>
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None

@@ -1,7 +1,5 @@
 === tail before wheel (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 34                        ││
-│                                     ││
 │ ❯ You                               ││
 │ │ message 35                        ││
 │                                     ││
@@ -21,13 +19,13 @@
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
 │  commands                            │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
 === wheel up (40x24) ===
-╭ Conversation · message 34 of 40 · En…╮
-│ │ message 33                        ││
-│                                     ││
+╭ Conversation · message 35 of 40 · En…╮
 │ ❯ You                               ││
 │ │ message 34                        ││
 │                                     ││
@@ -47,13 +45,13 @@ ctrl+b then : palette · ? keys
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
 │  commands                            │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
 === wheel down follows (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 34                        ││
-│                                     ││
 │ ❯ You                               ││
 │ │ message 35                        ││
 │                                     ││
@@ -73,13 +71,13 @@ ctrl+b then : palette · ? keys
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
 │  commands                            │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
 === page navigation tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
-│ │ message 34                                            ││
-│                                                         ││
 │ ❯ You                                                   ││
 │ │ message 35                                            ││
 │                                                         ││
@@ -99,15 +97,13 @@ ctrl+b then : palette · ? keys
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
 │                                                          │
+│                                                          │
+│                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 
 === page up (60x24) ===
-╭ Conversation · message 29 of 40 · End to follow ─────────╮
-│                                                         ││
-│ ❯ You                                                   ││
-│ │ message 29                                            ││
-│                                                         ││
+╭ Conversation · message 31 of 40 · End to follow ─────────╮
 │ ❯ You                                                   ││
 │ │ message 30                                            ││
 │                                                         ││
@@ -117,21 +113,23 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │ ❯ You                                                   ││
 │ │ message 32                                            ││
 │                                                         ││
-│ ❯ You                                                   ▐│
+│ ❯ You                                                   ││
 │ │ message 33                                            ││
 │                                                         ││
-│ ❯ You                                                   ││
+│ ❯ You                                                   ▐│
+│ │ message 34                                            ││
+│                                                         ││
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 
 === page down follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
-│ │ message 34                                            ││
-│                                                         ││
 │ ❯ You                                                   ││
 │ │ message 35                                            ││
 │                                                         ││
@@ -151,13 +149,13 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
 │                                                          │
+│                                                          │
+│                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 
 === ctrl end follows (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
-│ │ message 34                                            ││
-│                                                         ││
 │ ❯ You                                                   ││
 │ │ message 35                                            ││
 │                                                         ││
@@ -176,6 +174,8 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
@@ -197,19 +197,17 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │ ❯ You                               ││
 │ │ message 4                         ││
 │                                     ││
-│ ❯ You                               ││
-│ │ message 5                         ││
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
 │  commands                            │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
 === ctrl end (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
-│                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
 │                                     ││
@@ -229,6 +227,8 @@ ctrl+b then : palette · ? keys
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
 │  commands                            │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 
@@ -249,11 +249,11 @@ ctrl+b then : palette · ? keys
 │ ❯ You                               ││
 │ │ message 4                         ││
 │                                     ││
-│ ❯ You                               ││
-│ │ message 5                         ││
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
 │> draft prompt                        │
+│                                      │
+│                                      │
 │                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
@@ -261,8 +261,6 @@ input cursor: 12
 
 === keypad end leaves draft cursor (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
-│                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
 │                                     ││
@@ -281,6 +279,8 @@ input cursor: 12
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
 │> draft prompt                        │
+│                                      │
+│                                      │
 │                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
@@ -288,8 +288,6 @@ input cursor: 12
 
 === plain home edits draft (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
-│                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
 │                                     ││
@@ -309,14 +307,14 @@ input cursor: 12
 ╭ 🎙︎ ───────────────────────────────────╮
 │> draft prompt                        │
 │                                      │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 input cursor: 0
 
 === plain end edits draft (40x24) ===
 ╭ Conversation ────────────────────────╮
-│ │ message 194                       ││
-│                                     ││
 │ ❯ You                               ││
 │ │ message 195                       ││
 │                                     ││
@@ -335,6 +333,8 @@ input cursor: 0
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
 │> draft prompt                        │
+│                                      │
+│                                      │
 │                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
@@ -345,7 +345,7 @@ input cursor: 12
 │ ● Agent                                                 ▐│
 │ │ response advertised on the dashboard                  ▐│
 │                                                         ▐│
-│ ─ Mjolnir                                               ▐│
+│ ─ Mjolnir                                               ││
 │ │ terminal failure 0                                    ││
 │ │ output                                                ││
 │ │ output                                                ││
@@ -357,19 +357,43 @@ input cursor: 12
 │ │ output                                                ││
 │ │ output                                                ││
 │ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 
 === revealed transcript tail (60x24) ===
 ╭ Conversation ────────────────────────────────────────────╮
+│ ─ Mjolnir                                               ││
+│ │ terminal failure 7                                    ││
 │ │ output                                                ││
-│                                                         ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ││
+│ │ output                                                ▐│
+│ │ output                                                ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+
+=== reopened transcript tail (60x24) ===
+╭ Conversation ────────────────────────────────────────────╮
 │ ─ Mjolnir                                               ││
 │ │ terminal failure 7                                    ││
 │ │ output                                                ││
@@ -389,31 +413,7 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
 │                                                          │
-╰─────────────────────────────── Enter  send   /  commands ╯
-Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
-
-=== reopened transcript tail (60x24) ===
-╭ Conversation ────────────────────────────────────────────╮
-│ │ output                                                ││
-│                                                         ││
-│ ─ Mjolnir                                               ││
-│ │ terminal failure 7                                    ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ││
-│ │ output                                                ▐│
-│ │ output                                                ▐│
-│ │ output                                                ▐│
-│                                                         ▐│
-╰──────────────────────────────────────────────────────────╯
-╭ 🎙︎ ───────────────────────────────────────────────────────╮
-│> Message the agent, or / for commands                    │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
@@ -435,12 +435,12 @@ Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
 │                                     ▐│
 │                                     ▐│
 │                                     ▐│
-│                                     ▐│
-│                                     ▐│
 ╰──────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────╮
 │> Message the agent, or / for         │
 │  commands                            │
+│                                      │
+│                                      │
 ╰──────────────────────────────────────╯
 ctrl+b then : palette · ? keys
 viewport unchanged: true
@@ -462,11 +462,11 @@ viewport unchanged: true
 │ │ line 11                                               ││
 │ │ line 12                                               ││
 │ │ line 13                                               ││
-│ │ line 14                                               ││
-│ │ line 15                                               ││
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
@@ -474,7 +474,6 @@ track content surface: None
 
 === scrollbar track seeks (60x24) ===
 ╭ Conversation · message 1 of 1 · End to follow ───────────╮
-│ │ line 92                                               ││
 │ │ line 93                                               ││
 │ │ line 94                                               ││
 │ │ line 95                                               ││
@@ -490,18 +489,18 @@ track content surface: None
 │ │ line 105                                              ││
 │ │ line 106                                              ││
 │ │ line 107                                              ││
-│ │ line 108                                              ││
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
 │                                                          │
+│                                                          │
+│                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
-anchor: Row { entry: 0, row: 93 }
+anchor: Row { entry: 0, row: 94 }
 
 === scrollbar release preserves seek (60x24) ===
 ╭ Conversation · message 1 of 1 · End to follow ───────────╮
-│ │ line 92                                               ││
 │ │ line 93                                               ││
 │ │ line 94                                               ││
 │ │ line 95                                               ││
@@ -517,10 +516,11 @@ anchor: Row { entry: 0, row: 93 }
 │ │ line 105                                              ││
 │ │ line 106                                              ││
 │ │ line 107                                              ││
-│ │ line 108                                              ││
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> Message the agent, or / for commands                    │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
@@ -543,11 +543,11 @@ anchor unchanged: true
 │                                                         ▐│
 │                                                         ▐│
 │                                                         ▐│
-│                                                         ▐│
-│                                                         ▐│
 ╰──────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────╮
 │> What would you like to build?                           │
+│                                                          │
+│                                                          │
 │                                                          │
 ╰─────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
@@ -570,11 +570,11 @@ scrollbar dragging: false
 │  │
 │  │
 │  │
-│  │
-│  │
 ╰──╯
 ╭ 🎙︎╮
 │> │
+│  │
+│  │
 │  │
 ╰──╯
 
@@ -597,11 +597,11 @@ scrollbar dragging: false
 │ │
 │ │
 │ │
-│ │
-│ │
 ╰─╯
 ╭ ╮
 │>│
+│ │
+│ │
 │ │
 ╰─╯
 
@@ -624,11 +624,11 @@ scrollbar dragging: false
 ││
 ││
 ││
-││
-││
 ╰╯
 ╭╮
 │>
+││
+││
 ││
 ╰╯
 

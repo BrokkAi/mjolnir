@@ -15,10 +15,10 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Editing the most recently queued prompt
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│  queued 1: first                                                                                 │
 │                                                                                                  │
 │> second                                                                                          │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
@@ -73,10 +73,10 @@ remaining queue: ["first", "second"]
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Editing the most recently queued prompt
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
+│  queued 1: first                                                                                 │
 │                                                                                                  │
 │> second                                                                                          │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
@@ -102,12 +102,12 @@ remaining queue: ["first"]
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Editing the most recently queued prompt
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> first                                                                                           │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: RemoveQueuedPrompt { id: "queued-1", text: "first", kind: Prompt }
@@ -131,11 +131,11 @@ remaining queue: []
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -160,12 +160,12 @@ remaining queue: []
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │  queued config 1: /model sonnet                                                                  │
 │                                                                                                  │
 │> What would you like to build?                                                                   │
+│                                                                                                  │
 ╰ 1 queued────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
 queue label: queued config
@@ -187,12 +187,12 @@ queue label: queued config
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Editing the most recently queued configuration change
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> /model sonnet                                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: RemoveQueuedPrompt { id: "queued-config", text: "/model sonnet", kind: SetConfig { key: "model", value: "sonnet" } }
@@ -216,11 +216,11 @@ queue empty: true
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  opus ▾ ───────────────────────────────────────────────────────────────────────────────────────╮
 │> Add a follow-up while the agent works…                                                          │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys

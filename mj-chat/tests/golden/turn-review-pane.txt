@@ -4,11 +4,11 @@
 │                             ▐││[P1] src/lib.rs:1 -- unbounded│
 │                             ▐││retry                         │
 │                             ▐││                              │
-│                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
+
+
 
 
 
@@ -22,11 +22,11 @@ action: TurnReview(Resolve(Forwarded))
 │                             ▐││reviewer exited with 1        │
 │                             ▐││                              │
 │                             ▐││                              │
-│                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
+
+
 
 
 
@@ -57,11 +57,11 @@ action: TurnReview(Resolve(Dismissed))
 │                             ▐││[P1] src/lib.rs:1 -- unbounded│
 │                             ▐││retry                         │
 │                             ▐││                              │
-│                             ▐││                              │
-│                             ▐││                              │
 ╰──────────────────────────────╯╰──────────────────────────────╯
   ●··········· Reviewing
   Forward findings     Dismiss     Cancel      Enter to act · Ta
+
+
 
 
 

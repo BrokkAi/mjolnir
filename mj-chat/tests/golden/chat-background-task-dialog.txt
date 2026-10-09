@@ -15,11 +15,11 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │> keep this draft                                                                                 │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰ Tasks (1) › ────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -44,12 +44,12 @@ initial task control x: 1
 │                             ▐│
 │                             ▐│
 │                             ▐│
-│                             ▐│
 ╰──────────────────────────────╯
 ╭ 🎙︎ ───────────── ●··········· ╮
 │  queued 1: follow up         │
 │                              │
 │> keep this draft             │
+│                              │
 ╰ 1 queued · Esc steers next───╯
 ctrl+b then : palette · ? keys
 task control area: None
@@ -72,12 +72,12 @@ queued text: 1
 │                                             ▐│
 │                                             ▐│
 │                                             ▐│
-│                                             ▐│
 ╰──────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────── ●··········· ╮
 │  queued 1: follow up                         │
 │                                              │
 │> keep this draft                             │
+│                                              │
 ╰ 1 queued · Esc steers next · Tasks (1) › ────╯
 ctrl+b then : palette · ? keys
 task control area: Some(Rect { x: 30, y: 22, width: 13, height: 1 })
@@ -100,12 +100,12 @@ queued text: 1
 │                                                     ▐│
 │                                                     ▐│
 │                                                     ▐│
-│                                                     ▐│
 ╰──────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                 │
 │                                                      │
 │> keep this draft                                     │
+│                                                      │
 ╰ 1 queued · Esc steers next · Tasks (1) › ────────────╯
 ctrl+b then : palette · ? keys
 task control area: Some(Rect { x: 30, y: 22, width: 13, height: 1 })
@@ -128,12 +128,12 @@ queued text: 1
 │                                                                             ▐│
 │                                                                             ▐│
 │                                                                             ▐│
-│                                                                             ▐│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                                         │
 │                                                                              │
 │> keep this draft                                                             │
+│                                                                              │
 ╰ 1 queued · Esc steers next · Tasks (1) › ───────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then : palette · ? keys
 task control area: Some(Rect { x: 30, y: 22, width: 13, height: 1 })
@@ -156,12 +156,12 @@ queued text: 1
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                                                             │
 │                                                                                                  │
 │> keep this draft                                                                                 │
+│                                                                                                  │
 ╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
 task control area: Rect { x: 30, y: 22, width: 13, height: 1 }
@@ -184,12 +184,12 @@ task control shifted right: true
   ╰─────────────────────────────────────────────────────────────────────────────────── Esc close ╯
 
 
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                                                             │
 │                                                                                                  │
 │> keep this draft                                                                                 │
+│                                                                                                  │
 ╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -214,12 +214,12 @@ chat surface claims click: true
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                                                             │
 │                                                                                                  │
 │> keep this draft                                                                                 │
+│                                                                                                  │
 ╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -244,12 +244,12 @@ chat surface claims outside click: true
   ╰─────────────────────────────────────────────────────────────────────────────────── Esc close ╯
 
 
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                                                             │
 │                                                                                                  │
 │> keep this draft                                                                                 │
+│                                                                                                  │
 ╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -273,12 +273,12 @@ draft: "keep this draft"
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────── ●··········· ╮
 │  queued 1: follow up                                                                             │
 │                                                                                                  │
 │> keep this draft                                                                                 │
+│                                                                                                  │
 ╰ 1 queued · Esc steers next · Tasks (1) › ───────────────────────────── Enter  send   /  commands ╯
 Up/Ctrl-P edit last queued · Enter send/queue · Ctrl-R history │ ctrl+b then : palette · ? keys
 action: None
@@ -359,7 +359,7 @@ Up/Ctrl-P edit last queued · Enter send/queue │ ctrl+b then : palette · ? ke
   ╰─────────────────────────────────────────────────────────────── Esc close ╯
 
 
-│> What would you like to build?                                               │
+│                                                                              │
 │                                                                              │
 ╰ Tasks (1) › ────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Ctrl-V paste · Enter send │ ctrl+b then : palette · ? keys

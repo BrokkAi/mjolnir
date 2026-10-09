@@ -76,6 +76,12 @@ fn review_status_omits_the_deprecated_tier() {
     );
 }
 
+#[test]
+fn empty_composer_requests_the_raised_minimum() {
+    let chat = ChatState::new(&snapshot(), &[]);
+    assert_eq!(chat.desired_prompt_height(100), 6);
+}
+
 /// Mirrors what `ActiveChat::open` does for a session with no warm view:
 /// build the state from the snapshot, then seed the saved draft.
 fn freshly_opened_chat(saved_draft: &str) -> ChatState {

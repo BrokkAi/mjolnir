@@ -12,14 +12,14 @@
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╭ values · ↑/↓ select · Tab/Enter accept ──────────────────────────────────────────────────────────╮
 │Model name                                                                                        │
 │m-fallback                                                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  m-fallback ▾ ─────────────────────────────────────────────────────────────────────────────────╮
 │> /model m                                                                                        │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -39,13 +39,13 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╭ values · ↑/↓ select · Tab/Enter accept ──────────────────────────────────────────────────────────╮
 │Luna                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> /model lun                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -67,11 +67,11 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> /model gpt-5.6-luna                                                                             │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -89,8 +89,6 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 │    ╭ model ╮                                                                                     │
 │    │  Auto │                                                                                     │
 │    │✓ Luna │                                                                                     │
@@ -98,6 +96,8 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 ╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -120,11 +120,11 @@ action: None
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -146,11 +146,11 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -168,8 +168,6 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 │    ╭ model ╮                                                                                     │
 │    │  Auto │                                                                                     │
 │    │✓ Luna │                                                                                     │
@@ -177,6 +175,8 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 ╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -194,8 +194,6 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 │    ╭ model ╮                                                                                     │
 │    │  Auto │                                                                                     │
 │    │✓ Luna │                                                                                     │
@@ -203,6 +201,8 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 ╰────╰───────╯─────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -222,13 +222,13 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 │    ╭ model: terra ╮                                                                              │
 │    │  Terra       │                                                                              │
 ╰────╰──────────────╯──────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -250,11 +250,11 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -272,8 +272,6 @@ action: SetConfig { key: "model", value: "gpt-5.6-terra" }
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
 │             ╭ effort ╮                                                                           │
 │             │  low   │                                                                           │
 │             │  medium│                                                                           │
@@ -282,6 +280,8 @@ action: SetConfig { key: "model", value: "gpt-5.6-terra" }
 ╰─────────────╰────────╯───────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -304,11 +304,11 @@ selection: max
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 │                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
@@ -330,20 +330,18 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 │                                                                                                 ▐│
 │                                                                                                 ▐│
 │                                                                                                 ▐│
-│                                                                                                 ▐│
-│                                                                                                 ▐│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 The agent does not advertise model values; usage: /model <value>
 ╭ 🎙︎ ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 
 === selector anchored at prompt chip (100x24) ===
 ╭ Conversation ────────────────────────────────────────────────────────────────────────────────────╮
 │ No messages yet — send a prompt to begin.                                                        │
-│                                                                                                  │
-│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
@@ -362,14 +360,14 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 ╭ 🎙︎  Luna ▾ · high ▾ ──────────────────────────────────────────────────────────────────────────────╮
 │> What would you like to build?                                                                   │
 │                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
 ╰─────────────────────────────────────────────────────────────────────── Enter  send   /  commands ╯
 Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palette · ? keys
 
 === ASCII selector in Midnight theme (100x24) ===
 + Conversation ------------------------------------------------------------------------------------+
 | No messages yet — send a prompt to begin.                                                        |
-|                                                                                                  |
-|                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
@@ -387,6 +385,8 @@ Tab pane · Cmd-V paste · Enter send · Ctrl-R history │ ctrl+b then : palett
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -404,8 +404,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -413,6 +411,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -430,8 +430,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -439,6 +437,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -456,8 +456,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -465,6 +463,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -482,8 +482,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -491,6 +489,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -508,8 +508,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -517,6 +515,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -534,8 +534,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -543,6 +541,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -560,8 +560,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -569,6 +567,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -586,8 +586,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -595,6 +593,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -612,8 +612,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -621,6 +619,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -638,8 +638,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -647,6 +645,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
@@ -664,8 +664,6 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 |                                                                                                  |
 |                                                                                                  |
 |                                                                                                  |
-|                                                                                                  |
-|                                                                                                  |
 |      + model +                                                                                   |
 |      |  Auto |                                                                                   |
 |      |x Luna |                                                                                   |
@@ -673,6 +671,8 @@ Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ?
 +------+-------+-----------------------------------------------------------------------------------+
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
+|                                                                                                  |
+|                                                                                                  |
 |                                                                                                  |
 + Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
 Tab pane - Cmd-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
