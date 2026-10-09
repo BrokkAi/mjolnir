@@ -664,11 +664,10 @@ Mjolnir release into `$XDG_CACHE_HOME/mjolnir/harnesses`, or
 only the resulting absolute path—never an arbitrary compatible executable from
 `PATH`. Codex and Claude require Node.js 22 or newer plus npm on the host.
 Kimi and Grok require curl and Bash for their official installers.
-Muse requires curl and tar; Mjolnir downloads the pinned native Muse binary and
-`muse-acp` adapter and verifies both SHA-256 checksums. Linux and macOS, on
-x86-64 and ARM64, are supported. The adapter's Apache-2.0 LICENSE and NOTICE
-are retained with the installation; the native Muse binary retains its own
-upstream terms.
+Muse requires Node.js 22 or newer, npm, and curl; Mjolnir launches the pinned
+`muse-acp` adapter through npx and downloads the pinned native Muse binary,
+verifying its SHA-256 checksum. Linux and macOS, on x86-64 and ARM64, are
+supported. The native Muse binary retains its own upstream terms.
 OpenCode requires curl and tar; Mjolnir downloads the pinned OpenCode archive
 from its GitHub releases and verifies its SHA-256 checksum. Linux and macOS, on
 x86-64 and ARM64, are supported. The pinned installation disables OpenCode's

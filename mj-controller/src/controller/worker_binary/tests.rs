@@ -1747,7 +1747,7 @@ fn podman_worker_start_and_upgrade_use_each_containers_recorded_identity() {
 
 #[test]
 fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
-    use mj_core::harness_runtime::CLAUDE_CLI_VERSION;
+    use mj_core::harness_runtime::{CLAUDE_CLI_VERSION, MUSE_ACP_PACKAGE, MUSE_ACP_VERSION};
 
     const CONTAINERFILE: &str = include_str!("../../../../containers/Containerfile.agent-dev");
 
@@ -1773,6 +1773,14 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
         "containers/Containerfile.agent-dev must install {claude_code}"
     );
     assert!(CONTAINERFILE.contains("ENV CLAUDE_CODE_EXECUTABLE=/usr/local/bin/claude"));
+
+    let muse = format!("{MUSE_ACP_PACKAGE}@{MUSE_ACP_VERSION}");
+    assert!(
+        CONTAINERFILE.contains(&muse),
+        "containers/Containerfile.agent-dev must install {muse}. The image and the \
+             bridge_launch() npx fallbacks have to stay in lockstep, otherwise a container \
+             session and an npx session run different adapter versions."
+    );
 
     let package: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../mj-worker/assets/harnesses/claude/package.json"

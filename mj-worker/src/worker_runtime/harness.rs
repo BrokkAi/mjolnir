@@ -12,7 +12,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mj_core::config::{ExecutionPolicy, HarnessKind};
 use mj_core::harness_runtime::{
     GROK_VERSION, HarnessPin, KIMI_VERSION, LEASE_FILE, MANIFEST_FILE, ManagedHarnessManifest,
-    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches, pin,
+    managed_harness_cache_root, managed_harness_install_dir, managed_harness_manifest_matches,
+    npm_bridge, pin,
 };
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
@@ -147,11 +148,15 @@ async fn resolve_at_async(
     drop(install_lock);
 
     let mut launch_environment = BTreeMap::new();
-    // Muse's CLI is the extra executable its own installer creates.
-    if let (HarnessKind::Muse, Some(entry)) = (harness, harness.extra_managed_entrypoint()) {
+    // The managed Muse install provides only the native server; the adapter
+    // itself comes from its pinned npm package.
+    if harness == HarnessKind::Muse {
         launch_environment.insert(
             "MUSE_CLI".into(),
-            install.join(entry).to_string_lossy().into_owned(),
+            install
+                .join(selected.entrypoint)
+                .to_string_lossy()
+                .into_owned(),
         );
     }
     if harness == HarnessKind::Codex {
@@ -175,13 +180,27 @@ async fn resolve_at_async(
     if harness == HarnessKind::OpenCode {
         launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
     }
+    // Muse launches its adapter the way the other npm bridges do: the target's
+    // own `muse-acp` when present, otherwise npx fetches the pinned package.
+    let (command, args) = if harness == HarnessKind::Muse {
+        let bridge = npm_bridge(harness).expect("Muse installs its adapter from npm");
+        (
+            PathBuf::from("sh"),
+            vec!["-c".to_owned(), bridge.bootstrap_script()],
+        )
+    } else {
+        (
+            install.join(selected.entrypoint),
+            harness
+                .bridge_args(execution_policy)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        )
+    };
     Ok(ManagedHarness {
-        command: install.join(selected.entrypoint),
-        args: harness
-            .bridge_args(execution_policy)
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+        command,
+        args,
         environment: launch_environment,
         lease_path,
         cache_root: root.to_path_buf(),
@@ -267,7 +286,7 @@ async fn install_into(
         }
         HarnessKind::Kimi => install_kimi(staging.path(), environment).await?,
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
-        HarnessKind::Muse => install_muse(staging.path(), environment).await?,
+        HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
     }
     relativize_internal_links(staging.path(), staging.path())?;
@@ -353,12 +372,17 @@ async fn install_npm(
     .await
 }
 
-async fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
-    use mj_core::harness_runtime::{MUSE_ACP_VERSION, MUSE_VERSION};
+/// Install the native Muse server a managed Muse session drives.
+///
+/// The `@brokkai/muse-acp` adapter comes from its pinned npm package, which
+/// carries the adapter only; the `muse` executable it drives keeps its own
+/// verified download.
+async fn install_muse_native(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    use mj_core::harness_runtime::MUSE_VERSION;
     let metadata: serde_json::Value =
         serde_json::from_str(include_str!("../../assets/muse/runtime.json"))?;
     anyhow::ensure!(
-        metadata["adapter_version"] == MUSE_ACP_VERSION && metadata["muse_version"] == MUSE_VERSION,
+        metadata["muse_version"] == MUSE_VERSION,
         "Muse download metadata does not match the managed runtime pin"
     );
     let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
@@ -372,27 +396,6 @@ async fn install_muse(staging: &Path, environment: &BTreeMap<String, String>) ->
     };
     let bin = staging.join("bin");
     std::fs::create_dir_all(&bin)?;
-    let archive = staging.join("muse-acp.tar.gz");
-    let adapter_target = field("adapter_target")?;
-    let url = format!(
-        "https://github.com/BrokkAi/muse-acp/releases/download/v{MUSE_ACP_VERSION}/muse-acp-v{MUSE_ACP_VERSION}-{adapter_target}.tar.gz"
-    );
-    download_verified_async(&url, &archive, field("adapter_sha256")?, environment).await?;
-    let mut tar = tokio::process::Command::new("tar");
-    tar.arg("-xzf")
-        .arg(&archive)
-        .arg("--strip-components=1")
-        .arg("-C")
-        .arg(&bin)
-        .env_clear()
-        .envs(environment);
-    run_bounded_checked(
-        &mut tar,
-        "extract verified Muse ACP archive",
-        HARNESS_COMMAND_TIMEOUT,
-    )
-    .await?;
-    std::fs::remove_file(archive)?;
     let muse_target = field("muse_target")?;
     let url = format!(
         "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version={MUSE_VERSION}&file=muse-{muse_target}"
@@ -897,12 +900,15 @@ INSTALLER
 
     #[test]
     fn muse_pin_matches_runtime_metadata() {
-        use mj_core::harness_runtime::{MUSE_ACP_VERSION, MUSE_VERSION};
+        use mj_core::harness_runtime::{MUSE_ACP_PACKAGE, MUSE_ACP_VERSION, MUSE_VERSION};
         let metadata: serde_json::Value =
             serde_json::from_str(include_str!("../../assets/muse/runtime.json"))
                 .expect("parse Muse runtime metadata");
-        assert_eq!(metadata["adapter_version"], MUSE_ACP_VERSION);
         assert_eq!(metadata["muse_version"], MUSE_VERSION);
+        let bridge = mj_core::harness_runtime::npm_bridge(HarnessKind::Muse)
+            .expect("Muse installs its adapter from npm");
+        assert_eq!(bridge.package, MUSE_ACP_PACKAGE);
+        assert_eq!(bridge.version, MUSE_ACP_VERSION);
         let selected = pin(HarnessKind::Muse);
         assert_eq!(
             selected.install_id,
@@ -950,7 +956,7 @@ INSTALLER
     }
 
     #[test]
-    #[ignore = "downloads the pinned Muse runtime and adapter from their publishers"]
+    #[ignore = "installs the pinned Muse runtime from its publisher"]
     fn muse_real_install_is_verified_concurrent_and_reusable() {
         let parent =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/muse-integration-inspect");
@@ -978,10 +984,15 @@ INSTALLER
             let first = first.join().unwrap();
             let second = second.join().unwrap();
             assert_eq!(first.command, second.command);
+            assert_eq!(first.command, PathBuf::from("sh"));
+            let bridge = npm_bridge(HarnessKind::Muse).unwrap();
+            assert_eq!(first.args, vec!["-c".to_owned(), bridge.bootstrap_script()]);
             let mut muse = Command::new(&first.environment["MUSE_CLI"]);
             muse.arg("--version");
             run_checked(&mut muse, "verify installed Muse executable").unwrap();
-            assert!(entrypoint_is_executable(&first.command));
+            assert!(entrypoint_is_executable(Path::new(
+                &first.environment["MUSE_CLI"]
+            )));
         });
     }
     fn executable(path: &Path, body: &str) {

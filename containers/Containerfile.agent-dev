@@ -95,11 +95,13 @@ RUN npm install --global --no-audit --no-fund \
         @brokkai/codex-acp@1.13.6 \
         @agentclientprotocol/claude-agent-acp@0.87.0 \
         @anthropic-ai/claude-code@2.1.293 \
+        @brokkai/muse-acp@0.11.1 \
         @openai/codex@0.160.1 \
     && npm cache clean --force \
     && codex --version \
     && codex-acp --version \
-    && claude --version
+    && claude --version \
+    && [ "$(node -p "require('/usr/local/lib/node_modules/@brokkai/muse-acp/package.json').version")" = "0.11.1" ]
 
 # The bridge prefers CODEX_PATH over its bundled Codex binary. Select the
 # separately pinned global CLI so containers and managed bare workers use

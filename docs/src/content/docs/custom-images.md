@@ -68,12 +68,13 @@ that surface to work. Those commands intentionally use the session user's
 shell environment.
 
 Muse Code requires both `muse-acp` on `PATH` and the native `muse` executable.
-Set `MUSE_CLI` to the native binary's absolute path. The reference image uses
+Set `MUSE_CLI` to the native binary's absolute path. Install the pinned
+`@brokkai/muse-acp` adapter from npm, or let npx fetch it at launch, and use
 `scripts/install-muse.py` with `mj-worker/assets/muse/runtime.json` to install
-the same checksum-verified versions as managed workers. Copy both files into
-your image build and run the installer with the manifest path and destination
-bin directory. It needs Python 3.11 or newer, curl, and tar. Keep the installed
-adapter LICENSE and NOTICE files under `share/licenses/muse-acp`.
+the matching checksum-verified native binary as managed workers do. Copy the
+manifest and script into your image build and run the installer with the
+manifest path and destination bin directory. It needs Python 3.11 or newer and
+curl.
 
 ## Workspace and Mjolnir's own files
 
