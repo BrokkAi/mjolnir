@@ -72,8 +72,7 @@ stages the `:ask-me` permission profile, selects `promptUnmatched` approvals,
 and turns auto-review on, so a read-only Muse reviewer answers each approval
 and a failed review denies the action. Muse keeps that review in containers
 too and disables only the sandbox there; on a bare runtime the sandbox stays
-on. Kimi Code
-cannot preserve approvals. Mjolnir warns when a harness without
+on. Kimi Code cannot preserve approvals. Mjolnir warns when a harness without
 guardian support is paired with a raw target, but a warning is not a
 sandbox—choose a container or instance instead.
 

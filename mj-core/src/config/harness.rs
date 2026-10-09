@@ -59,7 +59,8 @@ pub enum ExecutionPolicy {
 pub enum PermissionMode {
     /// Preserve the selected harness profile's approval behavior.
     Guardian,
-    /// Run every action without sandboxing or approval checks.
+    /// Run without sandboxing. Most harnesses also skip approval checks;
+    /// Muse keeps its auto-review, with only the sandbox disabled.
     Yolo,
 }
 
