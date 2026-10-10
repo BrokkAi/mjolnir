@@ -1625,13 +1625,14 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
+    wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
     let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
         .await
         .unwrap()
         .expect("idle worker");
     assert!(lease.verify_for_upgrade().await.unwrap());
     drop(lease);
-    wait_until_the_actor_serves_again(&handle).await;
+    wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
     let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
         .await
         .unwrap()
@@ -1726,6 +1727,31 @@ async fn wait_until_the_actor_serves_again(handle: &ManagedSessionHandle) {
         assert!(attempt < 200, "the actor never took its connection back");
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+}
+/// `wait_for_session` publishes the actor before its first relay sync finishes.
+#[cfg(unix)]
+async fn wait_until_the_actor_is_safe_to_replace(
+    handle: &ManagedSessionHandle,
+    harness: HarnessKind,
+) {
+    for attempt in 0..1000 {
+        let served = handle.sync_now().await.is_ok();
+        let snapshot = handle.view().snapshot;
+        if served
+            && snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.operational.safe_to_replace(harness))
+        {
+            return;
+        }
+        assert!(
+            attempt < 999,
+            "worker never became safe to replace: {:?}",
+            snapshot.map(|snapshot| snapshot.operational.facts())
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    unreachable!("the readiness loop returns or panics")
 }
 /// Ending the latch is the whole point of the split checkpoint: the actor
 /// serves the dashboard again while the archive is still being exported,
