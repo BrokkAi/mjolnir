@@ -416,6 +416,8 @@ fn validate_action_against(
             base: _,
             subagents: _,
             review,
+            no_project_memory: _,
+            no_mailbox: _,
         } => {
             if let Some(mj_core::config::SessionReview::On { model, effort, .. }) = review
                 && [model, effort].into_iter().flatten().any(|value| {

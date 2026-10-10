@@ -338,6 +338,8 @@ fn stale_worker_fails_before_any_container_is_created() {
             "stale worker",
             SessionLaunchOptions {
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 create_managed_worktree: None,
                 at: None,
@@ -402,6 +404,8 @@ fn failed_ssh_docker_preflight_retains_durable_error_record() {
             "failed image",
             SessionLaunchOptions {
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -486,6 +490,8 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
             "borrow the parent container",
             SessionLaunchOptions {
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -757,6 +763,8 @@ fn failed_node_preflight_retains_error_before_provisioning() {
             "missing Node",
             SessionLaunchOptions {
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 at: None,
                 branch: None,
                 base: None,
@@ -834,6 +842,8 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         project_directory: Some("/srv/project".into()),
         managed_worktree: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         target_template_id: "remote".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -958,6 +968,8 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
             "cancelled launch",
             SessionLaunchOptions {
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 at: None,
                 branch: None,
                 base: None,

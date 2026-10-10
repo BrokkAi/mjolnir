@@ -485,6 +485,8 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         project_directory: None,
         managed_worktree: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         target_template_id: "local".into(),
         resource_allocation: Some(SessionResourceAllocation::Container {
             cpus: 8,
@@ -1271,6 +1273,27 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
         }),
         "writes omit the legacy tier while preserving the review choice"
     );
+}
+
+#[test]
+fn a_session_keeps_its_project_memory_and_mailbox_opt_outs_through_lifecycle_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut record = session("session-1", "project-1");
+    record.no_project_memory = true;
+    record.no_mailbox = true;
+    save_session_to(&database, &record).unwrap();
+    record.state = SessionState::Running;
+    save_lifecycle_session_to(&database, &record).unwrap();
+
+    let loaded = load_state_from(&database).unwrap();
+    assert!(loaded.sessions["session-1"].no_project_memory);
+    assert!(loaded.sessions["session-1"].no_mailbox);
+    let ordinary = session("session-2", "project-1");
+    save_session_to(&database, &ordinary).unwrap();
+    let loaded = load_state_from(&database).unwrap();
+    assert!(!loaded.sessions["session-2"].no_project_memory);
+    assert!(!loaded.sessions["session-2"].no_mailbox);
 }
 
 // Hard-won: d92ab7ce: the lifecycle UPDATE omitted build_cache_json and live sessions reloaded without their mounted cache

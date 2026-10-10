@@ -1505,6 +1505,8 @@ fn prompt_action() -> ControllerAction {
 fn new_action() -> ControllerAction {
     ControllerAction::New {
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         at: None,
         branch: None,
         base: None,
@@ -1545,6 +1547,8 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         project_directory: None,
         managed_worktree: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

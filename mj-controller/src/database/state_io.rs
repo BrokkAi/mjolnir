@@ -512,8 +512,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              container_cpus, container_memory, archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
-             review_json
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)
+             review_json, no_project_memory, no_mailbox
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -546,7 +546,9 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
              publication_json = excluded.publication_json,
              checkout_json = excluded.checkout_json,
              project_json = coalesce(excluded.project_json, sessions.project_json),
-             review_json = excluded.review_json",
+             review_json = excluded.review_json,
+             no_project_memory = excluded.no_project_memory,
+             no_mailbox = excluded.no_mailbox",
         params![
             session.id,
             session.title,
@@ -597,6 +599,8 @@ pub(super) fn insert_session(tx: &Transaction<'_>, session: &SessionRecord) -> R
             session.checkout.as_ref().map(serde_json::to_string).transpose()?,
             session.project.as_ref().map(serde_json::to_string).transpose()?,
             session.review.as_ref().map(serde_json::to_string).transpose()?,
+            session.no_project_memory,
+            session.no_mailbox,
         ],
     )?;
     tx.execute(
@@ -648,6 +652,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         publication: _,
         // Chosen once, when the session is created.
         review: _,
+        no_project_memory: _,
+        no_mailbox: _,
         // A Move can change it along with the profile the session runs on.
         subagents,
         additional_mounts: _,
@@ -1154,7 +1160,7 @@ const SESSION_QUERY: &str =
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
-                s.review_json
+                s.review_json, s.no_project_memory, s.no_mailbox
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
@@ -1259,6 +1265,8 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
                     None
                 }
             }),
+        no_project_memory: row.get(34)?,
+        no_mailbox: row.get(35)?,
         target_template_id: row.get(5)?,
         resource_allocation: row
             .get::<_, Option<String>>(14)?

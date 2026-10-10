@@ -470,6 +470,14 @@ impl Config {
     pub fn agent_mailboxes_enabled(&self) -> bool {
         self.mailbox.enabled && self.jev.enabled
     }
+
+    /// Whether one session has an agent mailbox. A session's own opt-out
+    /// (`mj new --no-mailbox`) only turns its mailbox off; it never turns
+    /// mailboxes on when the global switch is off.
+    #[must_use]
+    pub fn agent_mailboxes_enabled_for(&self, session: &crate::state::SessionRecord) -> bool {
+        self.agent_mailboxes_enabled() && !session.no_mailbox
+    }
 }
 
 pub const CONFIG_VERSION: u32 = 16;

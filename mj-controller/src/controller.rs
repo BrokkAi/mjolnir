@@ -581,6 +581,10 @@ pub struct SessionLaunchOptions {
     pub subagents: Option<mj_core::subagent::SubagentPolicy>,
     /// Turn review for this session; `None` follows `[review]`.
     pub review: Option<mj_core::config::SessionReview>,
+    /// Start with no project memory; see `SessionRecord::no_project_memory`.
+    pub no_project_memory: bool,
+    /// Start with no agent mailbox; see `SessionRecord::no_mailbox`.
+    pub no_mailbox: bool,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -872,6 +876,8 @@ impl Controller {
             base,
             subagents,
             review,
+            no_project_memory,
+            no_mailbox,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1039,6 +1045,8 @@ impl Controller {
             project_directory,
             managed_worktree: None,
             review,
+            no_project_memory,
+            no_mailbox,
             target_template_id: target_id.to_string(),
             resource_allocation,
             additional_mounts: additional_mounts.clone(),

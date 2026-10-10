@@ -700,6 +700,8 @@ fn bundle_creation_skips_unreadable_configured_repositories() {
 fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptions {
     SessionLaunchOptions {
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         at: None,
         branch: None,
         base: None,
@@ -1597,9 +1599,11 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         controller
             .project_memory_sync_target(&child_id)
             .unwrap()
+            .unwrap()
             .canonical_root,
         controller
             .project_memory_sync_target(parent_id)
+            .unwrap()
             .unwrap()
             .canonical_root,
     );
@@ -1621,6 +1625,123 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     assert_eq!(
         memory_key(&controller, &child_id, child_root),
         memory_key(&controller, parent_id, parent_root),
+    );
+}
+
+#[test]
+fn a_sessions_mailbox_opt_out_only_turns_its_mailbox_off() {
+    let mut session =
+        super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
+    let mut config = registration_config();
+    config.mailbox.enabled = true;
+    config.jev.enabled = true;
+    assert!(config.agent_mailboxes_enabled_for(&session));
+    session.no_mailbox = true;
+    assert!(!config.agent_mailboxes_enabled_for(&session));
+    // With the global switch off, no session has a mailbox, flag or not.
+    config.mailbox.enabled = false;
+    assert!(!config.agent_mailboxes_enabled_for(&session));
+    session.no_mailbox = false;
+    assert!(!config.agent_mailboxes_enabled_for(&session));
+}
+
+/// `mj new --no-project-memory --no-mailbox` is per session: the session and
+/// its sub-agents launch without project memory or a mailbox, no memory is
+/// synchronized for them, and a session started without the flags keeps both.
+#[test]
+fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
+    const MARKER: &str = "MJ_TEST_SUBAGENT_OPT_OUT_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = registration_config();
+    config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mailboxes = config.agent_mailboxes_enabled();
+    let mut controller = Controller {
+        config,
+        state: State::default(),
+    };
+    let session = |id: &str, opted_out: bool| {
+        let mut session = super::test_support::checkpoint_test_session(id);
+        session.target_template_id = "localhost".into();
+        session.project_directory = Some(project.path().to_path_buf());
+        session.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+        session.target = Some(TargetLocator::LocalBare {
+            worker_root: mj_core::config::data_dir().join("workers").join(id),
+        });
+        session.no_project_memory = opted_out;
+        session.no_mailbox = opted_out;
+        session
+    };
+    let opted_out_id = "0123456789abcdef0123456789abcdef";
+    let ordinary_id = "fedcba9876543210fedcba9876543210";
+    for (id, opted_out) in [(opted_out_id, true), (ordinary_id, false)] {
+        controller
+            .state
+            .sessions
+            .insert(id.to_owned(), session(id, opted_out));
+    }
+    crate::database::save_state(&controller.state).unwrap();
+
+    let child_id = controller
+        .register_subagent(super::subagents::RegisterSubagentRequest {
+            parent_session_id: opted_out_id.to_owned(),
+            task_name: "Review calc.py".into(),
+            profile_id: "codex".into(),
+            model: None,
+            effort: None,
+            working_directory: PathBuf::new(),
+            initial_prompt: "Review calc.py".into(),
+            request_key: "review-calc".into(),
+            report_root: Some("/reports".into()),
+        })
+        .unwrap()
+        .child_session_id;
+    assert!(controller.state.sessions[&child_id].no_project_memory);
+    assert!(controller.state.sessions[&child_id].no_mailbox);
+
+    let launch = |controller: &Controller, id: &str| {
+        controller
+            .current_worker_launch_config(
+                id,
+                &targets::TargetLocator::LocalBare {
+                    worker_root: mj_core::config::data_dir()
+                        .join("workers")
+                        .join(id)
+                        .to_string_lossy()
+                        .into_owned(),
+                },
+            )
+            .unwrap()
+    };
+    for id in [opted_out_id, child_id.as_str()] {
+        let launch = launch(&controller, id);
+        assert!(launch.project_memory.is_none(), "{id}");
+        assert!(!launch.agent_mailboxes_enabled, "{id}");
+        assert_eq!(
+            controller.project_memory_sync_target(id).unwrap(),
+            None,
+            "{id}"
+        );
+    }
+    let ordinary = launch(&controller, ordinary_id);
+    assert!(ordinary.project_memory.is_some());
+    assert_eq!(ordinary.agent_mailboxes_enabled, mailboxes);
+    assert!(
+        controller
+            .project_memory_sync_target(ordinary_id)
+            .unwrap()
+            .is_some()
     );
 }
 

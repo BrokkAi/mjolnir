@@ -41,6 +41,8 @@ fn session_record(id: &str) -> SessionRecord {
         project_directory: None,
         managed_worktree: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         target_template_id: "target-1".into(),
         resource_allocation: None,
         container_cpus: None,

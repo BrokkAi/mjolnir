@@ -281,7 +281,7 @@ impl Controller {
                     "replacement worker reported an unexpected execution mode"
                 );
                 let project_memory = match self.project_memory_sync_target(session_id) {
-                    Ok(target) => Some(target),
+                    Ok(target) => target,
                     Err(error) => {
                         tracing::warn!(
                             session_id,
@@ -468,7 +468,7 @@ impl Controller {
             .await
             .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
             let project_memory = match self.project_memory_sync_target(session_id) {
-                Ok(target) => Some(target),
+                Ok(target) => target,
                 Err(error) => {
                     tracing::warn!(
                         session_id,

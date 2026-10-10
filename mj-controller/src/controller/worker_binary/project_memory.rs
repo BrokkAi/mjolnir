@@ -14,6 +14,9 @@ impl Controller {
     }
 }
 
+/// Claude Code's switch for its auto-memory directory and memory reminder.
+pub(super) const CLAUDE_DISABLE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+
 pub(super) fn project_memory_launch(
     session: &mj_core::state::SessionRecord,
     bundle: Option<&ProjectBundle>,

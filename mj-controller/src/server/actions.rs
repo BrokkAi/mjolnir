@@ -34,6 +34,12 @@ pub enum ControllerAction {
         /// Turn review for this session. Omitted follows `[review]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         review: Option<mj_core::config::SessionReview>,
+        /// Start the session with no project memory.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_project_memory: bool,
+        /// Start the session with no agent mailbox.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_mailbox: bool,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty

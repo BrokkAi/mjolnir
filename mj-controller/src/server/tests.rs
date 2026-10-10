@@ -161,6 +161,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 project_directory: None,
                 managed_worktree: None,
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: vec![],
@@ -2540,6 +2542,8 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         at: None,
         branch: None,
         base: None,
@@ -2601,6 +2605,8 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
          resource_allocation: Option<mj_core::state::SessionResourceAllocation>| {
             ControllerAction::New {
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 at: None,
                 branch: None,
                 base: None,

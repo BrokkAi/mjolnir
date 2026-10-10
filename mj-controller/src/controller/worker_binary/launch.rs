@@ -161,17 +161,21 @@ impl Controller {
                 launch.agent_mailboxes_enabled,
             )?;
         }
-        stage_memory_replica(
-            &project_memory,
-            Path::new(&target_profile_home),
-            &profile_stage,
-        )?;
-        if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
-            configure_kimi_history_mcp(
+        // A session without project memory gets no replica, no baseline and
+        // no history server: nothing of the workspace's memory reaches it.
+        if let Some(project_memory) = &project_memory {
+            stage_memory_replica(
+                project_memory,
+                Path::new(&target_profile_home),
                 &profile_stage,
-                worker_root,
-                project_memory.history_socket.as_deref(),
             )?;
+            if project_memory.mcp_delivery == ProjectMemoryMcpDelivery::HarnessProfile {
+                configure_kimi_history_mcp(
+                    &profile_stage,
+                    worker_root,
+                    project_memory.history_socket.as_deref(),
+                )?;
+            }
         }
         let worker_binary = worker_binary_for(backend, executor)?;
 
@@ -377,7 +381,11 @@ impl Controller {
         &self,
         session_id: &str,
         backend: &targets::TargetLocator,
-    ) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+    ) -> Result<(
+        WorkerLaunchConfig,
+        Option<ProjectMemoryLaunchConfig>,
+        String,
+    )> {
         let session = self
             .state
             .sessions
@@ -444,7 +452,7 @@ impl Controller {
         }
         apply_jev_switch(&mut launch, self.config.jev.enabled);
         apply_continuation_switch(&mut launch, self.config.automatic_continuation_enabled());
-        launch.agent_mailboxes_enabled = self.config.agent_mailboxes_enabled();
+        launch.agent_mailboxes_enabled = self.config.agent_mailboxes_enabled_for(session);
         launch.subagents = session
             .subagents
             .clone()
@@ -553,12 +561,20 @@ impl Controller {
         Ok(launch)
     }
 
-    pub fn project_memory_sync_target(&self, session_id: &str) -> Result<ProjectMemorySyncTarget> {
+    /// Where the session's project memory is synchronized, or `None` for a
+    /// session that has none.
+    pub fn project_memory_sync_target(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ProjectMemorySyncTarget>> {
         let session = self
             .state
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        if session.no_project_memory {
+            return Ok(None);
+        }
         session.validate_configuration(&self.config)?;
         let locator = session
             .target
@@ -594,9 +610,9 @@ impl Controller {
             &target_home,
             self.subagent_parent_worktree(session_id),
         )?;
-        Ok(ProjectMemorySyncTarget {
+        Ok(Some(ProjectMemorySyncTarget {
             canonical_root: canonical_memory_root(&launch.project_key),
-        })
+        }))
     }
 }
 
@@ -686,7 +702,11 @@ pub(super) fn worker_launch_config(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
-) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+) -> Result<(
+    WorkerLaunchConfig,
+    Option<ProjectMemoryLaunchConfig>,
+    String,
+)> {
     worker_launch_config_with_checkout(
         session,
         &session.checkout(),
@@ -706,7 +726,11 @@ pub(super) fn worker_launch_config_with_checkout(
     backend: &targets::TargetLocator,
     worker_workspace: LaunchWorkspace<'_>,
     target: &mj_core::state::TargetRuntimeSettings,
-) -> Result<(WorkerLaunchConfig, ProjectMemoryLaunchConfig, String)> {
+) -> Result<(
+    WorkerLaunchConfig,
+    Option<ProjectMemoryLaunchConfig>,
+    String,
+)> {
     let session_id = session.id.as_str();
     let execution_policy = target.execution_policy;
     let target_profile_home = target_profile_home(backend, session_id, profile);
@@ -833,6 +857,9 @@ pub(super) fn worker_launch_config_with_checkout(
     profile
         .kind
         .configure_execution_environment(execution_policy, &mut environment)?;
+    // The project's identity also keys the shared tool cache and names the
+    // Claude project directory, so it is worked out for every session. Only
+    // the memory launch config below depends on the session's choice.
     let mut project_memory = project_memory_launch(
         session,
         bundle,
@@ -866,7 +893,14 @@ pub(super) fn worker_launch_config_with_checkout(
             "CLAUDE_CODE_PROJECT_DIR_NAME".into(),
             project_memory_replica_slug(&project_memory.project_key, session_id),
         );
+        if session.no_project_memory {
+            // Claude Code reads and offers its auto-memory directory unless
+            // told not to. Set after the profile's own environment so the
+            // session's choice wins.
+            environment.insert(CLAUDE_DISABLE_AUTO_MEMORY_ENV.into(), "1".into());
+        }
     }
+    let project_memory = (!session.no_project_memory).then_some(project_memory);
     apply_claude_setup_token(
         &mut environment,
         profile.kind,
@@ -913,7 +947,7 @@ pub(super) fn worker_launch_config_with_checkout(
             cwd: PathBuf::from(&workspace.0),
             additional_directories,
             native_session_id: session.native_session_id.clone(),
-            project_memory: Some(project_memory.clone()),
+            project_memory: project_memory.clone(),
             execution_policy,
         },
         project_memory,

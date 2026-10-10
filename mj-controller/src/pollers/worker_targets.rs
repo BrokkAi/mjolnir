@@ -42,7 +42,7 @@ pub(crate) fn worker_poll_target(
             }
         },
         project_memory: match controller.project_memory_sync_target(&session.id) {
-            Ok(target) => Some(target),
+            Ok(target) => target,
             Err(error) => {
                 tracing::debug!(session_id = %session.id, "project memory target unavailable: {error:#}");
                 None

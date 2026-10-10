@@ -103,6 +103,15 @@ pub trait ExportRuntime: Send + Sync {
         true
     }
 
+    /// Whether daemon configuration enables agent mailboxes and the session
+    /// has not opted out (`--no-mailbox`). The opt-out only turns it off.
+    fn agent_mailboxes_enabled_for(&self, session_id: &str) -> bool {
+        self.agent_mailboxes_enabled()
+            && self
+                .session_record(session_id)
+                .is_none_or(|session| !session.no_mailbox)
+    }
+
     fn workspace_session(
         &self,
         _session_id: String,

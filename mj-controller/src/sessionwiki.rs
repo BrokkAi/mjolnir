@@ -2802,6 +2802,8 @@ mod tests {
             project_directory: Some(PathBuf::from("/home/dev/project")),
             managed_worktree: None,
             review: None,
+            no_project_memory: false,
+            no_mailbox: false,
             target_template_id: "local-bare".into(),
             resource_allocation: None,
             additional_mounts: Vec::new(),

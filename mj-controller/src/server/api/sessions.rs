@@ -211,6 +211,8 @@ pub(super) async fn start_session(
         base: request.base.clone(),
         subagents: request.subagents,
         review: request.review.clone(),
+        no_project_memory: request.no_project_memory,
+        no_mailbox: request.no_mailbox,
         workspace_id: workspace_for_new_session(&backend, request.workspace_id.clone()).await?,
         profile_id,
         bundle_id,

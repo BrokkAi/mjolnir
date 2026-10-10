@@ -1427,6 +1427,34 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Compatible: adds two columns with defaults, the per-session opt-outs
+    // from project memory and from the agent mailbox. Older readers ignore
+    // them, and the older writer's session upsert lists columns explicitly, so
+    // it preserves the values. An older executable would start such a session
+    // with the workspace's project memory and the mailbox, which is a
+    // behaviour difference after a manual downgrade, not data loss. The
+    // compatibility floor stays where it is.
+    if version < 80 {
+        let add_column = |column: &str| -> Result<String> {
+            Ok(
+                if super::legacy_schema::table_has_column(connection, "sessions", column)? {
+                    String::new()
+                } else {
+                    format!("ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;")
+                },
+            )
+        };
+        let add_columns = add_column("no_project_memory")? + &add_column("no_mailbox")?;
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_columns}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (80, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 80;
+             COMMIT;"
+        ))?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

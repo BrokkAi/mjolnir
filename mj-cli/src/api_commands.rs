@@ -163,6 +163,20 @@ pub(crate) struct NewArgs {
     /// is on. `/review` still reviews on request.
     #[arg(long, conflicts_with_all = ["review_model", "review_effort", "review_tier"])]
     no_review: bool,
+    /// Start this session with no project memory: nothing from the
+    /// workspace's project memory is loaded into the harness, and the harness
+    /// is offered no memory directory to write to. Sub-agents of the session
+    /// get none either. Without this flag the session loads the workspace's
+    /// project memory.
+    #[arg(long)]
+    no_project_memory: bool,
+    /// Give this session no agent mailbox: GitHub watch events and peer
+    /// messages are not routed to it, and its harness gets no mailbox hook or
+    /// message tool. Sub-agents of the session get none either. Does not
+    /// change `[mailbox]` or other sessions, and cannot turn mailboxes on
+    /// when `[mailbox]` is off.
+    #[arg(long)]
+    no_mailbox: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 8 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -1046,6 +1060,8 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
     let request = StartSessionRequest {
         subagents: new_subagent_policy(&args)?,
         review: new_session_review(&args),
+        no_project_memory: args.no_project_memory,
+        no_mailbox: args.no_mailbox,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -2622,6 +2638,25 @@ mod tests {
         assert_eq!(events.session.as_deref(), Some("s1"));
         assert_eq!(events.workspace_id.as_deref(), Some("w1"));
         assert_eq!(events.after_seq, Some(9));
+    }
+
+    #[test]
+    fn new_opt_out_flags_are_off_unless_named() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["mj", "new", "--bundle", "product"];
+            argv.extend_from_slice(extra);
+            match Cli::try_parse_from(argv).unwrap().command {
+                Some(Command::New(args)) => (args.no_project_memory, args.no_mailbox),
+                _ => panic!("expected the new command"),
+            }
+        };
+        assert_eq!(parse(&[]), (false, false));
+        assert_eq!(parse(&["--no-project-memory"]), (true, false));
+        assert_eq!(parse(&["--no-mailbox"]), (false, true));
+        assert_eq!(
+            parse(&["--no-mailbox", "--no-project-memory"]),
+            (true, true)
+        );
     }
 
     #[test]

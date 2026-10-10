@@ -104,7 +104,7 @@ impl Controller {
         held_relay: Option<ControllerRelayLease>,
     ) -> Result<(ControllerRelayLease, bool)> {
         let project_memory = match self.project_memory_sync_target(session_id) {
-            Ok(target) => Some(target),
+            Ok(target) => target,
             Err(error) => {
                 tracing::warn!(
                     session_id,

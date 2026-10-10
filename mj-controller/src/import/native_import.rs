@@ -163,6 +163,8 @@ pub fn import_native_session(
             project_directory: raw_project.as_ref().map(|(directory, _)| directory.clone()),
             managed_worktree: None,
             review: None,
+            no_project_memory: false,
+            no_mailbox: false,
             target_template_id: raw_project.map_or(target_id, |(_, raw_target_id)| raw_target_id),
             resource_allocation: None,
             additional_mounts: Vec::new(),

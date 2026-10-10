@@ -437,6 +437,19 @@ manual review still runs. A blank or overlong `model` or `effort` answers `400`.
 When `review` is omitted, the session follows `[review]`. See
 [per-session settings](/turn-review/#per-session-settings).
 
+`no_project_memory` (boolean, default `false`) starts the session with no
+project memory: nothing from the workspace's project memory is added to the
+agent's context, the harness is offered no memory directory, and the session's
+sub-agents get none either. The `mj-memory` history tools are not offered
+either. The choice is stored with the session and kept on resume and Move.
+
+`no_mailbox` (boolean, default `false`) gives the session no agent mailbox:
+GitHub watch events are not routed to it, messages from other sessions are
+refused, `POST /sessions/{id}/events` answers `409`, and its harness gets
+no mailbox hook or message tool. Its sub-agents get none either. It only turns
+the session's mailbox off: `[mailbox]` and other sessions are unchanged, and
+with `[mailbox]` off no session has a mailbox whatever this says.
+
 On a container target, the session gets the same CPU and memory limit that
 the viewer's create form selects: the size last chosen for that host, else
 8 CPUs and 32 GiB, capped at the host's totals. `cpus` and `memory_bytes`
