@@ -1413,6 +1413,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: runtime JSON now records native cache placement. Older writers
+    // discard that field, losing the authoritative path of fixed container
+    // mounts during lifecycle transitions. No existing placement is changed.
+    if version < 79 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 79 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (79, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 79;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2088,7 +2102,7 @@ mod reader_tests {
             let schema = read_schema_state(&writer).unwrap();
             assert_eq!(schema.revision, SCHEMA_VERSION);
             assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-            assert!(schema.ensure_supported_by(77).is_err());
+            assert!(schema.ensure_supported_by(78).is_err());
             assert_eq!(
                 writer
                     .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
@@ -2260,8 +2274,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 78 adds typed incoming messages.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 78;
+    /// `SCHEMA_VERSION`. Migration 79 preserves native cache placement.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 79;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

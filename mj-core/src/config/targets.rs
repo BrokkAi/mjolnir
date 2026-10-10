@@ -144,6 +144,10 @@ pub struct TargetBuildCache {
     /// Cache directory on the target's own host, not on this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
+    /// Native Go, Gradle, Turbo, Nx and Bazel caches on this machine. mbx
+    /// continues to own its separate Rust/C/C++ storage and configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_directory: Option<PathBuf>,
     /// Shared storage budget, an mbx size string such as `100GiB`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_total_size: Option<String>,
@@ -181,6 +185,7 @@ impl BuildCacheScheduler {
 struct BuildCacheSettings {
     enabled: Option<bool>,
     directory: Option<PathBuf>,
+    tools_directory: Option<PathBuf>,
     max_total_size: Option<String>,
     scheduler: BuildCacheScheduler,
     #[serde(rename = "max_size")]
@@ -194,6 +199,7 @@ impl From<BuildCacheSettings> for TargetBuildCache {
         Self {
             enabled: settings.enabled,
             directory: settings.directory,
+            tools_directory: settings.tools_directory,
             max_total_size: settings.max_total_size,
             scheduler: settings.scheduler,
         }
@@ -207,6 +213,11 @@ impl TargetBuildCache {
     }
 
     pub(super) fn validate(&self, template_id: &str) -> Result<()> {
+        if let Some(directory) = &self.tools_directory
+            && !crate::target_path::is_absolute(directory)
+        {
+            bail!("target template {template_id:?} build cache tools_directory must be absolute");
+        }
         if let Some(directory) = &self.directory
             && !crate::target_path::is_absolute(directory)
         {

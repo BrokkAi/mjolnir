@@ -1137,6 +1137,7 @@ fn setup_protects_active_dependencies_but_allows_additions_repairs_and_defaults(
     container.build_cache = Some(crate::config::TargetBuildCache {
         enabled: None,
         directory: None,
+        tools_directory: None,
         max_total_size: Some("20GB".into()),
         scheduler: Default::default(),
     });
