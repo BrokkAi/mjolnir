@@ -526,10 +526,11 @@ pub enum RelayResponsePayload {
     },
     Status(RelayOperationalState),
     MailboxDrained {
-        /// Present only when a nonempty event batch is leased to the hook.
+        /// Present when mailbox events or a Claude boundary steer are leased.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lease_id: Option<String>,
         text: Option<String>,
+        /// Number of context items leased to the hook.
         count: usize,
     },
     MailboxAcknowledged {

@@ -2,6 +2,54 @@ use super::*;
 
 pub(super) const MAILBOX_EVENTS_NOTICE_ID: &str = "system:mailbox:external-events";
 
+fn project_steered_prompt(
+    current: &MaterializedSession,
+    index: &ProjectionIndex,
+    event: &RelayEvent,
+    queue: &mut Vec<MaterializedQueuedPrompt>,
+    queued_prompt_id: &str,
+    mutation: &mut MaterializedSessionMutation,
+) -> Result<()> {
+    let Some(queue_index) = queue
+        .iter()
+        .position(|queued| queued.command_id == queued_prompt_id)
+    else {
+        bail!("steered prompt is missing from the materialized queue");
+    };
+    let entry = queue.remove(queue_index);
+    if !entry.kind.is_prompt() {
+        bail!("steered queue entry is not a prompt");
+    }
+    // The running turn becomes the steered prompt's turn, while the original
+    // harness turn remains the one whose completion closes it.
+    mutation.active_turn = Some(Some(MaterializedTurn {
+        command_id: queued_prompt_id.to_owned(),
+        accepted_ordinal: entry.accepted_ordinal,
+        turn_start_position: event.ordinal,
+        started_at_ms: event.recorded_at_ms,
+        steered_into: current.active_turn.as_ref().map(|turn| {
+            turn.steered_into
+                .clone()
+                .unwrap_or_else(|| turn.command_id.clone())
+        }),
+    }));
+    close_streams(index, mutation, event.recorded_at_ms);
+    upsert(
+        mutation,
+        TranscriptItem {
+            stable_id: format!("user:{queued_prompt_id}"),
+            position: event.ordinal,
+            latest_content_event_ordinal: None,
+            created_at_ms: event.recorded_at_ms,
+            last_changed_at_ms: event.recorded_at_ms,
+            body: TranscriptBody::User {
+                content: entry.content,
+            },
+        },
+    );
+    Ok(())
+}
+
 pub(super) fn project_observation(
     current: &MaterializedSession,
     index: &ProjectionIndex,
@@ -349,46 +397,14 @@ pub(super) fn project_observation(
                         .any(|command_id| command_id == &queued.command_id)
                 }),
                 mj_core::relay::RelayCommandOutcome::Steered { queued_command_id } => {
-                    let Some(queue_index) = queue
-                        .iter()
-                        .position(|queued| queued.command_id == *queued_command_id)
-                    else {
-                        bail!("steered prompt is missing from the materialized queue");
-                    };
-                    let entry = queue.remove(queue_index);
-                    if !entry.kind.is_prompt() {
-                        bail!("steered queue entry is not a prompt");
-                    }
-                    // The running turn becomes the steered prompt's turn: the
-                    // harness keeps the same command in flight but the work it
-                    // now reports belongs to the queued prompt.
-                    mutation.active_turn = Some(Some(MaterializedTurn {
-                        command_id: queued_command_id.clone(),
-                        accepted_ordinal: entry.accepted_ordinal,
-                        turn_start_position: event.ordinal,
-                        started_at_ms: event.recorded_at_ms,
-                        // The relay keeps the original prompt in flight, and
-                        // its completion is what ends this turn.
-                        steered_into: current.active_turn.as_ref().map(|turn| {
-                            turn.steered_into
-                                .clone()
-                                .unwrap_or_else(|| turn.command_id.clone())
-                        }),
-                    }));
-                    close_streams(index, mutation, event.recorded_at_ms);
-                    upsert(
+                    project_steered_prompt(
+                        current,
+                        index,
+                        event,
+                        &mut queue,
+                        queued_command_id,
                         mutation,
-                        TranscriptItem {
-                            stable_id: format!("user:{queued_command_id}"),
-                            position: event.ordinal,
-                            latest_content_event_ordinal: None,
-                            created_at_ms: event.recorded_at_ms,
-                            last_changed_at_ms: event.recorded_at_ms,
-                            body: TranscriptBody::User {
-                                content: entry.content,
-                            },
-                        },
-                    );
+                    )?;
                 }
                 mj_core::relay::RelayCommandOutcome::Configured => {
                     mutation.config_results.push((command_id.clone(), None));
@@ -763,6 +779,21 @@ pub(super) fn project_observation(
             if index.get(&stable_id).is_none() {
                 push_system_with_id(mutation, event, stable_id, message.clone());
             }
+        }
+        RelayObservation::MailboxEventsDelivered {
+            steering: Some(steering),
+            ..
+        } => {
+            let mut queue = current.queued_prompts.clone();
+            project_steered_prompt(
+                current,
+                index,
+                event,
+                &mut queue,
+                &steering.queued_prompt_id,
+                mutation,
+            )?;
+            mutation.queued_prompts = Some(queue);
         }
         RelayObservation::MailboxEventsDelivered { .. } => {}
         RelayObservation::MailboxHookLeaseCreated { .. }

@@ -154,6 +154,7 @@ impl<'a> LegacyMailboxObservation<'a> {
                 hook_event,
                 events,
                 lease_id,
+                ..
             } => Some(Self::MailboxEventsDelivered {
                 event_keys,
                 path,

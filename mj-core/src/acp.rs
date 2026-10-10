@@ -420,6 +420,18 @@ pub fn prompt_is_slash_command(prompt: &[ContentBlock]) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':'))
 }
 
+/// Return prompt text that can be represented faithfully as one plain text
+/// context block at a harness tool boundary.
+pub fn steering_text_context(prompt: &[ContentBlock]) -> Option<&str> {
+    let [ContentBlock::Text(text)] = prompt else {
+        return None;
+    };
+    if prompt_is_slash_command(prompt) || context_command(prompt).is_some() {
+        return None;
+    }
+    Some(&text.text)
+}
+
 /// Whether this update is the agent doing the work a prompt asked for.
 ///
 /// This is how Mjolnir tells "the harness answered" from "the harness ended

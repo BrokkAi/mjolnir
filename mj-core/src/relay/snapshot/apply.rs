@@ -114,6 +114,108 @@ fn retain_delivered_mailbox_event_keys(
     }
 }
 
+fn hook_steering_prompt(
+    snapshot: &RelaySnapshot,
+    steering: &MailboxHookSteering,
+) -> Result<Vec<ContentBlock>> {
+    let operation = snapshot
+        .steering
+        .as_ref()
+        .ok_or_else(|| anyhow!("hook steer names no active steering operation"))?;
+    if operation.command_id != steering.command_id
+        || operation.active_prompt_id != steering.active_prompt_id
+        || operation.queued_prompt_id != steering.queued_prompt_id
+        || operation.status != SteeringStatus::Pending
+        || snapshot
+            .active_prompt
+            .as_ref()
+            .map(|prompt| &prompt.command_id)
+            != Some(&steering.active_prompt_id)
+    {
+        bail!("hook steer no longer matches its active turn");
+    }
+    let dispatch = snapshot
+        .dispatches
+        .get(&steering.command_id)
+        .ok_or_else(|| anyhow!("hook steer names an unknown command"))?;
+    if dispatch.state != RelayDispatchState::Pending
+        || !matches!(
+            &dispatch.command,
+            RelayCommand::Steer {
+                active_prompt_id,
+                queued_prompt_id,
+            } if active_prompt_id == &steering.active_prompt_id
+                && queued_prompt_id == &steering.queued_prompt_id
+        )
+    {
+        bail!("hook steer command is not waiting at the tool boundary");
+    }
+    let Some(queued) = snapshot.queued_prompts.first() else {
+        bail!("hook steer prompt is no longer queued");
+    };
+    if queued.command_id != steering.queued_prompt_id {
+        bail!("hook steer prompt is not at the queue head");
+    }
+    let StoredQueuedRelayPayload::Prompt { prompt } = &queued.payload else {
+        bail!("hook steer target is not a prompt");
+    };
+    if crate::acp::steering_text_context(prompt).is_none() {
+        bail!("hook steer prompt cannot be represented as text context");
+    }
+    Ok(prompt.clone())
+}
+
+fn complete_hook_steering(
+    snapshot: &mut RelaySnapshot,
+    steering: &MailboxHookSteering,
+    ordinal: u64,
+) -> Result<()> {
+    hook_steering_prompt(snapshot, steering)?;
+    let command = snapshot
+        .dispatches
+        .get_mut(&steering.command_id)
+        .expect("validated hook steer command disappeared");
+    command.state = RelayDispatchState::Completed;
+    let handled = snapshot
+        .handled_commands
+        .get_mut(&steering.command_id)
+        .ok_or_else(|| anyhow!("hook steer is not in the command ledger"))?;
+    handled.terminal_ordinal = Some(ordinal);
+    handled.outcome = Some(RelayCommandOutcome::Steered {
+        queued_command_id: steering.queued_prompt_id.clone(),
+    });
+    let operation = snapshot
+        .steering
+        .as_mut()
+        .expect("validated hook steering operation disappeared");
+    operation.status = SteeringStatus::Applied;
+    operation.message = None;
+
+    let queued = snapshot.queued_prompts.remove(0);
+    let target = snapshot
+        .dispatches
+        .get_mut(&queued.command_id)
+        .ok_or_else(|| anyhow!("hook steered an unknown queued prompt"))?;
+    target.state = RelayDispatchState::Completed;
+    snapshot
+        .handled_commands
+        .get_mut(&queued.command_id)
+        .ok_or_else(|| anyhow!("hook steered prompt is not in the ledger"))?
+        .terminal_ordinal = Some(ordinal);
+    if snapshot
+        .pending_prompt_context
+        .as_ref()
+        .and_then(|context| context.attached_command_id.as_deref())
+        == Some(steering.queued_prompt_id.as_str())
+    {
+        snapshot.pending_prompt_context = None;
+    }
+    snapshot.pending_user_shell_contexts.retain(|context| {
+        context.attached_command_id.as_deref() != Some(steering.queued_prompt_id.as_str())
+    });
+    Ok(())
+}
+
 pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Result<()> {
     validate_relay_event(snapshot.latest_ordinal, &snapshot.latest_digest, event)?;
     match &event.observation {
@@ -1311,9 +1413,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             if lease.lease_id.trim().is_empty()
                 || !matches!(lease.hook_event.as_str(), "PostToolUse" | "PostToolBatch")
-                || lease.events.is_empty()
+                || (lease.events.is_empty() && lease.steering.is_none())
             {
                 bail!("mailbox hook lease is missing its ID, event, or events");
+            }
+            if lease.steering.is_some() && lease.hook_event != "PostToolBatch" {
+                bail!("hook steer requires the PostToolBatch boundary");
             }
             let unique_keys: std::collections::BTreeSet<_> = lease
                 .events
@@ -1325,6 +1430,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             if snapshot.pending_mailbox_events != lease.events {
                 bail!("mailbox hook lease does not claim all pending events in order");
+            }
+            if let Some(steering) = &lease.steering {
+                hook_steering_prompt(snapshot, steering)?;
             }
             snapshot.pending_mailbox_events.clear();
             snapshot.mailbox_hook_lease = Some(lease.clone());
@@ -1348,8 +1456,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             hook_event,
             events,
             lease_id,
+            steering,
         } => {
-            if event_keys.is_empty() {
+            if event_keys.is_empty() && steering.is_none() {
                 bail!("mailbox delivery claim has no event keys");
             }
             let unique_keys: std::collections::BTreeSet<_> = event_keys.iter().cloned().collect();
@@ -1358,6 +1467,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             let claimed = match (path, prompt_command_id, hook_event.as_deref(), lease_id) {
                 (MailboxDeliveryPath::Prompt, Some(command_id), None, None) => {
+                    if steering.is_some() {
+                        bail!("prompt mailbox claim cannot complete a steer");
+                    }
                     let mut claimed = Vec::with_capacity(event_keys.len());
                     for key in event_keys {
                         let Some(mailbox_event) = snapshot
@@ -1407,6 +1519,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     };
                     if lease.lease_id != *lease_id
                         || lease.hook_event != hook_event.as_deref().unwrap_or_default()
+                        || lease.steering != *steering
                         || lease
                             .events
                             .iter()
@@ -1414,6 +1527,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                             .ne(event_keys.iter())
                     {
                         bail!("tool-hook acknowledgement does not match its active lease");
+                    }
+                    if event_keys.is_empty() && lease.steering.is_none() {
+                        bail!("tool-hook acknowledgement has no leased delivery");
                     }
                     lease.events.clone()
                 }
@@ -1425,6 +1541,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     Some("PostToolUse" | "PostToolBatch"),
                     None,
                 ) => {
+                    if steering.is_some() {
+                        bail!("legacy tool-hook claim cannot complete a steer");
+                    }
                     let mut claimed = Vec::with_capacity(event_keys.len());
                     for key in event_keys {
                         let Some(mailbox_event) = snapshot
@@ -1465,6 +1584,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 event_keys.iter().cloned(),
                 event.ordinal,
             );
+            if let Some(steering) = steering {
+                complete_hook_steering(snapshot, steering, event.ordinal)?;
+            }
         }
     }
     if let Some(steering) = snapshot.steering.as_mut()
@@ -1590,6 +1712,10 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             outcome: RelayCommandOutcome::Steered { queued_command_id },
             ..
         } => delivered = Some(queued_command_id),
+        RelayObservation::MailboxEventsDelivered {
+            steering: Some(steering),
+            ..
+        } => delivered = Some(&steering.queued_prompt_id),
         _ => {}
     }
     if let Some(id) = delivered

@@ -13,6 +13,74 @@ pub(super) fn validate_identifier(value: &str, name: &str) -> Result<()> {
 }
 
 impl DurableRelay {
+    fn return_boundary_steer_after_turn_end(&mut self, active_prompt_id: &str) -> Result<()> {
+        if self.steering_delivery_mode == SteeringDeliveryMode::Acp {
+            return Ok(());
+        }
+        let Some(steering) = self
+            .snapshot
+            .steering
+            .as_ref()
+            .filter(|steering| {
+                steering.active_prompt_id == active_prompt_id
+                    && steering.status == SteeringStatus::Pending
+            })
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let Some(dispatch) = self.snapshot.dispatches.get(&steering.command_id) else {
+            bail!("boundary steer command disappeared before its turn ended");
+        };
+        if !matches!(
+            &dispatch.command,
+            RelayCommand::Steer {
+                active_prompt_id: target,
+                queued_prompt_id,
+            } if target == &steering.active_prompt_id
+                && queued_prompt_id == &steering.queued_prompt_id
+        ) {
+            bail!("boundary steer command changed before its turn ended");
+        }
+        if self
+            .snapshot
+            .mailbox_hook_lease
+            .as_ref()
+            .and_then(|lease| lease.steering.as_ref())
+            .is_some_and(|leased| {
+                leased.command_id == steering.command_id
+                    && leased.active_prompt_id == steering.active_prompt_id
+                    && leased.queued_prompt_id == steering.queued_prompt_id
+            })
+        {
+            self.return_mailbox_hook_lease(MailboxHookLeaseReturnReason::TurnEnded)?;
+        }
+        let state = self.snapshot.dispatches[&steering.command_id].state;
+        if state == RelayDispatchState::Queued {
+            self.append_relay_event(
+                Some(&steering.command_id),
+                RelayObservation::CommandStarted {
+                    command_id: steering.command_id.clone(),
+                    started_at_ms: epoch_millis(),
+                },
+            )?;
+        } else if state != RelayDispatchState::Pending {
+            bail!("boundary steer command is not pending at its turn end");
+        }
+        self.append_relay_event(
+            Some(&steering.command_id),
+            RelayObservation::CommandCompleted {
+                barrier_command_id: None,
+                command: Some(RelayCommandKind::Steer),
+                command_id: steering.command_id.clone(),
+                outcome: RelayCommandOutcome::SteeringReturned {
+                    queued_command_id: steering.queued_prompt_id,
+                },
+            },
+        )?;
+        Ok(())
+    }
+
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
@@ -972,6 +1040,14 @@ impl DurableRelay {
                 if dispatch.state != RelayDispatchState::Pending {
                     return None;
                 }
+                if self.steering_delivery_mode != SteeringDeliveryMode::Acp
+                    && matches!(dispatch.command, RelayCommand::Steer { .. })
+                {
+                    // Claude's steer is completed by its PostToolBatch hook,
+                    // or returned when the current turn ends. It never enters
+                    // the ACP command channel.
+                    return None;
+                }
                 match active_barrier {
                     Some(barrier_id) if command_id == barrier_id => self
                         .snapshot
@@ -1011,16 +1087,18 @@ impl DurableRelay {
                     hook_event: None,
                     events: self.snapshot.pending_mailbox_events.clone(),
                     lease_id: None,
+                    steering: None,
                 },
             )?;
         }
         let mut claimed = Vec::with_capacity(claimable.len());
         let mut next_snapshot = self.snapshot.clone();
         for (accepted_ordinal, command_id) in claimable {
-            let steering_prompt = matches!(
-                next_snapshot.dispatches[&command_id].command,
-                RelayCommand::Cancel | RelayCommand::Steer { .. }
-            )
+            let steering_prompt = (self.steering_delivery_mode == SteeringDeliveryMode::Acp
+                && matches!(
+                    next_snapshot.dispatches[&command_id].command,
+                    RelayCommand::Cancel | RelayCommand::Steer { .. }
+                ))
             .then(|| next_snapshot.queued_prompts.first())
             .flatten()
             .and_then(|queued| match &queued.payload {
@@ -1112,6 +1190,9 @@ impl DurableRelay {
         if !self.automatic_steering || self.checkpoint_only {
             return None;
         }
+        if self.steering_delivery_mode == SteeringDeliveryMode::ClaudeTurnEnd {
+            return None;
+        }
         // Automatic steering is only useful for a Hel-owned prompt. In a
         // harness-initiated turn, the agent cannot read the steer until its
         // current tool call returns; Esc can cancel that turn instead.
@@ -1138,6 +1219,8 @@ impl DurableRelay {
         };
         // Commands run at turn boundaries, not inside another turn.
         if mj_core::acp::prompt_is_slash_command(prompt)
+            || (self.steering_delivery_mode == SteeringDeliveryMode::ClaudePostToolBatch
+                && mj_core::acp::steering_text_context(prompt).is_none())
             || self.snapshot.dispatches.get(&head.command_id)?.state != RelayDispatchState::Queued
         {
             return None;
@@ -1571,6 +1654,9 @@ impl DurableRelay {
                 mj_core::clock::epoch_millis(),
             )?;
         }
+        if finishes_turn {
+            self.return_boundary_steer_after_turn_end(command_id)?;
+        }
         self.promote_next_queued_command()?;
         Ok(ordinal)
     }
@@ -1594,6 +1680,7 @@ impl DurableRelay {
         )?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
+            self.return_boundary_steer_after_turn_end(command_id)?;
         }
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;
@@ -1619,6 +1706,7 @@ impl DurableRelay {
         )?;
         if command == RelayCommandKind::Prompt {
             self.finish_turn_activity()?;
+            self.return_boundary_steer_after_turn_end(command_id)?;
         }
         self.settle_held_writes()?;
         self.promote_next_queued_command()?;
@@ -1833,7 +1921,53 @@ impl DurableRelay {
         Ok(())
     }
 
-    /// Atomically lease pending events to one harness hook.
+    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, String)> {
+        if hook_event != "PostToolBatch"
+            || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
+        {
+            return None;
+        }
+        let operation = self
+            .snapshot
+            .steering
+            .as_ref()
+            .filter(|steering| steering.status == SteeringStatus::Pending)?;
+        if self.snapshot.active_prompt.as_ref()?.command_id != operation.active_prompt_id {
+            return None;
+        }
+        let dispatch = self.snapshot.dispatches.get(&operation.command_id)?;
+        if dispatch.state != RelayDispatchState::Pending
+            || !matches!(
+                &dispatch.command,
+                RelayCommand::Steer {
+                    active_prompt_id,
+                    queued_prompt_id,
+                } if active_prompt_id == &operation.active_prompt_id
+                    && queued_prompt_id == &operation.queued_prompt_id
+            )
+        {
+            return None;
+        }
+        let queued = self.snapshot.queued_prompts.first()?;
+        if queued.command_id != operation.queued_prompt_id {
+            return None;
+        }
+        let StoredQueuedRelayPayload::Prompt { prompt } = &queued.payload else {
+            return None;
+        };
+        let text = mj_core::acp::steering_text_context(prompt)?;
+        Some((
+            MailboxHookSteering {
+                command_id: operation.command_id.clone(),
+                active_prompt_id: operation.active_prompt_id.clone(),
+                queued_prompt_id: operation.queued_prompt_id.clone(),
+            },
+            text.to_owned(),
+        ))
+    }
+
+    /// Atomically lease pending mailbox events and eligible Claude steers to
+    /// one harness hook.
     pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
@@ -1848,7 +1982,8 @@ impl DurableRelay {
             });
         }
         let events = self.snapshot.pending_mailbox_events.clone();
-        if events.is_empty() {
+        let hook_steering = self.pending_hook_steering(hook_event);
+        if events.is_empty() && hook_steering.is_none() {
             return Ok(RelayResponsePayload::MailboxDrained {
                 lease_id: None,
                 text: None,
@@ -1864,8 +1999,19 @@ impl DurableRelay {
             hook_event: hook_event.to_owned(),
             expires_at_ms: epoch_millis()
                 .saturating_add(mj_core::mailbox::MAILBOX_HOOK_LEASE_TIMEOUT_MS),
+            steering: hook_steering.as_ref().map(|(steering, _)| steering.clone()),
         };
-        let text = mj_core::mailbox::render_mailbox_events(&events);
+        let mut contexts = Vec::with_capacity(2);
+        if !events.is_empty() {
+            contexts.push(mj_core::mailbox::render_mailbox_events(&events));
+        }
+        if let Some((_, text)) = &hook_steering {
+            contexts.push(format!(
+                "<user_message_sent_while_working>\n{text}\n</user_message_sent_while_working>"
+            ));
+        }
+        let text = contexts.join("\n\n");
+        let count = events.len() + usize::from(hook_steering.is_some());
         self.append_relay_event(
             None,
             RelayObservation::MailboxHookLeaseCreated {
@@ -1875,7 +2021,7 @@ impl DurableRelay {
         Ok(RelayResponsePayload::MailboxDrained {
             lease_id: Some(lease.lease_id),
             text: Some(text),
-            count: events.len(),
+            count,
         })
     }
 
@@ -1893,8 +2039,12 @@ impl DurableRelay {
         let events = lease.events.clone();
         let event_keys = events.iter().map(|event| event.key.clone()).collect();
         let hook_event = lease.hook_event.clone();
+        let steering = lease.steering.clone();
+        let command_id = steering
+            .as_ref()
+            .map(|steering| steering.command_id.clone());
         self.append_relay_event(
-            None,
+            command_id.as_deref(),
             RelayObservation::MailboxEventsDelivered {
                 event_keys,
                 path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
@@ -1902,6 +2052,7 @@ impl DurableRelay {
                 hook_event: Some(hook_event),
                 events,
                 lease_id: Some(lease_id.to_owned()),
+                steering,
             },
         )?;
         Ok(RelayResponsePayload::MailboxAcknowledged { acknowledged: true })

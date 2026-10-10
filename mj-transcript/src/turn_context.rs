@@ -33,6 +33,10 @@ pub fn delivered_prompt_command_id(observation: &mj_core::relay::RelayObservatio
             outcome: RelayCommandOutcome::Steered { queued_command_id },
             ..
         } => Some(queued_command_id),
+        RelayObservation::MailboxEventsDelivered {
+            steering: Some(steering),
+            ..
+        } => Some(&steering.queued_prompt_id),
         _ => None,
     }
 }
@@ -106,6 +110,9 @@ impl TurnContext {
             | RelayObservation::CommandCompleted {
                 outcome: RelayCommandOutcome::Steered { .. },
                 ..
+            }
+            | RelayObservation::MailboxEventsDelivered {
+                steering: Some(_), ..
             } => {
                 if let Some(prompt) = prompt {
                     self.reset(prompt);

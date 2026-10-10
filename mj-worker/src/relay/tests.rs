@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use mj_core::config::HarnessKind;
+
 use super::background::{CLAUDE_STOP_ACKNOWLEDGEMENT_PREFIX, agent_chunk_text};
 use super::*;
 
@@ -373,6 +375,22 @@ fn relay_steering_automatically(root: &std::path::Path) -> DurableRelay {
     relay
 }
 
+fn running_claude_turn(root: &std::path::Path, hook_available: bool) -> DurableRelay {
+    let mut relay =
+        DurableRelay::open_for_harness(root, SESSION, "test", HarnessKind::Claude).unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Claude);
+    relay.set_steering_delivery_mode(HarnessKind::Claude, hook_available);
+    submit_relay(
+        &mut relay,
+        "prompt-first",
+        prompt("Work on the first request."),
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command_id, "prompt-first");
+    relay
+}
+
 fn queue_prompt(relay: &mut DurableRelay, command_id: &str, text: &str) {
     submit_relay(
         relay,
@@ -464,6 +482,290 @@ fn automatic_steering_stops_for_a_turn_that_returned_a_steer() {
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].command_id, "prompt-second");
+}
+
+#[test]
+fn claude_automatic_steer_is_delivered_and_completed_by_post_tool_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), true);
+    relay.set_automatic_steering(true);
+    queue_prompt(&mut relay, "prompt-second", "Please change direction.");
+
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Pending
+    );
+    let (text, count, lease_id) = drain_post_tool_batch(&mut relay);
+    assert_eq!(count, 1);
+    assert_eq!(
+        text.as_deref(),
+        Some(
+            "<user_message_sent_while_working>\nPlease change direction.\n</user_message_sent_while_working>"
+        )
+    );
+    let lease_id = lease_id.expect("a boundary steer creates a hook lease");
+    assert!(
+        relay
+            .snapshot
+            .queued_prompts
+            .iter()
+            .any(|queued| { queued.command_id == "prompt-second" })
+    );
+    acknowledge_mailbox_for_test(&mut relay, "boundary-ack", &lease_id);
+
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Applied
+    );
+    assert!(relay.snapshot.queued_prompts.is_empty());
+    assert_eq!(
+        relay.snapshot.dispatches["prompt-second"].state,
+        RelayDispatchState::Completed
+    );
+    let delivered = retained_events(&relay)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.observation,
+                RelayObservation::MailboxEventsDelivered {
+                    steering: Some(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(delivered, 1);
+
+    drop(relay);
+    let mut replayed =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Claude).unwrap();
+    assert_eq!(
+        replayed.operational_state().steering.unwrap().status,
+        SteeringStatus::Applied
+    );
+    assert!(replayed.snapshot.queued_prompts.is_empty());
+    assert_eq!(drain_post_tool_batch(&mut replayed).1, 0);
+}
+
+#[test]
+fn claude_explicit_steer_is_delivered_at_the_post_tool_batch_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), true);
+    queue_prompt(
+        &mut relay,
+        "prompt-second",
+        "Please take this into account.",
+    );
+    submit_relay(
+        &mut relay,
+        "explicit-steer",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-second".into(),
+        },
+    );
+
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let (text, count, lease_id) = drain_post_tool_batch(&mut relay);
+    assert_eq!(count, 1);
+    assert_eq!(
+        text.as_deref(),
+        Some(
+            "<user_message_sent_while_working>\nPlease take this into account.\n</user_message_sent_while_working>"
+        )
+    );
+    acknowledge_mailbox_for_test(
+        &mut relay,
+        "explicit-steer-ack",
+        &lease_id.expect("explicit steer needs a PostToolBatch lease"),
+    );
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Applied
+    );
+    assert!(relay.snapshot.queued_prompts.is_empty());
+}
+
+#[test]
+fn claude_explicit_steer_waits_for_turn_end_when_no_post_tool_batch_hook_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), false);
+    queue_prompt(&mut relay, "prompt-second", "Continue with this request.");
+    submit_relay(
+        &mut relay,
+        "explicit-steer",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-second".into(),
+        },
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+
+    relay
+        .record_command_completed(
+            "prompt-first",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Resolved
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [next] = claimed.as_slice() else {
+        panic!("the returned prompt must run as the next normal command");
+    };
+    assert_eq!(next.command_id, "prompt-second");
+    assert!(matches!(&next.command, RelayCommand::Prompt { .. }));
+    assert!(next.steering_prompt.is_none());
+}
+
+#[test]
+fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), true);
+    submit_relay(
+        &mut relay,
+        "prompt-with-attachment",
+        RelayCommand::Prompt {
+            prompt: vec![
+                ContentBlock::from("Review this image."),
+                ContentBlock::Image(agent_client_protocol::schema::v1::ImageContent::new(
+                    "aW1hZ2U=",
+                    "image/png",
+                )),
+            ],
+        },
+    );
+    submit_relay(
+        &mut relay,
+        "attachment-steer",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-with-attachment".into(),
+        },
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let (text, count, lease_id) = drain_post_tool_batch(&mut relay);
+    assert_eq!((text, count, lease_id), (None, 0, None));
+
+    relay
+        .record_command_completed(
+            "prompt-first",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    let [next] = claimed.as_slice() else {
+        panic!("the attachment prompt must run after the turn ends");
+    };
+    assert_eq!(next.command_id, "prompt-with-attachment");
+    assert!(matches!(&next.command, RelayCommand::Prompt { .. }));
+    assert!(next.steering_prompt.is_none());
+}
+
+#[test]
+fn codex_steer_still_claims_an_acp_steering_prompt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Codex).unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay.set_steering_delivery_mode(HarnessKind::Codex, false);
+    submit_relay(&mut relay, "prompt-first", prompt("work"));
+    relay.claim_pending_commands(true).unwrap();
+    queue_prompt(&mut relay, "prompt-second", "Change direction.");
+    submit_relay(
+        &mut relay,
+        "codex-steer",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-second".into(),
+        },
+    );
+
+    let claims = relay.claim_pending_commands(true).unwrap();
+    let [claimed] = claims.as_slice() else {
+        panic!("Codex must keep claiming its ACP steer command");
+    };
+    assert_eq!(claimed.command_id, "codex-steer");
+    assert_eq!(
+        claimed
+            .steering_prompt
+            .as_ref()
+            .map(|prompt| prompt.queued_command_id.as_str()),
+        Some("prompt-second")
+    );
+}
+
+#[test]
+fn boundary_steer_lease_timeout_then_ack_replay_does_not_deliver_twice() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = running_claude_turn(temp.path(), true);
+    queue_prompt(&mut relay, "prompt-second", "One boundary delivery.");
+    submit_relay(
+        &mut relay,
+        "timeout-steer",
+        RelayCommand::Steer {
+            active_prompt_id: "prompt-first".into(),
+            queued_prompt_id: "prompt-second".into(),
+        },
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let (_, _, first_lease) = drain_post_tool_batch(&mut relay);
+    let first_lease = first_lease.expect("first boundary hook leases the steer");
+    relay
+        .snapshot
+        .mailbox_hook_lease
+        .as_mut()
+        .unwrap()
+        .expires_at_ms = 0;
+    assert!(relay.expire_mailbox_hook_lease_and_promote(1).unwrap());
+    assert_eq!(
+        relay.operational_state().steering.unwrap().status,
+        SteeringStatus::Pending
+    );
+
+    let (_, _, retry_lease) = drain_post_tool_batch(&mut relay);
+    let retry_lease = retry_lease.expect("an expired lease can be retried");
+    acknowledge_mailbox_for_test(&mut relay, "timeout-steer-ack", &retry_lease);
+    assert!(matches!(
+        relay.ack_mailbox(&first_lease).unwrap(),
+        RelayResponsePayload::MailboxAcknowledged {
+            acknowledged: false
+        }
+    ));
+    assert!(relay.snapshot.queued_prompts.is_empty());
+    let delivered = retained_events(&relay)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.observation,
+                RelayObservation::MailboxEventsDelivered {
+                    steering: Some(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(delivered, 1);
+
+    drop(relay);
+    let mut replayed =
+        DurableRelay::open_for_harness(temp.path(), SESSION, "test", HarnessKind::Claude).unwrap();
+    assert_eq!(
+        replayed.operational_state().steering.unwrap().status,
+        SteeringStatus::Applied
+    );
+    assert_eq!(drain_post_tool_batch(&mut replayed).1, 0);
 }
 
 #[test]
@@ -5549,6 +5851,17 @@ fn request_mailbox_drain_for_test(
         panic!("mailbox drain failed: {:?}", response.body);
     };
     (text, count, lease_id)
+}
+
+fn drain_post_tool_batch(relay: &mut DurableRelay) -> (Option<String>, usize, Option<String>) {
+    match relay.drain_mailbox("PostToolBatch").unwrap() {
+        RelayResponsePayload::MailboxDrained {
+            lease_id,
+            text,
+            count,
+        } => (text, count, lease_id),
+        other => panic!("unexpected PostToolBatch response: {other:?}"),
+    }
 }
 
 fn acknowledge_mailbox_for_test(relay: &mut DurableRelay, request_id: &str, lease_id: &str) {

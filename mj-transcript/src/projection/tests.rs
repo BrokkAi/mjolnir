@@ -467,6 +467,7 @@ fn golden_mailbox_delivery_transcript() {
             hook_event: Some("PostToolUse".into()),
             events: vec![github_event.clone()],
             lease_id: Some("hook-lease".into()),
+            steering: None,
         },
     );
 
@@ -498,6 +499,7 @@ fn golden_mailbox_delivery_transcript() {
             hook_event: None,
             events: vec![parent_event.clone()],
             lease_id: None,
+            steering: None,
         },
     );
 
@@ -943,6 +945,64 @@ fn a_steered_prompt_finishes_with_the_turn_it_joined() {
     assert_eq!(outcome.accepted_ordinal, Some(second));
     assert!(second > first);
     assert_eq!(outcome.turn_start_position, Some(turn.turn_start_position));
+}
+
+#[test]
+fn a_post_tool_batch_steer_has_the_same_turn_projection_as_acp_steering() {
+    let mut session = MaterializedSession::empty("session");
+    start_prompt_and_queue_a_steer(&mut session);
+    let delivery = event(
+        &session,
+        RelayObservation::MailboxEventsDelivered {
+            event_keys: Vec::new(),
+            path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+            prompt_command_id: None,
+            hook_event: Some("PostToolBatch".into()),
+            events: Vec::new(),
+            lease_id: Some("hook-lease".into()),
+            steering: Some(mj_core::relay::MailboxHookSteering {
+                command_id: "steer-1".into(),
+                active_prompt_id: "prompt-1".into(),
+                queued_prompt_id: "prompt-2".into(),
+            }),
+        },
+    );
+    let mutation = project_relay_event(&session, &delivery).unwrap().mutation;
+    assert!(matches!(
+        mutation.api_events.first(),
+        Some(mj_core::storage::ApiEventData::TurnStarted { turn })
+            if turn.command_id == "prompt-2"
+                && turn.steered_into.as_deref() == Some("prompt-1")
+    ));
+    assert!(matches!(
+        mutation.api_events.get(1),
+        Some(mj_core::storage::ApiEventData::CommandEnded { result })
+            if result.command_id == "steer-1"
+                && result.outcome == mj_core::event_outcome::CommandResultKind::Succeeded
+    ));
+    apply(&mut session, delivery);
+    assert!(session.queued_prompts.is_empty());
+    assert_eq!(
+        session
+            .active_turn
+            .as_ref()
+            .map(|turn| turn.command_id.as_str()),
+        Some("prompt-2")
+    );
+    assert_eq!(
+        session
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .steered_into
+            .as_deref(),
+        Some("prompt-1")
+    );
+    assert!(session.transcript.iter().any(|item| {
+        item.stable_id == "user:prompt-2"
+            && matches!(&item.body, TranscriptBody::User { content }
+                if crate::transcript::materialized_content_text(content) == "prompt-2")
+    }));
 }
 
 #[test]

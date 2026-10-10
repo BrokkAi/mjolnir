@@ -121,6 +121,13 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
             } => {
                 ids.insert(observation::MAILBOX_EVENTS_NOTICE_ID.to_owned());
             }
+            RelayObservation::MailboxEventsDelivered {
+                steering: Some(steering),
+                ..
+            } => {
+                ids.insert(format!("user:{}", steering.queued_prompt_id));
+                ids.insert(format!("user:{}", steering.command_id));
+            }
             _ => {}
         }
     }

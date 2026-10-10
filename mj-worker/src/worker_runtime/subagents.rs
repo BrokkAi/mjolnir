@@ -89,11 +89,15 @@ pub(super) fn resolve_claude_mcp_paths(root: &Path, home: &Path, required: bool)
 
 /// Install the mailbox command hook in the session-private Claude settings and
 /// resolve staged remote paths on the worker target before Claude reads them.
-pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: bool) -> Result<()> {
+pub(super) fn configure_claude_mailbox_hook(
+    root: &Path,
+    home: &Path,
+    enabled: bool,
+) -> Result<bool> {
     let path = home.join("settings.json");
     let body = match std::fs::read(&path) {
         Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     let mut settings: serde_json::Value = serde_json::from_slice(&body)
@@ -111,7 +115,7 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: b
             .and_then(|hooks| hooks.get_mut("PostToolBatch"))
             .and_then(serde_json::Value::as_array_mut)
         else {
-            return Ok(());
+            return Ok(false);
         };
         let mut changed = false;
         groups.retain_mut(|group| {
@@ -138,7 +142,7 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: b
             mj_core::config::atomic_write(&path, &resolved)
                 .with_context(|| format!("write staged Claude settings {}", path.display()))?;
         }
-        return Ok(());
+        return Ok(false);
     }
     anyhow::ensure!(root.is_absolute(), "Claude worker root must be absolute");
     let worker = std::env::current_exe().context("locate worker for Claude mailbox hook")?;
@@ -180,7 +184,7 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: b
     }) else {
         // A missing marker means this home was not staged with the worker hook.
         // Do not create or edit a profile file that might belong to the user.
-        return Ok(());
+        return Ok(false);
     };
     existing["command"] = serde_json::Value::String(command);
     existing["timeout"] = serde_json::json!(mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS);
@@ -190,7 +194,7 @@ pub(super) fn configure_claude_mailbox_hook(root: &Path, home: &Path, enabled: b
         mj_core::config::atomic_write(&path, &resolved)
             .with_context(|| format!("write staged Claude settings {}", path.display()))?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Register the owned server in Codex's session-private profile. The ACP bridge
@@ -885,9 +889,9 @@ mod tests {
         )
         .unwrap();
 
-        configure_claude_mailbox_hook(worker_root.path(), &staged_home, true).unwrap();
+        assert!(configure_claude_mailbox_hook(worker_root.path(), &staged_home, true).unwrap());
         let first = std::fs::read(&path).unwrap();
-        configure_claude_mailbox_hook(worker_root.path(), &staged_home, true).unwrap();
+        assert!(configure_claude_mailbox_hook(worker_root.path(), &staged_home, true).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), first);
 
         let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
@@ -926,7 +930,7 @@ mod tests {
         let legacy_root = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(source_profile.path(), legacy_root.path().join("profile"))
             .unwrap();
-        configure_claude_mailbox_hook(legacy_root.path(), &source_home, true).unwrap();
+        assert!(!configure_claude_mailbox_hook(legacy_root.path(), &source_home, true).unwrap());
         assert_eq!(
             std::fs::read(source_settings).unwrap(),
             br#"{"user":"source"}"#

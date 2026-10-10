@@ -1,5 +1,6 @@
 use super::*;
 use mj_core::event_outcome::{CommandResult, CommandResultKind, OutcomeReason, TurnResultKind};
+use mj_core::relay::RelayCommandOutcome;
 use mj_core::storage::ApiEventData;
 
 /// Retain transitions before the database page coalesces its final projection.
@@ -87,6 +88,21 @@ pub(super) fn derive(
             }
             events.push(ApiEventData::CommandEnded {
                 result: CommandResult::completed(command_id, *command, outcome),
+            });
+        }
+        RelayObservation::MailboxEventsDelivered {
+            steering: Some(steering),
+            ..
+        } => {
+            let outcome = RelayCommandOutcome::Steered {
+                queued_command_id: steering.queued_prompt_id.clone(),
+            };
+            events.push(ApiEventData::CommandEnded {
+                result: CommandResult::completed(
+                    &steering.command_id,
+                    RelayCommandKind::Steer,
+                    &outcome,
+                ),
             });
         }
         RelayObservation::SessionFault { reason, message } => {

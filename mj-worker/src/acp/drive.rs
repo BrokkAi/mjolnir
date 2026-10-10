@@ -1694,9 +1694,9 @@ pub(super) fn steering_supported_from_meta(
 }
 
 /// Whether the bridge returns a steer it cannot inject (`promptRequired`)
-/// instead of starting a turn of its own. Codex bridges advertise it; the
-/// pinned Claude bridge (claude-agent-acp 0.81.0) honors it in `steer` without
-/// advertising it.
+/// instead of starting a turn of its own. Codex bridges advertise it; Claude
+/// ACP 0.87.0 does not. Claude steers are routed through PostToolBatch, so this
+/// compatibility fact enables automatic admission without sending ACP steering.
 pub(super) fn steering_returns_idle_input(
     meta: Option<&agent_client_protocol::schema::v1::Meta>,
     harness: HarnessKind,

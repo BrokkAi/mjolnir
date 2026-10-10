@@ -7466,6 +7466,7 @@ async fn expired_mailbox_hook_lease_starts_idle_wake_without_another_request() {
                     events: vec![event],
                     hook_event: "PostToolUse".into(),
                     expires_at_ms: mj_core::clock::epoch_millis().saturating_add(2_000),
+                    steering: None,
                 },
             })
             .unwrap();

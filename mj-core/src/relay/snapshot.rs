@@ -1004,6 +1004,7 @@ pub struct RelayEvent {
 pub enum MailboxHookLeaseReturnReason {
     Timeout,
     WorkerRestart,
+    TurnEnded,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1013,6 +1014,18 @@ pub struct MailboxHookLease {
     pub events: Vec<MailboxEvent>,
     pub hook_event: String,
     pub expires_at_ms: i64,
+    /// A queued user prompt delivered as context at this tool boundary.
+    /// The queue remains the authoritative source for the prompt text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steering: Option<MailboxHookSteering>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxHookSteering {
+    pub command_id: String,
+    pub active_prompt_id: String,
+    pub queued_prompt_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1184,6 +1197,9 @@ pub enum RelayObservation {
         /// Present for hook delivery acknowledged against a durable lease.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lease_id: Option<String>,
+        /// A steer prompt delivered by the same acknowledged hook lease.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steering: Option<MailboxHookSteering>,
     },
     /// The harness began working. Claude records this when output arrives
     /// without a prompt in flight; Codex records native execution starts,

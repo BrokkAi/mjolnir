@@ -67,6 +67,14 @@ pub enum HarnessTurnPolicy {
     CodexAdapter,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SteeringDeliveryMode {
+    #[default]
+    Acp,
+    ClaudePostToolBatch,
+    ClaudeTurnEnd,
+}
+
 /// How long a stop sent during a turn Claude Code started on its own waits
 /// for the result that ends an interrupted cycle before the relay ends the
 /// turn itself.
@@ -123,6 +131,9 @@ pub struct DurableRelay {
     /// The connected bridge returns steers it cannot inject, so the relay may
     /// steer queued prompts on its own. Belongs to the bridge, like readiness.
     automatic_steering: bool,
+    /// How this harness receives an accepted steer. Claude never uses ACP
+    /// steering because its bridge can cancel an in-flight tool hook.
+    steering_delivery_mode: SteeringDeliveryMode,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -234,7 +245,18 @@ impl DurableRelay {
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
     ) -> Result<Self> {
-        Self::open_with_mode(root, session_id, relay_version, false)
+        Self::open_with_harness(root, session_id, relay_version, false, None)
+    }
+
+    /// Open a live relay with its harness delivery mode established before
+    /// restart recovery can settle interrupted turns.
+    pub fn open_for_harness(
+        root: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        relay_version: impl Into<String>,
+        harness: mj_core::config::HarnessKind,
+    ) -> Result<Self> {
+        Self::open_with_harness(root, session_id, relay_version, false, Some(harness))
     }
 
     /// Open existing durable state without promoting work onto a harness.
@@ -248,14 +270,15 @@ impl DurableRelay {
             root.join(RELAY_STATE_FILE).is_file(),
             "checkpoint recovery requires existing relay state"
         );
-        Self::open_with_mode(root, session_id, relay_version, true)
+        Self::open_with_harness(root, session_id, relay_version, true, None)
     }
 
-    fn open_with_mode(
+    fn open_with_harness(
         root: impl Into<PathBuf>,
         session_id: impl Into<String>,
         relay_version: impl Into<String>,
         checkpoint_only: bool,
+        harness: Option<mj_core::config::HarnessKind>,
     ) -> Result<Self> {
         let root = root.into();
         let session_id = session_id.into();
@@ -448,6 +471,10 @@ impl DurableRelay {
             next_reviewer_admission: 0,
             steering_supported: None,
             automatic_steering: false,
+            steering_delivery_mode: match harness {
+                Some(mj_core::config::HarnessKind::Claude) => SteeringDeliveryMode::ClaudeTurnEnd,
+                _ => SteeringDeliveryMode::Acp,
+            },
             snapshot,
             journal_spans,
             hot_events,
@@ -686,6 +713,23 @@ impl DurableRelay {
     /// Allow the relay to steer queued prompts into the running turn itself.
     pub fn set_automatic_steering(&mut self, enabled: bool) {
         self.automatic_steering = enabled;
+    }
+
+    /// Select steering delivery for the configured harness and staged profile.
+    /// The safe Claude turn-end mode is selected before worker admission opens;
+    /// preparation upgrades it only after verifying a usable hook marker.
+    pub fn set_steering_delivery_mode(
+        &mut self,
+        harness: mj_core::config::HarnessKind,
+        claude_post_tool_batch_hook: bool,
+    ) {
+        self.steering_delivery_mode = match (harness, claude_post_tool_batch_hook) {
+            (mj_core::config::HarnessKind::Claude, true) => {
+                SteeringDeliveryMode::ClaudePostToolBatch
+            }
+            (mj_core::config::HarnessKind::Claude, false) => SteeringDeliveryMode::ClaudeTurnEnd,
+            _ => SteeringDeliveryMode::Acp,
+        };
     }
 
     /// Every fact that bears on whether this session is working.

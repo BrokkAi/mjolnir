@@ -776,12 +776,20 @@ pub async fn run_daemon_owned(
     let mut durable_relay = if checkpoint_only {
         DurableRelay::open_for_checkpoint(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
     } else {
-        DurableRelay::open(&root, &config.session_id, env!("CARGO_PKG_VERSION"))?
+        DurableRelay::open_for_harness(
+            &root,
+            &config.session_id,
+            env!("CARGO_PKG_VERSION"),
+            config.harness,
+        )?
     };
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
     durable_relay.set_turn_verdict_harness(config.harness);
+    // Worker admission opens before profile preparation finishes. Claude must
+    // already be protected from ACP steering during that window.
+    durable_relay.set_steering_delivery_mode(config.harness, false);
     durable_relay.set_continuation_enabled(!mj_core::jev::continuation_disabled_by_environment());
     durable_relay.set_harness_turn_policy(match config.harness {
         HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
@@ -1505,6 +1513,7 @@ async fn prepare_and_start_harness(
     // Persist only explicit and Mjolnir-generated overrides, never shell exports.
     config.environment = session_environment.clone();
 
+    let mut claude_mailbox_hook_available = false;
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
             let budget = preparation_step(
@@ -1563,24 +1572,35 @@ async fn prepare_and_start_harness(
             let registration_required =
                 subagent_role != Some(mj_core::subagent::SubagentMcpRole::MessageOnly);
             let mailboxes_enabled = config.agent_mailboxes_enabled;
-            bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
-                if step_cancel.is_cancelled() {
-                    bail!("preparation cancelled before configuring the Claude profile");
-                }
-                if configure_subagents {
-                    super::subagents::resolve_claude_mcp_paths(
+            let (registered, mailbox_hook_available) =
+                bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
+                    if step_cancel.is_cancelled() {
+                        bail!("preparation cancelled before configuring the Claude profile");
+                    }
+                    if configure_subagents {
+                        super::subagents::resolve_claude_mcp_paths(
+                            &root,
+                            &home,
+                            registration_required,
+                        )?;
+                    }
+                    let mailbox_hook_available = super::subagents::configure_claude_mailbox_hook(
                         &root,
                         &home,
-                        registration_required,
+                        mailboxes_enabled,
                     )?;
-                }
-                super::subagents::configure_claude_mailbox_hook(&root, &home, mailboxes_enabled)?;
-                Ok(true)
-            })
-            .await?
+                    Ok((true, mailbox_hook_available))
+                })
+                .await?;
+            claude_mailbox_hook_available = mailbox_hook_available;
+            registered
         }
         _ => false,
     };
+    relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
     if config.project_memory.is_some()
         && resume_session.is_none()
         && config.harness != HarnessKind::Claude
