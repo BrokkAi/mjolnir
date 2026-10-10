@@ -11,9 +11,21 @@ use std::path::Path;
 /// relay lease. Relay unavailability is deliberately fail-open: an unacked
 /// lease returns to the mailbox after its timeout or a worker restart.
 pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
-    if let Err(error) = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()) {
+    let mut stdin = std::io::stdin().lock();
+    let hook_input = match serde_json::from_reader::<_, HookInput>(&mut stdin) {
+        Ok(input) => input,
+        Err(error) if error.is_io() => {
+            return write_empty_with_diagnostic(&format!("could not consume hook input: {error}"));
+        }
+        Err(_) => HookInput { agent_id: None },
+    };
+    if let Err(error) = std::io::copy(&mut stdin, &mut std::io::sink()) {
         return write_empty_with_diagnostic(&format!("could not consume hook input: {error}"));
     }
+    if is_subagent_hook_input(&hook_input) {
+        return write_stdout(&json!({}));
+    }
+
     match drain(socket, hook_event) {
         Ok((Some(text), count, Some(lease_id))) if count > 0 => {
             write_stdout(&json!({
@@ -33,6 +45,18 @@ pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
         Ok(_) => write_empty_with_diagnostic("worker returned an incomplete mailbox lease"),
         Err(error) => write_empty_with_diagnostic(&format!("could not drain mailbox: {error:#}")),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct HookInput {
+    agent_id: Option<String>,
+}
+
+fn is_subagent_hook_input(input: &HookInput) -> bool {
+    input
+        .agent_id
+        .as_deref()
+        .is_some_and(|agent_id| !agent_id.is_empty())
 }
 
 fn drain(socket: &Path, hook_event: &str) -> Result<(Option<String>, usize, Option<String>)> {
