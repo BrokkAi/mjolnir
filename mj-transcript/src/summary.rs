@@ -46,7 +46,7 @@ fn user_text(text: String) -> String {
 
 pub const FULL_TOOL_CALLS: usize = 8;
 /// Change when derived indexing content changes, even without a source update.
-pub const SUMMARY_VERSION: u32 = 2;
+pub const SUMMARY_VERSION: u32 = 3;
 pub const DEFAULT_SUMMARY_BYTES: usize = 256 * 1024;
 const LIVE_ITEMS: usize = 512;
 const LIVE_ITEM_BYTES: usize = 64 * 1024;
@@ -226,6 +226,15 @@ fn tool_label(value: &Value) -> String {
 
 impl TranscriptSummary {
     pub fn from_snapshot(snapshot: &CanonicalSessionSnapshot) -> Self {
+        Self::from_snapshot_keeping(snapshot, FULL_TOOL_CALLS)
+    }
+
+    /// Like [`Self::from_snapshot`], keeping the full call for the last
+    /// `full_tool_calls` tool calls instead of [`FULL_TOOL_CALLS`].
+    pub fn from_snapshot_keeping(
+        snapshot: &CanonicalSessionSnapshot,
+        full_tool_calls: usize,
+    ) -> Self {
         let mut summary = Self::default();
         let start = snapshot.current_context_start();
         let cutoff = snapshot
@@ -234,7 +243,7 @@ impl TranscriptSummary {
             .filter(|i| start == 0 || i.position > start)
             .filter(|i| matches!(i.body, CanonicalTranscriptBody::Tool { .. }))
             .rev()
-            .take(FULL_TOOL_CALLS)
+            .take(full_tool_calls)
             .map(|i| i.position)
             .min()
             .unwrap_or(u64::MAX);
@@ -305,6 +314,15 @@ impl TranscriptSummary {
     }
 
     pub fn from_materialized(session: &MaterializedSession) -> Self {
+        Self::from_materialized_keeping(session, FULL_TOOL_CALLS)
+    }
+
+    /// Like [`Self::from_materialized`], keeping the full call for the last
+    /// `full_tool_calls` tool calls instead of [`FULL_TOOL_CALLS`].
+    pub fn from_materialized_keeping(
+        session: &MaterializedSession,
+        full_tool_calls: usize,
+    ) -> Self {
         let start = session
             .transcript
             .iter()
@@ -318,7 +336,7 @@ impl TranscriptSummary {
             .filter(|i| start == 0 || i.position > start)
             .filter(|i| matches!(i.body, TranscriptBody::Tool { .. }))
             .rev()
-            .take(FULL_TOOL_CALLS)
+            .take(full_tool_calls)
             .map(|i| i.position)
             .min()
             .unwrap_or(u64::MAX);

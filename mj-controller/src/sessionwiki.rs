@@ -300,9 +300,9 @@ impl MjolnirAdapter {
                 evidence.observe(call, item.created_at_ms);
             }
         }
-        let messages = summary_messages(mj_transcript::summary::TranscriptSummary::from_snapshot(
-            &snapshot,
-        ));
+        let messages = summary_messages(
+            mj_transcript::summary::TranscriptSummary::from_snapshot_keeping(&snapshot, usize::MAX),
+        );
         Ok(IndexedTranscript {
             messages,
             title: snapshot.session.session_title.clone(),
@@ -414,26 +414,115 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
 
 /// A running session's conversation, as SessionWiki stores it.
 fn projected_messages(projection: &mj_core::state::MaterializedSession) -> Vec<Message> {
-    summary_messages(mj_transcript::summary::TranscriptSummary::from_materialized(projection))
+    summary_messages(
+        mj_transcript::summary::TranscriptSummary::from_materialized_keeping(
+            projection,
+            usize::MAX,
+        ),
+    )
 }
 
+/// A transcript summary as SessionWiki messages.
+///
+/// The summary must keep every tool call in full: a call's output line count
+/// and first error line come from its full record.
 fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<Message> {
     use mj_transcript::summary::SummaryRole;
-    summary
-        .entries
+    let mut messages = Vec::with_capacity(summary.entries.len());
+    for entry in summary.entries {
+        let role = match entry.role {
+            SummaryRole::User => Role::User,
+            SummaryRole::Assistant => Role::Assistant,
+            SummaryRole::Tool => {
+                if let Some(tool) = &entry.tool {
+                    messages.extend(tool_messages(tool, entry.created_at_ms));
+                    continue;
+                }
+                Role::Tool
+            }
+            // SessionWiki has no external-message role. Preserve sender
+            // provenance as received context in its tool channel.
+            SummaryRole::Message => Role::Tool,
+            SummaryRole::Plan => continue,
+        };
+        messages.extend(message(role, entry.body(), entry.created_at_ms));
+    }
+    messages
+}
+
+/// One tool call as SessionWiki's call and result parts, which its sync folds
+/// into a single summary line such as `→ execute(cargo test) ⇒ ok · 12 lines`.
+/// The result carries the output only so SessionWiki can count its lines and
+/// quote the first line of a failure; the index keeps neither in full.
+fn tool_messages(tool: &serde_json::Value, created_at_ms: i64) -> Vec<Message> {
+    use sessionwiki::model::{ToolCall, ToolResult};
+    let ts = DateTime::from_timestamp_millis(created_at_ms);
+    let text = |key: &str| tool.get(key).and_then(serde_json::Value::as_str);
+    let id = text("toolCallId").map(str::to_owned);
+    // The title names the file or command; the presentation summary is often
+    // a single word such as "Edit".
+    let description = tool
+        .pointer("/call/title")
+        .and_then(serde_json::Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| text("name"))
+        .unwrap_or("tool");
+    let mut messages = vec![Message::tool_call(
+        ts,
+        ToolCall {
+            id: id.clone(),
+            name: text("kind").unwrap_or("other").to_owned(),
+            args: serde_json::json!({ "description": description }),
+        },
+    )];
+    let failed = match text("status") {
+        Some("completed") => false,
+        Some("failed") => true,
+        _ => return messages,
+    };
+    let is_error = failed
+        || tool.get("signal").is_some()
+        || tool
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|code| code != 0);
+    messages.push(Message::tool_result(
+        ts,
+        ToolResult {
+            call_id: id,
+            text: tool_output(tool),
+            is_error,
+        },
+    ));
+    messages
+}
+
+/// The text a finished tool call produced, as Mjolnir's transcript shows it.
+fn tool_output(tool: &serde_json::Value) -> String {
+    let Some(call) = tool.get("call").and_then(|call| {
+        serde_json::from_value::<agent_client_protocol::schema::v1::ToolCall>(call.clone()).ok()
+    }) else {
+        return String::new();
+    };
+    let terminals: Vec<mj_core::transcript::TerminalOutputRecord> = tool
+        .get("terminals")
+        .and_then(serde_json::Value::as_object)
         .into_iter()
-        .filter_map(|entry| {
-            let role = match entry.role {
-                SummaryRole::User => Role::User,
-                SummaryRole::Assistant => Role::Assistant,
-                // SessionWiki has no external-message role. Preserve sender
-                // provenance as received context in its tool channel.
-                SummaryRole::Tool | SummaryRole::Message => Role::Tool,
-                SummaryRole::Plan => return None,
-            };
-            message(role, entry.body(), entry.created_at_ms)
+        .flatten()
+        .filter_map(|(id, record)| {
+            let mut record = record.clone();
+            record
+                .as_object_mut()?
+                .insert("terminal_id".into(), id.clone().into());
+            serde_json::from_value(record).ok()
         })
-        .collect()
+        .collect();
+    mj_transcript::transcript::tool_content_details(
+        &call.content,
+        &terminals,
+        call.raw_output.as_ref(),
+    )
+    .join("\n")
 }
 
 /// One indexed message, or nothing when the item carried no text.
@@ -443,6 +532,7 @@ fn message(role: Role, text: String, created_at_ms: i64) -> Option<Message> {
         role,
         text,
         ts: DateTime::from_timestamp_millis(created_at_ms),
+        tool: None,
     })
 }
 
@@ -817,6 +907,24 @@ async fn run_abandonable<T: Send + 'static>(
         .context("the SessionWiki sync thread stopped without an answer")?
 }
 
+/// Open the index for writing, with tool output kept as summaries.
+///
+/// Mjolnir keeps only SessionWiki's one-line tool summaries: full output
+/// would greatly enlarge an index that holds every session on the machine and
+/// is shared with the `sessionwiki` command. The mode is set
+/// on every open rather than once, so an index whose setting is absent stays
+/// on summaries if SessionWiki's default changes. Setting the mode starts its
+/// own transaction, so it must run before any sync does.
+fn open_for_sync() -> Result<rusqlite::Connection> {
+    let connection = sessionwiki::index::open().context("open the SessionWiki index")?;
+    sessionwiki::index::set_tool_output_mode(
+        &connection,
+        sessionwiki::index::ToolOutputMode::Summary,
+    )
+    .context("keep tool output as summaries in the SessionWiki index")?;
+    Ok(connection)
+}
+
 /// One synchronous sync pass. Returns false when this process must not touch
 /// the index, so a refused run never records a success it did not have.
 fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> Result<bool> {
@@ -842,7 +950,7 @@ fn sync_blocking(since: Option<i64>, cache: &crate::import::NativeScanCache) -> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .ownership
         .clone();
-    let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
+    let mut connection = open_for_sync()?;
     top_level::prune(&mut connection, &BTreeSet::new(), &ownership)?;
     sessionwiki::index::sync_with(&mut connection, &owned, since)
         .context("sync Mjolnir sessions into SessionWiki")?;
@@ -1318,7 +1426,7 @@ fn write_captured(captured: &Arc<Vec<CapturedSession>>) -> Result<()> {
         index_is_writable(),
         "this process may not write the SessionWiki index"
     );
-    let mut connection = sessionwiki::index::open().context("open the SessionWiki index")?;
+    let mut connection = open_for_sync()?;
     for index in 0..captured.len() {
         let adapter: Box<dyn Adapter> = Box::new(CapturedAdapter {
             captured: Arc::clone(captured),
@@ -1451,6 +1559,7 @@ fn copy_session(session: &Session) -> Session {
                 role: message.role,
                 text: message.text.clone(),
                 ts: message.ts,
+                tool: message.tool.clone(),
             })
             .collect(),
         touched: session.touched.clone(),
@@ -2909,7 +3018,7 @@ mod tests {
             Some(format!("{}/", directory.path().display()))
         );
 
-        let session = adapter.parse_key(&key).unwrap();
+        let session = sessionwiki::adapters::parse_session_key(&adapter, &key).unwrap();
         assert_eq!(session.id, session_id);
         assert_eq!(session.tool, "mjolnir");
         assert_eq!(session.path, PathBuf::from(&key));
@@ -2921,11 +3030,69 @@ mod tests {
             vec![Role::User, Role::Tool, Role::Assistant]
         );
         assert_eq!(session.messages[0].text, "index this session");
-        let tool: serde_json::Value = serde_json::from_str(&session.messages[1].text).unwrap();
-        assert_eq!(tool["name"], "Edit");
-        assert_eq!(tool["call"]["title"], "Edit config.toml");
+        assert_eq!(
+            session.messages[1].text,
+            "→ edit(Edit config.toml) ⇒ ok · 0 lines"
+        );
         assert_eq!(session.messages[2].text, "done");
         assert_eq!(session.touched, vec!["/old/container/config.toml"]);
+    }
+
+    #[test]
+    fn a_failed_command_is_indexed_as_one_line_without_its_output() {
+        let tool = serde_json::json!({
+            "toolCallId": "call-9",
+            "name": "cargo",
+            "kind": "execute",
+            "status": "failed",
+            "call": {
+                "toolCallId": "call-9",
+                "title": "cargo test",
+                "kind": "execute",
+                "status": "failed",
+                "content": [{"type": "terminal", "terminalId": "term-1"}]
+            },
+            "terminals": {
+                "term-1": {"output": "error[E0063]: missing field\nmore detail", "exit_code": 101}
+            }
+        });
+        let mut session = Session {
+            id: "s".into(),
+            tool: "mjolnir",
+            path: PathBuf::new(),
+            project: String::new(),
+            started: None,
+            ended: None,
+            title: String::new(),
+            subagent: false,
+            messages: tool_messages(&tool, 0),
+            touched: Vec::new(),
+            edits: Vec::new(),
+        };
+
+        sessionwiki::tool_summary::fold_tool_parts(&mut session);
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].text,
+            "→ execute(cargo test) ⇒ error · 3 lines — error[E0063]: missing field"
+        );
+    }
+
+    #[test]
+    fn opening_for_sync_keeps_tool_output_as_summaries() {
+        use sessionwiki::index::{ToolOutputMode, set_tool_output_mode, tool_output_mode};
+        let _held = tags::testing::lock();
+        let (_index_dir, connection) = tags::testing::isolated_index();
+        set_tool_output_mode(&connection, ToolOutputMode::Full).unwrap();
+        drop(connection);
+
+        let connection = open_for_sync().unwrap();
+
+        assert_eq!(
+            tool_output_mode(&connection).unwrap(),
+            ToolOutputMode::Summary
+        );
     }
 
     #[test]
@@ -3171,6 +3338,7 @@ mod tests {
                     role,
                     text: text.to_owned(),
                     ts: None,
+                    tool: None,
                 })
                 .collect(),
             touched: Vec::new(),

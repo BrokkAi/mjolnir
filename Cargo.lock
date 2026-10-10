@@ -5394,9 +5394,9 @@ dependencies = [
 
 [[package]]
 name = "sessionwiki"
-version = "0.33.1"
+version = "0.34.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed0af43a008edcf99bfdff83789959b1907cc2b1ea8276d375441455ded461a8"
+checksum = "c87a9c1e4534abe3558ee9bacba3c41b18a246f3eea83b92a5cb3fe0b155c38c"
 dependencies = [
  "anyhow",
  "chrono",

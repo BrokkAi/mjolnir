@@ -477,6 +477,7 @@ mod tests {
                 role: sessionwiki::model::Role::User,
                 text: "é🙂abcdef".into(),
                 ts: None,
+                tool: None,
             }],
         };
         let first = read_page(&session, 0, 0, None, 20, 3);
