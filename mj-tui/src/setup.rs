@@ -1138,11 +1138,6 @@ impl SetupDialog {
         if is_build_cache_field(&path, "enabled") {
             // An unset value means on, so the box cycles on → off → unset.
             let on = value.as_bool().unwrap_or(true);
-            if let Some(reason) = self.build_cache_blocked() {
-                let notice = format!("The build cache cannot be turned on here: {reason}");
-                self.notice = Some(notice);
-                return;
-            }
             *self.draft.pointer_mut(&pointer(&path)).unwrap() =
                 if on { Value::Bool(false) } else { Value::Null };
             self.form = RefCell::new(Dialog::default());
@@ -1520,7 +1515,7 @@ impl SetupDialog {
         }
         match &preview.result {
             BuildCachePreviewResult::Ready(Some(preview)) => match preview.off_reason {
-                Some(BuildCacheOff::Unavailable(_)) => Some("Off · not available on this host"),
+                Some(BuildCacheOff::Unavailable(_)) => Some("mbx unavailable"),
                 _ => None,
             },
             _ => None,
@@ -1567,13 +1562,23 @@ impl SetupDialog {
     fn build_cache_automatic_label(&self, field: &str) -> Option<String> {
         use mj_core::state::BuildCacheLimit;
         let (_, key) = self.build_cache_page()?;
+        if field == "tools_directory" {
+            return None;
+        }
         let preview = self.build_cache_preview.as_ref()?;
         if preview.key != key {
             return None;
         }
         let label = match &preview.result {
             BuildCachePreviewResult::Ready(Some(preview)) => match field {
-                "enabled" if preview.off_reason.is_some() => Checkbox::marker(false).to_owned(),
+                "enabled"
+                    if matches!(
+                        preview.off_reason,
+                        Some(mj_core::state::BuildCacheOff::TurnedOff)
+                    ) =>
+                {
+                    Checkbox::marker(false).to_owned()
+                }
                 "enabled" => Checkbox::marker(true).to_owned(),
                 "directory" => preview
                     .directory
@@ -1686,9 +1691,8 @@ impl SetupDialog {
         ))
     }
 
-    /// The reason this page's host cannot support the build cache at all, so
-    /// the machine's own switch cannot turn it on.
-    fn build_cache_blocked(&self) -> Option<&str> {
+    /// mbx availability does not govern native tool caches or their switch.
+    fn mbx_unavailable(&self) -> Option<&str> {
         use mj_core::state::BuildCacheOff;
         let (_, key) = self.build_cache_page()?;
         let preview = self.build_cache_preview.as_ref()?;
@@ -2924,7 +2928,7 @@ impl DashboardState {
                 };
                 match &preview.off_reason {
                     Some(reason) => {
-                        format!("Sessions here run without the build cache: {reason} ({host_mbx}).")
+                        format!("The mbx build cache is unavailable: {reason} ({host_mbx}).")
                     }
                     None => format!("Sessions here share the build cache ({host_mbx})."),
                 }
@@ -3543,10 +3547,9 @@ pub(crate) fn render_setup(
         let keys = dialog.keys();
         let mut rows = Vec::new();
         let mut row_map = Vec::new();
-        // Rows a page draws but cannot act on, such as the switch of a
-        // machine whose host has no cache to share.
+        // Settings owned by host mbx are shown but edited through mbx.
         let mut row_enabled = Vec::new();
-        let blocked = dialog.build_cache_blocked().map(str::to_owned);
+        let mbx_unavailable = dialog.mbx_unavailable().map(str::to_owned);
         for row in page_plan(&dialog.path, &keys) {
             let index = match row {
                 PageRow::Gap => {
@@ -3606,21 +3609,19 @@ pub(crate) fn render_setup(
             };
             rows.push(setting_row(&name, &summary, body.width));
             row_map.push(Some(index));
-            let unavailable = blocked
+            let unavailable = mbx_unavailable
                 .as_deref()
                 .filter(|_| is_build_cache_field(&child_path, "enabled"));
             row_enabled.push(
-                unavailable.is_none()
-                    && !((is_build_cache_budget(&child_path)
-                        || is_build_cache_field(&child_path, "directory"))
-                        && dialog.build_cache_user_managed()),
+                !((is_build_cache_budget(&child_path)
+                    || is_build_cache_field(&child_path, "directory"))
+                    && dialog.build_cache_user_managed()),
             );
-            // Why the switch cannot be turned on, on its own unselectable line
-            // under the row it explains.
+            // Explain mbx availability without disabling native tool caches.
             if let Some(reason) = unavailable {
                 rows.push(Line::styled(
                     truncate(
-                        &format!("{SETTING_GUTTER}    Off: {reason}"),
+                        &format!("{SETTING_GUTTER}    mbx: {reason}"),
                         usize::from(body.width),
                     ),
                     theme::muted(),

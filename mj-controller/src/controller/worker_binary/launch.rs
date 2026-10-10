@@ -843,6 +843,24 @@ pub(super) fn worker_launch_config_with_checkout(
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);
     project_memory.history_socket =
         Some(Path::new(&targets::worker_root(backend, &session.id)?).join("control.sock"));
+    if let Some(cache) = &target.tool_cache {
+        let private = Path::new(&targets::worker_root(backend, session_id)?).join("tool-cache");
+        for (name, value) in [
+            (
+                "MJ_TOOL_CACHE_DIR",
+                cache.directory.to_string_lossy().into_owned(),
+            ),
+            ("MJ_TOOL_CACHE_PROJECT", project_memory.project_key.clone()),
+            ("MJ_TOOL_CACHE_HOME", private.to_string_lossy().into_owned()),
+            (
+                "MJ_NX_HOME_DIR",
+                cache.nx_home.to_string_lossy().into_owned(),
+            ),
+        ] {
+            target_environment.insert(name.into(), value.clone());
+            environment.insert(name.into(), value);
+        }
+    }
     if profile.kind == mj_core::config::HarnessKind::Claude {
         environment.insert(
             "CLAUDE_CODE_PROJECT_DIR_NAME".into(),

@@ -757,7 +757,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        78
+        79
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -839,7 +839,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        78
+        79
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
@@ -6008,6 +6008,11 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
         r#"{"kind":"ssh-podman","host":"original.test","user":"builder","identity_file":"/keys/id","extra_args":["-p","2222"],"image":"test"}"#
     ).unwrap();
     record.target_runtime = Some((&template).into());
+    record.target_runtime.as_mut().unwrap().tool_cache = Some(mj_core::state::ToolCachePlacement {
+        host: "ssh:builder@original.test".into(),
+        directory: "/fast/shared native caches".into(),
+        nx_home: "/home/hel/.nx".into(),
+    });
     record.target = Some(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),

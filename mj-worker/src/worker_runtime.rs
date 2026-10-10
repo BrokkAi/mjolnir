@@ -305,6 +305,10 @@ pub(crate) mod harness;
 #[cfg(unix)]
 mod harness_launch;
 #[cfg(unix)]
+mod shell_environment;
+#[cfg(unix)]
+mod tool_cache;
+#[cfg(unix)]
 pub use discovery::discover_profile_config;
 #[cfg(unix)]
 pub use harness_launch::{PreparedHarnessLaunch, prepare_harness_launch};

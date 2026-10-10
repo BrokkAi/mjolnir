@@ -1023,7 +1023,7 @@ fn golden_build_cache() {
             40,
         );
         if mouse {
-            let location = point(&lines, "Build cache (mbx)");
+            let location = point(&lines, "Build caches");
             for _ in 0..2 {
                 for kind in [
                     MouseEventKind::Down(MouseButton::Left),
@@ -2071,11 +2071,11 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     let resolved = buffer_lines(terminal.backend().buffer()).join("\n");
     for expected in [
         "Enabled",
-        "☐",
-        "Off: the filesystem under /mnt/fast/mbx-cache does not support reflinks",
+        "☑",
+        "mbx: the filesystem under /mnt/fast/mbx-cache does not support reflinks",
         "/mnt/fast/mbx-cache",
         "537 GB, host mbx config",
-        "run without the build cache: the filesystem under",
+        "mbx build cache is unavailable: the filesystem under",
     ] {
         assert!(
             resolved.contains(expected),
@@ -2144,8 +2144,7 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     dialog.prepare();
     dashboard.handle_key(key(KeyCode::Enter));
 
-    // A host that cannot support the cache cannot be overruled from here: the
-    // row is disabled, so Enter on it does nothing.
+    // Native tool caches remain selectable without mbx.
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     dialog.selected = dialog
         .keys()
@@ -2158,8 +2157,8 @@ fn the_build_cache_page_shows_the_values_its_host_resolves_for_blank_fields() {
     let dialog = setup_dialog_mut(&mut dashboard.mode).expect("settings");
     assert_eq!(
         dialog.draft["machines"]["local"]["build_cache"]["enabled"],
-        Value::Null,
-        "the blocked switch keeps its value"
+        Value::Bool(false),
+        "the switch controls native tools even when mbx is unavailable"
     );
 
     // Changing a setting on the page makes the answer stale and asks again.
@@ -2337,7 +2336,7 @@ fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
     choose(&mut dashboard, "build_cache");
     let text = drawn(&mut dashboard, 140, 30).join("\n");
     assert!(
-        text.contains("Settings › Machines › local › Build cache (mbx)"),
+        text.contains("Settings › Machines › local › Build caches"),
         "a schema key below it still gets its label:\n{text}"
     );
 }
@@ -2904,6 +2903,7 @@ fn every_setting_description_fits_its_two_rows() {
         &["subagents", "eligible_profiles"],
         &["machines", "m", "build_cache"],
         &["machines", "m", "build_cache", "directory"],
+        &["machines", "m", "build_cache", "tools_directory"],
         &["machines", "m", "build_cache", "max_total_size"],
         &["machines", "m", "build_cache", "scheduler"],
         &["machines", "m", "build_cache", "scheduler", "cpus"],
@@ -2975,7 +2975,13 @@ fn a_page_lists_its_settings_in_a_fixed_order() {
             json!({"machines": {"local": {"kind": "local", "build_cache": {"max_total_size": "20GB", "enabled": false}}}}),
             &["machines", "local", "build_cache"],
         ),
-        ["enabled", "directory", "max_total_size", "scheduler"],
+        [
+            "enabled",
+            "directory",
+            "tools_directory",
+            "max_total_size",
+            "scheduler"
+        ],
     );
     assert_eq!(
         order(
@@ -3319,8 +3325,8 @@ fn machine_row_reports_an_unsupported_cache_host_like_its_page() {
     );
     let lines = drawn(&mut dashboard, 160, 40);
     assert!(
-        lines.iter().any(|line| line.contains("Build cache (mbx)")
-            && line.contains("Off")
+        lines.iter().any(|line| line.contains("Build caches")
+            && line.contains("mbx unavailable")
             && !line.contains("Enabled by default")),
         "{lines:#?}"
     );

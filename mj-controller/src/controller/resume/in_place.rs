@@ -274,7 +274,12 @@ impl Controller {
                 // Another bare target on the same machine is the same environment;
                 // the record only names it differently afterwards.
                 record.target_template_id = target_template_id.to_string();
-                record.target_runtime = Some((&target_template).into());
+                let mut runtime = mj_core::state::TargetRuntimeSettings::from(&target_template);
+                runtime.tool_cache = record
+                    .target_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.tool_cache.clone());
+                record.target_runtime = Some(runtime);
                 record.native_session_id =
                     native_continuity.then(|| archive_manifest.session.native_session_id.clone());
                 record.state = SessionState::Provisioning;

@@ -13,6 +13,18 @@ pub struct TargetRuntimeSettings {
     pub connection: TargetConnection,
     pub execution_policy: ExecutionPolicy,
     pub environment: BTreeMap<String, String>,
+    /// Shared native build caches selected when this environment was created.
+    /// Container mounts cannot follow subsequent machine configuration edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_cache: Option<ToolCachePlacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCachePlacement {
+    pub host: String,
+    pub directory: PathBuf,
+    /// Nx 23.2+ owns the cache and its database together under ~/.nx.
+    pub nx_home: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +120,7 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             connection,
             execution_policy: template.execution_policy(),
             environment,
+            tool_cache: None,
         }
     }
 }

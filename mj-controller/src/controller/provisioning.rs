@@ -531,8 +531,9 @@ impl Controller {
                 .get(&session.last_profile)
                 .context("harness profile disappeared before provisioning")?
                 .ensure_ready(&session.last_profile)?;
-            let runtime = mj_core::state::TargetRuntimeSettings::from(selected);
+            let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
+                runtime.tool_cache = recorded.tool_cache.clone();
                 ensure!(
                     recorded == &runtime,
                     "target access settings changed before provisioning; retry with the selected target"
@@ -572,8 +573,7 @@ impl Controller {
             .get(session_id)
             .expect("session retained after managed worktree preparation")
             .clone();
-        let checkout = self.state.checkout(session_id)?;
-        let project_directory = checkout.project_directory();
+        let project_directory = self.state.checkout(session_id)?.project_directory().map(Path::to_path_buf);
         // Keep planning, preflight, creation, and locator discovery in one
         // result so the caller's failure disposition applies to every error.
         let result = (|| {
@@ -633,6 +633,19 @@ impl Controller {
                 .map(|op| targets::move_resource_name(session_id, &op.operation_id))
                 .unwrap_or_else(|| targets::resource_name(session_id))?;
             let moving_workspace = resource_name != targets::resource_name(session_id)?;
+            let tool_cache = super::tool_cache::prepare(
+                &self.config,
+                &session.target_template_id,
+                &mut runtime_mounts,
+                executor,
+            );
+            // Record placement before creating fixed container mounts. A crash
+            // after creation must not leave a mount whose location was lost.
+            self.state.sessions.get_mut(session_id)
+                .expect("session retained during provisioning")
+                .target_runtime.as_mut().context("selected runtime disappeared")?
+                .tool_cache = tool_cache;
+            self.persist_session_state(session_id)?;
             let prepared_cache = bundle
                 .as_mut()
                 .filter(|_| !moving_workspace)
@@ -651,8 +664,6 @@ impl Controller {
             let build_cache = super::mbx::prepare(
                 &target,
                 &session,
-                bundle.as_ref(),
-                prepared_cache.as_ref(),
                 &mut runtime_mounts,
                 executor,
             );
@@ -734,7 +745,6 @@ impl Controller {
             );
             result
         })();
-        drop(checkout);
         let result = match result {
             Err(error)
                 if created_worktree

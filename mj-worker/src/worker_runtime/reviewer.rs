@@ -778,6 +778,12 @@ impl ReviewerRole {
                 Arc::new(Mutex::new(accepted_config)),
             )
         };
+        let mut additional_directories = self.placement.additional_directories.clone();
+        super::tool_cache::extend_writable_directories(
+            config.harness,
+            &session_environment,
+            &mut additional_directories,
+        );
         let spec = LaunchSpec {
             clear_context_request: None,
             context_restore: None,
@@ -793,7 +799,7 @@ impl ReviewerRole {
             environment: session_environment,
             bridge_spec_path: Some(supervisor_path.clone()),
             cwd: self.placement.cwd.clone(),
-            additional_directories: self.placement.additional_directories.clone(),
+            additional_directories,
             // A reviewer reads the workspace; it never syncs project memory,
             // which belongs to the primary session alone.
             project_memory: None,

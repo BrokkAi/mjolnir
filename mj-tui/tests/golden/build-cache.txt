@@ -2,15 +2,15 @@
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                                25  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                                25  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -34,7 +34,7 @@ Enter open · / searc                                                           
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx) › Total cache budget (GB)                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Total cache budget (GB)                         │                     │
 │ Create   Open   Fi  │ Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial │                     │
 │hel ───────────────  │ automatic budget.                                                                            │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
@@ -67,7 +67,7 @@ editor value: 107
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx) › Total cache budget (GB)                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Total cache budget (GB)                         │                     │
 │ Create   Open   Fi  │ Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial │                     │
 │hel ───────────────  │ automatic budget.                                                                            │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
@@ -100,7 +100,7 @@ stored size after rejection: "100GiB"
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx) › Total cache budget (GB)                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Total cache budget (GB)                         │                     │
 │ Create   Open   Fi  │ Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial │                     │
 │hel ───────────────  │ automatic budget.                                                                            │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
@@ -134,15 +134,15 @@ saved machine.local: {"kind":"local","build_cache":{"max_total_size":"12GB"}}
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                                12  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                                12  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -166,7 +166,7 @@ Settings saved. New
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx) › Total cache budget (GB)                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Total cache budget (GB)                         │                     │
 │ Create   Open   Fi  │ Budget for compiler outputs, worktrees, and incremental state, in GB. Blank uses the initial │                     │
 │hel ───────────────  │ automatic budget.                                                                            │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
@@ -199,7 +199,7 @@ budget after Use default: null
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx) › Compile scheduling                         │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Compile scheduling                              │                     │
 │ Create   Open   Fi  │ mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's          │                     │
 │hel ───────────────  │ defaults.                                                                                    │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
@@ -231,7 +231,7 @@ Enter open · / searc                                                           
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx) › Compile scheduling                         │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches › Compile scheduling                              │                     │
 │ Create   Open   Fi  │ mbx shares this scheduler across all builds on the machine. Blank fields keep mbx's          │                     │
 │hel ───────────────  │ defaults.                                                                                    │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
@@ -264,15 +264,15 @@ saved scheduler: {"cpus":12,"memory":"6GiB"}
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                        Resolving…  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                        Resolving…  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -297,15 +297,15 @@ focused control: Some(Back)
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                        Resolving…  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                        Resolving…  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -330,15 +330,15 @@ focused control: Some(Save)
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                        Resolving…  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                        Resolving…  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -363,15 +363,15 @@ focused control: Some(List)
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                        Resolving…  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                        Resolving…  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -397,15 +397,15 @@ Tab-reached Save action: true
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                        Resolving…  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                        Resolving…  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -430,15 +430,15 @@ focused control: Some(Back)
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                        Resolving…  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                        Resolving…  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -467,7 +467,7 @@ focused control: Some(Save)
 │ Create   Open   Fi  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                     │
 │hel ───────────────  │                                                                                              │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
-│  Stopped  podman    │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                     │
+│  Stopped  podman    │   Build caches                                     Enabled by default · automatic budget  ›  │                     │
 │  │ No messages yet  │                                                                                              │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -497,15 +497,15 @@ returned page path: ["machines", "local"]
 ╭ Workspaces ───────                                                                                                    ────────── ◇   ⋯───╮
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
-╭ Sessions ─────────  │ Settings › Machines › local › Build cache (mbx)                                              │                     │
-│ Create   Open   Fi  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                     │
-│hel ───────────────  │ Machines.                                                                                    │                     │
+╭ Sessions ─────────  │ Settings › Machines › local › Build caches                                                   │                     │
+│ Create   Open   Fi  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                     │
+│hel ───────────────  │ Bazel.                                                                                       │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   Enabled                                                                                 ☑  │                     │
 │  │ No messages yet  │   Cache directory                                                                Resolving…  │                     │
-│  │                  │   Total cache budget (GB)                                                               250  │                     │
+│  │                  │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                     │
+│                     │   Total cache budget (GB)                                                               250  │                     │
 │                     │   Compile scheduling                                                          2 settings  ›  │                     │
-│                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -534,7 +534,7 @@ Enter open · / searc                                                           
 │hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
 │› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                               │
+│  │ No messages yet            │   Build caches                                     Enabled by default · automatic budget  ›  │                               │
 │  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -572,15 +572,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│ Create   Open   Filter: ____  │ Settings › Machines › local › Build cache (mbx)                                              │                               │
-│hel ─────────────────────────  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                               │
-│› ■ ACP pretty name            │ Machines.                                                                                    │                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local › Build caches                                                   │                               │
+│hel ─────────────────────────  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                               │
+│› ■ ACP pretty name            │ Bazel.                                                                                       │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
 │  │ No messages yet            │   Enabled                                                                                 ☑  │                               │
 │  │                            │   Cache directory                                                                Resolving…  │                               │
+│                               │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                               │
 │                               │   Total cache budget (GB)                                                        Resolving…  │                               │
 │                               │   Compile scheduling                                                          2 settings  ›  │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -618,7 +618,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
 │› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │   Build cache (mbx)                                             Disabled · 100 GB budget  ›  │                               │
+│  │ No messages yet            │   Build caches                                                  Disabled · 100 GB budget  ›  │                               │
 │  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -661,7 +661,7 @@ summary contains changed state: true
 │hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
 │› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │   Build cache (mbx)                                Enabled by default · automatic budget  ›  │                               │
+│  │ No messages yet            │   Build caches                                     Enabled by default · automatic budget  ›  │                               │
 │  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -699,15 +699,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ default                                                                                                                                                      │
 ╰─────────────────────────────                                                                                                                                 │
 ╭ Sessions ───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                               │
-│ Create   Open   Filter: ____  │ Settings › Machines › local › Build cache (mbx)                                              │                               │
-│hel ─────────────────────────  │ Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup ›      │                               │
-│› ■ ACP pretty name            │ Machines.                                                                                    │                               │
+│ Create   Open   Filter: ____  │ Settings › Machines › local › Build caches                                                   │                               │
+│hel ─────────────────────────  │ Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and │                               │
+│› ■ ACP pretty name            │ Bazel.                                                                                       │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
 │  │ No messages yet            │   Enabled                                                                                 ☑  │                               │
 │  │                            │   Cache directory                                                                Resolving…  │                               │
+│                               │   Native tool cache directory                         ~/.cache/mjolnir/build on the machine  │                               │
 │                               │   Total cache budget (GB)                                                        Resolving…  │                               │
 │                               │   Compile scheduling                                                          2 settings  ›  │                               │
-│                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │
@@ -745,7 +745,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │hel ─────────────────────────  │ Enter opens or edits a setting. Changes stay in this draft until you save.                   │                               │
 │› ■ ACP pretty name            │                                                                                              │                               │
 │  Stopped  podman  codex-1     │                                                                                              │                               │
-│  │ No messages yet            │   Build cache (mbx)                                             Disabled · 100 GB budget  ›  │                               │
+│  │ No messages yet            │   Build caches                                                  Disabled · 100 GB budget  ›  │                               │
 │  │                            │                                                                                              │                               │
 │                               │                                                                                              │                               │
 │                               │                                                                                              │                               │

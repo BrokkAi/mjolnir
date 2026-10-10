@@ -49,6 +49,22 @@ pub async fn prepare_harness_launch(
         environment.insert("PATH".into(), path.clone());
         spec.environment.insert("PATH".into(), path);
     }
+    let (prepared_spec, prepared_environment) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let before = environment.clone();
+            super::tool_cache::prepare(&spec.cwd, &mut environment)?;
+            spec.environment.extend(
+                environment
+                    .iter()
+                    .filter(|(name, value)| before.get(*name) != Some(*value))
+                    .map(|(name, value)| (name.clone(), value.clone())),
+            );
+            Ok((spec, environment))
+        })
+        .await
+        .context("build cache preparation task failed")??;
+    spec = prepared_spec;
+    environment = prepared_environment;
     let bridge =
         npm_bridge(harness).filter(|bridge| bridge.matches_launcher(&spec.command, &spec.args));
     let mut selected_policy = policy;
@@ -193,7 +209,10 @@ fn resolve_command(command: &Path, environment: &BTreeMap<String, String>) -> Re
         .context("runtime command is not executable on the selected PATH")
 }
 
-fn find_command(command: &Path, environment: &BTreeMap<String, String>) -> Result<Option<PathBuf>> {
+pub(super) fn find_command(
+    command: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<PathBuf>> {
     let selected = if command.is_absolute() {
         command.to_path_buf()
     } else {
