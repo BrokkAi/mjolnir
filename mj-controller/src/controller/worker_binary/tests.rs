@@ -1887,6 +1887,85 @@ chmod +x "$HOME/.grok/bin/grok""#,
 }
 
 #[test]
+fn a_session_without_project_memory_launches_without_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    for (index, kind) in [HarnessKind::Claude, HarnessKind::Codex]
+        .into_iter()
+        .enumerate()
+    {
+        let session_id = format!("{:032x}", index + 1);
+        let worker_root = directory.path().join("workers").join(&session_id);
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: worker_root.to_string_lossy().into_owned(),
+        };
+        let profile = mj_core::config::HarnessProfile {
+            enabled: true,
+            kind,
+            home: directory.path().join(format!("{}-home", kind.id())),
+            environment: Default::default(),
+            context_window_bytes: None,
+            subagents: Default::default(),
+            guardian_review_model: None,
+        };
+        let launch = |no_project_memory: bool| {
+            let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
+            session.harness_kind = kind;
+            session.last_profile = kind.id().into();
+            session.target_template_id = "localhost".into();
+            session.project_directory = Some(project.clone());
+            session.no_project_memory = no_project_memory;
+            worker_launch_config(
+                &session,
+                &profile,
+                None,
+                &backend,
+                LaunchWorkspace {
+                    session_id: &session_id,
+                    container: None,
+                    parent_worktree: None,
+                },
+                &mj_core::state::TargetRuntimeSettings::from(
+                    &mj_core::config::TargetTemplate::LocalBare,
+                ),
+            )
+            .unwrap()
+        };
+
+        let (ordinary, ordinary_memory, _) = launch(false);
+        assert!(ordinary.project_memory.is_some(), "{kind:?}");
+        assert_eq!(ordinary.project_memory, ordinary_memory, "{kind:?}");
+        assert!(
+            !ordinary
+                .environment
+                .contains_key(CLAUDE_DISABLE_AUTO_MEMORY_ENV),
+            "{kind:?}"
+        );
+
+        let (opted_out, opted_out_memory, _) = launch(true);
+        assert!(opted_out.project_memory.is_none(), "{kind:?}");
+        assert!(opted_out_memory.is_none(), "{kind:?}");
+        // Claude's own auto-memory is switched off, and the project's
+        // identity still names its transcript directory and tool cache.
+        assert_eq!(
+            opted_out
+                .environment
+                .get(CLAUDE_DISABLE_AUTO_MEMORY_ENV)
+                .map(String::as_str),
+            (kind == HarnessKind::Claude).then_some("1"),
+            "{kind:?}"
+        );
+        assert_eq!(
+            opted_out.environment.get("CLAUDE_CODE_PROJECT_DIR_NAME"),
+            ordinary.environment.get("CLAUDE_CODE_PROJECT_DIR_NAME"),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
 fn project_memory_replica_is_separate_from_controller_attachment_directories() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
@@ -1931,6 +2010,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             ),
         )
         .unwrap();
+        let memory = memory.expect("a session without the opt-out has project memory");
 
         assert!(
             !launch.additional_directories.contains(&memory.root),
@@ -4617,6 +4697,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             ),
         )
         .unwrap();
+        let memory = memory.expect("a session without the opt-out has project memory");
         let target_home = PathBuf::from(target_home);
         assert!(memory.root.starts_with(&target_home), "{kind:?}");
 

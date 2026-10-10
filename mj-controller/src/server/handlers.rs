@@ -600,6 +600,8 @@ pub(super) async fn preflight_new(
     let action = ControllerAction::New {
         subagents: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         create_managed_worktree: None,
         at: None,
         branch: None,

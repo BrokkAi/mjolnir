@@ -205,6 +205,7 @@ impl ViewerSnapshot {
                     retry_assessment_pending: false,
                     quota_recovery: None,
                     is_subagent_session: state.is_subagent_session(&session.id),
+                    no_mailbox: session.no_mailbox,
                     id: session.id.clone(),
                     publication_state: session.publication_state(),
                     managed_checkout_kind: checkout.managed_worktree().map(|owned| owned.kind),
@@ -437,6 +438,10 @@ pub struct ViewerSession {
     /// viewer or API JSON contract.
     #[serde(skip, default)]
     pub(crate) is_subagent_session: bool,
+    /// In-process copy of the session's mailbox opt-out, read by the mailbox
+    /// event route; not part of the viewer or API JSON contract.
+    #[serde(skip, default)]
+    pub(crate) no_mailbox: bool,
     #[serde(default)]
     pub subagents: mj_core::subagent::SubagentPolicy,
     /// Commit the workspace started checked out at, when one was named.

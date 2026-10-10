@@ -865,6 +865,8 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         project_directory: None,
         managed_worktree: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

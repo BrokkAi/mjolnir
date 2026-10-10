@@ -185,6 +185,8 @@ mod tests {
                 project_directory: None,
                 managed_worktree: None,
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 target_template_id: "target-1".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),

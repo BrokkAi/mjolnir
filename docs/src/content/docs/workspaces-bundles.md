@@ -302,6 +302,14 @@ pointer to each file in `MEMORY.md`. Update an existing note instead of
 duplicating it, and delete notes that are wrong. Claude Code keeps its native
 memory conventions. See [Harness limitations](/profiles/#harness-limitations).
 
+A session can start without any of this. `mj new --no-project-memory` (or
+`"no_project_memory": true` in the session-creation API) adds no startup
+context, stages no memory directory, turns off Claude Code's auto-memory, and
+leaves out the `mj-memory` history tools. The session's sub-agents inherit the
+choice, and its memory is neither read from nor synchronized with the project's
+canonical copy. The choice is stored with the session and kept on resume and
+Move. Other sessions are unaffected.
+
 For a multi-root bundle, bundle-wide material lives at the virtual root and
 repository-specific material may live below `/roots/<repository-id>/`.
 The startup context also tells the agent which repository ID maps to each

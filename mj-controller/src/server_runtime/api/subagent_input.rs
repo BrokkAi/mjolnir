@@ -130,6 +130,13 @@ impl ApiBackend {
                     "target session was destroyed and cannot receive messages"
                 ));
             }
+            // The person's own message still reaches the session as a turn, as
+            // it does with mailboxes off; another session's does not.
+            if !own_child && sender.is_some() && target.no_mailbox {
+                anyhow::bail!(mj_core::refusal::Refusal::unusable(
+                    "target session was started with --no-mailbox and accepts no messages from other sessions"
+                ));
+            }
             if !own_child {
                 if target.state == SessionState::Stopped {
                     anyhow::bail!(mj_core::refusal::Refusal::precondition(
@@ -230,7 +237,7 @@ impl ApiBackend {
             });
         }
 
-        let protocol = if self.exports.agent_mailboxes_enabled() {
+        let protocol = if self.exports.agent_mailboxes_enabled_for(&target_session_id) {
             match self.sessions.session(target_session_id.clone()).await {
                 Ok(handle) => {
                     crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())
@@ -357,7 +364,7 @@ impl ApiBackend {
 
         // This is the single routing decision for send_message. Reuse the
         // published protocol fact and compatibility check used by the outbox.
-        let published_protocol = if self.exports.agent_mailboxes_enabled() {
+        let published_protocol = if self.exports.agent_mailboxes_enabled_for(child) {
             match self.sessions.session(child.to_owned()).await {
                 Ok(handle) => {
                     crate::mailbox_outbox::published_worker_relay_protocol(&handle.view())

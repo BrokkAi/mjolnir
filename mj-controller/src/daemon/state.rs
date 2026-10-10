@@ -257,6 +257,8 @@ impl RuntimeState {
                 create_managed_worktree: None,
                 subagents: None,
                 review: None,
+                no_project_memory: false,
+                no_mailbox: false,
                 initial_prompt: None,
                 workspace_id: request.workspace_id,
                 profile_id: request.profile_id,

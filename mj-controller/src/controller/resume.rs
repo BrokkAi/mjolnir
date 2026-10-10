@@ -678,7 +678,8 @@ impl Controller {
                             .unwrap_or_default(),
                         profile.kind,
                         self.state.subagents.get(session_id),
-                        self.config.agent_mailboxes_enabled(),
+                        self.config
+                            .agent_mailboxes_enabled_for(&self.state.sessions[session_id]),
                     );
             resume_notices.extend(mj_core::subagent::stopped_subagents_notice(
                 &stopped_subagents,

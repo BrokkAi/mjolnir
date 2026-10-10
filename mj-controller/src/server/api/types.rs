@@ -257,6 +257,18 @@ pub struct StartSessionRequest {
     /// Turn review for this session. Omitted follows `[review]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<mj_core::config::SessionReview>,
+    /// Start the session with no project memory: nothing from the workspace's
+    /// project memory is injected and the harness is offered no memory
+    /// directory. Omitted or false keeps the workspace's project memory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_project_memory: bool,
+    /// Start the session with no agent mailbox: no GitHub watch events or
+    /// peer messages are routed to it and its harness gets no mailbox hook or
+    /// message tool. Only turns the session's mailbox off; it does not turn
+    /// mailboxes on when `[mailbox]` is off. Omitted or false follows
+    /// `[mailbox]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_mailbox: bool,
     #[serde(default)]
     pub workspace_id: Option<String>,
     /// Omitted follows the saved default, or anchors model-based profile

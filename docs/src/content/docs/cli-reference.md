@@ -237,7 +237,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--model <name>] [--effort <name>] [--subagents native|single-model|none]
        [--subagent-model <name>] [--subagent-effort <name>]
        [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
-       [--no-review] [--cpus <count>] [--memory-gib <GiB>]
+       [--no-review] [--no-project-memory] [--no-mailbox] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -306,6 +306,21 @@ cannot be combined with a session that runs directly in the selected directory.
   `[review]` is on; `/review` still works. `mj import <harness>` takes the same
   flags for the session it adopts. See
   [per-session settings](/turn-review/#per-session-settings).
+- `mj new --no-project-memory` starts the session with no project memory:
+  nothing from the workspace's project memory is put in the agent's startup
+  context, and the harness is offered no memory directory to write to. Its
+  sub-agents get none either. Use it when a session must see only its checkout
+  and its prompt, as an evaluation run does. Without the flag the session loads
+  the workspace's project memory as before. See
+  [project memory](/workspaces-bundles/#what-the-agent-sees).
+- `mj new --no-mailbox` gives the session no agent mailbox, whatever
+  `[mailbox]` says: GitHub watch events are not routed to it, another session's
+  messages to it are refused, and its harness gets no mailbox hook or message
+  tool. Its sub-agents get no mailbox either. The setting applies to this
+  session only; `[mailbox]` and every other session keep their mailbox. The
+  flag cannot turn mailboxes on: with `[mailbox]` or `[jev]` off, no session has
+  one. A message you send yourself with `mj message` still reaches the session
+  as a turn, as it does with mailboxes off.
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
   that host, else 8 CPUs and 32 GiB, capped at the host's totals.

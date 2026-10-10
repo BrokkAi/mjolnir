@@ -197,7 +197,11 @@ fn sessions_by_github_repo(
 ) -> BTreeMap<(String, String), Vec<SessionRecord>> {
     let mut sessions_by_repo = BTreeMap::<(String, String), Vec<SessionRecord>>::new();
     for session in state.sessions.values() {
-        if !session.state.has_live_worker() || state.is_subagent_session(&session.id) {
+        // A session started with `--no-mailbox` is never a delivery target.
+        if !session.state.has_live_worker()
+            || state.is_subagent_session(&session.id)
+            || session.no_mailbox
+        {
             continue;
         }
         let Some(project) = &session.project else {
@@ -2072,6 +2076,22 @@ mod tests {
             .sessions
             .insert(session.id.clone(), session.clone());
         assert!(sessions_by_github_repo(&projection).contains_key(&("acme".into(), "repo".into())));
+        // A session started with `--no-mailbox` is not a delivery target.
+        let mut opted_out = session.clone();
+        opted_out.id = "no-mailbox-session".into();
+        opted_out.no_mailbox = true;
+        let mut with_opt_out = projection.clone();
+        with_opt_out
+            .sessions
+            .insert(opted_out.id.clone(), opted_out);
+        let targets = &sessions_by_github_repo(&with_opt_out)[&("acme".into(), "repo".into())];
+        assert_eq!(
+            targets
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            [creator_id]
+        );
 
         let fake = FakeGithub {
             data: Arc::new(tokio::sync::Mutex::new(FakeGithubData {

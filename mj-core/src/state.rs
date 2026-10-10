@@ -1436,6 +1436,22 @@ pub struct SessionRecord {
     /// follows the global `[review]` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<crate::config::SessionReview>,
+    /// Chosen when the session is created (`mj new --no-project-memory`): the
+    /// session starts with no project memory. The worker gets no memory
+    /// directory, no memory index in its context and no history tools, the
+    /// controller does not stage or synchronize a memory replica, and
+    /// sub-agent children inherit the choice. Kept on resume and Move.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_project_memory: bool,
+    /// Chosen when the session is created (`mj new --no-mailbox`): this
+    /// session gets no agent mailbox, whatever `[mailbox]` says. The worker
+    /// launches with mailboxes off, the mailbox hook and message tool are not
+    /// configured, and GitHub watch events and peer messages are not routed to
+    /// it. It never turns mailboxes on: with `[mailbox]` off, every session
+    /// has none. Sub-agent children inherit the choice; kept on resume and
+    /// Move. See [`crate::config::Config::agent_mailboxes_enabled_for`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_mailbox: bool,
     pub target_template_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_allocation: Option<SessionResourceAllocation>,

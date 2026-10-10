@@ -1562,7 +1562,7 @@ async fn reopen_subagent_admission_after_move(
             // config must not stop the reconnect, so assume the queue exists;
             // a worker without one refuses the reopen harmlessly below.
             let agent_mailboxes_enabled = mj_core::config::Config::load()
-                .map_or(true, |config| config.agent_mailboxes_enabled());
+                .map_or(true, |config| config.agent_mailboxes_enabled_for(&session));
             let queue_enabled = crate::controller::move_session::worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
                 session.harness_kind,

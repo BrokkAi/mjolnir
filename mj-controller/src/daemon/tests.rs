@@ -1103,6 +1103,8 @@ pub(super) fn runtime_test_session(
         project_directory: None,
         managed_worktree: None,
         review: None,
+        no_project_memory: false,
+        no_mailbox: false,
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
@@ -3917,6 +3919,8 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let create = |title: &str| {
         DaemonAction::StartCreateSession(mj_client::daemon::CreateSessionRequest {
             review: None,
+            no_project_memory: false,
+            no_mailbox: false,
             create_managed_worktree: Some(false),
             at: None,
             branch: None,
