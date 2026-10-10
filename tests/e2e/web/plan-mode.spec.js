@@ -920,6 +920,36 @@ test('submitted content appears while the request is held and a newer draft surv
   await expect(prompt).toHaveText('a newer draft');
 });
 
+// The browser projection gives the context-cleared divider no command ID, so
+// an accepted /clear must not wait for one.
+test('an accepted /clear leaves no queued row, and a refused one stays recoverable', async ({ page }) => {
+  const state = await mockViewerApi(page);
+  let held;
+  await page.route('**/api/actions', route => { held = route; });
+  const prompt = page.locator('#prompt-text');
+  const pending = page.locator('#pending-submissions');
+
+  await prompt.fill('/Clear');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => Boolean(held)).toBe(true);
+  expect(held.request().postDataJSON()).toMatchObject({ action: 'prompt', text: '/Clear' });
+  await expect(pending).toContainText('Sending');
+  await held.fulfill({ status: 202, body: '' });
+  await expect(pending.locator('article')).toHaveCount(0);
+  await publishSnapshotDelta(page, state);
+  await expect(pending.locator('article')).toHaveCount(0);
+
+  held = null;
+  await prompt.fill('/clear');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => Boolean(held)).toBe(true);
+  const refusal = '/clear requires an idle session with no queued or background work; finish or cancel that work first';
+  await held.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: refusal }) });
+  await expect(pending).toContainText(`Not sent: ${refusal}`);
+  await pending.locator('button').click();
+  await expect(prompt).toHaveText('/clear');
+});
+
 test('projection before a lost acknowledgement reconciles only the matching identical prompt', async ({ page }) => {
   const state = await mockViewerApi(page);
   const held = [];

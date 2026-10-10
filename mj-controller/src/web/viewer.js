@@ -6952,7 +6952,12 @@ async function sendSubmission(body, images = [], prerequisite = null, recoveryTe
     await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
     pending.finished = true;
     pending.status = 'Queued';
-    if (pending.represented) pendingSubmissions.delete(id);
+    // An accepted /clear has no user message to reconcile with: the browser
+    // projection gives its divider no command ID. The relay's "Clearing
+    // context…" line and divider record it instead, so a row of our own would
+    // stay pinned as "Queued".
+    const isContextClear = body.action === 'prompt' && !images.length && /^\/clear$/i.test(body.text.trim());
+    if (pending.represented || isContextClear) pendingSubmissions.delete(id);
   } catch (err) {
     pending.finished = true;
     if (pending.represented) pendingSubmissions.delete(id);
