@@ -707,11 +707,11 @@ fn tool_definitions_with_mailboxes(
 fn send_message_tool() -> Value {
     tool(
         "send_message",
-        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires an enabled mailbox and a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID. Check pending_messages and message_deliveries in wait or list_agents before retrying; do not resend an acknowledged message.",
+        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires an enabled mailbox and a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Check pending_messages and message_deliveries in wait or list_agents before retrying; do not resend an acknowledged message.",
         json!({
             "type":"object",
             "properties":{
-                "session_id":{"type":"string","description":"Top-level session ID, or the ID of one of your own Mjolnir sub-agents."},
+                "session_id":{"type":"string","description":"Full ID or unique case-insensitive hexadecimal prefix (at least 8 characters) of a top-level session or one of your own Mjolnir sub-agents."},
                 "message":{"type":"string"}
             },
             "required":["session_id","message"],
@@ -1141,6 +1141,9 @@ mod tests {
                 .unwrap()
         };
         let send_message = description("send_message");
+        assert!(send_message.contains("unique case-insensitive hexadecimal prefix"));
+        assert!(send_message.contains("at least 8 characters"));
+        assert!(send_message.contains("resolved full session ID"));
         assert!(
             send_message.contains("parked child is restarted"),
             "{send_message}"

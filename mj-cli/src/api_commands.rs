@@ -228,7 +228,7 @@ pub(crate) struct EventArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct MessageArgs {
-    /// Session id, as `mj sessions` lists it.
+    /// Full session ID or unique case-insensitive hexadecimal prefix of at least 8 characters.
     #[arg(long)]
     session: String,
     /// Print the response as JSON instead of text.

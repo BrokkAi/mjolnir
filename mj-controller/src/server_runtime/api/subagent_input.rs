@@ -5,6 +5,7 @@ use mj_client::session::ViewError;
 
 const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
+const MIN_SESSION_ID_PREFIX_LENGTH: usize = 8;
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 pub(super) enum SubagentInputDelivery {
@@ -70,14 +71,15 @@ impl ApiBackend {
     pub(super) async fn deliver_session_message(
         &self,
         sender_session_id: Option<String>,
-        target_session_id: String,
+        requested_target_id: String,
         text: String,
         request_id: String,
         created_at_ms: i64,
     ) -> Result<crate::server::api::SessionMessageResponse> {
-        let target_id = target_session_id.clone();
+        let requested_target_for_auth = requested_target_id.clone();
         let sender_for_auth = sender_session_id.clone();
-        let (own_child, sender_record) = blocking("authorize session message", move || {
+        let (target_session_id, own_child, sender_record) =
+            blocking("authorize session message", move || {
             let state = Controller::load()?.state;
             let sender = match sender_for_auth.as_deref() {
                 Some(sender_id) => {
@@ -95,9 +97,15 @@ impl ApiBackend {
                 }
                 None => None,
             };
+            let target_id = resolve_session_message_target(
+                &state,
+                sender_for_auth.as_deref(),
+                &requested_target_for_auth,
+            )?;
             let target = state.sessions.get(&target_id).cloned().ok_or_else(|| {
                 anyhow::Error::new(mj_core::refusal::Refusal::unusable(format!(
-                    "target session {target_id} does not exist or was destroyed"
+                    "target session {} does not exist or was destroyed",
+                    requested_target_for_auth
                 )))
             })?;
             if sender_for_auth.as_deref() == Some(target_id.as_str()) {
@@ -143,7 +151,7 @@ impl ApiBackend {
                     )));
                 }
             }
-            Ok((own_child, sender.cloned()))
+            Ok((target_id, own_child, sender.cloned()))
         })
         .await?;
 
@@ -183,7 +191,16 @@ impl ApiBackend {
             (None, _) => mj_core::mailbox::Sender::User,
             _ => unreachable!("sender record accompanies every session sender id"),
         };
+        // The request id is the durable mailbox idempotency key; the row's
+        // target is the resolved full session ID.
         let event_key = format!("session-message-{request_id}");
+        let mailbox_route_exists = {
+            let event_key = event_key.clone();
+            blocking("check existing session-message route", move || {
+                crate::database::mailbox_event_exists(&event_key)
+            })
+            .await?
+        };
         let event = mj_core::mailbox::MailboxEvent {
             key: event_key.clone(),
             source: "session_message".into(),
@@ -192,13 +209,6 @@ impl ApiBackend {
             body: mj_core::mailbox::MailboxEventBody::SessionMessage { from: sender, text },
         };
 
-        let mailbox_route_exists = {
-            let event_key = event_key.clone();
-            blocking("check existing session-message route", move || {
-                crate::database::mailbox_event_exists(&event_key)
-            })
-            .await?
-        };
         if mailbox_route_exists {
             self.enqueue_session_message(&target_session_id, &event, &event_key)
                 .await?;
@@ -542,6 +552,83 @@ impl ApiBackend {
             source,
         })?;
         Ok(())
+    }
+}
+
+/// Resolve a message recipient without widening the sender's existing target
+/// scope. Exact IDs are passed through so the authorization checks below keep
+/// returning their established refusals for self and foreign-child targets.
+pub(super) fn resolve_session_message_target(
+    state: &mj_core::state::State,
+    sender_session_id: Option<&str>,
+    requested_id: &str,
+) -> Result<String> {
+    if state.sessions.contains_key(requested_id) {
+        return Ok(requested_id.to_owned());
+    }
+
+    if requested_id.len() < MIN_SESSION_ID_PREFIX_LENGTH {
+        return Err(mj_core::refusal::Refusal::unusable(format!(
+            "session id must be a full id or a prefix of at least {MIN_SESSION_ID_PREFIX_LENGTH} hexadecimal characters"
+        ))
+        .into());
+    }
+
+    let is_hex_prefix = requested_id.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let mut permitted_matches = Vec::new();
+    let mut refused_matches = Vec::new();
+    if is_hex_prefix {
+        for (id, record) in &state.sessions {
+            if !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !id
+                    .get(..requested_id.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(requested_id))
+            {
+                continue;
+            }
+
+            let is_subagent = state.is_subagent_session(id);
+            let is_own_child = state.subagents.get(id).is_some_and(|relation| {
+                Some(relation.parent_session_id.as_str()) == sender_session_id
+            });
+            if is_subagent && !is_own_child {
+                refused_matches.push((id.as_str(), record, "foreign_subagent"));
+            } else if !is_subagent && Some(id.as_str()) == sender_session_id {
+                refused_matches.push((id.as_str(), record, "self"));
+            } else {
+                permitted_matches.push((id.as_str(), record));
+            }
+        }
+    }
+
+    match permitted_matches.as_slice() {
+        [(id, _)] => Ok((*id).to_owned()),
+        [] if refused_matches.len() == 1 => match refused_matches[0].2 {
+            "self" => Err(mj_core::refusal::Refusal::unusable(
+                "a session cannot send a message to itself",
+            )
+            .into()),
+            "foreign_subagent" => Err(mj_core::refusal::Refusal::unusable(
+                "a session cannot message another session's sub-agent",
+            )
+            .into()),
+            _ => unreachable!("all refused prefix matches have a refusal kind"),
+        },
+        [] => Err(mj_core::refusal::Refusal::unusable(format!(
+            "target session {requested_id} does not exist or was destroyed"
+        ))
+        .into()),
+        _ => {
+            let candidates = permitted_matches
+                .iter()
+                .map(|(id, record)| format!("{id} ({:?})", record.title))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(mj_core::refusal::Refusal::unusable(format!(
+                "session id prefix {requested_id:?} is ambiguous; matching sessions: {candidates}"
+            ))
+            .into())
+        }
     }
 }
 
