@@ -170,6 +170,9 @@ pub(super) fn project_observation(
                     );
                 }
                 let mailbox_wake = matches!(command, RelayCommand::MailboxWake { .. });
+                if let RelayCommand::MailboxWake { events } = command {
+                    delivered_messages(index, event, events, mutation);
+                }
                 let content = if mailbox_wake {
                     Vec::new()
                 } else {
@@ -260,13 +263,26 @@ pub(super) fn project_observation(
                     upsert(
                         mutation,
                         TranscriptItem {
-                            stable_id: format!("user:{command_id}"),
+                            stable_id: if entry.content.is_empty() {
+                                format!(
+                                    "{}{command_id}",
+                                    crate::transcript::HARNESS_TURN_ITEM_PREFIX
+                                )
+                            } else {
+                                format!("user:{command_id}")
+                            },
                             position: event.ordinal,
                             latest_content_event_ordinal: None,
                             created_at_ms: *started_at_ms,
                             last_changed_at_ms: *started_at_ms,
-                            body: TranscriptBody::User {
-                                content: entry.content,
+                            body: if entry.content.is_empty() {
+                                TranscriptBody::System {
+                                    text: crate::transcript::HARNESS_TURN_TEXT.to_owned(),
+                                }
+                            } else {
+                                TranscriptBody::User {
+                                    content: entry.content,
+                                }
                             },
                         },
                     );
@@ -781,21 +797,22 @@ pub(super) fn project_observation(
             }
         }
         RelayObservation::MailboxEventsDelivered {
-            steering: Some(steering),
-            ..
+            events, steering, ..
         } => {
-            let mut queue = current.queued_prompts.clone();
-            project_steered_prompt(
-                current,
-                index,
-                event,
-                &mut queue,
-                &steering.queued_prompt_id,
-                mutation,
-            )?;
-            mutation.queued_prompts = Some(queue);
+            delivered_messages(index, event, events, mutation);
+            if let Some(steering) = steering {
+                let mut queue = current.queued_prompts.clone();
+                project_steered_prompt(
+                    current,
+                    index,
+                    event,
+                    &mut queue,
+                    &steering.queued_prompt_id,
+                    mutation,
+                )?;
+                mutation.queued_prompts = Some(queue);
+            }
         }
-        RelayObservation::MailboxEventsDelivered { .. } => {}
         RelayObservation::MailboxHookLeaseCreated { .. }
         | RelayObservation::MailboxHookLeaseReturned { .. } => {}
         RelayObservation::Closing => {
@@ -819,6 +836,9 @@ fn mailbox_queued_notice(
     mailbox_event: &mj_core::mailbox::MailboxEvent,
     mutation: &mut MaterializedSessionMutation,
 ) {
+    if mailbox_event.message_text().is_some() {
+        return;
+    }
     let description = mj_core::mailbox::describe_mailbox_event(mailbox_event);
     if let Some(existing) = index.get(MAILBOX_EVENTS_NOTICE_ID) {
         let mut item = existing.as_ref().clone();
@@ -834,6 +854,43 @@ fn mailbox_queued_notice(
             event,
             MAILBOX_EVENTS_NOTICE_ID.to_owned(),
             format!("External events:\n  - {}", description.transcript_line),
+        );
+    }
+}
+
+fn delivered_messages(
+    index: &ProjectionIndex,
+    delivery: &RelayEvent,
+    events: &[mj_core::mailbox::MailboxEvent],
+    mutation: &mut MaterializedSessionMutation,
+) {
+    let mut messages = events
+        .iter()
+        .filter(|event| event.message_text().is_some())
+        .collect::<Vec<_>>();
+    // Equal-position rows use stable identity order in the durable reader.
+    // Keep the live batch in that same order across detach and restoration.
+    messages.sort_by(|left, right| left.key.cmp(&right.key));
+    for event in messages {
+        let stable_id = mj_core::transcript::message_item_id(&event.key);
+        if index.get(&stable_id).is_some()
+            || mutation.transcript.iter().any(|change| matches!(change, TranscriptMutation::Upsert(item) if item.stable_id == stable_id))
+        {
+            continue;
+        }
+        close_streams(index, mutation, delivery.recorded_at_ms);
+        upsert(
+            mutation,
+            TranscriptItem {
+                stable_id,
+                position: delivery.ordinal,
+                latest_content_event_ordinal: None,
+                created_at_ms: delivery.recorded_at_ms,
+                last_changed_at_ms: delivery.recorded_at_ms,
+                body: TranscriptBody::Message {
+                    event: Box::new(event.clone()),
+                },
+            },
         );
     }
 }

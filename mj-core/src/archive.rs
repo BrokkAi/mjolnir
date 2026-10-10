@@ -36,6 +36,8 @@ pub const ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS: u32 = 7;
 /// files are named from the checkout's top level. An older build would unpack
 /// them inside the subdirectory. It supersedes every earlier schema.
 pub const ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY: u32 = 8;
+/// Typed received-message history that older canonical readers cannot decode.
+pub const ARCHIVE_SCHEMA_VERSION_MESSAGES: u32 = 9;
 pub const ARCHIVE_FORMAT: &str = "hel-session";
 pub const EVENT_FRONTIER_GENESIS_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -227,6 +229,9 @@ pub struct CanonicalTranscriptItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanonicalTranscriptBody {
+    Message {
+        event: Box<crate::mailbox::MailboxEvent>,
+    },
     User {
         /// ACP content blocks in their JSON representation.
         content: Vec<serde_json::Value>,
@@ -473,6 +478,15 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
             item.stable_id
         );
         match &item.body {
+            CanonicalTranscriptBody::Message { event } => {
+                ensure!(
+                    !event.key.trim().is_empty()
+                        && event.message_text().is_some()
+                        && item.stable_id == crate::transcript::message_item_id(&event.key),
+                    "canonical message '{}' has invalid message data",
+                    item.stable_id
+                );
+            }
             CanonicalTranscriptBody::User { content } => {
                 for (index, block) in content.iter().enumerate() {
                     serde_json::from_value::<agent_client_protocol::schema::v1::ContentBlock>(

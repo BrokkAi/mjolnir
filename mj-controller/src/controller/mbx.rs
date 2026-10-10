@@ -40,7 +40,10 @@ const LABEL: &str = "hel-mbx";
 const UNSUPPORTED_HOST: &str = "Mjolnir's shared mbx cache requires a Linux host. Native mbx on macOS must be installed and configured separately.";
 
 /// Ask the cache host, not the controller or a container running on that host.
-fn host_supports_cache(host: &CacheHost, executor: &impl CommandExecutor) -> Result<bool> {
+pub(super) fn host_supports_cache(
+    host: &CacheHost,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
     // Windows is no Linux host and has no `uname` to ask; its container
     // engine runs in a VM this machine's paths do not reach.
     if host.ssh().is_none() && !cfg!(unix) {
@@ -1212,36 +1215,12 @@ fn checked(output: CommandOutput, command: &CommandSpec) -> Result<CommandOutput
 
 // -- per-session decision -------------------------------------------------
 
-/// Whether the primary repository is a Cargo workspace, read from the host
-/// mirror the clone cache prepared. A repository whose manifest is not at its
-/// root, and a session whose clone cache was not prepared, run without mbx.
-pub(super) fn primary_repository_is_rust(
-    host: &CacheHost,
-    mirror: &Path,
-    executor: &impl CommandExecutor,
-) -> bool {
-    let command = host.command(
-        vec![
-            "git".to_owned(),
-            "--git-dir".to_owned(),
-            mirror.to_string_lossy().into_owned(),
-            "cat-file".to_owned(),
-            "-e".to_owned(),
-            "HEAD:Cargo.toml".to_owned(),
-        ],
-        "detect a Cargo workspace in the session repository",
-    );
-    matches!(executor.execute(&command), Ok(output) if output.status == 0)
-}
-
 /// Decide the build cache for one session and attach its mounts, returning the
 /// placement to record on the session. Resumes and moves resolve current
 /// machine policy instead of reviving a saved session budget.
 pub(super) fn prepare(
     target: &targets::TargetTemplate,
     session: &mj_core::state::SessionRecord,
-    bundle: Option<&targets::ProjectBundleSpec>,
-    clone_cache: Option<&super::git_cache::PreparedCloneCache>,
     mounts: &mut Vec<targets::AdditionalMount>,
     executor: &impl CommandExecutor,
 ) -> Option<SessionBuildCache> {
@@ -1252,12 +1231,9 @@ pub(super) fn prepare(
     session.container_workspace.as_ref()?;
     let resolved = resolve(target, executor)?;
     let host = supported_host(target)?.0;
-    if session.build_cache.is_none() {
-        let mirror = clone_cache?.mirror_for(&bundle?.primary)?;
-        if !primary_repository_is_rust(&host, mirror, executor) {
-            return None;
-        }
-    }
+    // Make mbx available before the checkout exists. Target-side discovery
+    // decides whether to wrap C/C++ tools; a mirror's HEAD can differ from
+    // the session's branch, and Cargo is no longer the only consumer.
     match sync_current_mbx_binary(&host, &resolved.directory, executor) {
         Ok(CachedMbxSync::Ready(_)) => {}
         Ok(CachedMbxSync::Unavailable(reason)) => {
@@ -1923,6 +1899,7 @@ mod tests {
                 &podman(Some(TargetBuildCache {
                     enabled: Some(true),
                     directory: None,
+                    tools_directory: None,
                     max_total_size: None,
                     scheduler: Default::default(),
                 })),
@@ -2006,30 +1983,6 @@ mod tests {
             .expect("a local machine can hold a cache");
         assert_eq!(preview.stats, None);
     }
-    fn bundle() -> targets::ProjectBundleSpec {
-        targets::ProjectBundleSpec {
-            primary: "main".into(),
-            repositories: vec![targets::RepositorySpec {
-                url: Some("https://github.com/example/main.git".into()),
-                push_urls: Vec::new(),
-                destination: "main".into(),
-                git_ref: None,
-                reference: None,
-            }],
-        }
-    }
-
-    fn clone_cache() -> super::super::git_cache::PreparedCloneCache {
-        super::super::git_cache::PreparedCloneCache::from_mirrors(
-            [(
-                "main".to_owned(),
-                PathBuf::from("/home/dev/mirror/repo.git"),
-            )]
-            .into_iter()
-            .collect(),
-        )
-    }
-
     fn session(container_workspace: Option<&str>) -> mj_core::state::SessionRecord {
         let mut record = crate::controller::test_support::checkpoint_test_session("session-1");
         record.container_workspace = container_workspace.map(PathBuf::from);
@@ -2037,21 +1990,17 @@ mod tests {
     }
 
     #[test]
-    fn a_rust_session_mounts_the_native_cache_and_records_its_synchronized_binary() {
+    fn a_container_session_mounts_the_native_cache_and_records_its_synchronized_binary() {
         let _isolated = isolated();
-        let mut answers = native_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 0, ""));
-        let executor = ProbeExecutor::new(&answers);
+        let executor = ProbeExecutor::new(&native_host());
         let mut mounts = Vec::new();
         let build_cache = prepare(
             &podman(None),
             &session(Some("/workspace/session-1")),
-            Some(&bundle()),
-            Some(&clone_cache()),
             &mut mounts,
             &executor,
         )
-        .expect("a Rust session uses the build cache");
+        .expect("a container session uses the build cache");
         assert_eq!(build_cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));
         assert_eq!(
             cache_binary_path(&build_cache.directory),
@@ -2070,19 +2019,10 @@ mod tests {
     #[test]
     fn a_session_at_the_legacy_shared_workspace_runs_without_the_cache() {
         let _isolated = isolated();
-        let mut answers = native_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 0, ""));
-        let executor = ProbeExecutor::new(&answers);
+        let executor = ProbeExecutor::new(&native_host());
         let mut mounts = Vec::new();
         assert_eq!(
-            prepare(
-                &podman(None),
-                &session(None),
-                Some(&bundle()),
-                Some(&clone_cache()),
-                &mut mounts,
-                &executor,
-            ),
+            prepare(&podman(None), &session(None), &mut mounts, &executor,),
             None
         );
         assert!(executor.ran().is_empty());
@@ -2100,8 +2040,7 @@ mod tests {
             target_root: None,
         });
         let mut mounts = Vec::new();
-        let build_cache =
-            prepare(&podman(None), &record, None, None, &mut mounts, &executor).unwrap();
+        let build_cache = prepare(&podman(None), &record, &mut mounts, &executor).unwrap();
         assert_eq!(build_cache.max_size, None);
         assert_eq!(build_cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));
         assert_eq!(mounts.len(), 1);
@@ -2116,9 +2055,7 @@ mod tests {
     #[test]
     fn a_session_moved_to_another_host_resolves_its_build_cache_again() {
         let _isolated = isolated();
-        let mut answers = native_host();
-        answers.push(("cat-file -e HEAD:Cargo.toml", 0, ""));
-        let executor = ProbeExecutor::new(&answers);
+        let executor = ProbeExecutor::new(&native_host());
         let mut record = session(Some("/workspace/session-1"));
         record.build_cache = Some(SessionBuildCache {
             // The host the session was provisioned on, which the target below
@@ -2130,15 +2067,8 @@ mod tests {
         });
         let mut mounts = Vec::new();
 
-        let build_cache = prepare(
-            &podman(None),
-            &record,
-            Some(&bundle()),
-            Some(&clone_cache()),
-            &mut mounts,
-            &executor,
-        )
-        .expect("the destination host qualifies on its own");
+        let build_cache = prepare(&podman(None), &record, &mut mounts, &executor)
+            .expect("the destination host qualifies on its own");
 
         assert_eq!(build_cache.host, "local");
         assert_eq!(build_cache.directory, PathBuf::from("/mnt/fast/mbx-cache"));

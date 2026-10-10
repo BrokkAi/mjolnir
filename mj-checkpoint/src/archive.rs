@@ -722,7 +722,14 @@ fn prepare_archive_view_with_part_size(
         .map(|payload| payload.descriptor.clone())
         .collect();
     let manifest = ArchiveManifest {
-        schema_version: if carries_checkout_subdirectory(&repositories) {
+        schema_version: if input
+            .canonical_session
+            .transcript
+            .iter()
+            .any(|item| matches!(item.body, CanonicalTranscriptBody::Message { .. }))
+        {
+            ARCHIVE_SCHEMA_VERSION_MESSAGES
+        } else if carries_checkout_subdirectory(&repositories) {
             ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
         } else if carries_agent_reports(&descriptors) {
             ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
@@ -1125,6 +1132,15 @@ fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<Verifie
                 serde_json::from_slice(bytes).context("parse canonical session snapshot")?;
             snapshot.validate()?;
             ensure!(
+                manifest.schema_version >= ARCHIVE_SCHEMA_VERSION_MESSAGES
+                    || !snapshot
+                        .transcript
+                        .iter()
+                        .any(|item| matches!(item.body, CanonicalTranscriptBody::Message { .. })),
+                "message transcript entries require archive schema {}",
+                ARCHIVE_SCHEMA_VERSION_MESSAGES
+            );
+            ensure!(
                 canonical_session.replace(snapshot).is_none(),
                 "archive contains duplicate canonical session payloads"
             );
@@ -1306,7 +1322,8 @@ fn parse_archive_manifest(manifest_bytes: &[u8]) -> Result<ArchiveManifest> {
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CONTEXT
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_CLONE_REFS
             || header.schema_version == ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
-            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY,
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY
+            || header.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES,
         "incompatible Mjolnir archive schema {}; this build requires schema {}",
         header.schema_version,
         ARCHIVE_SCHEMA_VERSION
@@ -1362,6 +1379,7 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         };
     ensure!(
         manifest.schema_version == expected_schema
+            || manifest.schema_version == ARCHIVE_SCHEMA_VERSION_MESSAGES
             || (expected_schema != ARCHIVE_SCHEMA_VERSION_CLONE_REFS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_AGENT_REPORTS
                 && expected_schema != ARCHIVE_SCHEMA_VERSION_CHECKOUT_SUBDIRECTORY

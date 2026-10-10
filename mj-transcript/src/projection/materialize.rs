@@ -29,6 +29,13 @@ pub fn materialized_session_from_entries(
                     .filter(|id| id.starts_with(mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX))
                     .cloned()
                     .unwrap_or_else(|| format!("user:{}", entry.start_seq)),
+                ChatRole::Message => mj_core::transcript::message_item_id(
+                    &entry
+                        .incoming_message
+                        .as_ref()
+                        .expect("message entry metadata")
+                        .key,
+                ),
                 ChatRole::Agent => entry.message_id.as_ref().map_or_else(
                     || format!("agent:{}", entry.start_seq),
                     |id| format!("agent:{id}"),
@@ -56,6 +63,12 @@ pub fn materialized_session_from_entries(
                         "type": "text",
                         "text": entry.text,
                     })],
+                },
+                ChatRole::Message => TranscriptBody::Message {
+                    event: entry
+                        .incoming_message
+                        .clone()
+                        .expect("message entry metadata"),
                 },
                 ChatRole::Agent | ChatRole::Thought => {
                     let mut chunk =
@@ -293,6 +306,9 @@ pub fn canonical_session_from_materialized(
                 TranscriptBody::User { content } => CanonicalTranscriptBody::User {
                     content: content.clone(),
                 },
+                TranscriptBody::Message { event } => CanonicalTranscriptBody::Message {
+                    event: event.clone(),
+                },
                 TranscriptBody::Agent { chunks, streaming } => CanonicalTranscriptBody::Agent {
                     chunks: chunks.clone(),
                     streaming: *streaming,
@@ -394,6 +410,9 @@ pub fn materialized_session_from_canonical(
             let body = match &item.body {
                 CanonicalTranscriptBody::User { content } => TranscriptBody::User {
                     content: content.clone(),
+                },
+                CanonicalTranscriptBody::Message { event } => TranscriptBody::Message {
+                    event: event.clone(),
                 },
                 // Chunks stored before streamed text was merged on the way in
                 // arrive one per token; collapse them as they come back.

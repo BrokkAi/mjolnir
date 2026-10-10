@@ -472,7 +472,7 @@ impl Config {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 15;
+pub const CONFIG_VERSION: u32 = 16;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -828,8 +828,9 @@ impl TryFrom<StoredConfig> for Config {
             // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes; version 13 adds automatic continuation;
             // version 14 moves the global cache opt-out onto machines; version
-            // 15 stops writing the default image into a container target.
-            version: if matches!(version, 1..=14) {
+            // 15 stops writing the default image into a container target;
+            // 16 adds native tool cache storage.
+            version: if matches!(version, 1..=15) {
                 CONFIG_VERSION
             } else {
                 version

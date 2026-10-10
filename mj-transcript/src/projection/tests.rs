@@ -477,7 +477,7 @@ fn golden_mailbox_delivery_transcript() {
         false,
         300,
         MailboxEventBody::ParentMessage {
-            text: "Please check this detail.".into(),
+            text: "Please check this detail.\nThe whole second line must survive delivery.".into(),
         },
     );
     apply_observation(
@@ -684,6 +684,67 @@ fn golden_mailbox_delivery_transcript() {
             command: RelayCommand::MailboxWake { events },
             created_at_ms: 600,
         },
+    );
+
+    // A wake starts an autonomous turn, with no invented local user prompt.
+    apply_observation(
+        &mut session,
+        RelayObservation::CommandStarted {
+            command_id: "mixed-event-wake".into(),
+            started_at_ms: 700,
+        },
+    );
+    apply_observation(
+        &mut session,
+        untagged_agent_chunk("Working on the delivered messages."),
+    );
+    // Hook acknowledgments can carry a batch, and a replay must retain each
+    // original position rather than append another copy.
+    let hook_messages = [
+        mailbox_event(
+            "hook:one",
+            "session_message",
+            false,
+            710,
+            MailboxEventBody::SessionMessage {
+                from: Sender::Session {
+                    id: "review-session".into(),
+                    title: "Review agent".into(),
+                },
+                text: "The first review item.\n支持 Unicode and **markdown**.".into(),
+            },
+        ),
+        mailbox_event(
+            "hook:two",
+            "session_message",
+            false,
+            711,
+            MailboxEventBody::SessionMessage {
+                from: Sender::Session {
+                    id: "untitled-session".into(),
+                    title: String::new(),
+                },
+                text: "The second item arrives in the same acknowledgment.".into(),
+            },
+        ),
+    ];
+    let delivered = RelayObservation::MailboxEventsDelivered {
+        event_keys: hook_messages
+            .iter()
+            .map(|event| event.key.clone())
+            .collect(),
+        path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+        prompt_command_id: None,
+        hook_event: Some("PostToolUse".into()),
+        events: hook_messages.to_vec(),
+        lease_id: Some("batch-lease".into()),
+        steering: None,
+    };
+    apply_observation(&mut session, delivered.clone());
+    apply_observation(&mut session, delivered);
+    apply_observation(
+        &mut session,
+        untagged_agent_chunk("Responding after delivery."),
     );
 
     mj_core::golden::assert_golden(

@@ -309,7 +309,12 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             })
         })),
     }));
-    let additional_directories = acp_additional_directories(&config);
+    let mut additional_directories = acp_additional_directories(&config);
+    super::tool_cache::extend_writable_directories(
+        config.harness,
+        &session_environment,
+        &mut additional_directories,
+    );
     let acp_spec = LaunchSpec {
         clear_context_request: None,
         context_restore: None,

@@ -66,14 +66,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 15
+version = 16
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `15`. |
+| `version` | integer | yes | none | Configuration schema version; use `16`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -99,7 +99,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 14 configuration. Older
+A missing or empty file is treated as an empty version 16 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -708,6 +708,9 @@ it when it carries a setting of its own.
 ### `local`
 
 ```toml
+[machines.local]
+kind = "local"
+
 [machines.local.build_cache]
 max_size = "50GiB"
 ```
@@ -777,16 +780,25 @@ instance. See [AWS EC2](/aws/).
 
 ### Build cache `[machines.<id>.build_cache]`
 
-Every container runtime on a machine can share one mbx build cache, so the
-settings belong to the machine. Caching is enabled by default only when the
-Linux host has mbx 1.22.0 or newer and its filesystem supports reflinks. A
-missing or older mbx leaves sessions uncached; install or upgrade it from
-**Settings › Setup › Machines**.
+Linux raw local/SSH sessions and Podman/Docker sessions share native Go,
+Gradle, Turbo, Nx and Bazel build caches by default. Mjolnir detects the tools
+from manifests in the checkout root; it does not adopt or install a build
+system. Native caches do not require mbx. Set `enabled = false` to disable
+Mjolnir's cache setup for new sessions on the machine. Existing containers keep
+their recorded mounts until recreated.
+
+Rust and C/C++ also use the machine's mbx 1.22.0 or newer. Container mbx needs
+a Linux host and a local filesystem with reflinks; install or upgrade it from
+**Settings › Setup › Machines**. Raw Rust builds keep the host's existing Cargo
+configuration. In C/C++ projects, private `cmake`, `make`, `gmake` and `ninja`
+launchers use `mbx exec`, including the CMake configuration step.
+For Autoconf projects, run `mbx exec ./configure` so configuration records the
+cached compiler launchers before running `make`.
 The host executable is atomically refreshed at `<cache>/.mjolnir/bin/mbx` inside
 the read-write shared cache mount. Mjolnir checks that copy in the container
 before adding its marked Cargo and `mbx` launchers; periodic reconciliation
 refreshes it after host upgrades without interrupting running processes.
-In Settings, open **Machines → [machine] → Build cache (mbx)**, or search for
+In Settings, open **Machines → [machine] → Build caches**, or search for
 **mbx**, **cache**, or **build cache**. The machine row shows its configured
 state and total budget; opening it resolves the host's actual defaults and
 reports any compatibility limitations. See [Container targets](/containers/)
@@ -794,9 +806,33 @@ for cache prerequisites.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | unset (decided by host mbx compatibility and the machine's filesystem) | `false` runs sessions on this machine without the cache. |
+| `enabled` | boolean | no | enabled for supported tools and local filesystems | `false` runs sessions on this machine without the cache. |
+| `tools_directory` | path string | no | `~/.cache/mjolnir/build` on the machine | Absolute path on a local filesystem for Go, Gradle, Turbo and Bazel. Independent of mbx's directory and budget. |
 | `directory` | path string | no | the host's native mbx cache directory | Must be absolute. It is a path on that machine, not on the controller. New sessions use the directory reported by native mbx; a missing or too-old mbx does not get a fallback cache. |
 | `max_size` | string | no | the host's native mbx configuration | An mbx size such as `100GiB`. Configure limits on the machine with mbx. |
+
+Go shares `GOCACHE` and adds `-trimpath` to `GOFLAGS`, which makes package cache
+keys independent of checkout paths. Explicit environment overrides, including
+`-trimpath=false`, win. Gradle uses a private user home for each checkout and
+shares only task outputs. Existing user properties and initialization scripts
+are preserved; repository cache settings and `--no-build-cache` still apply.
+Turbo uses a per-project `TURBO_CACHE_DIR`. Bazel/Bazelisk launchers add a private
+rc file with `build --disk_cache=...`; explicit command-line flags take
+precedence, and `--ignore_all_rc_files` disables this configuration too.
+
+Nx 23.2 or newer owns coordinated artifact and database sharing under the host's
+`~/.nx`. Mjolnir mounts that real directory at the container's `HOME/.nx`;
+checkout-specific state remains private. The standard image uses
+`HOME=/home/hel`; custom Docker images with another home must declare `HOME`
+in their target environment. Existing Nx cache overrides remain untouched and
+may opt out of Nx's automatic sharing. Older Nx versions need an upgrade for
+sharing between independent clones. Mjolnir never disables Nx cache validation.
+
+These caches reuse completed outputs. Each tool manages its own retention and
+locking; mbx's size and scheduler settings do not limit native caches. Task
+caches require correctly declared inputs and outputs in the repository. Cache
+stores persist when a session is destroyed. Private Gradle dependency caches
+are not shared across containers.
 
 The optional `scheduler` table controls mbx's shared compiler scheduler:
 
@@ -999,7 +1035,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 15
+version = 16
 
 [phone]
 enabled = true

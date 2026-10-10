@@ -228,7 +228,7 @@ pub(crate) struct EventArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct MessageArgs {
-    /// Session id, as `mj sessions` lists it.
+    /// Full session ID or unique case-insensitive hexadecimal prefix of at least 8 characters.
     #[arg(long)]
     session: String,
     /// Print the response as JSON instead of text.
@@ -347,7 +347,7 @@ pub(crate) struct TranscriptArgs {
 fn parse_transcript_role(value: &str) -> Result<mj_core::transcript::TranscriptRole, String> {
     serde_json::from_value(serde_json::Value::String(value.into())).map_err(|_| {
         format!(
-            "unknown transcript role {value:?}; expected user, agent, thought, tool, terminal, plan, plan_proposal, or system"
+            "unknown transcript role {value:?}; expected user, agent, message, thought, tool, terminal, plan, plan_proposal, or system"
         )
     })
 }
@@ -368,6 +368,7 @@ fn requested_transcript_roles(
         return Ok(vec![
             TranscriptRole::User,
             TranscriptRole::Agent,
+            TranscriptRole::Message,
             TranscriptRole::Thought,
             TranscriptRole::Plan,
             TranscriptRole::PlanProposal,
@@ -3289,6 +3290,7 @@ mod tests {
             [
                 TranscriptRole::User,
                 TranscriptRole::Agent,
+                TranscriptRole::Message,
                 TranscriptRole::Thought,
                 TranscriptRole::Plan,
                 TranscriptRole::PlanProposal,

@@ -290,7 +290,7 @@ fn the_wheel_scrolls_whichever_pane_it_is_over() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let (mut chat, reviewer) = drawn_split();
-    let primary_before = chat.anchor;
+    let primary_before = chat.anchor.clone();
 
     let wheel = |kind, column, row| MouseEvent {
         kind,

@@ -1362,6 +1362,13 @@ pub fn apply_runtime_event_to_entries(
 pub fn transcript_item_text(item: &TranscriptItem) -> String {
     match &item.body {
         TranscriptBody::User { content } => materialized_content_text(content),
+        TranscriptBody::Message { event } => format!(
+            "{}\n\n{}",
+            event.message_label(),
+            mj_core::transcript::sanitize_terminal_text(
+                event.message_text().expect("message entry metadata")
+            )
+        ),
         TranscriptBody::Agent { chunks, .. } | TranscriptBody::Thought { chunks, .. } => {
             materialized_chunks_text(chunks)
         }

@@ -66,7 +66,7 @@ pub(super) fn repository_default() -> Value {
 }
 
 fn build_cache_defaults() -> Value {
-    json!({"enabled":null,"directory":null,"max_total_size":null,"scheduler":scheduler_defaults()})
+    json!({"enabled":null,"directory":null,"tools_directory":null,"max_total_size":null,"scheduler":scheduler_defaults()})
 }
 
 fn scheduler_defaults() -> Value {
@@ -241,7 +241,7 @@ pub(super) fn label(key: &str) -> String {
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
-        "build_cache" => "Build cache (mbx)",
+        "build_cache" => "Build caches",
         "scheduler" => "Compile scheduling",
         "directory" => "Cache directory",
         "max_total_size" => "Total cache budget (GB)",
@@ -288,6 +288,7 @@ pub(super) fn label(key: &str) -> String {
         "github" => "GitHub owner/repository",
         "local" => "Local repository directory",
         "destination" => "Checkout folder",
+        "tools_directory" => "Native tool cache directory",
         "root" => "Storage directory",
         "helper" => "Storage helper command",
         _ => key,
@@ -319,6 +320,9 @@ pub(super) fn field_label(path: &[String]) -> String {
 pub(super) fn null_label(path: &[String], draft: &Value) -> String {
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     match parts.as_slice() {
+        ["machines", _, "build_cache", "tools_directory"] => {
+            "~/.cache/mjolnir/build on the machine".to_owned()
+        }
         ["machines", _, "build_cache", "scheduler", "cpus"] => "Available logical CPUs".to_owned(),
         ["machines", _, "build_cache", "scheduler", "memory"] => "85% of host memory".to_owned(),
         ["profiles", _, "subagents", "effort"] => "Model default".to_owned(),
@@ -684,9 +688,16 @@ pub(super) fn page_help(path: &[String], draft: &Value) -> &'static str {
 /// Alternate names for a page participate in the search's preferred matches.
 pub(super) fn search_aliases(path: &[String]) -> &'static [&'static str] {
     match path {
-        [section, _, page] if section == "machines" && page == "build_cache" => {
-            &["mbx", "cache", "build cache"]
-        }
+        [section, _, page] if section == "machines" && page == "build_cache" => &[
+            "mbx",
+            "cache",
+            "build cache",
+            "Go",
+            "Gradle",
+            "Turbo",
+            "Nx",
+            "Bazel",
+        ],
         _ => &[],
     }
 }
@@ -795,7 +806,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."
         }
         "build_cache" => {
-            "Linux Rust cache needs mbx 1.22.0 or newer. Install or upgrade it in Settings › Setup › Machines."
+            "Share build caches on Linux: mbx for Rust/C/C++, native caches for Go, Gradle, Turbo, Nx and Bazel."
+        }
+        "tools_directory" => {
+            "Go, Gradle, Turbo and Bazel on local disk. Nx 23.2+ uses ~/.nx. Blank uses ~/.cache/mjolnir/build."
         }
         "directory" => {
             "The cache directory reported by the machine's native mbx installation. Configure its location on that machine."
@@ -848,7 +862,12 @@ pub(super) fn path_kind(path: &[String]) -> Option<PathKind> {
         | ["machines", _, "identity_file"]
         | ["bundles", _, "repositories", _, "local"] => Some(Local),
         ["machines", _, "workspace_prefix"]
-        | ["machines", _, "build_cache", "directory"]
+        | [
+            "machines",
+            _,
+            "build_cache",
+            "directory" | "tools_directory",
+        ]
         | ["targets", _, "workspace_storage", "root"] => Some(Target),
         ["bundles", _, "repositories", _, "destination"] => Some(RelativeDestination),
         _ => None,

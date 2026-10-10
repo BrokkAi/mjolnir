@@ -11,6 +11,7 @@ pub(crate) mod mbx;
 pub mod move_session;
 mod network_git;
 mod new_session_preflight;
+mod tool_cache;
 pub use new_session_preflight::{NewSessionPreflight, NewSessionRepository};
 mod path_completion;
 pub mod profile_config;

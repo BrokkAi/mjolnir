@@ -26,7 +26,7 @@ pub(crate) fn render_transcript(
     let window = chat.viewport(content_width, viewport_height);
     // The window resolves and clamps the anchor: an anchor inside the last
     // screenful snaps back to following the tail.
-    chat.anchor = window.anchor;
+    chat.anchor = window.anchor.clone();
     let at_tail = window.anchor == TranscriptAnchor::Bottom;
     let top = window.top;
     let mut title = transcript_title(chat, mj_core::clock::epoch_seconds());
@@ -73,9 +73,13 @@ pub(crate) fn render_transcript(
         u16::from(inner.width > 0),
         inner.height,
     );
-    if let Some(geometry) =
-        chat.update_transcript_scrollbar(track, content_width, viewport_height, top, chat.anchor)
-    {
+    if let Some(geometry) = chat.update_transcript_scrollbar(
+        track,
+        content_width,
+        viewport_height,
+        top,
+        chat.anchor.clone(),
+    ) {
         render_scrollbar(frame, geometry);
     }
 }
@@ -132,7 +136,7 @@ pub(crate) fn transcript_title(chat: &ChatState, now_epoch_seconds: u64) -> Line
         spans.push(Span::styled("  ", style));
         spans.push(Span::styled(chat.header_title.clone(), theme::title(false)));
     }
-    let suffix = match (chat.anchor, chat.render_mode) {
+    let suffix = match (chat.anchor.clone(), chat.render_mode) {
         (TranscriptAnchor::Restoring(_), _) => format!("{separator}Loading… "),
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Rich) => " ".to_owned(),
         (TranscriptAnchor::Bottom, TranscriptRenderMode::Raw) => {
@@ -488,7 +492,7 @@ fn render_entry_tracking(
     let mut out = Vec::new();
     let visual = entry_visual(entry);
     let time = match entry.role {
-        ChatRole::User | ChatRole::Agent | ChatRole::System => {
+        ChatRole::User | ChatRole::Agent | ChatRole::Message | ChatRole::System => {
             format_event_time(entry.recorded_at_ms)
         }
         _ => None,
@@ -765,6 +769,7 @@ fn role_glyph(entry: &ChatEntry) -> &'static str {
     let glyphs = theme::glyphs();
     match entry.role {
         ChatRole::User => glyphs.role_user,
+        ChatRole::Message => glyphs.role_message,
         ChatRole::Agent => glyphs.role_agent,
         ChatRole::Thought => glyphs.role_thought,
         ChatRole::Plan => glyphs.role_plan,
@@ -807,6 +812,20 @@ pub(super) fn entry_visual(entry: &ChatEntry) -> EntryVisual {
                 header_style: style,
                 body_style: Style::default(),
                 rail_style: Style::default().fg(theme::palette().border),
+            }
+        }
+        ChatRole::Message => {
+            let style = Style::default().fg(theme::palette().secondary);
+            EntryVisual {
+                glyph: role_glyph(entry),
+                label: entry
+                    .incoming_message
+                    .as_ref()
+                    .expect("message entry metadata")
+                    .message_label(),
+                header_style: style,
+                body_style: Style::default(),
+                rail_style: style,
             }
         }
         ChatRole::Thought => {

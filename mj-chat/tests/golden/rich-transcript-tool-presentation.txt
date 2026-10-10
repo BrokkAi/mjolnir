@@ -992,3 +992,106 @@ expanded tools: {2}
 |                                                                              |
 +--------------------------------------------------- Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send | ctrl+b then : palette - ? keys
+
+=== dedicated delivered messages wrap between agent replies (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ← Message from Review agent · 15:00     ▐│
+│ │ This report has one item.             ▐│
+│ │ The actual message continues here,    ▐│
+│ │ with markdown and enough words to wrap▐│
+│ │ on a narrow terminal.                 ▐│
+│                                         ▐│
+│ ← Message from Build agent · 15:00      ▐│
+│ │ The checks passed.                    ▐│
+│ │ Keep this second message visible too. ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== restored anchor distinguishes messages in one delivery (44x24) ===
+╭ Conversation ────────────────────────────╮
+│ ● Agent · 15:00                         ▐│
+│ │ I am checking the report.             ▐│
+│                                         ▐│
+│ ← Message from Review agent · 15:00     ▐│
+│ │ This report has one item.             ▐│
+│ │ The actual message continues here,    ▐│
+│ │ with markdown and enough words to wrap▐│
+│ │ on a narrow terminal.                 ▐│
+│                                         ▐│
+│ ← Message from Build agent · 15:00      ▐│
+│ │ The checks passed.                    ▐│
+│ │ Keep this second message visible too. ▐│
+│                                         ▐│
+│ ● Agent · 15:00                         ▐│
+│ │ I will address that item.             ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+{"Entry":{"start_seq":2,"stable_id":"message:review-two","row":0}}
+
+=== incoming message ASCII marks (44x36) ===
++ Conversation ----------------------------+
+| * Agent - 15:00                         #|
+| | I am checking the report.             #|
+|                                         #|
+| < Message from Review agent - 15:00     #|
+| | This report has one item.             #|
+| | The actual message continues here,    #|
+| | with markdown and enough words to wrap#|
+| | on a narrow terminal.                 #|
+|                                         #|
+| < Message from Build agent - 15:00      #|
+| | The checks passed.                    #|
+| | Keep this second message visible too. #|
+|                                         #|
+| * Agent - 15:00                         #|
+| | I will address that item.             #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
++------------------------------------------+
++ mic -------------------------------------+
+|> Message the agent, or / for commands    |
+|                                          |
++------------------------------------------+
+Tab pane | ctrl+b then : palette - ? keys

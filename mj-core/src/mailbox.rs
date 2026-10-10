@@ -50,6 +50,41 @@ pub(crate) struct LegacyMailboxEvent<'a> {
 }
 
 impl MailboxEvent {
+    /// Full message text, as distinct from an informational mailbox event.
+    pub fn message_text(&self) -> Option<&str> {
+        match &self.body {
+            MailboxEventBody::ParentMessage { text }
+            | MailboxEventBody::SessionMessage { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Human sender label; the event retains the complete session identity.
+    pub fn message_label(&self) -> String {
+        let sender = match &self.body {
+            MailboxEventBody::ParentMessage { .. } => "your parent agent",
+            MailboxEventBody::SessionMessage {
+                from: Sender::Session { id, title },
+                ..
+            } => {
+                if title.trim().is_empty() {
+                    id
+                } else {
+                    title
+                }
+            }
+            MailboxEventBody::SessionMessage {
+                from: Sender::User, ..
+            } => "the user",
+            _ => "external source",
+        };
+        let sender = crate::transcript::sanitize_terminal_text(sender)
+            .lines()
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("Message from {sender}")
+    }
+
     pub(crate) fn legacy_representation(&self) -> LegacyMailboxEvent<'_> {
         let text = match &self.body {
             MailboxEventBody::PlainText { text } => Cow::Borrowed(text.as_str()),

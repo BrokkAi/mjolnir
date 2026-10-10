@@ -53,6 +53,10 @@ pub const BROWSER_LINE_BYTES: usize = 4 * 1024;
 pub struct HistoryEntry {
     pub role: &'static str,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_at_ms: Option<i64>,
 }
 
 pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<HistoryEntry> {
@@ -60,7 +64,18 @@ pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<Hi
         .iter()
         .map(|item| HistoryEntry {
             role: mj_core::transcript::transcript_item_role(&item.body),
-            text: mj_transcript::transcript::transcript_item_text(item),
+            text: match &item.body {
+                TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
+                    event.message_text().expect("message entry metadata"),
+                ),
+                _ => mj_transcript::transcript::transcript_item_text(item),
+            },
+            label: match &item.body {
+                TranscriptBody::Message { event } => Some(event.message_label()),
+                _ => None,
+            },
+            recorded_at_ms: matches!(&item.body, TranscriptBody::Message { .. })
+                .then_some(item.created_at_ms),
         })
         .collect()
 }
@@ -90,7 +105,7 @@ pub fn browser_transcript(
         .collect::<Vec<_>>();
     let mut remaining = BROWSER_TRANSCRIPT_LINES;
     for entry in entries.iter_mut().rev() {
-        if entry.lines.len() > remaining {
+        if entry.role != "message" && entry.lines.len() > remaining {
             let omitted = entry
                 .lines
                 .len()
@@ -349,6 +364,7 @@ pub fn entry_role(item: &TranscriptItem) -> ChatRole {
                 ChatRole::User
             }
         }
+        TranscriptBody::Message { .. } => ChatRole::Message,
         TranscriptBody::Agent { .. } => ChatRole::Agent,
         TranscriptBody::Thought { .. } => ChatRole::Thought,
         TranscriptBody::Tool { .. } => ChatRole::Tool,
@@ -376,7 +392,8 @@ pub fn materialized_chat_entry(item: &Arc<TranscriptItem>, frontier: u64) -> Cha
 pub fn item_update_ordinal(item: &TranscriptItem, frontier: u64) -> u64 {
     let latest = match &item.body {
         // Created once and never revisited, so the creating event is exact.
-        TranscriptBody::User { .. }
+        TranscriptBody::Message { .. }
+        | TranscriptBody::User { .. }
         | TranscriptBody::System { .. }
         | TranscriptBody::PlanProposal { .. } => item.position,
         // Every appended chunk records the ordinal that appended it. Closing
@@ -401,6 +418,7 @@ pub fn materialized_chat_entry_with_diffstats(
             entry_role(item),
             materialized_content_text(content),
         ),
+        TranscriptBody::Message { event } => ChatEntry::received_message(item.position, event),
         TranscriptBody::Agent { chunks, .. } => ChatEntry::plain(
             item.position,
             ChatRole::Agent,
@@ -552,6 +570,14 @@ pub fn user_label(entry: &ChatEntry) -> &'static str {
 pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
     let (role, label) = match entry.role {
         ChatRole::User => ("user", user_label(entry).to_owned()),
+        ChatRole::Message => (
+            "message",
+            entry
+                .incoming_message
+                .as_ref()
+                .expect("message entry metadata")
+                .message_label(),
+        ),
         ChatRole::Agent => ("agent", "Agent".to_owned()),
         ChatRole::Thought => ("thought", "Thinking".to_owned()),
         ChatRole::Tool => ("tool", format!("Tool · {}", tool_state_name(entry))),
@@ -596,6 +622,8 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
                 .or_else(|| item.stable_id.strip_prefix("shell:"))
                 .map(str::to_owned)
         }),
+        stable_id: (entry.role == ChatRole::Message)
+            .then(|| entry.message_id.clone().expect("message identity")),
         id: entry.start_seq,
         updated_seq: entry.seq,
         role,
@@ -603,7 +631,13 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         recorded_at_ms: entry.recorded_at_ms,
         lines: source
             .into_iter()
-            .map(|line| truncate_browser_line(&line))
+            .map(|line| {
+                if entry.role == ChatRole::Message {
+                    line
+                } else {
+                    truncate_browser_line(&line)
+                }
+            })
             .collect(),
         glyph: entry_glyph(entry),
         tone: entry_tone(entry),
@@ -722,6 +756,7 @@ pub fn rich_presentation_key(
 pub fn role_tag(role: ChatRole) -> &'static [u8] {
     match role {
         ChatRole::User => b"user",
+        ChatRole::Message => b"message",
         ChatRole::Agent => b"agent",
         ChatRole::Thought => b"thought",
         ChatRole::Tool => b"tool",
@@ -738,6 +773,7 @@ pub fn role_tag(role: ChatRole) -> &'static [u8] {
 pub fn entry_tone(entry: &ChatEntry) -> &'static str {
     match entry.role {
         ChatRole::User => "user",
+        ChatRole::Message => "message",
         ChatRole::Agent => "agent",
         ChatRole::Thought => "thinking",
         ChatRole::Tool if entry.ended_after_interrupt => "system",
@@ -1060,6 +1096,7 @@ fn collapsed_streak_entry_refs(members: &[&ChatEntry]) -> Vec<ChatEntry> {
 pub fn entry_glyph(entry: &ChatEntry) -> &'static str {
     match entry.role {
         ChatRole::User => "❯",
+        ChatRole::Message => "←",
         ChatRole::Agent => "●",
         ChatRole::Thought => "○",
         ChatRole::Plan => "◇",
@@ -1090,7 +1127,7 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
 pub struct BrowserTranscriptProjector {
     entries: Vec<ChatEntry>,
     /// The entries this projector last published, by id.
-    published: BTreeMap<u64, BrowserTranscriptEntry>,
+    published: BTreeMap<String, BrowserTranscriptEntry>,
 }
 
 impl BrowserTranscriptProjector {
@@ -1110,7 +1147,7 @@ impl BrowserTranscriptProjector {
             browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
         let first = self.published.is_empty();
         for entry in &mut transcript.entries {
-            match self.published.get(&entry.id) {
+            match self.published.get(&entry.identity()) {
                 Some(previous) if same_rendering(previous, entry) => {
                     entry.updated_seq = previous.updated_seq;
                 }
@@ -1122,7 +1159,7 @@ impl BrowserTranscriptProjector {
         self.published = transcript
             .entries
             .iter()
-            .map(|entry| (entry.id, entry.clone()))
+            .map(|entry| (entry.identity(), entry.clone()))
             .collect();
         transcript
     }
@@ -1133,6 +1170,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
     let BrowserTranscriptEntry {
         command_id,
         id,
+        stable_id,
         updated_seq: _,
         role,
         label,
@@ -1143,7 +1181,8 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         tool_status,
         diffstats,
     } = next;
-    previous.command_id == *command_id
+    previous.stable_id == *stable_id
+        && previous.command_id == *command_id
         && previous.id == *id
         && previous.role == *role
         && previous.label == *label
@@ -1159,6 +1198,74 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn golden_delivered_message_browser_history() {
+        let mut session = MaterializedSession::empty("recipient");
+        session.applied_event_ordinal = 10;
+        for (key, sender, text) in [
+            (
+                "first",
+                "Reviewer",
+                "One finding.\nThe complete **second line**.",
+            ),
+            ("second", "Builder", "Build passed.\n支持 Unicode."),
+        ] {
+            session.transcript.push(Arc::new(TranscriptItem {
+                stable_id: mj_core::transcript::message_item_id(key),
+                position: 10,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1_000,
+                last_changed_at_ms: 1_000,
+                body: TranscriptBody::Message {
+                    event: Box::new(mj_core::mailbox::MailboxEvent {
+                        key: key.into(),
+                        source: "session_message".into(),
+                        wake: false,
+                        created_at_ms: 900,
+                        body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                            from: mj_core::mailbox::Sender::Session {
+                                id: format!("{key}-sender"),
+                                title: sender.into(),
+                            },
+                            text: text.into(),
+                        },
+                    }),
+                },
+            }));
+        }
+        let mut projector = BrowserTranscriptProjector::default();
+        let browser = assert_projection(&mut projector, &session);
+        session.applied_event_ordinal = 11;
+        let unchanged = assert_projection(&mut projector, &session);
+        assert_eq!(
+            unchanged.entries, browser.entries,
+            "a batch has independent publication cursors"
+        );
+        let page = mj_core::storage::TranscriptHistoryPage {
+            items: session.transcript.clone(),
+            before: None,
+            frontier: session.applied_event_ordinal,
+        };
+        let history = history_entries(&page);
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "delivered-message-browser-history",
+            &serde_json::to_string_pretty(&json!({"live": browser, "earlier": history})).unwrap(),
+        );
+        // Full message content also survives the live browser's ordinary
+        // tool-output byte/line budgets.
+        let TranscriptBody::Message { event } = &mut Arc::make_mut(&mut session.transcript[0]).body
+        else {
+            unreachable!()
+        };
+        let large = "支持 Unicode and a complete line.\n".repeat(2_500);
+        event.body = mj_core::mailbox::MailboxEventBody::ParentMessage {
+            text: large.clone(),
+        };
+        let browser = projector.project(&session);
+        assert_eq!(browser.entries[0].lines.join("\n") + "\n", large);
+    }
 
     fn item(position: u64, body: TranscriptBody) -> Arc<TranscriptItem> {
         Arc::new(TranscriptItem {

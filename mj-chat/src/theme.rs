@@ -475,6 +475,7 @@ pub struct Glyphs {
     /// message uses `rule` and a tool row uses the tool-status glyphs, so only
     /// the kinds without a mark of their own are listed here.
     pub role_user: &'static str,
+    pub role_message: &'static str,
     pub role_agent: &'static str,
     pub role_thought: &'static str,
     pub role_plan: &'static str,
@@ -532,6 +533,7 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     // as a compact text button rather than an emoji of a different width.
     microphone: "🎙︎",
     role_user: "❯",
+    role_message: "←",
     role_agent: "●",
     role_thought: "○",
     role_plan: "◇",
@@ -586,6 +588,7 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     role_gutter: "| ",
     microphone: "mic",
     role_user: ">",
+    role_message: "<",
     role_agent: "*",
     role_thought: "o",
     role_plan: "-",

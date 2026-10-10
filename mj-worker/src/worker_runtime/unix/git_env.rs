@@ -101,8 +101,6 @@ pub fn configure_github_cli(
 ) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    const ORIGINAL_BASH_ENV: &str = "MJ_ORIGINAL_BASH_ENV";
-
     let paths = GithubCliPaths::new(root);
     let bin = &paths.bin;
     if std::fs::symlink_metadata(bin).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
@@ -149,50 +147,15 @@ exec gh "$@"
     mj_core::config::atomic_write_existing(wrapper, WRAPPER.as_bytes())?;
     std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700))?;
 
-    // Harnesses can start `bash -lc`, whose login profile may replace PATH
-    // after the ACP bridge inherited it. BASH_ENV is read after that profile.
-    let shell_environment = root.join("github-shell-env");
-    if std::fs::symlink_metadata(&shell_environment)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-    {
-        bail!(
-            "GitHub CLI shell environment {} is a symbolic link",
-            shell_environment.display()
-        );
-    }
-    const SHELL_ENVIRONMENT: &str = r#"if [ -n "${MJ_ORIGINAL_BASH_ENV:-}" ] && [ "${MJ_ORIGINAL_BASH_ENV}" != "${BASH_ENV:-}" ] && [ -r "${MJ_ORIGINAL_BASH_ENV}" ]; then
-    . "${MJ_ORIGINAL_BASH_ENV}"
-fi
-if [ -n "${MJ_GITHUB_CLI_BIN:-}" ]; then
-    case ":${PATH:-}:" in
-        *:"${MJ_GITHUB_CLI_BIN}":*) ;;
-        *) PATH="${MJ_GITHUB_CLI_BIN}${PATH:+:${PATH}}"; export PATH ;;
-    esac
-fi
-"#;
-    mj_core::config::atomic_write_existing(&shell_environment, SHELL_ENVIRONMENT.as_bytes())?;
-    std::fs::set_permissions(&shell_environment, std::fs::Permissions::from_mode(0o600))?;
-
     prepend_github_cli_path(bin, environment)?;
     environment.insert(
         crate::worker_runtime::GITHUB_CLI_BIN_ENV.into(),
         bin.to_string_lossy().into_owned(),
     );
-    let shell_environment_text = shell_environment.to_string_lossy().into_owned();
-    let original_bash_env = environment
-        .get("BASH_ENV")
-        .filter(|configured| configured.as_str() != shell_environment_text)
-        .cloned()
-        .or_else(|| environment.get(ORIGINAL_BASH_ENV).cloned());
-    match original_bash_env {
-        Some(original) => {
-            environment.insert(ORIGINAL_BASH_ENV.into(), original);
-        }
-        None => {
-            environment.remove(ORIGINAL_BASH_ENV);
-        }
-    }
-    environment.insert("BASH_ENV".into(), shell_environment_text);
+    crate::worker_runtime::shell_environment::configure(
+        &root.join("github-shell-env"),
+        environment,
+    )?;
     configure_git_config_file(root, environment, &paths, saved_home, extra_global_include)?;
     Ok(())
 }

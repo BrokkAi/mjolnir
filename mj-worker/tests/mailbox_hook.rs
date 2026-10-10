@@ -2,6 +2,10 @@
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use mj_core::mailbox::{MailboxEvent, MailboxEventBody};
@@ -19,6 +23,15 @@ fn run_hook(
     data_dir: &std::path::Path,
     config_dir: &std::path::Path,
 ) -> serde_json::Value {
+    run_hook_with_stdin(socket, data_dir, config_dir, vec![b'x'; 128 * 1024])
+}
+
+fn run_hook_with_stdin(
+    socket: &std::path::Path,
+    data_dir: &std::path::Path,
+    config_dir: &std::path::Path,
+    stdin: Vec<u8>,
+) -> serde_json::Value {
     let mut command = CommandSpec::new(
         env!("CARGO_BIN_EXE_mj-worker"),
         [
@@ -30,7 +43,7 @@ fn run_hook(
             "PostToolUse",
         ],
     )
-    .with_sensitive_stdin(vec![b'x'; 128 * 1024]);
+    .with_sensitive_stdin(stdin);
     command.clear_env = true;
     command.env.extend([
         (
@@ -76,6 +89,106 @@ fn relay_events(relay: &mut DurableRelay, request_id: &str) -> Vec<mj_core::rela
         panic!("could not inspect relay event journal");
     };
     events
+}
+
+// Hard-won: native-subagent-hook: a child hook can consume a message before its parent sees it.
+#[test]
+fn subagent_hook_input_leaves_mailbox_for_main_agent() {
+    let root = tempfile::tempdir().expect("isolated mailbox hook root");
+    let relay_root = root.path().join("relay");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+
+    let socket = root.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).expect("bind a real Unix control socket");
+    listener.set_nonblocking(true).unwrap();
+    let mut relay = DurableRelay::open(&relay_root, SESSION, "test").unwrap();
+    let event = MailboxEvent {
+        key: "api:subagent-hook-test".into(),
+        source: "api".into(),
+        wake: false,
+        created_at_ms: 1,
+        body: MailboxEventBody::PlainText {
+            text: "This mailbox event belongs to the main agent.".into(),
+        },
+    };
+    let accepted = relay.handle(RelayRequestEnvelope {
+        request_id: "seed-subagent-hook-event".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::Submit {
+            command_id: "seed-subagent-hook-event-command".into(),
+            command: RelayCommand::DeliverMailboxEvent {
+                event: event.clone(),
+            },
+        },
+    });
+    assert!(matches!(accepted.body, RelayResponseBody::Ok { .. }));
+
+    let stopping = Arc::new(AtomicBool::new(false));
+    let server_stopping = Arc::clone(&stopping);
+    let server = std::thread::spawn(move || {
+        while !server_stopping.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut writer = stream;
+                    serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
+                        .expect("serve the actual durable relay protocol");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept mailbox hook connection: {error}"),
+            }
+        }
+        relay
+    });
+
+    let subagent_output = run_hook_with_stdin(
+        &socket,
+        &data_dir,
+        &config_dir,
+        serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "agent_id": "native-subagent-id",
+            "agent_type": "general-purpose",
+        }))
+        .unwrap(),
+    );
+    let main_output = run_hook_with_stdin(
+        &socket,
+        &data_dir,
+        &config_dir,
+        serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "top-level-session-id",
+        }))
+        .unwrap(),
+    );
+    stopping.store(true, Ordering::Release);
+    let mut relay = server.join().expect("relay socket server thread");
+
+    assert_eq!(subagent_output, serde_json::json!({}));
+    assert_eq!(
+        main_output["hookSpecificOutput"]["additionalContext"],
+        mj_core::mailbox::render_mailbox_events(std::slice::from_ref(&event))
+    );
+    assert_eq!(
+        relay_events(&mut relay, "inspect-subagent-hook-delivery")
+            .iter()
+            .filter(|event| matches!(
+                &event.observation,
+                RelayObservation::MailboxEventsDelivered {
+                    event_keys,
+                    path: mj_core::mailbox::MailboxDeliveryPath::ToolHook,
+                    ..
+                } if event_keys.len() == 1 && event_keys[0] == "api:subagent-hook-test"
+            ))
+            .count(),
+        1
+    );
 }
 
 #[test]

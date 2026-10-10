@@ -70,30 +70,11 @@ impl CacheHost {
 pub(super) struct PreparedCloneCache {
     host: CacheHost,
     session_root: PathBuf,
-    /// Host mirror of each cached repository, by its bundle destination. The
-    /// mirror is a real bare repository on the host, so it answers questions
-    /// about the session's code before any container exists.
-    mirrors: BTreeMap<String, PathBuf>,
 }
 
 impl PreparedCloneCache {
     pub(super) fn cleanup(&self, executor: &impl CommandExecutor) -> Result<()> {
         cleanup_session_root(&self.host, &self.session_root, executor)
-    }
-
-    /// The host mirror for the repository checked out at `destination`.
-    pub(super) fn mirror_for(&self, destination: &str) -> Option<&Path> {
-        self.mirrors.get(destination).map(PathBuf::as_path)
-    }
-
-    /// A prepared cache with only the mirrors a test needs.
-    #[cfg(test)]
-    pub(super) fn from_mirrors(mirrors: BTreeMap<String, PathBuf>) -> Self {
-        Self {
-            host: CacheHost::Local,
-            session_root: PathBuf::from("/tmp/hel-git-cache"),
-            mirrors,
-        }
     }
 }
 
@@ -204,7 +185,6 @@ pub(super) fn prepare(
         let _ = cleanup_session_root(&host, &session_root, executor);
         return None;
     }
-    let mut mirrors = BTreeMap::new();
     for repository in &mut bundle.repositories {
         let Some(source) = repository.url.as_deref() else {
             continue;
@@ -213,12 +193,6 @@ pub(super) fn prepare(
             continue;
         };
         repository.reference = references.get(&key).cloned();
-        if references.contains_key(&key) {
-            mirrors.insert(
-                repository.destination.clone(),
-                cache_root.join("mirrors").join(&key).join("repo.git"),
-            );
-        }
     }
     mounts.push(AdditionalMount {
         source: session_root.clone(),
@@ -241,11 +215,7 @@ pub(super) fn prepare(
     if let Err(error) = collect_garbage(&host, &cache_root, &live_sessions, executor) {
         executor.notify_notice(&format!("Clone-cache cleanup was skipped: {error:#}"));
     }
-    Some(PreparedCloneCache {
-        host,
-        session_root,
-        mirrors,
-    })
+    Some(PreparedCloneCache { host, session_root })
 }
 
 fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {

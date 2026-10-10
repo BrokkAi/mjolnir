@@ -49,6 +49,7 @@ fn a_container_target_without_an_image_uses_the_default_and_names_unknown_keys()
         build_cache: Some(TargetBuildCache {
             enabled: Some(true),
             directory: None,
+            tools_directory: None,
             max_total_size: None,
             scheduler: Default::default(),
         }),
@@ -2172,6 +2173,7 @@ fn a_version_ten_config_becomes_machines_and_runtimes_on_the_next_save() {
     let cache = TargetBuildCache {
         enabled: None,
         directory: None,
+        tools_directory: None,
         max_total_size: Some("50GiB".into()),
         scheduler: Default::default(),
     };
