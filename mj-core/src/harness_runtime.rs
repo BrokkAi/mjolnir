@@ -96,7 +96,7 @@ pub fn managed_harness_manifest_matches(
 }
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
-pub const CODEX_ACP_VERSION: &str = "1.13.6";
+pub const CODEX_ACP_VERSION: &str = "1.13.7";
 pub const CODEX_CLI_VERSION: &str = "0.160.1";
 pub const CLAUDE_ACP_VERSION: &str = "0.87.0";
 pub const CLAUDE_CLI_VERSION: &str = "2.1.293";
@@ -203,8 +203,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.13.6_codex-0.160.1",
-            display_version: "@brokkai/codex-acp 1.13.6 + codex 0.160.1",
+            install_id: "brokkai-codex-acp-1.13.7_codex-0.160.1",
+            display_version: "@brokkai/codex-acp 1.13.7 + codex 0.160.1",
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {
