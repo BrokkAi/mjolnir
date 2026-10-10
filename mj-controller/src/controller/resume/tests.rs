@@ -909,6 +909,87 @@ fn cross_harness_lanes_prove_overlap_with_handshake_channels() {
     assert!(handoff_seen_provision_rx.recv().is_ok());
 }
 
+// Hard-won: 3af552f27: cross-harness provisioning ran without a Tokio reactor.
+#[test]
+fn cross_harness_provisioning_lane_drives_tokio_io_and_timers() {
+    execute_joined_cross_harness_work(
+        "provision",
+        |_cancellation| {
+            block_on_cross_harness_lane("cross-harness provisioning", async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let address = listener.local_addr()?;
+                let (accepted, connected) = tokio::time::timeout(Duration::from_secs(2), async {
+                    tokio::join!(listener.accept(), tokio::net::TcpStream::connect(address))
+                })
+                .await?;
+                accepted?;
+                connected?;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                Ok(())
+            })
+        },
+        "handoff",
+        |_cancellation| Ok(()),
+    )
+    .unwrap();
+}
+
+// Hard-won: 7e50fc9fa: a cross-harness lane waited for its parent Move's worker permit.
+#[test]
+fn cross_harness_lanes_borrow_the_parent_worker_owner() {
+    use crate::worker_lifecycle::WorkerPermit;
+
+    let session_id = "cross-harness-lane-owner-test";
+    let owner = WorkerPermit::try_acquire(session_id, "test parent move")
+        .unwrap()
+        .unwrap();
+    let (provision_owner, handoff_owner) = owner
+        .scope_blocking(|| {
+            execute_joined_cross_harness_work(
+                "provision",
+                |_cancellation| {
+                    block_on_cross_harness_lane("provision", async {
+                        let nested = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            WorkerPermit::acquire(
+                                session_id,
+                                "test provisioning",
+                                &ProcessExecutor,
+                            ),
+                        )
+                        .await??;
+                        Ok(nested.operation_id().to_owned())
+                    })
+                },
+                "handoff",
+                |_cancellation| {
+                    block_on_cross_harness_lane("handoff", async {
+                        let nested = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            WorkerPermit::acquire(session_id, "test handoff", &ProcessExecutor),
+                        )
+                        .await??;
+                        Ok(nested.operation_id().to_owned())
+                    })
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(provision_owner, owner.operation_id());
+    assert_eq!(handoff_owner, owner.operation_id());
+    assert!(
+        WorkerPermit::try_acquire(session_id, "test unrelated operation")
+            .unwrap()
+            .is_none()
+    );
+    drop(owner);
+    assert!(
+        WorkerPermit::try_acquire(session_id, "test next operation")
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[test]
 fn cross_harness_lane_failure_cancels_and_joins_the_peer() {
     let (handoff_started_tx, handoff_started_rx) = std::sync::mpsc::sync_channel::<()>(1);
