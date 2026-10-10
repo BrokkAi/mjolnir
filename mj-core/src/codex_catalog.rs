@@ -174,13 +174,14 @@ fn known_reasoning_levels(
 /// Context window and automatic-compaction threshold, in tokens, for known
 /// model families whose providers list only ids.
 ///
-/// DeepSeek V4 serves a 1,000,000-token window. DeepSeek's own harness
-/// (`deepseek-harness`, `compaction-basic`) compacts at 80% of the window, so
+/// DeepSeek models (`deepseek-*`) use a 1,000,000-token window. DeepSeek's
+/// own harness (`deepseek-harness`, `compaction-basic`) compacts at 80% of
+/// the window, so
 /// Codex sessions on these models compact at the same 800,000 tokens rather
 /// than at Codex's default of 90%. Codex clamps the threshold to 90% of the
 /// window, so a `models.json` override that shrinks the window still works.
 fn known_context_limits(slug: &str) -> Option<(u64, u64)> {
-    if slug.starts_with("deepseek-v4") {
+    if slug.starts_with("deepseek-") {
         Some((1_000_000, 800_000))
     } else {
         None
@@ -414,6 +415,7 @@ mod tests {
         {"id":"deepseek-v4-pro","object":"model","owned_by":"deepseek"}
     ]}"#;
 
+    // Hard-won: the live deepseek-flash alias fell back to 128k and compacted far before the intended 800k threshold.
     #[test]
     fn parse_translates_an_openai_model_list_into_catalog_entries() {
         let catalog = parse(OPENAI_LIST).expect("parse");
@@ -435,10 +437,12 @@ mod tests {
             Value::from("high"),
             "the backfilled family default is supplied"
         );
-        assert_eq!(flash["context_window"], Value::from(128000));
-        assert!(
-            !flash.contains_key("auto_compact_token_limit"),
-            "an unknown family keeps Codex's default threshold"
+        assert_eq!(flash["context_window"], Value::from(1_000_000));
+        assert_eq!(flash["max_context_window"], Value::from(1_000_000));
+        assert_eq!(
+            flash["auto_compact_token_limit"],
+            Value::from(800_000),
+            "the provider's Flash alias uses the DeepSeek V4 limits"
         );
         let pro = &catalog.models[1];
         assert_eq!(pro["context_window"], Value::from(1_000_000));
@@ -541,7 +545,8 @@ mod tests {
             Value::from("DeepSeek Reasoner"),
             "the override field is kept on an appended entry"
         );
-        assert_eq!(appended["context_window"], Value::from(128000));
+        assert_eq!(appended["context_window"], Value::from(1_000_000));
+        assert_eq!(appended["auto_compact_token_limit"], Value::from(800_000));
         assert_eq!(appended["shell_type"], Value::from("shell_command"));
         assert!(
             appended.contains_key("supported_reasoning_levels"),
