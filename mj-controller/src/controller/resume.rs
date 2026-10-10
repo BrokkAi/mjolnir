@@ -2551,11 +2551,19 @@ fn execute_joined_cross_harness_work<A: Send, B: Send>(
     second: impl FnOnce(CancellationToken) -> Result<B> + Send,
 ) -> Result<(A, B)> {
     let cancellation = CancellationToken::new();
+    let owner = crate::worker_lifecycle::capture();
     std::thread::scope(|scope| {
         let first_cancel = cancellation.clone();
-        let mut first_handle = Some(scope.spawn(move || first(first_cancel)));
+        let first_owner = owner.clone();
+        let mut first_handle = Some(scope.spawn(move || match first_owner {
+            Some(owner) => owner.scope_blocking(|| first(first_cancel)),
+            None => first(first_cancel),
+        }));
         let second_cancel = cancellation.clone();
-        let mut second_handle = Some(scope.spawn(move || second(second_cancel)));
+        let mut second_handle = Some(scope.spawn(move || match owner {
+            Some(owner) => owner.scope_blocking(|| second(second_cancel)),
+            None => second(second_cancel),
+        }));
         let mut first_result = None;
         let mut second_result = None;
 
