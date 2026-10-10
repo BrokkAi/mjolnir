@@ -909,6 +909,31 @@ fn cross_harness_lanes_prove_overlap_with_handshake_channels() {
     assert!(handoff_seen_provision_rx.recv().is_ok());
 }
 
+// Hard-won: 3af552f27: cross-harness provisioning ran without a Tokio reactor.
+#[test]
+fn cross_harness_provisioning_lane_drives_tokio_io_and_timers() {
+    execute_joined_cross_harness_work(
+        "provision",
+        |_cancellation| {
+            block_on_cross_harness_lane("cross-harness provisioning", async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let address = listener.local_addr()?;
+                let (accepted, connected) = tokio::time::timeout(Duration::from_secs(2), async {
+                    tokio::join!(listener.accept(), tokio::net::TcpStream::connect(address))
+                })
+                .await?;
+                accepted?;
+                connected?;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                Ok(())
+            })
+        },
+        "handoff",
+        |_cancellation| Ok(()),
+    )
+    .unwrap();
+}
+
 #[test]
 fn cross_harness_lane_failure_cancels_and_joins_the_peer() {
     let (handoff_started_tx, handoff_started_rx) = std::sync::mpsc::sync_channel::<()>(1);

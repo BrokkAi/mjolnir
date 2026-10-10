@@ -2496,27 +2496,29 @@ fn provision_with_cross_harness_handoff(
                 inner: executor,
                 cancellation,
             };
-            futures::executor::block_on(controller.provision_session_with_failure_disposition(
-                session_id,
-                &provision_executor,
-                github_token,
-                ProvisioningFailureDisposition::Preserve,
-            ))
+            block_on_cross_harness_lane(
+                "cross-harness provisioning",
+                controller.provision_session_with_failure_disposition(
+                    session_id,
+                    &provision_executor,
+                    github_token,
+                    ProvisioningFailureDisposition::Preserve,
+                ),
+            )
         },
         "cross-harness handoff",
         move |cancellation| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("create cross-harness handoff runtime")?;
-            runtime.block_on(utility_handoff_while_cancellable(
-                session_id,
-                config,
-                snapshot,
-                context_bytes,
-                executor,
-                cancellation,
-            ))
+            block_on_cross_harness_lane(
+                "cross-harness handoff",
+                utility_handoff_while_cancellable(
+                    session_id,
+                    config,
+                    snapshot,
+                    context_bytes,
+                    executor,
+                    cancellation,
+                ),
+            )
         },
     )?;
     ensure!(
@@ -2524,6 +2526,19 @@ fn provision_with_cross_harness_handoff(
         "operation cancelled while provisioning destination"
     );
     Ok(handoff)
+}
+
+/// Each joined OS thread must own the Tokio reactor used by provisioning and
+/// handoff I/O. A plain futures executor cannot drive Tokio sockets or timers.
+fn block_on_cross_harness_lane<T>(
+    name: &str,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .with_context(|| format!("create {name} runtime"))?;
+    runtime.block_on(work)
 }
 
 /// Run the two independent cross-harness lanes together, cancelling and
