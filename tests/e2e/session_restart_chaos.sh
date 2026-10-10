@@ -19,7 +19,15 @@ command -v timeout >/dev/null
 # Requests must speak the relay's exact protocol, so read it from the source
 # the worker under test was built from rather than pinning a number here.
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-relay_protocol=$(sed -n 's/^pub const RELAY_PROTOCOL_VERSION: u32 = \([0-9]*\);$/\1/p' "$repo_root/mj-core/src/relay.rs")
+# The constant may be defined as another named constant, so follow the names
+# until one is a number.
+relay_protocol=RELAY_PROTOCOL_VERSION
+for _ in 1 2 3 4 5; do
+  [[ $relay_protocol =~ ^[0-9]+$ ]] && break
+  relay_protocol=$(sed -n "s/^pub const $relay_protocol: u32 = \([A-Z0-9_]*\);\$/\1/p" "$repo_root/mj-core/src/relay.rs")
+  [[ -n $relay_protocol ]] || break
+done
+[[ $relay_protocol =~ ^[0-9]+$ ]] || relay_protocol=
 [[ -n $relay_protocol ]] || { echo "could not read RELAY_PROTOCOL_VERSION" >&2; exit 2; }
 
 chaos_root=$(mktemp -d)

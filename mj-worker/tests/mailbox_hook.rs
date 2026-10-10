@@ -132,6 +132,9 @@ fn subagent_hook_input_leaves_mailbox_for_main_agent() {
         while !server_stopping.load(Ordering::Acquire) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // macOS accepted sockets inherit the listener's
+                    // non-blocking mode; Linux ones do not.
+                    stream.set_nonblocking(false).unwrap();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut writer = stream;
                     serve_relay_json_lines(&mut reader, &mut writer, &mut relay)
