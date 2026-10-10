@@ -365,7 +365,10 @@ fn stale_worker_fails_before_any_container_is_created() {
         detail.contains("stale-worker") && detail.contains("missing worker build stamp"),
         "{detail}"
     );
-    assert!(detail.contains(mj_core::worker_build::BUILD_ID), "{detail}");
+    assert!(
+        detail.contains(mj_core::worker_build::WORKER_BUILD_ID),
+        "{detail}"
+    );
     assert!(executor.commands().is_empty(), "{:?}", executor.commands());
     assert!(controller.state.sessions[&session].target.is_none());
 }

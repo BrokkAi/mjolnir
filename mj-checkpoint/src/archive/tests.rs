@@ -2551,4 +2551,45 @@ fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     );
     assert_eq!(verified.canonical_session, input.canonical_session);
     assert_eq!(verified.canonical_session.current_context_start(), 2);
+    input
+        .canonical_session
+        .transcript
+        .push(CanonicalTranscriptItem {
+            stable_id: "message:received-one".into(),
+            position: 3,
+            latest_content_event_ordinal: None,
+            created_at_ms: 300,
+            last_changed_at_ms: 300,
+            body: CanonicalTranscriptBody::Message {
+                event: Box::new(mj_core::mailbox::MailboxEvent {
+                    key: "received-one".into(),
+                    source: "session_message".into(),
+                    wake: true,
+                    created_at_ms: 200,
+                    body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                        from: mj_core::mailbox::Sender::Session {
+                            id: "sender-session".into(),
+                            title: "Reviewer".into(),
+                        },
+                        text: "All of the message.\nIncluding 支持 Unicode and the second line."
+                            .into(),
+                    },
+                }),
+            },
+        });
+    let verified = write_archive_atomic(&path, &input).unwrap();
+    assert_eq!(
+        verified.manifest.schema_version,
+        ARCHIVE_SCHEMA_VERSION_MESSAGES
+    );
+    assert_eq!(verified.canonical_session, input.canonical_session);
+    assert_eq!(verified.canonical_session.current_context_start(), 2);
+    let (mut manifest, payloads) = prepare_archive(&input).unwrap();
+    manifest.schema_version = ARCHIVE_SCHEMA_VERSION_CONTEXT;
+    let downgraded = directory.path().join("message-downgraded.hel.zip");
+    let mut file = File::create(&downgraded).unwrap();
+    write_zip(&mut file, &manifest, &payloads).unwrap();
+    drop(file);
+    let error = read_archive_verified(&downgraded).unwrap_err();
+    assert!(format!("{error:#}").contains("message transcript entries require archive schema 9"));
 }

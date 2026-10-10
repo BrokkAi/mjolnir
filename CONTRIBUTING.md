@@ -55,8 +55,10 @@ or on an SSH host. Install Visual Studio Build Tools with the C++ workload. On
 ARM64 Windows, also add the ARM64 build tools and the C++ Clang compiler
 component, and put its `VC\Tools\Llvm\ARM64\bin` on `PATH`: `ring` and
 `aws-lc-sys` compile their ARM64 assembly with clang. Container and SSH targets
-need the static Linux worker built from the same commit as `mj.exe`, since a
-worker must carry the controller's build. Build it on Linux or WSL with
+need the static Linux worker built from the same package version and worker
+inputs as `mj.exe`. The controller and worker may come from different commits
+when those commits changed only controller code or documentation. Build the
+worker on Linux or WSL with
 `cargo build -p brokk-mj-worker --target <arch>-unknown-linux-musl`, then point
 `MJ_WORKER_DIR` at a directory holding it as
 `mj-worker-<arch>-unknown-linux-musl`, or `MJ_WORKER_BINARY` at the file.

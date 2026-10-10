@@ -671,10 +671,9 @@ impl HarnessKind {
     /// entrypoint, relative to the install root.
     pub const fn extra_managed_entrypoint(self) -> Option<&'static str> {
         match self {
-            Self::Muse => Some("bin/muse"),
             Self::Grok => Some("bin/agent"),
             Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex | Self::Kimi | Self::OpenCode => None,
+            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode => None,
         }
     }
 

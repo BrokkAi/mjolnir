@@ -1073,7 +1073,7 @@ fn kimi_shell_tool_run_collapses_to_command_names() {
         transcript_text(&mut chat, 80),
         [
             "✓ Tool · done",
-            "│ rg, cargo test, npm run",
+            "│ rg, cargo test, npm run preview",
             "",
             "❯ You",
             "│ continue",
@@ -1890,7 +1890,7 @@ fn a_view_reopened_from_the_opening_reveal_follows_new_rows() {
 
     let mut unchanged = ChatState::new(&snapshot(), &[]);
     unchanged.entries = chat.entries.clone();
-    unchanged.restore_transcript_position(position);
+    unchanged.restore_transcript_position(position.clone());
     assert_eq!(drawn_transcript(&mut unchanged, 31, 12), opened);
 
     let mut reopened = ChatState::new(&snapshot(), &[]);
@@ -1972,7 +1972,7 @@ fn a_reopened_scroll_survives_tail_first_history_loading_in_either_order() {
             for draw_before_history in [false, true] {
                 let mut reopened = ChatState::from_materialized_tail(&session, &[], &[]);
                 let prefix = converted_prefix(&session, &reopened);
-                reopened.restore_transcript_position(saved);
+                reopened.restore_transcript_position(saved.clone());
                 if draw_before_history {
                     let rows = drawn_transcript(&mut reopened, 60, 24);
                     if entry < reopened.unconverted_prefix() {
@@ -1988,7 +1988,7 @@ fn a_reopened_scroll_survives_tail_first_history_loading_in_either_order() {
                     // Switching away again while history loads must keep the
                     // original position, rather than save a temporary viewport.
                     let saved = reopened.transcript_position();
-                    reopened.restore_transcript_position(saved);
+                    reopened.restore_transcript_position(saved.clone());
                 }
                 assert!(reopened.splice_transcript_prefix(prefix));
                 assert_eq!(
@@ -2018,7 +2018,7 @@ fn a_reopened_scroll_survives_tail_first_history_loading_in_either_order() {
 
     let mut reopened = ChatState::from_materialized_tail(&newer, &[], &[]);
     let prefix = converted_prefix(&newer, &reopened);
-    reopened.restore_transcript_position(saved);
+    reopened.restore_transcript_position(saved.clone());
     assert!(shows(&drawn_transcript(&mut reopened, 60, 24), "Loading"));
     assert!(reopened.splice_transcript_prefix(prefix));
     assert_eq!(drawn_transcript(&mut reopened, 60, 24), expected);
@@ -3013,7 +3013,7 @@ fn scrollbar_drag_keeps_its_mapping_when_history_renders_or_output_arrives() {
     drawn_transcript(&mut chat, 60, 24);
     assert!(chat.transcript_scrollbar_dragging());
     assert_eq!(chat.transcript_scrollbar.estimates, estimates);
-    let anchor = chat.anchor;
+    let anchor = chat.anchor.clone();
     scrollbar_mouse(&mut chat, MouseEventKind::Drag(Left), geometry.track.x, row);
     drawn_transcript(&mut chat, 60, 24);
     assert_eq!(chat.anchor, anchor);
@@ -3482,7 +3482,7 @@ fn golden_transcript_navigation() {
     let saved = chat.transcript_position();
     let mut reopened = ChatState::new(&snapshot(), &[]);
     reopened.entries = chat.entries.clone();
-    reopened.restore_transcript_position(saved);
+    reopened.restore_transcript_position(saved.clone());
     let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut reopened, 60, 24));
     append_transcript_golden_state(&mut output, "reopened transcript tail", 60, 24, &rows, &[]);
 
@@ -3529,7 +3529,7 @@ fn golden_transcript_navigation() {
         &rows,
         &[format!("anchor: {:?}", chat.anchor)],
     );
-    let before_release = chat.anchor;
+    let before_release = chat.anchor.clone();
     scrollbar_mouse(
         &mut chat,
         MouseEventKind::Up(MouseButton::Left),
@@ -4209,6 +4209,102 @@ fn golden_rich_transcript_tool_presentation() {
         &mut output,
         "inline with one output line and ASCII symbols",
         80,
+        36,
+        &rows,
+        &[],
+    );
+
+    use chrono::TimeZone as _;
+    let delivery_time = chrono::Local
+        .with_ymd_and_hms(2026, 10, 9, 15, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis();
+    let mut incoming = ChatState::new(&snapshot(), &[]);
+    incoming.entries.push(
+        ChatEntry::plain(1, ChatRole::Agent, "I am checking the report.")
+            .with_recorded_at(Some(delivery_time)),
+    );
+    for (key, title, text) in [
+        (
+            "review-one",
+            "Review agent",
+            "This report has one item.\nThe actual message continues here, with **markdown** and enough words to wrap on a narrow terminal.",
+        ),
+        (
+            "review-two",
+            "Build agent",
+            "The checks passed.\nKeep this second message visible too.",
+        ),
+    ] {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: key.into(),
+            source: "session_message".into(),
+            wake: false,
+            created_at_ms: 50,
+            body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session {
+                    id: format!("{key}-session"),
+                    title: title.into(),
+                },
+                text: text.into(),
+            },
+        };
+        incoming
+            .entries
+            .push(ChatEntry::received_message(2, &event).with_recorded_at(Some(delivery_time)));
+    }
+    incoming.entries.push(
+        ChatEntry::plain(3, ChatRole::Agent, "I will address that item.")
+            .with_recorded_at(Some(delivery_time)),
+    );
+    incoming.latest_seq = 3;
+    append_transcript_golden_state(
+        &mut output,
+        "dedicated delivered messages wrap between agent replies",
+        44,
+        36,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut incoming, 44, 36)),
+        &[],
+    );
+    incoming.anchor = TranscriptAnchor::Row { entry: 2, row: 0 };
+    let position = incoming.transcript_position();
+    let encoded = serde_json::to_string(&position).unwrap();
+    let materialized = mj_transcript::projection::materialized_session_from_entries(
+        "incoming-session",
+        &incoming.entries,
+        3,
+        mj_core::relay::WorkerPhase::Idle,
+        Default::default(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let canonical =
+        mj_transcript::projection::canonical_session_from_materialized(&materialized).unwrap();
+    let restored_session = mj_transcript::projection::materialized_session_from_canonical(
+        "incoming-session",
+        &canonical,
+    )
+    .unwrap();
+    let mut reopened = ChatState::from_materialized(&restored_session, &[], &[]);
+    reopened.restore_transcript_position(serde_json::from_str(&encoded).unwrap());
+    assert_eq!(reopened.anchor, TranscriptAnchor::Row { entry: 2, row: 0 });
+    append_transcript_golden_state(
+        &mut output,
+        "restored anchor distinguishes messages in one delivery",
+        44,
+        24,
+        &crate::golden::buffer_lines(&golden_chat_buffer(&mut reopened, 44, 24)),
+        &[encoded],
+    );
+    let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        reopened.anchor = TranscriptAnchor::Bottom;
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut reopened, 44, 36))
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "incoming message ASCII marks",
+        44,
         36,
         &rows,
         &[],

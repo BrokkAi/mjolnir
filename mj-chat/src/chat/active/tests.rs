@@ -468,7 +468,7 @@ fn transcript_wheel_scrolls_the_reduced_viewport_independently() {
         .surface(SurfaceId::Transcript)
         .expect("transcript registered")
         .rect;
-    let before = chat.anchor;
+    let before = chat.anchor.clone();
 
     assert_eq!(
         chat.handle_mouse(MouseEvent {
@@ -559,7 +559,7 @@ fn question_pointer_capture_wins_when_dragged_into_transcript() {
         modifiers: KeyModifiers::NONE,
     };
     assert!(chat.component_handles_mouse(drag));
-    let before = chat.anchor;
+    let before = chat.anchor.clone();
     chat.handle_mouse(drag);
     assert_eq!(chat.anchor, before);
     chat.handle_mouse(MouseEvent {

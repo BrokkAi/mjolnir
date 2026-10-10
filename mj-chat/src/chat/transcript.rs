@@ -343,7 +343,7 @@ impl TranscriptSnapshot {
 /// Where the transcript viewport is pinned. Anchoring to an entry rather than an
 /// absolute row keeps the view stable while the agent appends new rows below,
 /// and lets the renderer touch only the entries the viewport covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TranscriptAnchor {
     /// Follow the newest rows.
     Bottom,
@@ -355,10 +355,10 @@ pub(super) enum TranscriptAnchor {
 }
 
 /// A session-local transcript position, retained when its view is replaced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptPosition(SavedTranscriptAnchor);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SavedTranscriptAnchor {
     Bottom,
     /// Previous builds wrote entry indexes into terminal upgrade handoffs.
@@ -369,6 +369,8 @@ enum SavedTranscriptAnchor {
     /// Durable entry identity, independent of how much history is loaded.
     Entry {
         start_seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stable_id: Option<String>,
         row: usize,
         /// An opening reveal follows new content, but keeps its visible row
         /// when the conversation has not changed since the last draw.
@@ -579,7 +581,7 @@ impl TranscriptRenderCache {
 impl ChatState {
     /// Where the reader is, independent of the tail-first loading window.
     pub fn transcript_position(&self) -> TranscriptPosition {
-        match self.anchor {
+        match self.anchor.clone() {
             TranscriptAnchor::Restoring(position) => position,
             TranscriptAnchor::Row { entry, row } => {
                 let Some(entry) = self.entries.get(entry) else {
@@ -587,6 +589,8 @@ impl ChatState {
                 };
                 TranscriptPosition(SavedTranscriptAnchor::Entry {
                     start_seq: entry.start_seq,
+                    stable_id: (entry.role == ChatRole::Message)
+                        .then(|| entry.message_id.clone().expect("message identity")),
                     row,
                     revealed_through: self
                         .revealed_anchor
@@ -608,20 +612,31 @@ impl ChatState {
     }
 
     fn resolve_transcript_position(&mut self) {
-        let TranscriptAnchor::Restoring(TranscriptPosition(position)) = self.anchor else {
+        let TranscriptAnchor::Restoring(TranscriptPosition(position)) = self.anchor.clone() else {
             return;
         };
-        let anchor = match position {
+        let anchor = match &position {
             SavedTranscriptAnchor::Bottom => Some(TranscriptAnchor::Bottom),
             SavedTranscriptAnchor::Row { entry, row } => entry
                 .checked_sub(self.unconverted_prefix)
                 .filter(|entry| *entry < self.entries.len())
-                .map(|entry| TranscriptAnchor::Row { entry, row }),
-            SavedTranscriptAnchor::Entry { start_seq, row, .. } => self
+                .map(|entry| TranscriptAnchor::Row { entry, row: *row }),
+            SavedTranscriptAnchor::Entry {
+                start_seq,
+                stable_id,
+                row,
+                ..
+            } => self
                 .entries
                 .iter()
-                .position(|entry| entry.start_seq == start_seq)
-                .map(|entry| TranscriptAnchor::Row { entry, row }),
+                .position(|entry| {
+                    stable_id
+                        .as_ref()
+                        .map_or(entry.start_seq == *start_seq, |id| {
+                            entry.message_id.as_ref() == Some(id)
+                        })
+                })
+                .map(|entry| TranscriptAnchor::Row { entry, row: *row }),
         };
         if let Some(anchor) = anchor {
             self.anchor = anchor;
@@ -898,7 +913,7 @@ impl ChatState {
         if matches!(self.anchor, TranscriptAnchor::Restoring(_)) {
             return TranscriptViewport {
                 rows: vec![empty_transcript_row(true)],
-                anchor: self.anchor,
+                anchor: self.anchor.clone(),
                 top: AnchorRow { entry: 0, row: 0 },
             };
         }
@@ -1150,7 +1165,7 @@ impl ChatState {
     }
 
     pub(super) fn scroll_history_up(&mut self, rows: usize) -> bool {
-        let before = self.anchor;
+        let before = self.anchor.clone();
         let Some(TranscriptAnchor::Row { mut entry, mut row }) = self.resolved_anchor() else {
             // Either no draw has happened yet, or the transcript is shorter than
             // the viewport and has nothing above it.
@@ -1175,7 +1190,7 @@ impl ChatState {
     }
 
     pub(super) fn scroll_history_down(&mut self, rows: usize) -> bool {
-        let before = self.anchor;
+        let before = self.anchor.clone();
         let Some(TranscriptAnchor::Row { mut entry, mut row }) = self.resolved_anchor() else {
             return false;
         };

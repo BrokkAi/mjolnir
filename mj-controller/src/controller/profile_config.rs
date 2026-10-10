@@ -352,13 +352,13 @@ pub(crate) async fn observe(
             ObservationCheck::ProbeBuild => {
                 let executor = CancellableProcessExecutor::new(cancelled)
                     .with_deadline(Duration::from_secs(30));
-                let worker = super::worker_binary::worker_binary_for(
+                super::worker_binary::worker_binary_for(
                     &TargetLocator::LocalBare {
                         worker_root: String::new(),
                     },
                     &executor,
                 )?;
-                if mj_core::worker_launch::worker_executable_digest(&worker)? != worker_build {
+                if mj_core::worker_build::WORKER_BUILD_ID != worker_build {
                     return Ok(choices);
                 }
             }

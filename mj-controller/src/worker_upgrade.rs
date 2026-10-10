@@ -3,8 +3,8 @@
 //! A running session keeps the worker it started with, so a session that is
 //! never stopped never gains anything a newer daemon's worker learned. This
 //! coordinator watches the same session views the recovery coordinator does
-//! and, when a session is quiet and its worker is a different build from the
-//! one this controller would install, replaces it in place.
+//! and, when a session is quiet and its worker has a different compatibility
+//! identity from the one this controller would install, replaces it in place.
 //!
 //! Quiet is the whole safety argument: stopping a worker tears down the ACP
 //! bridge with it, so an upgrade may only run when nothing would be lost.
@@ -47,7 +47,7 @@ const WORKER_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub struct WorkerUpgradeObservation {
     pub session: SessionRecord,
     pub config: Config,
-    /// Content address the connected worker reported in hello, or `None` when
+    /// Worker-input compatibility identity reported in hello, or `None` when
     /// it is too old to report one. `None` counts as outdated.
     pub worker_build: Option<String>,
     /// Whether replacing the worker now would destroy nothing. See

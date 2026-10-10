@@ -537,10 +537,9 @@ pub struct ManagedSessionSnapshot {
     /// credential reconciliation. This is intentionally ephemeral: it avoids
     /// retaining raw replay pages or rescanning projected history.
     pub latest_credential_sync_signal: Option<CredentialSyncSignal>,
-    /// Content address of the executable the connected worker is running, as
-    /// it reported in hello. `None` when the connection did not come from a
-    /// live worker or the worker predates the field; either way the worker is
-    /// not known to be the build this controller would install.
+    /// Worker-input compatibility identity reported in hello. `None` when the
+    /// connection did not come from a live worker or the worker predates the
+    /// field; either way the worker is not known to match this controller.
     pub worker_build: Option<String>,
     /// Pending parent-tool work fetched from the target worker.
     pub subagent_requests: Vec<crate::subagent::SubagentToolRequest>,

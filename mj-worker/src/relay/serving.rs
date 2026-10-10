@@ -42,6 +42,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn hello_reports_the_worker_input_compatibility_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), SESSION, "2.0.0").unwrap();
+        let response = relay.handle(RelayRequestEnvelope {
+            request_id: "hello-current".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Hello {
+                controller_version: "2.0.0".into(),
+                supported: RelayVersionRange::CURRENT,
+            },
+        });
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::Hello { worker_build, .. },
+        } = response.body
+        else {
+            panic!("current worker must answer hello");
+        };
+        assert_eq!(
+            worker_build.as_deref(),
+            Some(mj_core::worker_build::WORKER_BUILD_ID)
+        );
+    }
+
     // Hard-won: 0a278358: protocol 2 only prevented a new controller from attaching to a live v1 worker.
     #[test]
     fn current_range_overlaps_protocol_v1() {

@@ -116,10 +116,35 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
                 }
             }
             RelayObservation::CommandQueued {
-                command: RelayCommand::DeliverMailboxEvent { .. },
+                command:
+                    RelayCommand::DeliverMailboxEvent {
+                        event: mailbox_event,
+                    },
                 ..
             } => {
-                ids.insert(observation::MAILBOX_EVENTS_NOTICE_ID.to_owned());
+                if mailbox_event.message_text().is_none() {
+                    ids.insert(observation::MAILBOX_EVENTS_NOTICE_ID.to_owned());
+                }
+            }
+            RelayObservation::MailboxEventsDelivered {
+                event_keys, events, ..
+            } => {
+                ids.extend(
+                    event_keys
+                        .iter()
+                        .chain(events.iter().map(|event| &event.key))
+                        .map(|key| mj_core::transcript::message_item_id(key)),
+                );
+            }
+            RelayObservation::CommandQueued {
+                command: RelayCommand::MailboxWake { events },
+                ..
+            } => {
+                ids.extend(
+                    events
+                        .iter()
+                        .map(|event| mj_core::transcript::message_item_id(&event.key)),
+                );
             }
             _ => {}
         }

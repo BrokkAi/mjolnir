@@ -136,21 +136,21 @@ impl WorkerUpgradeOutcome {
     }
 }
 
-/// Whether a worker that reported `reported` in hello is running `installed`,
-/// the binary this controller would provision.
+/// Whether a worker that reported `reported` in hello has the compatibility
+/// identity of the binary this controller would provision.
 ///
-/// A worker that reported nothing is not: the field postdates it, so its
-/// binary does too.
+/// A missing or different identity cannot establish compatibility.
 fn worker_runs_installed_build(reported: Option<&str>, installed: &str) -> bool {
     reported.is_some_and(|reported| reported == installed)
 }
 
 impl Controller {
     /// Replace a session's worker with the binary this controller would
-    /// install, when the session is quiet and its worker is a different build.
+    /// install, when the session is quiet and its worker is incompatible.
     ///
-    /// `reported_build` is the digest the worker gave the observer that asked
-    /// for this. It only saves work: a match returns before anything is leased.
+    /// `reported_build` is the compatibility identity the worker gave the
+    /// observer that asked for this. It only saves work: a match returns
+    /// before anything is leased.
     /// The decision that matters is taken again under the lease, against a
     /// snapshot read from the worker itself, because a session can start
     /// working between an observation and this call.
@@ -169,7 +169,7 @@ impl Controller {
             .context("reconnect plan is empty")?;
         let binary = worker_binary_for(&backend, executor)
             .context("resolve the worker binary this controller would install")?;
-        let installed = mj_core::worker_launch::worker_executable_digest(&binary)?;
+        let installed = mj_core::worker_build::WORKER_BUILD_ID.to_owned();
         if worker_runs_installed_build(reported_build, &installed) {
             return Ok(WorkerUpgradeOutcome::AlreadyCurrent { build: installed });
         }

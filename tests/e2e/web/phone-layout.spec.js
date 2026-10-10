@@ -270,3 +270,40 @@ test('phone task details open full width and scroll within forty percent of the 
   await page.screenshot({ path: testInfo.outputPath('phone-expanded-details.png') });
   fs.writeFileSync(testInfo.outputPath('phone-expanded-metrics.json'), JSON.stringify(dimensions, null, 2));
 });
+
+
+test('delivered messages in one batch keep separate prose rows after reload', async ({ page }) => {
+  const state = await mount(page);
+  const messages = [
+    { stable_id: 'message:review', label: 'Message from Review helper', lines: ['One finding.', 'The complete **second line** with 支持 Unicode.'] },
+    { stable_id: 'message:build', label: 'Message from Build helper', lines: ['Build passed.', 'The second message arrived in the same delivery.'] },
+  ].map(message => ({ ...message, id: 17, updated_seq: 17, role: 'message', tone: 'message', glyph: '←', recorded_at_ms: SERVER_TIME_MS }));
+  state.conversation.entries.push(...messages);
+  state.conversation.latest_seq = 17;
+  state.snapshot.sessions[0].latest_event_ordinal = 17;
+  await page.reload();
+  for (const message of messages) {
+    const row = page.locator(`.entry[data-entry-id="${message.stable_id}"]`);
+    await expect(row).toContainText(message.label);
+    await expect(row.locator('time')).toHaveAttribute('datetime', new Date(SERVER_TIME_MS).toISOString());
+  }
+  await expect(page.locator('.entry[data-entry-id="message:review"] strong').last()).toHaveText('second line');
+  await expect(page.locator('.entry.tone-message')).toHaveCount(2);
+  await page.route('**/api/v1/sessions/parent/history*', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ frontier: 17, before: null, items: messages.map(message => ({
+      role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
+    })) }),
+  }));
+  await page.locator('#earlier-messages').click();
+  const history = page.getByRole('dialog', { name: 'Earlier messages' });
+  await expect(history).toContainText('Message from Review helper');
+  await expect(history).toContainText('The second message arrived in the same delivery.');
+  await expect(history.locator('time')).toHaveCount(2);
+  await history.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.reload();
+  await expect(page.locator('.entry.tone-message')).toHaveCount(2);
+  await expect(page.locator('.entry[data-entry-id="message:build"]')).toContainText('The second message arrived in the same delivery.');
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+  expect(overflow).toBe(false);
+});

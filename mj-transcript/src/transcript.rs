@@ -10,7 +10,7 @@ use serde_json::Value;
 use tree_sitter::{Node, Parser};
 const TOOL_SUMMARY_SOURCE_BYTES: usize = 64 * 1024;
 /// Parser-rule version stored with cached tool summaries.
-pub const TOOL_SUMMARY_VERSION: u8 = 3;
+pub const TOOL_SUMMARY_VERSION: u8 = 4;
 
 /// Reduce a tool call to what a reader still needs, once a verified checkpoint
 /// holds the whole of it.
@@ -623,7 +623,7 @@ fn summarize_invocation_with_literals(
     }
     let mut index = 0;
 
-    if basename == "cargo"
+    if matches!(basename.as_str(), "cargo" | "mbx")
         && arguments.first().is_some_and(|argument| {
             argument.literal && argument.value.starts_with('+') && argument.value.len() > 1
         })
@@ -656,7 +656,13 @@ fn summarize_invocation_with_literals(
             && !argument.value.starts_with('-')
             && argument.value != "--"
         {
-            words.push(argument.value.clone());
+            // `uv run` is followed by a program, which may be given as a path.
+            let verb = if basename == "uv" && first_verb == "run" {
+                argument.value.rsplit('/').next().unwrap_or(&argument.value)
+            } else {
+                &argument.value
+            };
+            words.push(verb.to_owned());
         }
     }
     Some(words.join(" "))
@@ -697,11 +703,30 @@ fn is_summary_executable(basename: &str) -> bool {
             | "docker"
             | "podman"
             | "nice"
+            | "mbx"
+            | "mj"
+            | "tmux"
     )
 }
 
 fn allows_second_verb(basename: &str, first_verb: &str) -> bool {
     match basename {
+        // Only commands whose next word is always a subcommand: `git config`
+        // and `git reflog` also take a key or ref there.
+        "git" => matches!(
+            first_verb,
+            "bisect"
+                | "bundle"
+                | "hook"
+                | "lfs"
+                | "maintenance"
+                | "notes"
+                | "remote"
+                | "sparse-checkout"
+                | "stash"
+                | "submodule"
+                | "worktree"
+        ),
         "gh" => matches!(
             first_verb,
             "alias"
@@ -763,7 +788,14 @@ fn allows_second_verb(basename: &str, first_verb: &str) -> bool {
                 | "system"
                 | "volume"
         ),
-        "uv" => matches!(first_verb, "cache" | "pip" | "python" | "tool"),
+        "uv" => matches!(first_verb, "cache" | "pip" | "python" | "run" | "tool"),
+        "npm" => matches!(first_verb, "run" | "run-script"),
+        "pnpm" | "yarn" | "bun" => first_verb == "run",
+        "mbx" => matches!(first_verb, "cache" | "explain" | "settings"),
+        "mj" => matches!(
+            first_verb,
+            "daemon" | "import" | "recover" | "review" | "setup" | "workspaces"
+        ),
         "rustup" => matches!(
             first_verb,
             "component" | "override" | "target" | "toolchain"
@@ -805,6 +837,10 @@ fn known_leading_option_arguments(
         "git" => option.starts_with("-C") || option.starts_with("-c"),
         "gh" => option.starts_with("-R"),
         "docker" | "podman" => option.starts_with("-H"),
+        "mj" => option.starts_with("-i"),
+        "tmux" => ["-L", "-S", "-f", "-c", "-T"]
+            .iter()
+            .any(|prefix| option.starts_with(prefix)),
         _ => false,
     } && option.len() > 2;
     let takes_value = match basename {
@@ -834,6 +870,8 @@ fn known_leading_option_arguments(
         }
         "uv" => matches!(option_name, "--directory" | "--project" | "--python"),
         "rustup" => matches!(option_name, "--toolchain"),
+        "mj" => matches!(option_name, "-i" | "--instance" | "--workspace"),
+        "tmux" => matches!(option_name, "-L" | "-S" | "-f" | "-c" | "-T"),
         "nice" => {
             matches!(option_name, "-n" | "--adjustment")
         }
@@ -883,6 +921,10 @@ fn known_leading_option_arguments(
         ),
         "rustup" => matches!(option_name, "-q" | "--quiet" | "-v" | "--verbose"),
         "docker" | "podman" => matches!(option_name, "-D" | "--debug" | "--tls"),
+        "tmux" => matches!(
+            option_name,
+            "-2" | "-C" | "-CC" | "-D" | "-l" | "-N" | "-u" | "-v"
+        ),
         "nice" => false,
         _ => false,
     };
@@ -1320,6 +1362,13 @@ pub fn apply_runtime_event_to_entries(
 pub fn transcript_item_text(item: &TranscriptItem) -> String {
     match &item.body {
         TranscriptBody::User { content } => materialized_content_text(content),
+        TranscriptBody::Message { event } => format!(
+            "{}\n\n{}",
+            event.message_label(),
+            mj_core::transcript::sanitize_terminal_text(
+                event.message_text().expect("message entry metadata")
+            )
+        ),
         TranscriptBody::Agent { chunks, .. } | TranscriptBody::Thought { chunks, .. } => {
             materialized_chunks_text(chunks)
         }
@@ -1470,6 +1519,60 @@ mod tests {
     }
 
     #[test]
+    fn git_commands_with_nested_subcommands_show_both_verbs() {
+        let cases = [
+            ("git worktree add ../x mj/session", "git worktree add"),
+            ("git -C repo worktree list", "git worktree list"),
+            ("git stash push -u -m tag", "git stash push"),
+            ("git stash", "git stash"),
+            ("git remote -v", "git remote"),
+            ("git bisect good abc123", "git bisect good"),
+            ("git stash -- src", "git stash"),
+            ("git log origin/master", "git log"),
+            ("git config user.name", "git config"),
+        ];
+        for (command, summary) in cases {
+            assert_eq!(
+                execute_summary(json!({"command": command})),
+                summary,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_tools_and_script_runners_show_their_subcommands() {
+        let cases = [
+            ("mbx nextest run -p brokk-mj-tui", "mbx nextest"),
+            ("mbx +1.91 build bifrost", "mbx build"),
+            ("mbx cache stats --json", "mbx cache stats"),
+            ("mj daemon restart", "mj daemon restart"),
+            (
+                "mj -i test --workspace hel daemon status",
+                "mj daemon status",
+            ),
+            ("mj transcript abc123", "mj transcript"),
+            ("tmux -L mjv-e send-keys -t 0 q", "tmux send-keys"),
+            ("tmux -Lmjv capture-pane -p", "tmux capture-pane"),
+            ("tmux -S /tmp/sock -2 new-session -d", "tmux new-session"),
+            ("uv run pytest -q", "uv run pytest"),
+            ("uv run ./scripts/check.py", "uv run check.py"),
+            ("uv run --with x pytest", "uv run"),
+            ("npm run build", "npm run build"),
+            ("npm run-script test:e2e", "npm run-script test:e2e"),
+            ("pnpm run lint", "pnpm run lint"),
+            ("npm test", "npm test"),
+        ];
+        for (command, summary) in cases {
+            assert_eq!(
+                execute_summary(json!({"command": command})),
+                summary,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn a_nested_shell_is_named_without_its_path_and_shows_its_script() {
         let cases = [
             ("bash -c 'python x.py'", "bash -c python"),
@@ -1483,7 +1586,7 @@ mod tests {
             ("/bin/bash script.sh", "bash"),
             (
                 "bash -c 'bash -c \"uv run pytest\"'",
-                "bash -c bash -c uv run",
+                "bash -c bash -c uv run pytest",
             ),
         ];
         for (command, summary) in cases {

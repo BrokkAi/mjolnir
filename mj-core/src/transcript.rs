@@ -58,6 +58,10 @@ pub struct ToolCallPresentation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptBody {
+    /// A complete message at the worker's durable delivery boundary.
+    Message {
+        event: Box<crate::mailbox::MailboxEvent>,
+    },
     User {
         content: Vec<serde_json::Value>,
     },
@@ -370,6 +374,15 @@ impl TranscriptItem {
             ),
             (_, None) => {}
         }
+        if let TranscriptBody::Message { event } = &self.body {
+            anyhow::ensure!(
+                !event.key.trim().is_empty()
+                    && event.message_text().is_some()
+                    && self.stable_id == message_item_id(&event.key),
+                "invalid message transcript entry {:?}",
+                self.stable_id
+            );
+        }
         if self.last_changed_at_ms < self.created_at_ms {
             bail!(
                 "materialized transcript item {:?} changed before it was created",
@@ -384,6 +397,7 @@ impl TranscriptItem {
 pub enum ChatRole {
     User,
     Agent,
+    Message,
     /// Agent reasoning stream, rendered dimmed.
     Thought,
     /// Tool invocation titles.
@@ -405,6 +419,8 @@ pub struct ChatEntry {
     pub recorded_at_ms: Option<i64>,
     pub revision: u64,
     pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming_message: Option<Box<crate::mailbox::MailboxEvent>>,
     pub tool_call_id: Option<String>,
     pub tool_status: Option<ToolStatus>,
     /// Compact label used by Rich and browser projections. `text` remains the
@@ -467,6 +483,19 @@ impl PartialEq for TranscriptSource {
 impl Eq for TranscriptSource {}
 
 impl ChatEntry {
+    pub fn received_message(seq: u64, event: &crate::mailbox::MailboxEvent) -> Self {
+        let mut entry = Self::plain(
+            seq,
+            ChatRole::Message,
+            event
+                .message_text()
+                .expect("message entry carries a message event"),
+        );
+        entry.message_id = Some(message_item_id(&event.key));
+        entry.incoming_message = Some(Box::new(event.clone()));
+        entry
+    }
+
     /// Whether this entry is the durable marker emitted when a session's
     /// control plane restarts. The source identity is authoritative for
     /// materialized entries; the role/text check also covers entries built
@@ -488,6 +517,7 @@ impl ChatEntry {
             recorded_at_ms: None,
             revision: 0,
             message_id: None,
+            incoming_message: None,
             tool_call_id: None,
             tool_status: None,
             tool_summary: None,
@@ -569,6 +599,7 @@ impl ChatEntry {
             recorded_at_ms: None,
             revision: 0,
             message_id: None,
+            incoming_message: None,
             tool_call_id: None,
             tool_status: None,
             tool_summary: None,
@@ -599,6 +630,7 @@ impl ChatEntry {
             recorded_at_ms: None,
             revision: 0,
             message_id: None,
+            incoming_message: None,
             tool_call_id,
             tool_status: Some(tool_status),
             tool_summary: None,
@@ -718,6 +750,7 @@ pub fn materialized_content_text(content: &[serde_json::Value]) -> String {
 pub enum TranscriptRole {
     User,
     Agent,
+    Message,
     Thought,
     Tool,
     Terminal,
@@ -731,6 +764,7 @@ impl TranscriptRole {
         match self {
             Self::User => "user",
             Self::Agent => "agent",
+            Self::Message => "message",
             Self::Thought => "thought",
             Self::Tool => "tool",
             Self::Terminal => "terminal",
@@ -751,6 +785,7 @@ pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
     let role = match body {
         TranscriptBody::User { .. } => TranscriptRole::User,
         TranscriptBody::Agent { .. } => TranscriptRole::Agent,
+        TranscriptBody::Message { .. } => TranscriptRole::Message,
         TranscriptBody::Thought { .. } => TranscriptRole::Thought,
         TranscriptBody::Tool { .. } => TranscriptRole::Tool,
         TranscriptBody::TerminalOutput { .. } => TranscriptRole::Terminal,
@@ -759,6 +794,10 @@ pub fn transcript_item_role(body: &TranscriptBody) -> &'static str {
         TranscriptBody::System { .. } => TranscriptRole::System,
     };
     role.as_str()
+}
+
+pub fn message_item_id(event_key: &str) -> String {
+    format!("message:{event_key}")
 }
 
 pub fn materialized_chunks_text(chunks: &[serde_json::Value]) -> String {

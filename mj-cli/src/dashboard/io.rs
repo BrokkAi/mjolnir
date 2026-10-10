@@ -907,7 +907,7 @@ impl DashboardContext {
                         };
                         let mut chat = chat.open_replacing(self.chats.get(&session_id));
                         if let Some(position) = self.transcript_positions.get(&session_id) {
-                            chat.restore_transcript_position(*position);
+                            chat.restore_transcript_position(position.clone());
                         }
                         self.restore_question_draft(&session_id, &mut chat);
                         self.chats.insert(session_id.clone(), chat);

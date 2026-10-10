@@ -2672,6 +2672,244 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
 }
 
 #[tokio::test]
+async fn send_message_resolves_only_authorized_hex_session_prefixes() {
+    if !isolated_parked_test("send_message_resolves_only_authorized_hex_session_prefixes") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+
+    const CALLER: &str = "0bf0983d000000000000000000000001";
+    const UNIQUE_PEER: &str = "bc87d308410000000000000000000001";
+    const EXACT_PEER: &str = "deadbeef000000000000000000000001";
+    const AMBIGUOUS_PEER: &str = "deadbeef000000000000000000000002";
+    const OWN_CHILD: &str = "f00dba5e000000000000000000000001";
+    const FOREIGN_CHILD: &str = "c0ffee000000000000000000000001";
+    const OTHER_PARENT: &str = "11111111000000000000000000000001";
+    const STOPPED_PEER: &str = "51a7ed000000000000000000000001";
+    const DESTROYED_PEER: &str = "badc0ffe000000000000000000000001";
+
+    let mut caller = parent_record(CALLER, "parent");
+    caller.title = "caller".into();
+    crate::database::save_session(&caller).unwrap();
+    for (id, title) in [
+        (UNIQUE_PEER, "unique peer"),
+        (EXACT_PEER, "exact peer"),
+        (AMBIGUOUS_PEER, "ambiguous peer"),
+        (OTHER_PARENT, "other parent"),
+        (STOPPED_PEER, "stopped peer"),
+        (DESTROYED_PEER, "destroyed peer"),
+    ] {
+        let mut record = parent_record(id, "peer");
+        record.title = title.into();
+        crate::database::save_session(&record).unwrap();
+    }
+    let mut stopped = parent_record(STOPPED_PEER, "peer");
+    stopped.state = SessionState::Stopped;
+    crate::database::save_session(&stopped).unwrap();
+    let mut destroyed = parent_record(DESTROYED_PEER, "peer");
+    destroyed.state = SessionState::DestroyedWithDataLoss;
+    crate::database::save_session(&destroyed).unwrap();
+
+    let save_child = |id: &str, parent_id: &str, title: &str| {
+        let mut record = parent_record(id, "helper");
+        record.title = title.into();
+        crate::database::save_subagent_session(
+            &record,
+            &mj_core::subagent::SubagentRecord {
+                child_session_id: id.into(),
+                parent_session_id: parent_id.into(),
+                task_name: "message routing".into(),
+                profile_id: "helper".into(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                initial_prompt: "check routing".into(),
+                request_key: format!("request-{id}"),
+                created_at: "2026-09-24T00:00:00Z".into(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: true,
+            },
+        )
+        .unwrap();
+        record
+    };
+    let own_child_record = save_child(OWN_CHILD, CALLER, "own helper");
+    save_child(FOREIGN_CHILD, OTHER_PARENT, "foreign helper");
+
+    let exports = ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true);
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .insert(OWN_CHILD.into(), own_child_record);
+    let backend_for = |target: &str, exports: Arc<ParkingExports>| {
+        message_backend_for_session(
+            target,
+            exports,
+            &[],
+            Arc::new(|| {}),
+            mj_core::relay::RELAY_SESSION_MESSAGE_PROTOCOL,
+        )
+        .0
+    };
+    let send = |request_id: &str, target: &str| mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: request_id.into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::SendMessage {
+            child_session_id: target.into(),
+            message: "check the routing result".into(),
+        },
+    };
+
+    let unique_backend = backend_for(
+        UNIQUE_PEER,
+        ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true),
+    );
+    let unique_request = send("unique-prefix", "BC87D30841");
+    let unique = unique_backend
+        .execute_subagent_tool_durable(CALLER.into(), unique_request)
+        .await
+        .unwrap()
+        .result;
+    assert!(!unique.is_error, "{}", unique.message);
+    let unique: serde_json::Value = serde_json::from_str(&unique.message).unwrap();
+    assert_eq!(unique["session_id"], UNIQUE_PEER);
+    assert_eq!(unique["child_session_id"], UNIQUE_PEER);
+    let (prepared, _) = crate::database::load_delegation(CALLER, "unique-prefix")
+        .unwrap()
+        .unwrap();
+    let mj_core::subagent::SubagentToolAction::SendMessage {
+        child_session_id, ..
+    } = prepared.request.action
+    else {
+        panic!("the durable request remains a message")
+    };
+    assert_eq!(child_session_id, UNIQUE_PEER);
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].target_session_id, UNIQUE_PEER);
+
+    let exact = backend_for(
+        EXACT_PEER,
+        ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true),
+    )
+    .execute_subagent_tool(CALLER.into(), send("exact-wins", EXACT_PEER))
+    .await;
+    assert!(!exact.is_error, "{}", exact.message);
+    let exact: serde_json::Value = serde_json::from_str(&exact.message).unwrap();
+    assert_eq!(exact["session_id"], EXACT_PEER);
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .iter()
+            .any(|row| row.target_session_id == EXACT_PEER)
+    );
+
+    let own = backend_for(OWN_CHILD, exports)
+        .execute_subagent_tool(CALLER.into(), send("own-child-prefix", "F00DBA5E"))
+        .await;
+    assert!(!own.is_error, "{}", own.message);
+    let own: serde_json::Value = serde_json::from_str(&own.message).unwrap();
+    assert_eq!(own["child_session_id"], OWN_CHILD);
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .iter()
+            .any(|row| row.target_session_id == OWN_CHILD)
+    );
+
+    let refusals = backend_for(
+        UNIQUE_PEER,
+        ParkingExports::with_mailboxes_enabled(SessionState::Running, None, true),
+    );
+    let ambiguous = refusals
+        .execute_subagent_tool(CALLER.into(), send("ambiguous", "deadbeef"))
+        .await;
+    assert!(ambiguous.is_error);
+    assert!(
+        ambiguous.message.contains("ambiguous"),
+        "{}",
+        ambiguous.message
+    );
+    assert!(
+        ambiguous.message.contains(EXACT_PEER),
+        "{}",
+        ambiguous.message
+    );
+    assert!(
+        ambiguous.message.contains(AMBIGUOUS_PEER),
+        "{}",
+        ambiguous.message
+    );
+    assert!(
+        ambiguous.message.contains("exact peer"),
+        "{}",
+        ambiguous.message
+    );
+    assert!(
+        ambiguous.message.contains("ambiguous peer"),
+        "{}",
+        ambiguous.message
+    );
+
+    let too_short = refusals
+        .execute_subagent_tool(CALLER.into(), send("too-short", "bc87d30"))
+        .await;
+    assert!(too_short.is_error);
+    assert!(
+        too_short.message.contains("at least 8"),
+        "{}",
+        too_short.message
+    );
+
+    let foreign_child = refusals
+        .execute_subagent_tool(CALLER.into(), send("foreign-child", "c0ffee00"))
+        .await;
+    assert!(foreign_child.is_error);
+    assert!(
+        foreign_child
+            .message
+            .contains("another session's sub-agent"),
+        "{}",
+        foreign_child.message
+    );
+
+    let stopped = refusals
+        .execute_subagent_tool(CALLER.into(), send("stopped-prefix", "51A7ED00"))
+        .await;
+    assert!(stopped.is_error);
+    assert!(
+        stopped.message.contains("stopped (suspended)"),
+        "{}",
+        stopped.message
+    );
+
+    let destroyed = refusals
+        .execute_subagent_tool(CALLER.into(), send("destroyed-prefix", "badc0ffe"))
+        .await;
+    assert!(destroyed.is_error);
+    assert!(
+        destroyed
+            .message
+            .contains("destroyed and cannot receive messages"),
+        "{}",
+        destroyed.message
+    );
+
+    let self_prefix = refusals
+        .execute_subagent_tool(CALLER.into(), send("self-prefix", "0bf0983d"))
+        .await;
+    assert!(self_prefix.is_error);
+    assert!(
+        self_prefix.message.contains("itself"),
+        "{}",
+        self_prefix.message
+    );
+}
+
+#[tokio::test]
 async fn send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender() {
     if !isolated_parked_test(
         "send_message_refuses_stopped_self_foreign_child_unknown_target_and_child_sender",

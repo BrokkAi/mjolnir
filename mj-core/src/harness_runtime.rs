@@ -102,7 +102,8 @@ pub const CLAUDE_ACP_VERSION: &str = "0.87.0";
 pub const CLAUDE_CLI_VERSION: &str = "2.1.293";
 pub const KIMI_VERSION: &str = "2.1.1";
 pub const GROK_VERSION: &str = "1.0.40";
-pub const MUSE_ACP_VERSION: &str = "0.11.0";
+pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
+pub const MUSE_ACP_VERSION: &str = "0.11.1";
 pub const MUSE_VERSION: &str = "1.4.4-R5419.1";
 pub const OPENCODE_VERSION: &str = "1.18.34";
 
@@ -125,6 +126,13 @@ pub const fn npm_bridge(kind: HarnessKind) -> Option<NpmBridge> {
             command: "claude-agent-acp",
             package: "@agentclientprotocol/claude-agent-acp",
             version: CLAUDE_ACP_VERSION,
+        }),
+        // The npm package carries the adapter only; the native Muse server
+        // keeps its own verified download.
+        HarnessKind::Muse => Some(NpmBridge {
+            command: "muse-acp",
+            package: MUSE_ACP_PACKAGE,
+            version: MUSE_ACP_VERSION,
         }),
         _ => None,
     }
@@ -190,9 +198,9 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Muse => HarnessPin {
-            install_id: "muse-acp-0.11.0_muse-1.4.4-R5419.1",
-            display_version: "muse-acp 0.11.0 + Muse Code 1.4.4-R5419.1",
-            entrypoint: "bin/muse-acp",
+            install_id: "muse-acp-0.11.1_muse-1.4.4-R5419.1",
+            display_version: "muse-acp 0.11.1 + Muse Code 1.4.4-R5419.1",
+            entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
             install_id: "brokkai-codex-acp-1.13.6_codex-0.160.1",

@@ -426,7 +426,9 @@ fn summary_messages(summary: mj_transcript::summary::TranscriptSummary) -> Vec<M
             let role = match entry.role {
                 SummaryRole::User => Role::User,
                 SummaryRole::Assistant => Role::Assistant,
-                SummaryRole::Tool => Role::Tool,
+                // SessionWiki has no external-message role. Preserve sender
+                // provenance as received context in its tool channel.
+                SummaryRole::Tool | SummaryRole::Message => Role::Tool,
                 SummaryRole::Plan => return None,
             };
             message(role, entry.body(), entry.created_at_ms)

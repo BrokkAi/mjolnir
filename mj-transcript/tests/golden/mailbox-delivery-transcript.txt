@@ -1,7 +1,6 @@
 Session: session-mailbox
 1: External events:
   - Comment on your PR #12 by alice: The first comment line.
-  - Message from your parent agent: Please check this detail.
   - New PR #4623 Model Rust built-in macro values for CQ07
   - Comment on your PR #4623 by alice: Please check the ‹macro› case.
   - New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
@@ -11,7 +10,27 @@ Session: session-mailbox
   - Your PR #4623 was closed without merging.
   - Your PR #4624 was merged.
   - Your PR #4623 was reopened.
-  - Message from your parent agent: Please verify the edge case.
-  - Message from session "Fix cache race": The lock is fixed; please verify it.
-  - Message from the user: Please check the final result.
   - External event: A plain event from the CLI.
+4: Message from your parent agent
+
+Please check this detail.
+The whole second line must survive delivery.
+18: Message from your parent agent
+
+Please verify the edge case.
+18: Message from Fix cache race
+
+The lock is fixed; please verify it.
+18: Message from the user
+
+Please check the final result.
+19: Agent continued on its own
+20: Working on the delivered messages.
+21: Message from Review agent
+
+The first review item.
+支持 Unicode and **markdown**.
+21: Message from untitled-session
+
+The second item arrives in the same acknowledgment.
+23: Responding after delivery.

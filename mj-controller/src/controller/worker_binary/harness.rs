@@ -64,8 +64,9 @@ pub(in crate::controller) fn bridge_launch(
     policy: mj_core::config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
     match harness {
-        mj_core::config::HarnessKind::Muse => ("muse-acp".into(), Vec::new()),
-        mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude => {
+        mj_core::config::HarnessKind::Codex
+        | mj_core::config::HarnessKind::Claude
+        | mj_core::config::HarnessKind::Muse => {
             let bridge =
                 mj_core::harness_runtime::npm_bridge(harness).expect("npm harness has a bridge");
             ("sh".into(), vec!["-c".into(), bridge.bootstrap_script()])

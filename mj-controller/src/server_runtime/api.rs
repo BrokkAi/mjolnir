@@ -612,6 +612,9 @@ impl ApiBackend {
             }
             prepared
         } else {
+            let mut request = request;
+            self.canonicalize_message_target(&parent, &mut request)
+                .await?;
             let turn_target = if matches!(
                 request.action,
                 mj_core::subagent::SubagentToolAction::Handback { .. }
@@ -658,6 +661,48 @@ impl ApiBackend {
         })
         .await?;
         Ok(stored_result)
+    }
+
+    /// Store a resolved recipient in durable MCP requests so a replay does not
+    /// reinterpret a prefix after the session set changes.
+    async fn canonicalize_message_target(
+        &self,
+        parent_session_id: &str,
+        request: &mut mj_core::subagent::SubagentToolRequest,
+    ) -> Result<()> {
+        let Some(requested_id) = (match &request.action {
+            mj_core::subagent::SubagentToolAction::SendMessage {
+                child_session_id, ..
+            } => Some(child_session_id.clone()),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        let parent_session_id = parent_session_id.to_owned();
+        let resolved = blocking("resolve durable session message target", move || {
+            let state = Controller::load()?.state;
+            subagent_input::resolve_session_message_target(
+                &state,
+                Some(&parent_session_id),
+                &requested_id,
+            )
+        })
+        .await;
+        match resolved {
+            Ok(resolved_id) => {
+                if let mj_core::subagent::SubagentToolAction::SendMessage {
+                    child_session_id, ..
+                } = &mut request.action
+                {
+                    *child_session_id = resolved_id;
+                }
+                Ok(())
+            }
+            // Keep refused requests in their original form so the normal
+            // execution path can persist and return the same refusal.
+            Err(error) if mj_core::refusal::Refusal::of(&error).is_some() => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(test)]
@@ -726,7 +771,17 @@ impl ApiBackend {
                     )
                 }
             };
-            value["child_session_id"] = child_session_id.clone().into();
+            let result_session_id = if kind == "message" && !is_error {
+                value
+                    .get("child_session_id")
+                    .or_else(|| value.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(child_session_id)
+                    .to_owned()
+            } else {
+                child_session_id.clone()
+            };
+            value["child_session_id"] = result_session_id.into();
             value["request_id"] = request.request_id.clone().into();
             value["created_at_ms"] = request.created_at_ms.into();
             value["kind"] = kind.into();

@@ -5,7 +5,7 @@ This ExecPlan follows `.agents/PLANS.md` and is a living document.
 ## Purpose / Big Picture
 
 
-Issue #1138 describes new containers receiving an old worker executable and then rejecting the controller's launch configuration. After this change, the controller will select only workers with its package version and source revision. Missing or stale workers will produce an actionable error before provisioning. Existing stopped sessions will receive the matching worker before their launch configuration is refreshed and their worker restarts.
+Issue #1138 describes new containers receiving an old worker executable and then rejecting the controller's launch configuration. The controller selects workers with its package version and worker-input compatibility identity. The daemon keeps its package-version-plus-commit identity for daemon ordering and display. Missing or incompatible workers produce an actionable error before provisioning. Existing stopped sessions receive a compatible worker before their launch configuration is refreshed and their worker restarts.
 
 ## Progress
 
@@ -15,6 +15,7 @@ Issue #1138 describes new containers receiving an old worker executable and then
 - [x] (2026-09-24) Enforced matching candidates, snapshots, cache publication, downloads, uploads, prepared recovery, and provisioning preflight.
 - [x] (2026-09-24) Added isolated regressions for stale candidates, overrides, pins, downloads, digest equality, provisioning, and recovery retry. The real stopped-Docker regression passes with a portable Linux worker and a non-root container user.
 - [x] (2026-09-24) Full dev-profile suite, Clippy, formatting, build-script tests, Linux worker build, stripping, build metadata verification, and final diff review passed. Prepared the completed change for the required local commit.
+- [x] (2026-10-09) Replace the worker stamp's commit suffix with a digest of the worker's committed Cargo inputs. Keep the path list in `mj-core/worker-build-inputs.txt`, cover the normal/build dependency closure in a test, and have the Linux container build receive the same identity from the host helper. Core and worker suites, Clippy, formatting, and the portable-worker stamp comparison passed; the full controller suite had one timing-sensitive failure that passed when rerun alone.
 
 ## Surprises & Discoveries
 
@@ -30,10 +31,14 @@ Use the shared `mj-core` crate to derive package version plus source revision on
 
 Keep the full stamp referenced only by the worker entry point (and test fixtures); the controller scans a prefix and compares the shared build identity. Use `memchr` for efficient byte scanning of large development executables. Generate the stamped fake worker during compilation, preserving the existing rule against writing executables while parallel tests fork. These decisions were made on 2026-09-24 while implementing and validating the marker.
 
+On 2026-10-09, retain `BUILD_ID` as package version plus commit for daemon identity, ordering, and display, and add a separate worker compatibility identity as package version plus SHA-1 of sorted `<workspace path> <Git tree-or-blob id at HEAD>` lines. A docs-only, `.agents/`-only, or controller-only commit must not change worker compatibility. Keep the worker input paths in `mj-core/worker-build-inputs.txt`; the normal/build dependency-closure test makes additions to the Cargo graph fail until the list is updated. `mj-core/worker_build_inputs.py` is the one implementation used by `mj-core/build.rs` and `scripts/build-linux-worker.sh`. The explicit `MJ_WORKER_INPUTS_ID` override wins, Git tree IDs are used in a checkout, and commit identity remains the fallback for source packages without Git metadata. The relay Hello field now carries this compatibility identity; file SHA-256 digests remain in use for pinning, upload, and transfer integrity. Uncommitted changes remain outside the identity, as with `BUILD_ID`.
+
 ## Outcomes & Retrospective
 
 
 Implementation and validation are complete. Real Docker recovery verified both the installed executable digest and the running worker's reported digest, then read its checkpoint-only status to prove it consumed the refreshed configuration. The Linux marker survives stripping. The full dev-profile workspace suite and Clippy passed; this includes 1,631 controller tests, 466 core tests, and 573 worker library tests, plus other workspace suites, integration tests, and doctests. Existing opt-in tests remained ignored except the explicitly executed Docker regression. No database or protocol revision was needed: verifying the source repairs every existing install/upgrade path's digest comparison.
+
+2026-10-09 update: worker compatibility is now derived from the Git tree/blob IDs of the shared path list, and the dependency-closure regression makes workspace crate additions visible. `MJ_BUILD_ID` remains commit-based for daemon identity and ordering. The dev-profile core suite (496 tests), full worker suite (673 library tests plus binary and integration suites, one test thread), full workspace Clippy, and formatting check passed. The full controller suite had 1,971 passed, 1 timing-sensitive failure, and 10 ignored; `mbx_clean_survives_its_release_deadline_and_is_not_confirmed` passed when rerun alone. `scripts/build-linux-worker.sh podman --profile dev` built the x86_64 musl worker; its embedded `2.40.0+b0d49da0ef13bff48256cfb5870ff830f9b39491` stamp matched the controller build-script identity. A temporary README edit was stashed, and the helper's ID remained unchanged; the committed-docs case is covered by `worker_inputs_identity_ignores_docs_and_tracks_worker_inputs`. Logs and exact stamp evidence are in the assigned `.mj/agents` report directory.
 
 ## Context and Orientation
 

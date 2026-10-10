@@ -56,7 +56,7 @@ uv pip install
 rustup toolchain list
 
 === npm registered namespace (transcript row) ===
-npm run
+npm run build
 
 === shell and argv invocation depth (transcript rows) ===
 shell: git status

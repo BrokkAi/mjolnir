@@ -28,6 +28,9 @@ pub struct BrowserTranscriptEntry {
     /// Submission identity for replacing a client-local pending row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_id: Option<String>,
+    /// Stable identity for multiple messages delivered at the same relay ordinal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable_id: Option<String>,
     pub id: u64,
     pub updated_seq: u64,
     pub role: &'static str,
@@ -50,6 +53,14 @@ pub struct BrowserTranscriptEntry {
     /// every diffstat as one unsplit path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diffstats: Vec<BrowserDiffStat>,
+}
+
+impl BrowserTranscriptEntry {
+    pub fn identity(&self) -> String {
+        self.stable_id
+            .clone()
+            .unwrap_or_else(|| format!("ordinal:{}", self.id))
+    }
 }
 
 /// One file a tool changed, and by how much.

@@ -1601,6 +1601,9 @@ article > h3 {
 }
 
 /* Tone names come from the projection; what they look like is decided here. */
+.entry.tone-message {
+  --role: var(--user);
+}
 .entry.tone-user {
   --role: var(--user);
 }

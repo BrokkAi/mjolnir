@@ -440,7 +440,7 @@ impl DurableRelay {
         let mut relay = Self {
             root,
             relay_version: relay_version.into(),
-            worker_build: None,
+            worker_build: Some(mj_core::worker_build::WORKER_BUILD_ID.to_owned()),
             acp_ready: false,
             session_setup: false,
             checkpoint_only,
@@ -825,10 +825,9 @@ impl DurableRelay {
         Ok(())
     }
 
-    /// Record the content address of the executable serving this relay, so
-    /// hello can report which build a controller reached.
-    pub fn set_worker_build(&mut self, digest: Option<String>) {
-        self.worker_build = digest;
+    /// Set the worker-input compatibility identity served in hello.
+    pub fn set_worker_build(&mut self, build: Option<String>) {
+        self.worker_build = build;
     }
 
     /// Choose whether agent output with no prompt in flight opens a turn.
