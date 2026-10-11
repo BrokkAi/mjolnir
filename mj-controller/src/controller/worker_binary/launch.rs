@@ -211,7 +211,7 @@ impl Controller {
         };
         let worker_root = targets::worker_root(backend, &session.id)?;
         let config_roots = build_cache_config_roots(launch);
-        let configuration = crate::controller::mbx::shared_configuration_file(&cache.directory);
+        let configuration = mj_core::config::build_cache_configuration_directory(&cache.directory);
         if link_legacy_mbx_configuration(
             executor,
             backend,
