@@ -4186,6 +4186,43 @@ async fn durable_wait(backend: &Arc<ApiBackend>, request_id: &str) -> serde_json
     serde_json::from_str(&answer.result.message).unwrap()
 }
 
+// Hard-won: 8c73d3a8f: steering must retire the old wait without consuming a later child report.
+#[tokio::test]
+async fn worker_completed_wait_is_retired_without_collecting_child_reports() {
+    if !isolated_parked_test("worker_completed_wait_is_retired_without_collecting_child_reports") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "still collectible", 3, 9, 7);
+    let mut view = ready_view("model");
+    let yielded = serde_json::json!({"status": "interrupted", "agents": [], "waited_seconds": 1});
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .subagent_results
+        .push(mj_core::subagent::SubagentToolResult {
+            request_id: "yielded-wait".into(),
+            completed_at_ms: mj_core::clock::epoch_millis(),
+            is_error: false,
+            message: yielded.to_string(),
+        });
+    // A replacement daemon sees the worker's completed answer before it
+    // attempts to resume the durable wait. Even a ready report stays unread.
+    let (backend, _, _, _) = wait_prompt_backend(view);
+    assert_eq!(durable_wait(&backend, "yielded-wait").await, yielded);
+    assert!(
+        crate::database::load_subagent("child-1")
+            .unwrap()
+            .unwrap()
+            .reported_finish
+            .is_none()
+    );
+    assert_eq!(durable_wait(&backend, "yielded-wait").await, yielded);
+    let next = durable_wait(&backend, "next-wait").await;
+    assert_eq!(next["agents"][0]["output"], "still collectible");
+}
+
 /// A wait commits its report marker with the durable result. Replaying the
 /// same request returns that exact result, while a later request omits output.
 #[tokio::test]

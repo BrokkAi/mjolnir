@@ -1921,7 +1921,21 @@ impl DurableRelay {
         Ok(())
     }
 
-    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, String)> {
+    #[cfg(unix)]
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    /// A wait for this turn must yield so the hook can deliver its steer.
+    /// Use the hook's own eligibility decision, including delivery mode and
+    /// prompt shape, rather than treating every queued prompt as steering.
+    #[cfg(unix)]
+    pub(crate) fn boundary_steer_needs_turn(&self, active_prompt_id: &str) -> bool {
+        self.pending_hook_steering("PostToolBatch")
+            .is_some_and(|(steering, _)| steering.active_prompt_id == active_prompt_id)
+    }
+
+    fn pending_hook_steering(&self, hook_event: &str) -> Option<(MailboxHookSteering, &str)> {
         if hook_event != "PostToolBatch"
             || self.steering_delivery_mode != SteeringDeliveryMode::ClaudePostToolBatch
         {
@@ -1962,7 +1976,7 @@ impl DurableRelay {
                 active_prompt_id: operation.active_prompt_id.clone(),
                 queued_prompt_id: operation.queued_prompt_id.clone(),
             },
-            text.to_owned(),
+            text,
         ))
     }
 

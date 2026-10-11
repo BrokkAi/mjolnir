@@ -1141,6 +1141,11 @@ impl ApiBackend {
                 let deadline = started + remaining;
                 let mut changes = ChildWaitFeed::new(self, parent_session_id).await?;
                 loop {
+                    if let Some(result) = changes.completed_result(&request.request_id) {
+                        ensure!(!result.is_error, "{}", result.message);
+                        return serde_json::from_str(&result.message)
+                            .context("parse worker-completed sub-agent wait");
+                    }
                     // Capture the publication baseline before loading child
                     // snapshots. Otherwise a finish between the snapshot
                     // read and this baseline could look already observed and
