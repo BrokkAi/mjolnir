@@ -3874,26 +3874,22 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
 }
 
 #[cfg(target_os = "linux")]
+// Hard-won: 6fb245e38: legacy mbx relinking appended config.toml to a configuration filename.
 #[test]
 fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     struct CacheLinkExecutor {
         commands: RefCell<Vec<CommandSpec>>,
         worker_bin: PathBuf,
-        configuration: PathBuf,
         home: PathBuf,
     }
 
     impl CommandExecutor for CacheLinkExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             self.commands.borrow_mut().push(command.clone());
-            let mut args = vec![
-                "-c".into(),
-                command.args[4].clone(),
-                "sh".into(),
-                self.worker_bin.to_string_lossy().into_owned(),
-                self.configuration.to_string_lossy().into_owned(),
-            ];
-            args.extend(command.args[8..].iter().cloned());
+            let mut args = command.args[3..].to_vec();
+            // Translate only the container's worker directory; run the shell
+            // with the configuration path supplied by the production caller.
+            args[3] = self.worker_bin.to_string_lossy().into_owned();
             let mut local = CommandSpec::new("/bin/sh", args);
             local
                 .env
@@ -3904,7 +3900,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let shared_cache = directory.path().join("shared-cache");
+    let shared_cache = directory.path().join("shared cache");
     let configuration = shared_cache.join(".mjolnir/config/mbx");
     std::fs::create_dir_all(&configuration).unwrap();
     std::fs::write(
@@ -3962,7 +3958,6 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
     let executor = CacheLinkExecutor {
         commands: RefCell::new(Vec::new()),
         worker_bin,
-        configuration,
         home: home.clone(),
     };
 
@@ -3990,7 +3985,14 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         std::fs::read(&legacy_binary).unwrap(),
         b"legacy copied mbx executable"
     );
-    assert!(home.join(".config/mbx/config.toml").is_symlink());
+    assert_eq!(
+        std::fs::read_link(home.join(".config/mbx/config.toml")).unwrap(),
+        configuration.join("config.toml")
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join(".config/mbx/config.toml")).unwrap(),
+        "[gc]\nmax_total_size = '50GB'\n"
+    );
 }
 
 #[test]

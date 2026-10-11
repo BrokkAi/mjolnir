@@ -379,11 +379,6 @@ pub(super) fn prepare_session_configuration(
     publish_at(&host, &cache, &recorded.directory, executor)
 }
 
-/// The configuration file reachable through a session's shared cache mount.
-pub(super) fn shared_configuration_file(directory: &Path) -> PathBuf {
-    configuration::shared_directory(directory).join("config.toml")
-}
-
 /// Native mbx compatibility for a host used by configured container targets.
 pub(crate) struct DoctorHostMbx {
     pub host: String,
