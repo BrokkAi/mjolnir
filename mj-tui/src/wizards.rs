@@ -102,8 +102,6 @@ pub(crate) enum WizardControl {
     MountAccess,
     ReviewAttachments,
     Subagents,
-    SubagentModel,
-    SubagentEffort,
     CreateManagedWorktree,
     DiscardQueue,
     ChooseMoveFiles,
@@ -183,6 +181,7 @@ impl TargetReadiness {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NewWizard {
+    pub(crate) subagents: Box<subagents::SubagentDraft>,
     pub(crate) worktree_options: Option<(String, String, mj_core::state::ManagedWorktreeOptions)>,
     pub(crate) create_managed_worktree: bool,
     /// Creation stays in this workspace even if the visible tab changes.
@@ -227,7 +226,8 @@ pub(crate) struct NewWizard {
 
 impl PartialEq for NewWizard {
     fn eq(&self, other: &Self) -> bool {
-        self.worktree_options == other.worktree_options
+        self.subagents == other.subagents
+            && self.worktree_options == other.worktree_options
             && self.create_managed_worktree == other.create_managed_worktree
             && self.workspace_id == other.workspace_id
             && self.step == other.step

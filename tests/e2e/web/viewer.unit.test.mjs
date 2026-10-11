@@ -1300,49 +1300,77 @@ test('commit refuses unready, pending, or failed preflight even when called dire
   }
 });
 
-test('the create payload uses the selected profile sub-agent policy', async () => {
-  const posted = [];
-  const makeContext = (profileId, harnessKind, subagents) => vm.createContext({
-    snapshot: { targets: [], profiles: [
-      { id: 'other', harness_kind: 'claude', subagents: { mode: 'native' } },
-      { id: profileId, harness_kind: harnessKind, subagents },
-    ] },
-    newDraft: {
-      workspaceId: 'test',
-      preflighted: true,
-      profileId,
-      bundleId: 'bundle',
-      targetId: 'container',
-      projectDirectory: '',
-      title: '',
-      worktreeOptions: { available: false, default_create: false },
-      createManagedWorktree: false,
-      // Old drafts must not override the policy saved on the selected profile.
-      subagents: { mode: 'none' },
-    },
-    pendingNewPreflight: null,
-    targetResourceKind: () => 'fixed',
-    targetIsBare: () => false,
-    renderNewForm: () => {},
-    refresh: async () => {},
-    navigate: () => {},
-    newError: makeNode(),
-    request: async (_path, options) => { posted.push(JSON.parse(options.body)); },
+function delegationContext(kind = 'codex', configured = true) {
+  const context = vm.createContext({
+    snapshot: { targets: [], profiles: [{ id: 'profile', harness_kind: kind }], subagents_configured: configured },
+    document: { createTextNode: text => text },
+    el: (tag, className = '', text = '') => Object.assign(makeNode(tag), { className, textContent: text }),
   });
+  vm.runInContext(sourceBetween('function subagentChoiceApplies(', '\nfunction targetIsBare('), context);
+  vm.runInContext(sourceBetween('function moveSubagentChange(', '\nfunction moveStoppedChildren('), context);
+  return context;
+}
 
-  for (const [kind, choice, expected] of [
-    ['claude', { mode: 'single_model', model: 'sonnet', effort: 'high' }, { mode: 'single_model', model: 'sonnet', effort: 'high' }],
-    ['claude', { mode: 'native' }, { mode: 'native' }],
-    ['codex', { mode: 'single_model', model: 'gpt', effort: null }, { mode: 'single_model', model: 'gpt', effort: null }],
-    ['grok', { mode: 'native' }, { mode: 'native' }],
-    ['kimi', undefined, { mode: 'native' }],
-  ]) {
-    const context = makeContext('profile', kind, choice);
-    context.newDraft.committing = false;
-    vm.runInContext(sourceBetween('function profileSubagents(', '\nfunction targetIsBare('), context);
+test('Create sends the selected delegation policy across the browser action wire', async () => {
+  for (const mode of ['native', 'mjolnir']) {
+    const posted = [];
+    const context = delegationContext();
+    Object.assign(context, {
+      newDraft: {
+        workspaceId: 'test', preflighted: true, profileId: 'profile', bundleId: 'bundle',
+        targetId: 'container', projectDirectory: '', title: '',
+        worktreeOptions: { available: false }, createManagedWorktree: false, subagents: { mode },
+      },
+      pendingNewPreflight: null, targetResourceKind: () => 'fixed', targetIsBare: () => false,
+      renderNewForm() {}, refresh: async () => {}, navigate() {}, newError: makeNode(),
+      request: async (_path, options) => { posted.push(JSON.parse(options.body)); },
+    });
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
-    assert.deepEqual(posted.at(-1).subagents, expected, `${kind} with ${choice}`);
-    assert.equal(Object.hasOwn(posted.at(-1), 'resource_allocation'), false);
+    assert.deepEqual(posted[0].subagents, { mode });
+    assert.equal(Object.hasOwn(posted[0], 'resource_allocation'), false);
+  }
+});
+
+test('delegation reflects unavailable configuration and rechecks it before submission', async () => {
+  for (const [kind, configured] of [['codex', false], ['grok', true], ['claude', true]]) {
+    const context = delegationContext(kind, configured);
+    const body = makeNode();
+    const draft = { profileId: 'profile', subagents: { mode: 'native' } };
+    context.renderSubagentFields(body, draft, 'new', () => {});
+    const select = body.children[0].children[1];
+    const unavailable = !configured || kind === 'grok';
+    assert.equal(select.children[1].disabled, unavailable);
+    assert.equal(select.children[1].textContent, 'Mjolnir');
+    if (unavailable) assert.equal(body.children[1].textContent, "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents");
+    select.value = 'mjolnir';
+    select.onchange();
+    Object.assign(context, {
+      newDraft: Object.assign(draft, { preflighted: true }), pendingNewPreflight: null,
+      newError: makeNode(), request: () => assert.fail('unavailable configuration cannot launch'),
+    });
+    if (unavailable) {
+      vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
+      await vm.runInContext('commitNew()', context);
+      assert.match(context.newError.textContent, /TUI Settings -> Sub-agents/);
+    }
+  }
+});
+
+test('Move keeps legacy delegation unchanged without resending obsolete selectors', () => {
+  const context = delegationContext('codex', false);
+  Object.assign(context, { targetLaunchable: () => true, selectedWorkspaceId: () => 'test' });
+  vm.runInContext(sourceBetween('function freshMoveDraft(', '\n/// The delegation policy a Move'), context);
+  for (const mode of ['single_model', 'all_models', 'mjolnir', 'none']) {
+    const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: { mode, model: 'obsolete', effort: 'adaptive' } });
+    const body = makeNode();
+    context.renderSubagentFields(body, draft, 'move-session', () => {});
+    const select = body.children[0].children[1];
+    assert.equal(select.value, mode === 'none' ? 'native' : 'mjolnir');
+    assert.equal(context.moveSubagentChange(draft), null);
+    assert.equal(context.subagentSelectionError(draft), '');
+    select.value = mode === 'none' ? 'mjolnir' : 'native';
+    select.onchange();
+    assert.deepEqual(JSON.parse(JSON.stringify(context.moveSubagentChange(draft))), { mode: select.value });
   }
 });

@@ -28,17 +28,13 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"archive_after_days":null})
         }
         "subagents" if path.len() == 1 => {
-            json!({"max_concurrent":6,"eligible_profiles":{}})
+            json!({"max_concurrent":6,"eligible_profiles":{},"straightforward":{"model":null,"effort":null},"subtle":{"model":null,"effort":null}})
+        }
+        "subagents" if path.len() == 2 && matches!(key, "straightforward" | "subtle") => {
+            json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"subagents":{"mode":"native"}})
-        }
-        "profiles" if path.len() == 3 && key == "subagents" => {
-            if value["mode"] == "single_model" {
-                json!({"mode":"single_model","model":"","effort":null})
-            } else {
-                json!({"mode":"native"})
-            }
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -241,6 +237,8 @@ pub(super) fn label(key: &str) -> String {
         "sessionwiki" => "SessionWiki",
         "archive_after_days" => "Archive after (days)",
         "subagents" => "Sub-agents",
+        "straightforward" => "Straightforward",
+        "subtle" => "Subtle",
         "build_cache" => "Build caches",
         "scheduler" => "Compile scheduling",
         "directory" => "Cache directory",
@@ -263,8 +261,8 @@ pub(super) fn label(key: &str) -> String {
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
         "tls_key" => "TLS private key file",
-        "model" => "Review model",
-        "effort" => "Review effort",
+        "model" => "Model",
+        "effort" => "Effort",
         "image" => "Container image",
         "pull_policy" => "Download image policy",
         "platform" => "CPU platform",
@@ -325,7 +323,6 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
         }
         ["machines", _, "build_cache", "scheduler", "cpus"] => "Available logical CPUs".to_owned(),
         ["machines", _, "build_cache", "scheduler", "memory"] => "85% of host memory".to_owned(),
-        ["profiles", _, "subagents", "effort"] => "Model default".to_owned(),
         // An empty archive window never archives; there is no hidden number.
         ["sessionwiki", "archive_after_days"] => "Never".to_owned(),
         // A cleared number takes the setting's own default.
@@ -333,6 +330,16 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
             "{} (default)",
             mj_core::config::NotifyConfig::default().delay_seconds
         ),
+        ["subagents", task, "model"] if matches!(*task, "straightforward" | "subtle") => {
+            if draft["_subagent_options"][task].is_null() {
+                "Discovering models…".into()
+            } else {
+                "Not set".into()
+            }
+        }
+        ["subagents", task, "effort"] if matches!(*task, "straightforward" | "subtle") => {
+            "Harness default".into()
+        }
         ["subagents", "max_concurrent"] => format!(
             "{} (default)",
             mj_core::config::SubagentConfig::default().max_concurrent
@@ -487,8 +494,7 @@ pub(super) fn section_summary(key: &str, draft: &Value) -> Option<String> {
         }
         "subagents" => {
             // A cleared limit is the default one, which still applies.
-            // Whether any given session uses Mjolnir sub-agents is now a
-            // profile setting, so this page only bounds them.
+            // The delegation policy is selected when creating or moving a session.
             let limit = section["max_concurrent"].as_u64().unwrap_or(
                 u64::try_from(mj_core::config::SubagentConfig::default().max_concurrent)
                     .unwrap_or(u64::MAX),
@@ -568,7 +574,6 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
     }
     match value {
         "native" => "Native",
-        "single_model" => "Mjolnir, single model",
         "local" => "This machine",
         "ssh" => "SSH host",
         "aws-ec2" => "Amazon EC2",
@@ -596,10 +601,23 @@ pub(super) fn choice_label(path: &[String], value: &Value, draft: &Value) -> Str
 
 pub(super) fn choices(path: &[String], draft: &Value) -> Vec<Value> {
     let key = path.last().map(String::as_str).unwrap_or("");
-    let values: &[&str] = match key {
-        "mode" if path.len() == 4 && path[0] == "profiles" && path[2] == "subagents" => {
-            &["native", "single_model"]
+    if path.len() == 3 && path[0] == "subagents" && matches!(key, "model" | "effort") {
+        let mut choices = vec![Value::Null];
+        if let Some(values) = draft["_subagent_options"][&path[1]]
+            [if key == "model" { "models" } else { "efforts" }]
+        .as_array()
+        {
+            choices.extend(
+                values
+                    .iter()
+                    .filter_map(|v| v["value"].as_str())
+                    .filter(|v| *v != "adaptive")
+                    .map(|v| Value::String(v.into())),
+            );
         }
+        return choices;
+    }
+    let values: &[&str] = match key {
         "sessions_side" => &["left", "right"],
         "session_order" => &["project", "priority"],
         "symbols" => &["unicode", "ascii"],
@@ -720,9 +738,6 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         _ => {}
     }
-    if path.len() >= 3 && path[0] == "profiles" && path[2] == "subagents" {
-        return "Creation defaults copied into new sessions. Existing sessions keep their own policy; edit it in Move. Native uses the harness's own subagents. Single model uses Mjolnir with the selected model and effort; Adaptive asks Jev to choose an effort for each child task.";
-    }
     match path.last().map(String::as_str).unwrap_or("") {
         "prefix" if path.first().is_some_and(|key| key == "interface") => {
             "Key pressed before global shortcuts. Use ctrl, alt, or cmd/super with a key, or use a function key."
@@ -800,7 +815,11 @@ pub(super) fn help(path: &[String]) -> &'static str {
             "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
         "subagents" => {
-            "Mjolnir-owned child agents: their limit and extra profiles. A parent's own profile is always eligible."
+            "Set both task types to enable Mjolnir sub-agents. Parents choose a task type per spawn."
+        }
+        "straightforward" => "Work with a clear method. Choose a model and its effort.",
+        "subtle" => {
+            "Work needing judgment. Choose a smarter model or higher effort than Straightforward."
         }
         "eligible_profiles" => {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."

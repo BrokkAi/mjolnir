@@ -335,10 +335,6 @@ fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
             parent_instructions,
             tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
         ),
-        SubagentMcpRole::FixedParent => (
-            parent_instructions,
-            fixed_tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
-        ),
         SubagentMcpRole::MessageOnly => (
             if agent_mailboxes_enabled {
                 MESSAGE_ONLY_INSTRUCTIONS
@@ -388,12 +384,7 @@ struct CallParams {
 struct SpawnArgs {
     task_name: String,
     instructions: String,
-    #[serde(default)]
-    profile_id: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    effort: Option<String>,
+    task_type: mj_core::subagent::SubagentTaskType,
     #[serde(default)]
     working_directory: PathBuf,
 }
@@ -483,18 +474,7 @@ fn call_with_budget_and_mailboxes(
     {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
-    if role == SubagentMcpRole::FixedParent
-        && params.name == "spawn"
-        && ["profile_id", "model", "effort"]
-            .iter()
-            .any(|key| params.arguments.get(key).is_some())
-    {
-        bail!(
-            "single-model spawn does not accept profile_id, model, or effort; the user fixed them for this session"
-        );
-    }
     let action = match params.name.as_str() {
-        "list_profiles" => SubagentToolAction::ListProfiles,
         "spawn" => {
             if ["files", "context"]
                 .iter()
@@ -512,9 +492,7 @@ fn call_with_budget_and_mailboxes(
             SubagentToolAction::Spawn {
                 task_name: args.task_name,
                 instructions: instructions.to_owned(),
-                profile_id: args.profile_id,
-                model: args.model,
-                effort: args.effort,
+                task_type: args.task_type,
                 working_directory: args.working_directory,
                 // Legacy accepted requests keep these wire fields; new calls omit them.
                 context: None,
@@ -655,27 +633,19 @@ fn tool_definitions_with_mailboxes(
     agent_mailboxes_enabled: bool,
 ) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
-    let current = mj_core::subagent::CURRENT_MODEL;
-    let model = format!(
-        "A model value from list_profiles, or \"{current}\" for this session's own model. Unless profile_id is given, Mjolnir runs the child on the eligible profile that offers this model and has the most quota left (the lower of its 5-hour and weekly remaining)."
-    );
     let mut definitions = vec![
         tool(
-            "list_profiles",
-            "List eligible sub-agent profiles and the models and efforts each offers. Profiles that offer the same models are listed once, as the one with the most quota left.",
-            json!({"type":"object","additionalProperties":false}),
-        ),
-        tool(
             "spawn",
-            "Start a child in your target and filesystem. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect the report or startup error with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and starting pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Choose a model from list_profiles; Mjolnir selects an eligible profile with the most quota unless profile_id pins one. In all-models mode, effort may be `adaptive`; Jev chooses from the model's advertised efforts using the task brief. If Jev is unavailable, Mjolnir uses the effort mapped from `high`. An unavailable model, effort or login is an error, never replaced by another selection. A login the provider has refused stays unavailable until repaired with `mj login`. Only children holding processes count against the live children limit; Mjolnir parks it when a child hands back. A refused spawn names the live children. Close children you no longer need; failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted.",
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`.",
             json!({
                 "type":"object",
                 "properties":{
-                    "task_name":{"type":"string"},"instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
-                    "profile_id":{"type":"string","description":"Only to pin one profile; normally omit it and let the model choose the profile."},"model":{"type":"string","description":model},"effort":{"type":"string","description":"An effort the chosen profile offers, or `adaptive` for Jev to choose from its offered efforts using the task brief. Omitted, the child uses this session's effort when the chosen profile offers it, otherwise the harness default."},
-                    "working_directory":{"type":"string","description":"Launch directory for the child session on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent session's working directory. The directory must exist; no other restriction applies. Defaults to the parent session's working directory."}
+                    "task_name":{"type":"string"},
+                    "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
+                    "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
+                    "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
                 },
-                "required":["task_name","instructions","model"],"additionalProperties":false
+                "required":["task_name","instructions","task_type"],"additionalProperties":false
             }),
         ),
         tool(
@@ -720,39 +690,6 @@ fn send_message_tool() -> Value {
     )
 }
 
-#[cfg(test)]
-fn fixed_tool_definitions(harness: Option<HarnessKind>) -> Vec<Value> {
-    fixed_tool_definitions_with_mailboxes(harness, true)
-}
-
-fn fixed_tool_definitions_with_mailboxes(
-    harness: Option<HarnessKind>,
-    agent_mailboxes_enabled: bool,
-) -> Vec<Value> {
-    let mut tools = tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled);
-    tools.retain(|tool| tool["name"] != "list_profiles");
-    let spawn = tools
-        .iter_mut()
-        .find(|tool| tool["name"] == "spawn")
-        .expect("spawn tool");
-    for key in ["profile_id", "model", "effort"] {
-        spawn["inputSchema"]["properties"]
-            .as_object_mut()
-            .expect("properties")
-            .remove(key);
-    }
-    spawn["inputSchema"]["required"] = json!(["task_name", "instructions"]);
-    spawn["description"] = json!(format!(
-        "Start a child in your target and filesystem using the model and effort fixed by the user. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. {} Mjolnir selects an eligible profile with the most quota supporting the exact model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted.",
-        if agent_mailboxes_enabled {
-            "Use send_message for follow-up work when an idle child's context helps."
-        } else {
-            "Use an independent spawn for follow-up work."
-        }
-    ));
-    tools
-}
-
 /// A child's only tool: its report to the session that started it.
 fn child_tool_definitions() -> Vec<Value> {
     vec![tool(
@@ -790,7 +727,7 @@ mod tests {
     fn initialize_and_tool_list_deliver_concise_parent_and_child_contracts() {
         for role in [
             SubagentMcpRole::Parent,
-            SubagentMcpRole::FixedParent,
+            SubagentMcpRole::Parent,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
@@ -878,7 +815,7 @@ mod tests {
                         }
                         assert!(!description.contains("child_session_id"));
                     }
-                    SubagentMcpRole::Parent | SubagentMcpRole::FixedParent => {
+                    SubagentMcpRole::Parent => {
                         assert!(instructions.contains(DELEGATION_ROUTING));
                         assert!(
                             instructions.contains(
@@ -892,24 +829,32 @@ mod tests {
                         let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
                         let props = &spawn["inputSchema"]["properties"];
                         assert!(props.get("files").is_none() && props.get("context").is_none());
+                        let mut keys = props
+                            .as_object()
+                            .unwrap()
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>();
+                        keys.sort();
                         assert_eq!(
-                            props.get("model").is_some(),
-                            role == SubagentMcpRole::Parent
+                            keys,
+                            [
+                                "instructions",
+                                "task_name",
+                                "task_type",
+                                "working_directory"
+                            ]
                         );
-                        if role == SubagentMcpRole::Parent {
-                            assert!(
-                                props["effort"]["description"]
-                                    .as_str()
-                                    .unwrap()
-                                    .contains("adaptive")
-                            );
-                            assert!(
-                                spawn["description"]
-                                    .as_str()
-                                    .unwrap()
-                                    .contains("all-models")
-                            );
-                        }
+                        assert_eq!(
+                            props["task_type"]["enum"],
+                            json!(["straightforward", "subtle"])
+                        );
+                        assert!(
+                            spawn["description"]
+                                .as_str()
+                                .unwrap()
+                                .contains("Judge by difficulty, not by the length of the brief")
+                        );
                         assert_eq!(spawn["inputSchema"]["additionalProperties"], false);
                         assert_eq!(
                             tools
@@ -973,7 +918,7 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
         );
-        for role in [SubagentMcpRole::Parent, SubagentMcpRole::FixedParent] {
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::Parent] {
             let output = Arc::new(Mutex::new(Vec::new()));
             run_with_mailboxes(
                 input.as_bytes(),
@@ -1034,8 +979,8 @@ mod tests {
     }
 
     #[test]
-    fn fixed_parent_exposes_no_selector_arguments_and_refuses_hidden_tools_and_overrides() {
-        let tools = fixed_tool_definitions(None);
+    fn parent_requires_task_type_and_refuses_hidden_tools_and_selector_overrides() {
+        let tools = tool_definitions(None);
         assert!(!tools.iter().any(|tool| tool["name"] == "list_profiles"));
         assert!(tools.iter().any(|tool| tool["name"] == "send_message"));
         assert!(!tools.iter().any(|tool| tool["name"] == "send_input"));
@@ -1043,12 +988,12 @@ mod tests {
         let spawn = tools.iter().find(|tool| tool["name"] == "spawn").unwrap();
         assert_eq!(
             spawn["inputSchema"]["required"],
-            json!(["task_name", "instructions"])
+            json!(["task_name", "instructions", "task_type"])
         );
         let mut calls = vec![json!({"name":"list_profiles", "arguments":{}})];
         for key in ["profile_id", "model", "effort"] {
             assert!(spawn["inputSchema"]["properties"].get(key).is_none());
-            let mut args = json!({"task_name":"probe", "instructions":"report"});
+            let mut args = json!({"task_name":"probe", "instructions":"report", "task_type":"straightforward"});
             args[key] = json!("override");
             calls.push(json!({"name":"spawn", "arguments":args}));
         }
@@ -1056,14 +1001,14 @@ mod tests {
             let error = call(
                 Path::new("unused.sock"),
                 None,
-                SubagentMcpRole::FixedParent,
+                SubagentMcpRole::Parent,
                 Some(&params),
                 &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
             )
             .unwrap_err();
             assert!(
                 error.to_string().contains("unknown sub-agent tool")
-                    || error.to_string().contains("does not accept"),
+                    || error.to_string().contains("unknown field"),
                 "{error:#}"
             );
         }
@@ -1157,7 +1102,7 @@ mod tests {
         assert!(wait.contains("parked true"), "{wait}");
         let spawn = description("spawn");
         assert!(spawn.contains("live children"), "{spawn}");
-        assert!(spawn.contains("parks it"), "{spawn}");
+        assert!(spawn.contains("finished children are parked"), "{spawn}");
         assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
         assert!(SERVER_INSTRUCTIONS.contains("send_message resumes one"));
         // Codex code mode runs a wait inside an exec script that yields while
@@ -1322,7 +1267,7 @@ mod tests {
             &socket,
             None,
             SubagentMcpRole::Parent,
-            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i"}})),
+            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i", "task_type":"straightforward"}})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_secs(30),
         )
@@ -1572,7 +1517,7 @@ mod tests {
             socket,
             None,
             SubagentMcpRole::Child,
-            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i"}})),
+            Some(&json!({"name": "spawn", "arguments": {"task_name": "t", "instructions": "i", "task_type":"straightforward"}})),
             &progress,
             |_| Duration::from_millis(50),
         )
@@ -1827,7 +1772,7 @@ mod tests {
             None,
             SubagentMcpRole::Parent,
             Some(&json!({"name": "spawn", "arguments": {
-                "task_name": "t", "instructions": "i", "request_key": "k"
+                "task_name": "t", "instructions": "i", "task_type":"straightforward", "request_key": "k"
             }})),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_millis(50),

@@ -310,6 +310,12 @@ class SteerLab:
             "enabled = true\n"
             'bind = "127.0.0.1:0"\n'
             "tailscale_detect = false\n\n"
+            "[subagents.straightforward]\n"
+            'model = "opus"\n'
+            'effort = "low"\n\n'
+            "[subagents.subtle]\n"
+            'model = "opus"\n'
+            'effort = "low"\n\n'
             "[profiles.codex]\n"
             'kind = "codex"\n'
             f"home = {self.toml_string(codex_home)}\n"
@@ -435,7 +441,7 @@ class SteerLab:
 
     def create_session(self, harness: str, title: str, *, delegation: bool = False) -> str:
         delegation_args = (
-            ("--subagents", "single-model", "--subagent-model", "opus", "--subagent-effort", "low")
+            ("--subagents", "mjolnir")
             if delegation else ()
         )
         output = self.cli(

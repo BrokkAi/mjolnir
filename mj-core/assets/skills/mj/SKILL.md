@@ -62,8 +62,9 @@ reachable from here, and continue with the task by yourself.
 Some sessions are given an MCP server named `mj-agents`. It delegates work to
 child sessions in the same target and filesystem:
 
-- `list_profiles` — the profiles and models a child may use.
-- `spawn` — start a child; returns `child_session_id` at once, before the child
+- `spawn` — start a child with required `task_type` (`straightforward` for a
+  clear method, `subtle` for judgment or risk of subtle bugs). The user configures
+  both model/effort choices globally in Settings → Sub-agents; returns `child_session_id` at once, before the child
   has started running.
 - `list_agents` — this parent's children and their status.
 - `send_message` — send follow-up work to one child. With mailboxes enabled and

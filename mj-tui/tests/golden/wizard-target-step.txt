@@ -92,7 +92,6 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
 │                                            ││                                                                                            │
-│                                            ││                                      ✦  M J O L N I R                                      │
 │                                                                                                                                          │
 │                                                                                                                                          │
 │          ╭ × New session · 3/3 review ───────────────────────────────────────────────────────────────────────────────────────╮           │
@@ -106,12 +105,13 @@ action: ValidateProjectDirectory { target_template_id: "localhost", directory: "
 │          │ Use the selected directory directly.                                                                              │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │   Cancel     Back     Create                                                                                      │           │
-│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  ─────────╯
-│                                                                                                                                 ─────────╮
+│          │ Delegation Native ▾                                                                                               │           │
+│          │ Set up Mjolnir sub-agents in Settings -> Sub-agents                                                               │           │
+│          │                                                                                                                   │  ─────────╯
+│          │   Cancel     Back     Create                                                                                      │  ─────────╮
+│          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │
 │                                                                                                                                          │
-│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                                                                                                                 ─────────╯
 │                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -562,7 +562,7 @@ action: MoveSession { subagents: Some(Native), workspace_selection: WorkspaceSel
 │          │ Checking move destination…                                                                                        │           │
 │          │                                                                                                                   │           │
 │          │                                                                                                                   │           │
-│          │ Subagents  Native ▾                                                                                               │           │
+│          │ Delegation Native ▾                                                                                               │           │
 │          │                                                                                                                   │  ─────────╯
 │          │   Cancel     Back     Choose files…     Move                                                                      │  ─────────╮
 │          ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯           │

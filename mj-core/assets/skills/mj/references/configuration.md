@@ -66,14 +66,14 @@ still take precedence over the instance directories.
 Every current file starts with the required schema version:
 
 ```toml
-version = 16
+version = 17
 ```
 
 The only accepted top-level keys are:
 
 | Key | TOML type | Required | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `version` | integer | yes | none | Configuration schema version; use `16`. |
+| `version` | integer | yes | none | Configuration schema version; use `17`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
@@ -91,7 +91,7 @@ The only accepted top-level keys are:
 | `github` | table | no | empty | Optional GitHub App credentials shared by the controller. |
 | `machines` | table of named tables | no | empty | Named hosts sessions run on. `local` is implied even when it is absent. |
 | `targets` | table of named tables | no | empty | Named runtimes, each naming the machine it runs on. |
-| `subagents` | table | no | default `[subagents]` values | Policy for Mjolnir-owned child agents. |
+| `subagents` | table | no | default `[subagents]` values | Global task choices and limits for Mjolnir-owned child agents. |
 | `build_cache` | table | no | none | Legacy compatibility input. A global opt-out is migrated to the existing machines and omitted on save. |
 
 The terminal Settings screen groups the prefix key, `sessions_side`, `spinner`,
@@ -99,7 +99,7 @@ and `theme` under **Interface**. This is a presentation grouping: the prefix
 remains at `keys.prefix`, while the other three fields remain at the top level
 in `config.toml`.
 
-A missing or empty file is treated as an empty version 16 configuration. Older
+A missing or empty file is treated as an empty version 17 configuration. Older
 versions acquire defaults in memory and upgrade on the next ordinary save. Unknown
 fields in the current top-level, viewer, review, profile, bundle, and repository
 schemas are errors. If a file declares a version newer than this build
@@ -457,45 +457,41 @@ command-line tool must match the version Mjolnir links.
 
 ## Sub-agents `[subagents]`
 
-A Claude or Codex session can start child sessions, called sub-agents, through
-Mjolnir's `spawn` tool. Configure delegation under Settings → Agent Profiles →
-a profile → Sub-agents. Each profile defaults to **Native**, using the harness's
-own subagents. The other choice is **Mjolnir, single model**, which selects one
-model and its effort. Create and Move dialogs use the selected profile's setting;
-resuming a session retains its recorded policy. Confirm has no subagent controls.
-
-For example, keep an OpenAI/Codex profile native and configure a Claude profile
-with a fixed Mjolnir child model:
-
-```toml
-[profiles.claude.subagents]
-mode = "single_model"
-model = "your-model-slug"
-effort = "high"
-```
-
-Single-model `spawn` always uses that selection and cannot override the profile,
-model, or effort; `list_profiles` is omitted. Mjolnir chooses an eligible profile
-offering that exact model and effort by remaining quota, so single-model does
-not mean single-profile. Configure additional eligible profiles in Settings →
-Sub-agents. Claude/Codex Mjolnir children have native delegation disabled. The
-CLI can override delegation for one new session with
-`mj new --subagents native|single-model|none` and `--subagent-model` /
-`--subagent-effort` for single-model mode. `none` disables delegation without
-changing the profile's settings; profile setup still offers only Native and
-single model. Multi-model is retired for new selections; existing sessions
-retain their recorded policy on resume.
-
-This section sets the concurrent child limit and eligible profiles.
+A Claude or Codex session can use Mjolnir's `spawn` tool. Create and Move offer
+Native or Mjolnir. Native uses the harness's own delegation. Mjolnir requires
+both global task choices, configured in Settings → Sub-agents or config.toml:
 
 ```toml
 [subagents]
-# max_concurrent = 6
+max_concurrent = 6
+
+[subagents.straightforward]
+model = "your-codex-model"
+effort = "high"
+
+[subagents.subtle]
+model = "your-claude-model"
+effort = "high"
 
 [subagents.eligible_profiles]
 codex = true
-codex2 = true
+claude = true
 ```
+
+Each choice requires a non-empty model. Effort is optional and must be offered
+by that model when specified; omitted effort uses the harness default. Adaptive
+effort is no longer supported. Both choices must be available to the parent's
+eligible profiles before Mjolnir can be selected. Legacy per-profile subagent
+settings are ignored and dropped on save, with no migration to global choices.
+
+`spawn` takes `task_type`: `straightforward` for work with a clear method, such
+as locating code, running commands or tests, or implementing a settled design;
+`subtle` for judgment, ambiguous diagnosis, design choices, or risk of subtle
+bugs. A subtle task gets a smarter, more expensive agent. Judge difficulty,
+not brief length. Mjolnir chooses the eligible profile offering that task type's
+model and effort with the most quota. The agent cannot override the selection.
+Children cannot delegate. `mj new --subagents native|mjolnir` defaults to Native;
+`mj move --subagents native|mjolnir` retains the recorded policy when omitted.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -1035,7 +1031,7 @@ and runtime kinds from the examples above rather than mixing fields between
 variants.
 
 ```toml
-version = 16
+version = 17
 
 [phone]
 enabled = true

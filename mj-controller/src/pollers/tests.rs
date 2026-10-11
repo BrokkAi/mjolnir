@@ -66,7 +66,7 @@ fn podman_controller(state: SessionState) -> Controller {
             home: PathBuf::from("/home/dev/.codex"),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1092,7 +1092,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 home: home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
@@ -1172,7 +1172,7 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );

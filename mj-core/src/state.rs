@@ -2085,7 +2085,10 @@ fn created_at_seconds(timestamp: &str) -> Option<i64> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::subagent::deserialize_launch_policy"
+    )]
     pub last_subagent_policy: crate::subagent::SubagentPolicy,
     pub version: u32,
     #[serde(default, skip_serializing_if = "SnapshotMap::is_empty")]
@@ -2521,7 +2524,7 @@ impl State {
                 let mut comparable = profile.clone();
                 if let Some(updated) = after.profiles.get(&session.last_profile) {
                     comparable.enabled = updated.enabled;
-                    comparable.subagents = updated.subagents.clone();
+                    comparable.legacy_subagents = updated.legacy_subagents.clone();
                 }
                 // A mismatched harness is already broken; allow repairing it.
                 profile.kind == session.harness_kind

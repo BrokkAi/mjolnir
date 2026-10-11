@@ -80,6 +80,28 @@ pub(super) fn edit_in_place(existing: &str, loaded: &str, updated: &str) -> Opti
     if version <= LEGACY_DEFAULT_IMAGE_LAST_VERSION as i64 {
         drop_legacy_default_images(&mut document, LEGACY_DEFAULT_CONTAINER_IMAGE);
     }
+    // These keys are accepted only for legacy reads and must not survive the
+    // comment-preserving path merely because they are absent from both projections.
+    if let Some(subagents) = document
+        .get_mut("subagents")
+        .and_then(Item::as_table_like_mut)
+    {
+        subagents.remove("enabled");
+    }
+    if let Some(profiles) = document
+        .get_mut("profiles")
+        .and_then(Item::as_table_like_mut)
+    {
+        let ids = profiles
+            .iter()
+            .map(|(id, _)| id.to_owned())
+            .collect::<Vec<_>>();
+        for id in ids {
+            if let Some(profile) = profiles.get_mut(&id).and_then(Item::as_table_like_mut) {
+                profile.remove("subagents");
+            }
+        }
+    }
     Some(document.to_string())
 }
 

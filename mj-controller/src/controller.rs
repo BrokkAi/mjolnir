@@ -1027,7 +1027,7 @@ impl Controller {
             launch_branch,
             checkout,
             publication: None,
-            subagents: Some(subagents.unwrap_or_else(|| profile.subagents.clone())),
+            subagents: Some(subagents.unwrap_or_default()),
             archived: false,
             container_cpus: None,
             container_memory: None,

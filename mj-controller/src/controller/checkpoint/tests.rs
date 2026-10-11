@@ -2265,7 +2265,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -2594,7 +2594,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -3035,7 +3035,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
                 home: profile_home.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
@@ -3374,7 +3374,7 @@ async fn close_cut_controller(
             home: profile_home,
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );

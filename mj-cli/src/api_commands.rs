@@ -136,15 +136,14 @@ pub(crate) struct NewArgs {
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
     effort: Option<String>,
-    /// Delegation policy. Omitted uses the selected profile's setting.
-    #[arg(long, value_parser = ["native", "single-model", "none"])]
+    /// Delegation policy: native or mjolnir. Omitted uses Native.
+    #[arg(long)]
     subagents: Option<String>,
-    /// Fixed child model, required with --subagents single-model.
-    #[arg(long, requires = "subagents")]
+    /// Removed: configure global task types in config.toml.
+    #[arg(long, hide = true)]
     subagent_model: Option<String>,
-    /// Fixed child reasoning effort, or `adaptive` for a per-task Jev choice
-    /// when available.
-    #[arg(long, requires = "subagents")]
+    /// Removed: configure global task types in config.toml.
+    #[arg(long, hide = true)]
     subagent_effort: Option<String>,
     /// Review every turn of this session with this model, even when
     /// `[review]` is off. Without a `[review]` profile, Auto picks a profile
@@ -992,19 +991,15 @@ pub(crate) fn subagent_policy(
     effort: Option<&str>,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
-    if mode != Some("single-model") && (model.is_some() || effort.is_some()) {
-        bail!("--subagent-model and --subagent-effort require --subagents single-model");
+    const REMEDY: &str = "Configure [subagents.straightforward] and [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
+    if model.is_some() || effort.is_some() {
+        bail!("--subagent-model and --subagent-effort were removed. {REMEDY}");
     }
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
-        Some("none") => Some(SubagentPolicy::None),
-        Some("single-model") => Some(SubagentPolicy::SingleModel {
-            model: model
-                .context("--subagents single-model requires --subagent-model")?
-                .to_owned(),
-            effort: effort.map(str::to_owned),
-        }),
-        _ => None,
+        Some("mjolnir") => Some(SubagentPolicy::Mjolnir),
+        None => None,
+        Some(other) => bail!("unknown subagents mode {other:?}; use native or mjolnir. {REMEDY}"),
     })
 }
 
@@ -2748,29 +2743,15 @@ mod tests {
             Some(SubagentPolicy::Native)
         );
         assert_eq!(
-            parse(&["--subagents", "none"]).unwrap(),
-            Some(SubagentPolicy::None)
-        );
-        assert_eq!(
-            parse(&[
-                "--subagents",
-                "single-model",
-                "--subagent-model",
-                "model",
-                "--subagent-effort",
-                "high"
-            ])
-            .unwrap(),
-            Some(SubagentPolicy::SingleModel {
-                model: "model".into(),
-                effort: Some("high".into())
-            })
+            parse(&["--subagents", "mjolnir"]).unwrap(),
+            Some(SubagentPolicy::Mjolnir)
         );
         for args in [
             &["--mj-subagents"][..],
             &["--native-subagents"],
             &["--subagents", "all-models"],
             &["--subagents", "single-model"],
+            &["--subagents", "none"],
             &["--subagents", "native", "--subagent-model", "model"],
             &["--subagents", "native", "--subagent-effort", "high"],
             &["--subagents", "none", "--subagent-model", "model"],

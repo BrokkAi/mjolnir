@@ -2,8 +2,10 @@
 """Exercise Move with real local workers/Git and an isolated deterministic ACP."""
 
 import argparse
+import os
 import json
 import pathlib
+import sqlite3
 import sys
 import time
 import traceback
@@ -20,7 +22,17 @@ def run(lab):
     second_home.mkdir()
     profile = config.split("[profiles.fake]", 1)[1].split("[bundles.fixture]", 1)[0]
     profile = profile.replace(str(lab.profile), str(second_home)).replace('"60000"', '"0"')
-    config_path.write_text(config + "\n[profiles.destination]\n" + profile + '\n[targets.destination]\nkind = "bare"\n')
+    config_path.write_text(config + "\n[profiles.destination]\n" + profile + '\n[targets.destination]\nkind = "bare"\n' + '\n[subagents.straightforward]\nmodel = "fixture-straightforward"\neffort = "low"\n[subagents.subtle]\nmodel = "fixture-subtle"\neffort = "high"\n')
+    bridge = lab.runtime_root / "fake_acp.py"
+    options = [
+        {"id":"model", "name":"Model", "category":"model", "type":"select", "currentValue":"fixture-straightforward", "options":[{"value":model,"name":model} for model in ["fixture-straightforward","fixture-subtle"]]},
+        {"id":"effort", "name":"Effort", "category":"thought_level", "type":"select", "currentValue":"low", "options":[{"value":effort,"name":effort} for effort in ["low","high"]]},
+    ]
+    script = bridge.read_text().replace('for line in sys.stdin:', 'config_options = ' + repr(options) + '\nfor line in sys.stdin:')
+    script = script.replace('            "sessionId": session_id,\n            "modes":', '            "sessionId": session_id,\n            "configOptions": config_options,\n            "modes":')
+    script = script.replace('    elif method == "session/set_mode":', '    elif method == "session/set_config_option":\n        params = message["params"]\n        for option in config_options:\n            if option["id"] == params["configId"]:\n                option["currentValue"] = params["value"]\n        result = {"configOptions": config_options}\n    elif method == "session/set_mode":')
+    compile(script, str(bridge), "exec")
+    bridge.write_text(script)
     client = lab.start_tui("tui-1")
     client.wait_for("Workspaces")
     client.send(b"\r\r")
@@ -111,8 +123,18 @@ def run(lab):
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("chat_phase") == "running", "active source turn")
     prompt("discard-this-pending-prompt")
     wait_queued(1)
-    move("destination", "destination", "discard", subagents="none")
+    move("destination", "destination", "discard", subagents="mjolnir")
     lab.wait_snapshot(lambda s: (lab.session(s, session_id) or {}).get("chat_phase") == "idle", "idle destination")
+    for task_type, model, effort in [("straightforward", "fixture-straightforward", "low"), ("subtle", "fixture-subtle", "high")]:
+        status, response = lab.request("POST", f"/api/v1/sessions/{session_id}/subagents", {
+            "task_name": task_type, "instructions": "Verify configured delegation.", "task_type": task_type,
+        })
+        assert status == 201, (status, response)
+        child = response["session"]["id"]
+        with sqlite3.connect(lab.data / "mj.sqlite3") as database:
+            selected = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (child,)).fetchone()
+        assert selected == (model, effort), (task_type, selected)
+        lab.command("destroy", "--session", child)
     logs = (lab.runtime_root / "fake-acp.log").read_text()
     assert "discard-this-pending-prompt" not in logs, "discarded prompt ran on a harness"
     # A profile-only move goes back to the deliberately slow source profile.
@@ -190,7 +212,13 @@ def main():
     reliability_lab.TIMEOUT = 90.0
     parser = argparse.ArgumentParser()
     parser.add_argument("--hel", required=True, type=pathlib.Path)
+    parser.add_argument("--instance", default="subagent-move-redesign-test")
+    parser.add_argument("--worker", required=True, type=pathlib.Path)
     args = parser.parse_args()
+    if args.instance == "default":
+        parser.error("use a separate named test instance")
+    os.environ["MJ_INSTANCE"] = args.instance
+    os.environ["MJ_WORKER_BINARY"] = str(args.worker.resolve())
     lab = Lab(args.hel, "session-move", 1)
     print(f"move acceptance artifacts: {lab.root}", flush=True)
     try:

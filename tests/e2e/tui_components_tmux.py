@@ -362,6 +362,21 @@ def overlay_container_target(lab: Lab) -> None:
     _write_text(path, changed)
 
 
+def exercise_subagent_settings(tmux, evidence):
+    from tui_components_actions import click, record, absent
+    tmux.send_key("C-b")
+    tmux.send_key("s")
+    click(tmux, "Sub-agents")
+    tmux.send_key("Enter")
+    tmux.wait_for("Straightforward")
+    tmux.wait_for("Subtle")
+    record(tmux, evidence, "global-subagent-settings", "ctrl+b s; Sub-agents; Enter", "both global task types are visible")
+    tmux.send_key("Escape")
+    tmux.send_key("Escape")
+    absent(tmux, "× Settings")
+
+
+
 def create_session(
     lab: Lab, tmux: TmuxController, evidence: Evidence, seed: int, port: int, dialogs_only: bool = False
 ) -> None:
@@ -404,6 +419,8 @@ def create_session(
         "workspace focus remained responsive",
         evidence.capture("workspace-keyboard-focus", tmux.capture()),
     )
+
+    exercise_subagent_settings(tmux, evidence)
 
     snapshot = lab.snapshot()
     workspaces = snapshot.get("workspaces", [])
@@ -729,6 +746,7 @@ def run_workflow(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", required=True, type=int)
+    parser.add_argument("--subagents-only", action="store_true", help="Run only global sub-agent Settings and Create delegation checks")
     parser.add_argument("--dialogs-only", action="store_true", help="Skip unrelated chat and sidebar interaction probes")
     parser.add_argument(
         "--hel",
@@ -809,7 +827,19 @@ def main() -> int:
         profile = profile.replace(json.dumps(str(lab.profile)), json.dumps(str(reviewer_home)))
         config_path.write_text(config_text + "\n[profiles.reviewer]" + profile + '\n[review]\nenabled = false\nprofile = "reviewer"\n')
         (lab.runtime_root / "fake_acp.py").write_text((REPO_ROOT / "tests/e2e/tui_components_acp.py").read_text())
-        run_workflow(lab, tmux, evidence, args.seed, port, args.dialogs_only)
+        if args.subagents_only:
+            from tui_components_actions import create_through_dialog
+            tmux.start("subagent-config", 140, 40)
+            tmux.wait_for("Sessions")
+            code, _ = lab.wait_daemon_status(port)
+            status, _ = lab.request("POST", "/auth/session", {"code": code})
+            if status != 204:
+                raise ScenarioFailure(f"fixture viewer login returned {status}")
+            exercise_subagent_settings(tmux, evidence)
+            session_id = create_through_dialog(lab, tmux, evidence)
+            lab.wait_snapshot(lambda value: any(row["id"] == session_id and row.get("state") == "running" for row in value.get("sessions", [])), "Native delegation session running")
+        else:
+            run_workflow(lab, tmux, evidence, args.seed, port, args.dialogs_only)
         evidence.finish("passed")
         lab.trace["outcome"] = "passed"
         lab.trace["finished_at"] = lab.timestamp()

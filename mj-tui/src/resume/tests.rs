@@ -313,15 +313,10 @@ fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
 #[test]
 fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
     use mj_core::subagent::SubagentPolicy;
-    for retained in [None, Some(SubagentPolicy::None)] {
+    for retained in [None, Some(SubagentPolicy::Native)] {
         let mut session = running_session();
-        session.subagents = Some(SubagentPolicy::AllModels);
-        let mut configuration = config();
-        configuration.profiles.get_mut("codex-1").unwrap().subagents =
-            SubagentPolicy::SingleModel {
-                model: "creation-default".into(),
-                effort: None,
-            };
+        session.subagents = Some(SubagentPolicy::Mjolnir);
+        let configuration = config();
         let mut dashboard =
             DashboardState::new(configuration, state_with(vec![session]), BTreeMap::new());
         let mut operation = incomplete_move();
@@ -333,12 +328,12 @@ fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
         };
         assert_eq!(
             wizard.subagents.policy,
-            retained.clone().unwrap_or(SubagentPolicy::AllModels)
+            retained.clone().unwrap_or(SubagentPolicy::Mjolnir)
         );
         assert_eq!(wizard.subagent_change(&dashboard), retained);
         assert_eq!(
             dashboard.state.sessions["session-1"].subagents,
-            Some(SubagentPolicy::AllModels)
+            Some(SubagentPolicy::Mjolnir)
         );
     }
 }

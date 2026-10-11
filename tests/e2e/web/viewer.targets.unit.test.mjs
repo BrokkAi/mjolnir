@@ -28,6 +28,7 @@ const snapshot = {
 function loaded() {
   const context = vm.createContext({ snapshot, structuredClone, freshProjectPicker: () => ({}), selectedWorkspaceId: () => 'w1' });
   vm.runInContext(sourceBetween('// A target whose runtime', '\nfunction freshDraft() {'), context);
+  vm.runInContext(sourceBetween('function subagentChoiceApplies(', '\nfunction targetIsBare('), context);
   vm.runInContext(sourceBetween('function freshDraft() {', '\n}\n') + '\n}\n', context);
   vm.runInContext(sourceBetween('function resumeTargetItems(', '\nfunction resumeCard('), context);
   vm.runInContext(sourceBetween('function freshMoveDraft(', '\n}\n') + '\n}\n', context);

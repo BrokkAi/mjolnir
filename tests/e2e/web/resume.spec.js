@@ -40,7 +40,7 @@ async function mount(page, {
       revision: 1,
       workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }],
       sessions,
-      profiles,
+      profiles, subagents_configured: false,
       targets,
       bundles: [],
       capacity: [],
@@ -89,6 +89,11 @@ async function mount(page, {
       return detail ? json(detail) : route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: 'session not found' }) });
     }
     if (pathname === '/api/events') return route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' });
+    if (pathname === '/api/moves/prepare') {
+      state.movePreflights ||= [];
+      state.movePreflights.push(route.request().postDataJSON());
+      return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'fixture stops after preparation request' }) });
+    }
     if (pathname === '/api/actions') {
       state.actions.push(route.request().postDataJSON());
       if (state.holdAction) await state.holdAction;
@@ -191,6 +196,22 @@ test('Move loads a summary row before rendering destination controls', async ({ 
   releaseDetail();
   await expect(page.locator('#move-step select').last()).toBeVisible();
   await expect(page.locator('#move-next')).toHaveText('Prepare move');
+});
+
+test('Move preserves a legacy single_model delegation policy when unchanged', async ({ page }) => {
+  const state = await mount(page, {
+    sessions: [session('legacy', {
+      capabilities: { resume: true, move_session: true },
+      subagents: { mode: 'single_model', model: 'old-model', effort: 'high' },
+    })],
+  });
+  await page.evaluate(() => { location.hash = '#workspace/test/move/legacy'; });
+  await expect(page.locator('#move-legacy-subagents')).toHaveValue('mjolnir');
+  await expect(page.locator('#move-legacy-subagent-model')).toHaveCount(0);
+  await expect(page.locator('#move-legacy-subagent-effort')).toHaveCount(0);
+  await page.locator('#move-next').click();
+  await expect.poll(() => state.movePreflights?.length || 0).toBe(1);
+  expect(state.movePreflights[0].subagents).toBeNull();
 });
 
 test('resume detail keeps a visible retry when the summary row disappears before fetch', async ({ page }) => {

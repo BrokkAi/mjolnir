@@ -15,9 +15,10 @@ const INTERNED_FIELDS: [&str; 5] = [
     "incompatible_resume_targets",
 ];
 
-pub(super) const METADATA_FIELDS: [&str; 13] = [
+pub(super) const METADATA_FIELDS: [&str; 14] = [
     "profile_capabilities",
     "last_subagent_policy",
+    "subagents_configured",
     "revision",
     "generated_at",
     "server_time_ms",
@@ -94,6 +95,7 @@ pub(crate) struct WireRow {
 struct SnapshotMetadata<'a> {
     profile_capabilities: &'a mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
     last_subagent_policy: &'a mj_core::subagent::SubagentPolicy,
+    subagents_configured: bool,
     revision: u64,
     generated_at: &'a str,
     server_time_ms: i64,
@@ -141,6 +143,7 @@ pub(super) fn metadata(
     let metadata = SnapshotMetadata {
         profile_capabilities: &snapshot.profile_capabilities,
         last_subagent_policy: &snapshot.last_subagent_policy,
+        subagents_configured: snapshot.subagents_configured,
         revision: snapshot.revision,
         generated_at: &snapshot.generated_at,
         server_time_ms,
