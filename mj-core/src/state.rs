@@ -1006,9 +1006,29 @@ impl ManagedCheckoutKind {
     fn is_worktree(&self) -> bool {
         matches!(self, Self::Worktree)
     }
+
+    fn directory(&self) -> &'static str {
+        match self {
+            Self::Worktree => "worktrees",
+            Self::Clone => "clones",
+        }
+    }
 }
 
 impl ManagedWorktree {
+    /// The session-owned checkout root: `<repository>/.mj/<worktrees|clones>/<session_id>`.
+    /// Checkouts live on the session's target, which is always a POSIX machine,
+    /// so this joins POSIX-style on every controller.
+    pub fn checkout_root(
+        source_repository: &Path,
+        kind: ManagedCheckoutKind,
+        session_id: &str,
+    ) -> PathBuf {
+        let root = crate::target_path::join(source_repository, Path::new(".mj"));
+        let root = crate::target_path::join(&root, Path::new(kind.directory()));
+        crate::target_path::join(&root, Path::new(session_id))
+    }
+
     fn validate(&self, session_id: &str, project_directory: Option<&Path>) -> Result<()> {
         for (label, path) in [
             ("source project directory", &self.source_project_directory),
@@ -1027,14 +1047,7 @@ impl ManagedWorktree {
         {
             bail!("managed worktree source directory is outside its repository");
         }
-        let expected_root = self
-            .source_repository
-            .join(".mj")
-            .join(match self.kind {
-                ManagedCheckoutKind::Worktree => "worktrees",
-                ManagedCheckoutKind::Clone => "clones",
-            })
-            .join(session_id);
+        let expected_root = Self::checkout_root(&self.source_repository, self.kind, session_id);
         if self.worktree_root != expected_root {
             bail!("managed worktree root does not match the session-owned path");
         }
@@ -1048,7 +1061,9 @@ impl ManagedWorktree {
             .source_project_directory
             .strip_prefix(&self.source_repository)
             .expect("source relationship checked above");
-        if project_directory != Some(self.worktree_root.join(relative).as_path()) {
+        if project_directory
+            != Some(crate::target_path::join(&self.worktree_root, relative).as_path())
+        {
             bail!("session project directory does not match its managed worktree");
         }
         match &self.target {

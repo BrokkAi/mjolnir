@@ -509,7 +509,7 @@ impl Controller {
             launch.cwd = if subagent.working_directory.as_os_str().is_empty() {
                 parent_launch.cwd
             } else {
-                parent_launch.cwd.join(&subagent.working_directory)
+                mj_core::target_path::join(&parent_launch.cwd, &subagent.working_directory)
             };
             launch.additional_directories = parent_launch.additional_directories;
         }
@@ -809,10 +809,12 @@ pub(super) fn worker_launch_config_with_checkout(
         // them lets another container replace them with an unreachable path.
         target_environment.insert(
             "MBX_SHIMS_DIR".into(),
-            Path::new(&targets::worker_root(backend, session_id)?)
-                .join("mbx-shims")
-                .to_string_lossy()
-                .into_owned(),
+            mj_core::target_path::join(
+                Path::new(&targets::worker_root(backend, session_id)?),
+                Path::new("mbx-shims"),
+            )
+            .to_string_lossy()
+            .into_owned(),
         );
         // The per-build summary and savings lines are for a human at a
         // terminal; in a harness session they only add noise to Cargo output.
@@ -868,10 +870,15 @@ pub(super) fn worker_launch_config_with_checkout(
         worker_workspace.parent_worktree,
     )?;
     project_memory.mcp_delivery = project_memory_mcp_delivery(profile.kind, backend);
-    project_memory.history_socket =
-        Some(Path::new(&targets::worker_root(backend, &session.id)?).join("control.sock"));
+    project_memory.history_socket = Some(mj_core::target_path::join(
+        Path::new(&targets::worker_root(backend, &session.id)?),
+        Path::new("control.sock"),
+    ));
     if let Some(cache) = &target.tool_cache {
-        let private = Path::new(&targets::worker_root(backend, session_id)?).join("tool-cache");
+        let private = mj_core::target_path::join(
+            Path::new(&targets::worker_root(backend, session_id)?),
+            Path::new("tool-cache"),
+        );
         for (name, value) in [
             (
                 "MJ_TOOL_CACHE_DIR",

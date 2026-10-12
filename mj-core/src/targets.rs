@@ -2161,7 +2161,10 @@ pub fn container_workspace_root(recorded: Option<&Path>) -> String {
 /// The per-session container workspace recorded for a session created now.
 pub fn new_container_workspace(session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
-    Ok(Path::new(CONTAINER_WORKSPACE).join(session_id))
+    Ok(crate::target_path::join(
+        Path::new(CONTAINER_WORKSPACE),
+        Path::new(session_id),
+    ))
 }
 
 /// The workspace directory an EC2 session owns in its login home.

@@ -255,7 +255,7 @@ pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
         "Git returned an invalid path: {output:?}"
     );
     let mut common = PathBuf::new();
-    for component in directory.join(value).components() {
+    for component in crate::target_path::join(directory, Path::new(value)).components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
@@ -264,6 +264,14 @@ pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
             component => common.push(component.as_os_str()),
         }
     }
+    // `push` renders with the controller's separators; a target path must
+    // keep POSIX ones wherever it is shown or sent.
+    #[cfg(windows)]
+    let common = if crate::target_path::is_absolute(directory) {
+        PathBuf::from(crate::target_path::text(&common))
+    } else {
+        common
+    };
     anyhow::ensure!(
         crate::target_path::is_absolute_on_host_or_target(&common),
         "Git path must be absolute"

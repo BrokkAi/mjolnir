@@ -54,9 +54,12 @@ pub(super) fn configure_kimi_history_mcp(
                 )
             })?;
 
-        let worker = Path::new(worker_root).join("hel");
-        let socket_is_absolute = history_socket.is_none_or(|socket| socket.is_absolute());
-        let server = if worker.is_absolute() && socket_is_absolute {
+        // `worker_root` is a target path: POSIX-absolute, or home-relative
+        // over SSH, so it joins and tests POSIX-style on every controller.
+        let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+        let absolute = mj_core::target_path::is_absolute_on_host_or_target;
+        let socket_is_absolute = history_socket.is_none_or(absolute);
+        let server = if absolute(&worker) && socket_is_absolute {
             let mut args = vec!["worker".to_owned(), "memory-mcp".into()];
             if let Some(socket) = history_socket {
                 args.extend([
@@ -72,7 +75,7 @@ pub(super) fn configure_kimi_history_mcp(
             })
         } else {
             let worker = worker.to_string_lossy();
-            let worker_expression = if Path::new(worker.as_ref()).is_absolute() {
+            let worker_expression = if absolute(Path::new(worker.as_ref())) {
                 "\"$1\""
             } else {
                 "\"$HOME/$1\""
@@ -84,7 +87,7 @@ pub(super) fn configure_kimi_history_mcp(
                 worker.into_owned(),
             ];
             if let Some(socket) = history_socket {
-                args[1].push_str(if socket.is_absolute() {
+                args[1].push_str(if absolute(socket) {
                     " --history-socket \"$2\""
                 } else {
                     " --history-socket \"$HOME/$2\""
@@ -143,12 +146,12 @@ pub(super) fn configure_claude_subagent_mcp(
                 "alwaysLoad":true,
                 // Remote roots are home-relative; worker startup resolves
                 // both paths on the target before launching Claude.
-                "command":Path::new(worker_root).join("hel"),
+                "command":mj_core::target_path::join(Path::new(worker_root), Path::new("hel")),
                 "args":[
                     "worker",
                     "subagent-mcp",
                     "--socket",
-                    Path::new(worker_root).join(mj_worker_socket_name()),
+                    mj_core::target_path::join(Path::new(worker_root), Path::new(mj_worker_socket_name())),
                     // Claude's own limit is on silence, which the server's
                     // progress notifications break, so this keeps the full
                     // advertised wait. Naming the harness anyway keeps both
@@ -213,8 +216,9 @@ pub(super) fn configure_claude_mailbox_hook(
         return Ok(());
     }
     let path = profile_stage.join("settings.json");
-    let worker = Path::new(worker_root).join("hel");
-    let socket = Path::new(worker_root).join("control.sock");
+    let join = mj_core::target_path::join;
+    let worker = join(Path::new(worker_root), Path::new("hel"));
+    let socket = join(Path::new(worker_root), Path::new("control.sock"));
     let command = format!(
         "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
         mj_core::targets::posix_quote(&worker.to_string_lossy()),

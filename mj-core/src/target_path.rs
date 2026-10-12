@@ -22,16 +22,31 @@ pub fn is_absolute_on_host_or_target(path: &Path) -> bool {
     path.is_absolute() || is_absolute(path)
 }
 
-/// Join `relative` onto `base`. When `base` is a target path, the result keeps
-/// POSIX separators on a Windows controller too, so it reads the same wherever
-/// it is shown or sent.
+/// Join `relative` onto a target path `base`. The result keeps POSIX
+/// separators on a Windows controller too, so it reads the same wherever it
+/// is shown or sent. Like [`Path::join`], an absolute `relative`, by either
+/// the target's or the controller's spelling, replaces `base` instead of
+/// appending to it.
+///
+/// `base` is a target path by contract: POSIX-absolute, or home-relative as
+/// SSH and EC2 paths are. A controller-native absolute base (a drive or UNC
+/// path, which only names this machine) joins natively.
 pub fn join(base: &Path, relative: &Path) -> PathBuf {
-    if !cfg!(windows) || !is_absolute(base) {
+    if !cfg!(windows) {
+        return base.join(relative);
+    }
+    if is_absolute(relative) {
+        return PathBuf::from(text(relative));
+    }
+    if relative.is_absolute() {
+        return relative.to_path_buf();
+    }
+    if !is_absolute(base) && base.is_absolute() {
         return base.join(relative);
     }
     let mut joined = text(base);
     for component in relative.components() {
-        if !joined.ends_with('/') {
+        if !joined.is_empty() && !joined.ends_with('/') {
             joined.push('/');
         }
         joined.push_str(&component.as_os_str().to_string_lossy());

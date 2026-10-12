@@ -226,7 +226,11 @@ impl Controller {
             kind: Default::default(),
             source_project_directory: source.to_path_buf(),
             source_repository: source.to_path_buf(),
-            worktree_root: source.join(".mj").join("worktrees").join(&session.id),
+            worktree_root: ManagedWorktree::checkout_root(
+                source,
+                ManagedCheckoutKind::Worktree,
+                &session.id,
+            ),
             branch: format!("mj/{}", session.id),
             target: managed_worktree_target(
                 self.config
@@ -246,7 +250,8 @@ impl Controller {
                 session.launch_branch.as_deref(),
             )?;
             worktree.kind = ManagedCheckoutKind::Clone;
-            worktree.worktree_root = source.join(".mj").join("clones").join(&session.id);
+            worktree.worktree_root =
+                ManagedWorktree::checkout_root(source, ManagedCheckoutKind::Clone, &session.id);
             worktree.branch = branch.clone();
             worktree.base_commit = Some(managed_git_stdout(
                 executor,
@@ -334,11 +339,11 @@ impl Controller {
             .strip_prefix(&inspection.source_repository)
             .context("raw project directory is outside its repository")?
             .to_path_buf();
-        let worktree_root = inspection
-            .source_repository
-            .join(".mj")
-            .join("clones")
-            .join(session_id);
+        let worktree_root = ManagedWorktree::checkout_root(
+            &inspection.source_repository,
+            ManagedCheckoutKind::Clone,
+            session_id,
+        );
         // The worktree branch is created from the repository's HEAD, or from
         // the requested launch base, so record that commit as the session base
         // rather than rediscovering it later.
@@ -393,7 +398,10 @@ impl Controller {
         };
         ensure_managed_worktree_available(executor, &managed)?;
         let record = self.state.sessions.get_mut(session_id).unwrap();
-        record.project_directory = Some(worktree_root.join(relative_directory));
+        record.project_directory = Some(mj_core::target_path::join(
+            &worktree_root,
+            &relative_directory,
+        ));
         record.managed_worktree = Some(managed.clone());
         record.updated_at = now();
         self.persist_session_state(session_id)?;
@@ -689,7 +697,7 @@ fn resolve_git_root(
             .context("project Git root was not UTF-8")?
             .trim_end_matches(['\r', '\n']),
     );
-    if !root.is_absolute() {
+    if !mj_core::target_path::is_absolute_on_host_or_target(&root) {
         bail!(
             "resolve project Git root returned a non-absolute path: {}",
             root.display()
@@ -706,7 +714,7 @@ fn resolve_git_root(
     // Relative Git results resolve against Git's own spelling of the
     // directory, which `root` shares, not the caller's possibly symlinked one.
     let common = mj_core::local_git::resolve_git_path(
-        &root.join(prefix),
+        &mj_core::target_path::join(&root, Path::new(&prefix)),
         &managed_git_stdout(
             executor,
             target,
@@ -1132,7 +1140,7 @@ pub(super) fn raw_conversion_preview_with_checkout(
     };
     Ok(mj_core::state::RawConversionPreview {
         checkout: checkout.to_path_buf(),
-        destination: container_workspace.join(&conversion.destination),
+        destination: mj_core::target_path::join(&container_workspace, &conversion.destination),
         branch: position.branch,
         fetch_url: conversion.source.fetch_url.clone(),
         push_urls: conversion.source.push_urls.clone(),
@@ -1536,7 +1544,7 @@ fn inspect_raw_project(
     // Git prints `--absolute-git-dir` with symlinks resolved, so resolve the
     // relative common directory against Git's spelling of `selected` too.
     let common_git_dir = mj_core::local_git::resolve_git_path(
-        &repository.join(&prefix),
+        &mj_core::target_path::join(&repository, Path::new(&prefix)),
         &managed_git_stdout(
             executor,
             target,
@@ -1580,7 +1588,7 @@ fn inspect_raw_project(
         None => None,
     };
     Ok(RawProjectInspection {
-        source_project_directory: repository.join(prefix),
+        source_project_directory: mj_core::target_path::join(&repository, Path::new(&prefix)),
         source_repository: repository,
         primary_checkout: git_dir == common_git_dir,
         upstream,
@@ -2533,14 +2541,14 @@ fn remove_empty_managed_worktree_directories(
     executor: &impl CommandExecutor,
     worktree: &ManagedWorktree,
 ) -> Result<()> {
-    let worktrees = worktree
-        .source_repository
-        .join(".mj")
-        .join(match worktree.kind {
+    let hel = mj_core::target_path::join(&worktree.source_repository, Path::new(".mj"));
+    let worktrees = mj_core::target_path::join(
+        &hel,
+        Path::new(match worktree.kind {
             ManagedCheckoutKind::Worktree => "worktrees",
             ManagedCheckoutKind::Clone => "clones",
-        });
-    let hel = worktree.source_repository.join(".mj");
+        }),
+    );
     match &worktree.target {
         ManagedWorktreeTarget::Local => {
             for directory in [&worktrees, &hel] {

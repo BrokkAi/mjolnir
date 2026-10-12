@@ -35,11 +35,15 @@ pub(super) fn project_memory_launch(
     };
     let project_key = identity.key()?;
     let replica_slug = project_memory_replica_slug(&project_key, &session.id);
-    let project_root = PathBuf::from(target_profile_home)
-        .join("projects")
-        .join(replica_slug);
-    let root = project_root.join("memory");
-    let baseline_root = project_root.join(".hel-memory-baseline");
+    // The profile home is a target path: POSIX-absolute in containers and
+    // home-relative over SSH, so it joins POSIX-style on every controller.
+    let join = mj_core::target_path::join;
+    let project_root = join(
+        &join(Path::new(target_profile_home), Path::new("projects")),
+        Path::new(&replica_slug),
+    );
+    let root = join(&project_root, Path::new("memory"));
+    let baseline_root = join(&project_root, Path::new(".hel-memory-baseline"));
     let mut repository_roots = std::collections::BTreeMap::new();
     if let Some(bundle) = bundle {
         let target_roots =

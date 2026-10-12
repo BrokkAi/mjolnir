@@ -236,6 +236,68 @@ fn ssh_docker_locator() -> TargetLocator {
     }
 }
 
+/// A fake child writer: opens the download destination the way a child
+/// transfer process must be able to, then writes the archive bytes.
+struct ChildWriterExecutor {
+    archive: Vec<u8>,
+}
+
+impl CommandExecutor for ChildWriterExecutor {
+    fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+        let destination = command
+            .args
+            .last()
+            .context("missing local checkpoint path")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // A child writer such as scp is denied while the daemon holds the
+        // staging file open; an exclusive open detects any handle the
+        // transfer still holds.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let mut file = options.open(destination)?;
+        std::io::Write::write_all(&mut file, &self.archive)?;
+        Ok(CommandOutput {
+            status: 0,
+            stdout: vec![],
+            stderr: vec![],
+        })
+    }
+}
+
+// Hard-won: #1238: scp checkpoint downloads failed on Windows with
+// "Broken pipe" because the daemon held the staging file open.
+#[test]
+fn staged_checkpoint_download_leaves_the_destination_openable_by_child_writers() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, source) = fixture(temp.path());
+    let target = export_checkpoint(&spec).unwrap();
+    let archive = fs::read(&source).unwrap();
+    let destination = temp.path().join("controller/session.hel.zip");
+    let locator = TargetLocator::SshBare {
+        worker_id: None,
+        ssh: ssh(),
+        workspace: format!("~/hel/{SESSION}"),
+    };
+    let gate = CheckpointTransfer {
+        locator: &locator,
+        session_id: SESSION,
+        operation_id: "child-writer-transfer",
+        remote_archive: ".local/share/hel/workers/source.hel.zip",
+        destination: &destination,
+        expected_sha256: &target.sha256,
+        expected_event_frontier: 1,
+        expected_event_frontier_digest: &spec.canonical_session.event_frontier_digest,
+    }
+    .execute(&ChildWriterExecutor { archive })
+    .unwrap();
+    assert!(gate.teardown_allowed());
+    assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+}
+
 #[test]
 fn export_and_transfer_only_gate_after_local_verification() {
     let temp = tempfile::tempdir().unwrap();

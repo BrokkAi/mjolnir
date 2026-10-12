@@ -65,24 +65,30 @@ fn prepare_checked(
         return Ok(None);
     }
     let home = host.home(executor)?;
+    // The home is a target path on SSH hosts and a controller path for
+    // local sessions; the join keeps each spelling on its own side.
+    let join = mj_core::target_path::join;
     let directory = match settings.and_then(|settings| settings.tools_directory.clone()) {
         Some(directory) => directory,
-        None => home.join(".cache/mjolnir/build"),
+        None => join(&home, std::path::Path::new(".cache/mjolnir/build")),
     };
-    let nx_home = home.join(".nx");
+    let nx_home = join(&home, std::path::Path::new(".nx"));
     let container = !matches!(
         template,
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
     );
     let nx_destination = if container {
-        std::path::Path::new(
-            template
-                .container()
-                .and_then(|container| container.environment.resolved().get("HOME"))
-                .map(String::as_str)
-                .unwrap_or("/home/hel"),
+        // A container home is always a POSIX path.
+        join(
+            std::path::Path::new(
+                template
+                    .container()
+                    .and_then(|container| container.environment.resolved().get("HOME"))
+                    .map(String::as_str)
+                    .unwrap_or("/home/hel"),
+            ),
+            std::path::Path::new(".nx"),
         )
-        .join(".nx")
     } else {
         nx_home.clone()
     };

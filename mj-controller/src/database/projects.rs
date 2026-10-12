@@ -60,11 +60,14 @@ pub(super) fn read_project_catalog_from(connection: &Connection) -> Result<Proje
 }
 
 pub(crate) fn store_project_location(location: &ProjectLocation) -> Result<()> {
+    // Locations name controller directories and remote target paths alike;
+    // the latter are POSIX on every controller.
+    use mj_core::target_path::is_absolute_on_host_or_target as is_absolute;
     ensure!(
         !location.host.trim().is_empty()
-            && location.directory.is_absolute()
-            && location.checkout_root.is_absolute()
-            && location.repository_root.is_absolute(),
+            && is_absolute(&location.directory)
+            && is_absolute(&location.checkout_root)
+            && is_absolute(&location.repository_root),
         "project location on {:?} must contain absolute directory, checkout, and repository paths",
         location.host
     );
