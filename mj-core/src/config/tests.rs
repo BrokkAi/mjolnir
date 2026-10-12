@@ -2359,7 +2359,7 @@ fn a_version_14_file_follows_the_running_builds_default_image() {
 fn legacy_profile_subagents_load_without_migration_and_disappear_on_save() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("config.toml");
-    std::fs::write(&path, format!("version = {CONFIG_VERSION}\n[profiles.legacy]\nkind = \"codex\"\nhome = \"{}\"\nsubagents = {{ mode = \"single_model\", model = \"old\", effort = \"adaptive\" }}\n", root.path().display())).unwrap();
+    std::fs::write(&path, format!("version = {CONFIG_VERSION}\n[profiles.legacy]\nkind = \"codex\"\nhome = {:?}\nsubagents = {{ mode = \"single_model\", model = \"old\", effort = \"adaptive\" }}\n", root.path().to_string_lossy())).unwrap();
     let config = Config::load_from(&path).unwrap();
     assert!(!config.subagents.is_configured());
     config.save_to(&path).unwrap();
