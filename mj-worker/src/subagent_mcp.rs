@@ -384,8 +384,6 @@ struct CallParams {
 struct SpawnArgs {
     task_name: String,
     instructions: String,
-    // Parent harnesses can retain the spawn schema from before task types existed.
-    #[serde(default)]
     task_type: mj_core::subagent::SubagentTaskType,
     #[serde(default)]
     working_directory: PathBuf,
@@ -638,7 +636,7 @@ fn tool_definitions_with_mailboxes(
     let mut definitions = vec![
         tool(
             "spawn",
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type; a session override applies to both types. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`.",
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`.",
             json!({
                 "type":"object",
                 "properties":{
@@ -1014,39 +1012,6 @@ mod tests {
                 "{error:#}"
             );
         }
-    }
-
-    #[cfg(unix)]
-    // Hard-won: d745b9472: upgraded workers rejected spawn calls from cached parent schemas.
-    #[test]
-    fn cached_parent_spawn_schema_defaults_missing_task_type_to_straightforward() {
-        use std::io::{BufReader, Write};
-        use std::os::unix::net::UnixListener;
-        let root = tempfile::tempdir().unwrap();
-        let socket = root.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: mj_core::subagent::SubagentToolRequest =
-                serde_json::from_str(&line).unwrap();
-            assert!(matches!(
-                request.action,
-                SubagentToolAction::Spawn {
-                    task_type: mj_core::subagent::SubagentTaskType::Straightforward,
-                    ..
-                }
-            ));
-            reader
-                .into_inner()
-                .write_all(b"{\"result\":{\"child_session_id\":\"child\"}}\n")
-                .unwrap();
-        });
-        let result = call(&socket, None, SubagentMcpRole::Parent, Some(&json!({"name":"spawn", "arguments":{"task_name":"legacy", "instructions":"report"}})), &crate::mcp_stdio::Progress::silent(Duration::from_secs(1))).unwrap();
-        worker.join().unwrap();
-        assert_eq!(result.0["child_session_id"], "child");
     }
 
     #[test]
