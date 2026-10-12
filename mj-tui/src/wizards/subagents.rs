@@ -13,6 +13,7 @@ pub(crate) struct SubagentDiscovery {
 pub(crate) struct SubagentDraft {
     pub(crate) policy: SubagentPolicy,
     chosen_policy: Option<SubagentPolicy>,
+    mjolnir_override: Option<mj_core::config::SubagentChoice>,
     pub(crate) combo: ComboBoxState<WizardControl>,
     pub(crate) discovery: Option<SubagentDiscovery>,
 }
@@ -20,8 +21,9 @@ pub(crate) struct SubagentDraft {
 impl SubagentDraft {
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
+            mjolnir_override: policy.override_choice().cloned(),
             policy: if policy.uses_mjolnir() {
-                SubagentPolicy::Mjolnir
+                policy
             } else {
                 SubagentPolicy::Native
             },
@@ -30,7 +32,17 @@ impl SubagentDraft {
     }
 
     pub(crate) fn policies(&self) -> Vec<String> {
-        vec!["Native".into(), "Mjolnir".into()]
+        let mjolnir = if let Some(choice) = &self.mjolnir_override {
+            let effort = choice
+                .effort
+                .as_deref()
+                .map(|effort| format!(", {effort}"))
+                .unwrap_or_default();
+            format!("Mjolnir ({}{effort})", choice.model)
+        } else {
+            "Mjolnir".into()
+        };
+        vec!["Native".into(), mjolnir]
     }
     pub(crate) fn policy_index(&self) -> usize {
         usize::from(self.policy.uses_mjolnir())
@@ -63,7 +75,9 @@ impl SubagentDraft {
             return false;
         }
         let policy = if index == 1 {
-            SubagentPolicy::Mjolnir
+            SubagentPolicy::Mjolnir {
+                choice: self.mjolnir_override.clone(),
+            }
         } else {
             SubagentPolicy::Native
         };
@@ -115,7 +129,7 @@ impl SubagentDraft {
         // Keep the user's intent separate from the available displayed policy.
         let desired = self.chosen_policy.as_ref().unwrap_or(remembered);
         let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_none() {
-            SubagentPolicy::Mjolnir
+            desired.clone()
         } else {
             SubagentPolicy::Native
         };
@@ -139,7 +153,7 @@ impl SubagentDraft {
                     .is_some_and(|p| p.kind.supports_delegation_tools())
                 {
                     Err("Mjolnir sub-agents need a Claude or Codex profile".into())
-                } else if config.subagents.is_configured() {
+                } else if self.mjolnir_override.is_some() || config.subagents.is_configured() {
                     Ok(SubagentOptions::default())
                 } else {
                     Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())
@@ -191,8 +205,7 @@ impl DashboardState {
 }
 
 impl ResumeWizard {
-    /// The draft owns the displayed choice. Send it explicitly rather than
-    /// deriving a delta from a session snapshot that can be stale or absent.
+    /// The displayed effective policy for comparison with a prepared Move.
     pub(crate) fn subagent_selection(&self, dashboard: &DashboardState) -> Option<SubagentPolicy> {
         self.subagent_choice_applies(dashboard)
             .then(|| self.subagents.policy.clone())
@@ -213,7 +226,7 @@ impl ResumeWizard {
             .and_then(|session| session.subagents.clone())
             .unwrap_or_default();
         let displayed = if stored.uses_mjolnir() {
-            SubagentPolicy::Mjolnir
+            stored
         } else {
             SubagentPolicy::Native
         };

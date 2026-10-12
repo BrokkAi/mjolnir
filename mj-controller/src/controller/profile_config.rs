@@ -52,7 +52,7 @@ pub(crate) async fn discover_for(
     .await
 }
 
-/// Validate both global task choices against this parent's eligible profiles.
+/// Validate the session override or both global choices against eligible profiles.
 pub async fn validate_session_subagent_policy(
     config: &Config,
     profile_id: &str,
@@ -73,6 +73,15 @@ pub async fn validate_session_subagent_policy(
     }
     if !policy.uses_mjolnir() {
         return Ok(());
+    }
+    if let Some(choice) = policy.override_choice() {
+        let options = subagent_options_for(
+            config.clone(),
+            profile_id.to_owned(),
+            Some(choice.model.clone()),
+        )
+        .await?;
+        return options.validate(choice).map_err(refuse);
     }
     if !config.subagents.is_configured() {
         return Err(refuse("Mjolnir requires configured [subagents.straightforward] and [subagents.subtle] choices".into()));
@@ -644,6 +653,31 @@ mod tests {
         store("unsaved", &key, &catalog.model, &catalog).unwrap();
         let mut draft = Config::default();
         draft.profiles.insert("unsaved".into(), profile);
+        assert!(!draft.subagents.is_configured());
+        for (model, effort, available) in [
+            ("chosen", Some("high"), true),
+            ("chosen", None, true),
+            ("missing", None, false),
+            ("chosen", Some("missing"), false),
+            ("chosen", Some("adaptive"), false),
+        ] {
+            let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+                choice: Some(mj_core::config::SubagentChoice {
+                    model: model.into(),
+                    effort: effort.map(str::to_owned),
+                }),
+            };
+            let result = validate_session_subagent_policy(&draft, "unsaved", &policy).await;
+            if available {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    Refusal::of(&error).unwrap().code(),
+                    Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
+                );
+            }
+        }
         let options = subagent_options_for(draft, "unsaved".into(), Some("chosen".into()))
             .await
             .unwrap();
@@ -1000,7 +1034,7 @@ mod tests {
             let error = validate_session_subagent_policy(
                 &config,
                 "parent",
-                &mj_core::subagent::SubagentPolicy::Mjolnir,
+                &mj_core::subagent::SubagentPolicy::Mjolnir { choice: None },
             )
             .await
             .unwrap_err();

@@ -103,7 +103,7 @@ impl DashboardState {
         wizard.preparation_request_id = Some(request_id);
         wizard.preparing = true;
         wizard.preparation_error = None;
-        let subagents = wizard.subagent_selection(self);
+        let subagents = wizard.subagent_change(self);
         let action = DashboardAction::MoveSession {
             subagents,
             workspace_selection: wizard.files.selection.clone(),

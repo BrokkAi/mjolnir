@@ -459,7 +459,8 @@ command-line tool must match the version Mjolnir links.
 
 A Claude or Codex session can use Mjolnir's `spawn` tool. Create and Move offer
 Native or Mjolnir. Native uses the harness's own delegation. Mjolnir requires
-both global task choices, configured in Settings → Sub-agents or config.toml:
+both global task choices, configured in Settings → Sub-agents or config.toml,
+unless the session has a model override:
 
 ```toml
 [subagents]
@@ -492,7 +493,12 @@ not brief length. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Native; `mj move --subagents native|mjolnir|none` retains the recorded policy when
-omitted. `none` (CLI only) gives a Claude or Codex session no delegation tools.
+omitted, including any session override. `--subagent-model M [--subagent-effort E]`
+on either command overrides both task types for that session and implies Mjolnir.
+It does not require global choices. The model and optional effort must be offered
+by an eligible profile. Effort without a model, `adaptive`, and combining the
+override with `native` or `none` are rejected; omitted effort uses the harness
+default. `none` (CLI only) gives a Claude or Codex session no delegation tools.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |

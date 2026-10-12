@@ -269,11 +269,11 @@ struct MoveArgs {
     /// or the recorded policy when retrying a sealed Move.
     #[arg(long)]
     subagents: Option<String>,
-    /// Removed: configure global task types in config.toml.
-    #[arg(long, hide = true)]
+    /// Override the configured model for both task types of this session's Mjolnir sub-agents.
+    #[arg(long)]
     subagent_model: Option<String>,
-    /// Removed: configure global task types in config.toml.
-    #[arg(long, hide = true)]
+    /// Override effort for both task types of this session's Mjolnir sub-agents (requires --subagent-model).
+    #[arg(long)]
     subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
     #[arg(long)]

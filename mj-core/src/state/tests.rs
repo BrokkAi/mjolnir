@@ -1581,18 +1581,30 @@ fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
     use crate::subagent::SubagentPolicy;
     for (policy, expected) in [
         (
+            serde_json::json!({"mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"}),
+            SubagentPolicy::Mjolnir {
+                choice: Some(crate::config::SubagentChoice {
+                    model: "gpt-6-luna".into(),
+                    effort: Some("max".into()),
+                }),
+            },
+        ),
+        (
             serde_json::json!({"mode":"all_models"}),
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir { choice: None },
         ),
         (
             serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir { choice: None },
         ),
         (
             serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"adaptive"}),
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir { choice: None },
         ),
-        (serde_json::json!(true), SubagentPolicy::Mjolnir),
+        (
+            serde_json::json!(true),
+            SubagentPolicy::Mjolnir { choice: None },
+        ),
         (serde_json::json!(false), SubagentPolicy::Native),
     ] {
         let mut session = serde_json::to_value(sample_session()).unwrap();

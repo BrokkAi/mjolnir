@@ -364,7 +364,7 @@ mod delegation_replay_tests {
             &workspace.id,
             mj_core::state::SessionState::Running,
         );
-        legacy.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+        legacy.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let request = mj_client::daemon::CreateSessionRequest {
@@ -372,7 +372,7 @@ mod delegation_replay_tests {
             at: None,
             branch: None,
             base: None,
-            subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+            subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }),
             review: None,
             no_project_memory: false,
             no_mailbox: false,

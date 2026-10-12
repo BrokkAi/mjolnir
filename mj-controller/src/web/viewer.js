@@ -1742,11 +1742,14 @@ const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir']];
 const SUBAGENT_SETUP_REASON = "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 
 function delegationPolicy(policy) {
+  if (policy?.mode === 'mjolnir' && policy.model) {
+    return { mode: 'mjolnir', model: policy.model, ...(policy.effort != null ? { effort: policy.effort } : {}) };
+  }
   return { mode: ['mjolnir', 'single_model', 'all_models'].includes(policy?.mode) ? 'mjolnir' : 'native' };
 }
 
 function mjolnirAvailable(draft) {
-  return snapshot?.subagents_configured === true && subagentChoiceApplies(draft);
+  return (snapshot?.subagents_configured === true || !!draft?.subagents?.model || !!draft?.storedSubagents?.model) && subagentChoiceApplies(draft);
 }
 
 function subagentSelectionError(draft) {
@@ -1765,7 +1768,9 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   select.id = `${prefix}-subagents`;
   const available = mjolnirAvailable(draft);
   for (const [value, title] of SUBAGENT_MODES) {
-    const option = el('option', '', title);
+    const override = value === 'mjolnir' && draft.subagents?.model;
+    const text = override ? `${title} (${draft.subagents.model}${draft.subagents.effort ? `, ${draft.subagents.effort}` : ''})` : title;
+    const option = el('option', '', text);
     option.value = value;
     option.disabled = value === 'mjolnir' && !available;
     select.append(option);
@@ -1773,7 +1778,10 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   select.value = draft.subagents.mode;
   select.disabled = draft.queueLocked === true;
   select.onchange = () => {
-    draft.subagents = { mode: select.value };
+    if (select.value !== draft.subagents.mode) {
+      draft.subagents = select.value === 'mjolnir' && draft.storedSubagents?.mode === 'mjolnir'
+        ? { ...draft.storedSubagents } : { mode: select.value };
+    }
     onChange();
     rerender();
   };

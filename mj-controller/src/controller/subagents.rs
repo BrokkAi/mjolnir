@@ -745,7 +745,7 @@ mod tests {
             let mut session = crate::controller::test_support::checkpoint_test_session("parent");
             session.subagents = choice.map(|enabled| {
                 if enabled {
-                    mj_core::subagent::SubagentPolicy::Mjolnir
+                    mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }
                 } else {
                     mj_core::subagent::SubagentPolicy::Native
                 }

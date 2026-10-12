@@ -140,11 +140,11 @@ pub(crate) struct NewArgs {
     /// Omitted uses Native.
     #[arg(long)]
     subagents: Option<String>,
-    /// Removed: configure global task types in config.toml.
-    #[arg(long, hide = true)]
+    /// Override the configured model for both task types of this session's Mjolnir sub-agents.
+    #[arg(long)]
     subagent_model: Option<String>,
-    /// Removed: configure global task types in config.toml.
-    #[arg(long, hide = true)]
+    /// Override effort for both task types of this session's Mjolnir sub-agents (requires --subagent-model).
+    #[arg(long)]
     subagent_effort: Option<String>,
     /// Review every turn of this session with this model, even when
     /// `[review]` is off. Without a `[review]` profile, Auto picks a profile
@@ -993,12 +993,26 @@ pub(crate) fn subagent_policy(
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
     const REMEDY: &str = "Configure [subagents.straightforward] and [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
-    if model.is_some() || effort.is_some() {
-        bail!("--subagent-model and --subagent-effort were removed. {REMEDY}");
+    if effort.is_some() && model.is_none() {
+        bail!("--subagent-effort requires --subagent-model");
+    }
+    if effort == Some("adaptive") {
+        bail!("adaptive sub-agent effort is not supported");
+    }
+    if let Some(model) = model {
+        if mode.is_some_and(|mode| mode != "mjolnir") {
+            bail!("--subagent-model requires --subagents mjolnir or an omitted --subagents");
+        }
+        return Ok(Some(SubagentPolicy::Mjolnir {
+            choice: Some(mj_core::config::SubagentChoice {
+                model: model.to_owned(),
+                effort: effort.map(str::to_owned),
+            }),
+        }));
     }
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
-        Some("mjolnir") => Some(SubagentPolicy::Mjolnir),
+        Some("mjolnir") => Some(SubagentPolicy::Mjolnir { choice: None }),
         // Not offered in Create or Move: benchmarks use it for solo lanes.
         Some("none") => Some(SubagentPolicy::None),
         None => None,
@@ -2722,50 +2736,76 @@ mod tests {
     }
 
     #[test]
-    fn new_subagent_policy_accepts_native_mjolnir_and_none_and_rejects_legacy_flags() {
-        let parse = |extra: &[&str]| {
-            let mut argv = vec![
-                "mj",
-                "new",
-                "--profile",
-                "codex",
-                "--target",
-                "raw",
-                "--project-directory",
-                "/srv/project",
-            ];
+    fn new_and_move_parse_subagent_overrides_and_reject_conflicts() {
+        let parse_command = |command: &str, extra: &[&str]| {
+            let mut argv = vec!["mj", command, "--profile", "codex", "--target", "raw"];
+            if command == "new" {
+                argv.extend(["--project-directory", "/srv/project"]);
+            } else {
+                argv.extend(["--session", "session"]);
+            }
             argv.extend_from_slice(extra);
             let cli = Cli::try_parse_from(argv).map_err(anyhow::Error::from)?;
-            let Some(Command::New(args)) = cli.command else {
-                panic!("new command");
-            };
-            new_subagent_policy(&args)
+            match cli.command {
+                Some(Command::New(args)) => new_subagent_policy(&args),
+                Some(Command::Move(args)) => subagent_policy(
+                    args.subagents.as_deref(),
+                    args.subagent_model.as_deref(),
+                    args.subagent_effort.as_deref(),
+                ),
+                _ => panic!("new or move command"),
+            }
         };
-        use mj_core::subagent::SubagentPolicy;
-        assert_eq!(parse(&[]).unwrap(), None);
-        assert_eq!(
-            parse(&["--subagents", "native"]).unwrap(),
-            Some(SubagentPolicy::Native)
-        );
-        assert_eq!(
-            parse(&["--subagents", "mjolnir"]).unwrap(),
-            Some(SubagentPolicy::Mjolnir)
-        );
-        assert_eq!(
-            parse(&["--subagents", "none"]).unwrap(),
-            Some(SubagentPolicy::None)
-        );
-        for args in [
-            &["--mj-subagents"][..],
-            &["--native-subagents"],
-            &["--subagents", "all-models"],
-            &["--subagents", "single-model"],
-            &["--subagents", "native", "--subagent-model", "model"],
-            &["--subagents", "native", "--subagent-effort", "high"],
-            &["--subagents", "none", "--subagent-model", "model"],
-            &["--subagents", "none", "--subagent-effort", "high"],
-        ] {
-            assert!(parse(args).is_err());
+        for command in ["new", "move"] {
+            let parse = |extra: &[&str]| parse_command(command, extra);
+            use mj_core::subagent::SubagentPolicy;
+            assert_eq!(parse(&[]).unwrap(), None);
+            assert_eq!(
+                parse(&["--subagents", "native"]).unwrap(),
+                Some(SubagentPolicy::Native)
+            );
+            assert_eq!(
+                parse(&["--subagents", "mjolnir"]).unwrap(),
+                Some(SubagentPolicy::Mjolnir { choice: None })
+            );
+            assert_eq!(
+                parse(&["--subagents", "none"]).unwrap(),
+                Some(SubagentPolicy::None)
+            );
+            for mode in [None, Some("mjolnir")] {
+                for effort in [None, Some("max")] {
+                    let mut args = vec!["--subagent-model", "gpt-6-luna"];
+                    if let Some(mode) = mode {
+                        args.extend(["--subagents", mode]);
+                    }
+                    if let Some(effort) = effort {
+                        args.extend(["--subagent-effort", effort]);
+                    }
+                    assert_eq!(
+                        parse(&args).unwrap(),
+                        Some(SubagentPolicy::Mjolnir {
+                            choice: Some(mj_core::config::SubagentChoice {
+                                model: "gpt-6-luna".into(),
+                                effort: effort.map(str::to_owned)
+                            })
+                        })
+                    );
+                }
+            }
+            for args in [
+                &["--subagent-effort", "max"][..],
+                &["--subagent-model", "model", "--subagent-effort", "adaptive"],
+                &["--mj-subagents"],
+                &["--native-subagents"],
+                &["--subagents", "all-models"],
+                &["--subagents", "single-model"],
+                &["--subagents", "native", "--subagent-model", "model"],
+                &["--subagents", "native", "--subagent-effort", "high"],
+                &["--subagents", "none", "--subagent-model", "model"],
+                &["--subagents", "none", "--subagent-effort", "high"],
+            ] {
+                assert!(parse(args).is_err());
+            }
         }
     }
 

@@ -411,7 +411,15 @@ workspaces, and invalid selections fail visibly. `at` cannot be combined with
 Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
 Omitted policy defaults to Native. Mjolnir requires a Claude or Codex parent and
 both `[subagents.straightforward]` and `[subagents.subtle]` global model/effort
-choices to be configured and available to the parent's eligible profiles.
+choices, unless the policy supplies a session override:
+
+```json
+{"subagents": {"mode": "mjolnir", "model": "gpt-6-luna", "effort": "max"}}
+```
+
+The override applies to both task types and does not require global choices.
+Omit `effort` to use the harness default; `adaptive` is invalid. The selected
+model and effort must be available to the parent's eligible profiles.
 An unavailable choice answers `422` with code `subagent_choice_unavailable`.
 Move can explicitly change the policy; omission retains it. Legacy `none`
 policies and child sessions remain readable. Per-profile defaults are ignored.
@@ -419,9 +427,9 @@ policies and child sessions remain readable. Per-profile defaults are ignored.
 `POST /api/v1/sessions/{session_id}/subagents` starts a child with `task_name`
 and `instructions`. Optional `task_type` is `straightforward` or `subtle`;
 omission uses Straightforward for older callers. `working_directory` is
-optional. The daemon resolves the global model and effort and selects an
-eligible profile by quota. Spawn no longer accepts `profile_id`, `model`, or
-`effort` overrides. If the global choices become unconfigured, spawn fails
+optional. The daemon resolves the session override or global task choice and
+selects an eligible profile by quota. Spawn no longer accepts `profile_id`, `model`, or
+`effort` overrides. Without a session override, if global choices become unconfigured, spawn fails
 with a message naming both configuration sections.
 
 `review` sets the session's own turn review, overriding `[review]` for this

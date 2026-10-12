@@ -506,6 +506,25 @@ def main():
         assert all(not s["operational_session_present"] for s in after["sessions"]), after
         cli("daemon", "restart")
         assert after == json.loads(cli("usage", "--parent", parent, "--json"))
+        # The session override supplies both task types even with global choices unset.
+        cli("daemon", "stop")
+        config.write_text(config.read_text().split("\n[subagents.straightforward]")[0])
+        cli("daemon", "restart")
+        overridden = json.loads(cli("new", "--workspace", "Delegation test", "--profile", "fake",
+            "--target", "localhost", "--project-directory", str(lab.project),
+            "--subagent-model", "tiny", "--subagent-effort", "low", "--json"))["session_id"]
+        for task_type in ["straightforward", "subtle"]:
+            override_child = tool(overridden, "spawn", {"task_name": f"override-{task_type}",
+                "instructions": "Report the session override.", "task_type": task_type})["child_session_id"]
+            wait_prompt(override_child, "Report the session override.")
+            with sqlite3.connect(lab.data / "mj.sqlite3") as database:
+                row = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (override_child,)).fetchone()
+                assert row == ("tiny", "low"), (task_type, row)
+            tool(override_child, "handback", {"message": "session override verified"})
+            tool(overridden, "wait_agents")
+            wait_parked(override_child)
+            cli("destroy", "--session", override_child)
+        cli("destroy", "--session", overridden)
         print(
             json.dumps(
                 {

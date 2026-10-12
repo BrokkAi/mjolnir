@@ -73,7 +73,7 @@ pub(super) fn append_subagent_policy(
     policy: &mj_core::subagent::SubagentPolicy,
     limit: usize,
 ) -> Result<()> {
-    if matches!(policy, mj_core::subagent::SubagentPolicy::Mjolnir) {
+    if matches!(policy, mj_core::subagent::SubagentPolicy::Mjolnir { .. }) {
         append_staged_instructions(
             harness,
             destination,

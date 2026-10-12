@@ -42,7 +42,7 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let _writer = crate::database::install_isolated_test_writer();
     let parent_id = "0123456789abcdef0123456789abcdef";
     let mut parent = checkpoint_test_session(parent_id);
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(&parent).unwrap();
     let child_directory = tempfile::tempdir().unwrap();
     let mut child = parent.clone();
@@ -1980,7 +1980,7 @@ exit 0
     // The record as `resume_session_controlled` leaves it once the target
     // is provisioned: still provisioning, expecting the archived identity.
     let mut session = checkpoint_test_session(session_id);
-    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     session.harness_kind = harness;
     session.last_profile = profile_id.into();
     session.target_template_id = "local-bare".into();
@@ -2081,7 +2081,7 @@ exit 0
             );
             assert_eq!(
                 durable.sessions[session_id].subagents,
-                Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+                Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }),
                 "Resume retains legacy policy across differing creation defaults"
             );
             if stopped_subagents == StoppedSubagents::One {

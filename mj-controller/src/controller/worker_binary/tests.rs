@@ -474,7 +474,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session.harness_kind = HarnessKind::Claude;
         session.subagents = choice.map(|enabled| {
             if enabled {
-                mj_core::subagent::SubagentPolicy::Mjolnir
+                mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }
             } else {
                 mj_core::subagent::SubagentPolicy::Native
             }
@@ -494,7 +494,7 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let mut codex = claude(None);
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
-    codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     assert!(subagent_tools_enabled(&codex, false));
 }
 
@@ -5213,9 +5213,9 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         std::fs::write(&source, "User instructions without final newline").unwrap();
         for policy in [
             SubagentPolicy::Native,
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir { choice: None },
             SubagentPolicy::None,
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir { choice: None },
         ] {
             let stage = tempfile::tempdir().unwrap();
             let destination = stage.path().join(harness.agent_instructions_file());
@@ -5223,7 +5223,7 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
             append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
             append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
             let actual = std::fs::read_to_string(&destination).unwrap();
-            let expected = if matches!(policy, SubagentPolicy::Mjolnir) {
+            let expected = if matches!(policy, SubagentPolicy::Mjolnir { .. }) {
                 format!(
                     "User instructions without final newline\n\n{}",
                     mj_core::subagent::delegation_policy(9)

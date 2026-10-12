@@ -2411,7 +2411,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
         .unwrap()
         .unwrap();
-    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(&session).unwrap();
 
     let relay_root = tempfile::tempdir().unwrap();

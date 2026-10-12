@@ -470,7 +470,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
         (
             "unconfigured Mjolnir delegation",
             mj_core::state::MoveSelection {
-                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }),
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),
@@ -518,14 +518,14 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
     // A Move's new delegation policy is written with the destination's
     // lifecycle fields.
     let mut moved = state.sessions[session_id].clone();
-    moved.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    moved.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_resumed_session(&moved, None).unwrap();
     assert_eq!(
         crate::database::load_session_record(session_id)
             .unwrap()
             .unwrap()
             .subagents,
-        Some(mj_core::subagent::SubagentPolicy::Mjolnir)
+        Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None })
     );
 
     let mut incompatible = managed_raw_session(ssh_worktree_target());
@@ -1117,7 +1117,7 @@ fn a_move_that_only_changes_delegation_still_restarts_the_session() {
     assert!(super::move_changes_nothing(&source, &explicit_same));
 
     let to_mjolnir = mj_core::state::MoveSelection {
-        subagents: Some(SubagentPolicy::Mjolnir),
+        subagents: Some(SubagentPolicy::Mjolnir { choice: None }),
         workspace: Default::default(),
         ..same.clone()
     };
@@ -1132,7 +1132,7 @@ fn a_move_that_only_changes_delegation_still_restarts_the_session() {
 fn in_place_move_retains_running_and_parked_children_and_roleless_refusal_names_live_ones() {
     let mut parent = raw_session_on("local-bare", "/workspace");
     parent.state = SessionState::Running;
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     let mut running = parent.clone();
     running.id = "child-running".into();
     running.state = SessionState::Running;
@@ -2314,7 +2314,7 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
         .sessions
         .get_mut(parent_id)
         .unwrap();
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(parent).unwrap();
     let mut child = fixture.controller.state.sessions[parent_id].clone();
     child.id = "live-child".into();
@@ -2411,7 +2411,7 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(parent).unwrap();
     let parent = controller.state.sessions[LATCH_RELAY_SESSION].clone();
     for (child_id, task_name, child_state) in [
@@ -2523,7 +2523,7 @@ fn in_place_move_reopens_message_only_queue_after_parent_policy_becomes_native()
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
-    source.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    source.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(source).unwrap();
 
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
@@ -2585,7 +2585,7 @@ fn in_place_move_reopens_gate_after_lost_admission_close_reply() {
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap()
-        .subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+        .subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(&controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
     let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
     let executor = RecordingProcessExecutor::default();
@@ -2660,7 +2660,7 @@ fn in_place_closing_source_recovery_reopens_gate_after_restoring_running_session
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     parent.state = SessionState::Closing;
     crate::database::save_session(parent).unwrap();
     fs::write(
@@ -2719,7 +2719,7 @@ fn in_place_move_with_pre_v32_worker_stops_children_and_reports_fallback() {
     let _writer = crate::database::install_isolated_test_writer();
     let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
     fixture.controller.state.sessions[LATCH_RELAY_SESSION].subagents =
-        Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+        Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     crate::database::save_session(&fixture.controller.state.sessions[LATCH_RELAY_SESSION]).unwrap();
     let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
     let executor = RecordingProcessExecutor::default();
@@ -2776,7 +2776,7 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap()
-        .subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+        .subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
     // The original seed repository is gone, but the session's independent
     // clone still exists under its recorded owner path.
     let project = checkout.with_file_name("retained-project");
@@ -2916,7 +2916,7 @@ fn in_place_move_reinstalls_the_harness_without_removing_the_worker_root() {
     assert_eq!(moved.target, source_target);
     assert_eq!(
         moved.subagents,
-        Some(mj_core::subagent::SubagentPolicy::Mjolnir)
+        Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None })
     );
     assert_eq!(
         crate::database::load_session_record(LATCH_RELAY_SESSION)
