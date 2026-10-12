@@ -4984,10 +4984,33 @@ fn continuation_expectation_is_process_local_and_clears_when_a_harness_turn_open
     assert_eq!(relay.activity_facts().expected_continuation, None);
 }
 
+// Hard-won: d045ad87e: an older question was reused as an unanswered new turn's reply.
 #[test]
 fn new_prompt_invalidates_a_completed_turn_verdict_and_resets_its_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let mut relay = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+    submit_relay(&mut relay, "prior-prompt", prompt("Explain the options"));
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text", "text":"Should I stop at option 1?"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    relay
+        .record_command_completed(
+            "prior-prompt",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "EndTurn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
     let old_generation = relay.turn_context().generation();
     relay
         .expect_continuation(1_234, String::new(), old_generation)
@@ -5018,6 +5041,36 @@ fn new_prompt_invalidates_a_completed_turn_verdict_and_resets_its_evidence() {
             },
         )
         .unwrap();
+    relay.prepare_pending_assessment().unwrap();
+    let (_, assessment, _) = relay.pending_replied_verdict().unwrap();
+    assert!(assessment.assistant_text_tail.is_empty());
+    assert!(
+        assessment
+            .authorization
+            .as_ref()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.text == "Should I stop at option 1?")
+    );
+    assert_eq!(
+        assessment
+            .authorization
+            .as_ref()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .role,
+        "user"
+    );
+    // A restart must retain the empty current reply rather than reconstructing
+    // it from the older question in authorization history.
+    let recovered = DurableRelay::open(temp.path(), SESSION, "1.0.0").unwrap();
+    assert_eq!(
+        recovered.operational_state().assessment.unwrap().evidence,
+        Some(assessment)
+    );
     relay
         .expect_continuation(3_000, String::new(), old_generation)
         .unwrap();

@@ -693,9 +693,6 @@ pub(super) async fn serve_session(
         config_recovery.is_some(),
     )
     .await?;
-    let verdict_client = verdict_client::VerdictClient::resolve(spec.verdict.as_ref())
-        .await
-        .map(|client| client.with_log(spec.turn_context.decision_log()));
     let mut goal_controls = goal::PendingControls::default();
     loop {
         let request = tokio::select! {
@@ -876,15 +873,9 @@ pub(super) async fn serve_session(
                 let mut cancel_deadline = None;
                 let mut pending_steer: Option<PendingSteer> = None;
                 let mut steering_deadline = None;
-                let input_verdict = async {
-                    if let Some(client) = &verdict_client {
-                        verdict_client::await_input_verdict(spec, client, pending_elicitations)
-                            .await
-                    } else {
-                        std::future::pending::<verdict_client::VerdictAttempt>().await
-                    }
-                };
-                tokio::pin!(input_verdict);
+                // The pending ACP request owns this turn. Jev may assess
+                // unfinished work after the harness replies, never complete
+                // an active request based on silence or historical text.
                 loop {
                     tokio::select! {
                         biased;
@@ -1019,41 +1010,6 @@ pub(super) async fn serve_session(
                             .await?;
                             // An acknowledged cancel leaves the bridge in
                             // place; the next prompt goes to the same session.
-                            break;
-                        }
-                        mut attempt = &mut input_verdict, if prompt_running && cancel_deadline.is_none() => {
-                            let inferred_finished = attempt.running_outcome
-                                == Some(verdict_client::RunningVerdictOutcome::InferredFinished);
-                            let stop_reason = if inferred_finished {
-                                mj_core::acp::INFERRED_FINISHED_STOP_REASON
-                            } else {
-                                mj_core::acp::AWAITING_INPUT_STOP_REASON
-                            };
-                            let message = if inferred_finished {
-                                let minutes = attempt.silent_for_s.unwrap_or_default() / 60;
-                                format!("Classifier: the agent appeared to be wrapping up {minutes} minutes ago, and the harness has not closed the turn. Mjolnir ended the tracked turn; the harness may still be running.")
-                            } else {
-                                "Classifier: The agent appears to be waiting for you. The harness may still be running.".to_owned()
-                            };
-                            emit_runtime_event(events, RuntimeEvent::Notice { message: message.clone() }).await?;
-                            emit_runtime_event(events, RuntimeEvent::PromptFinished {
-                                request_id: request_id.clone(),
-                                stop_reason: stop_reason.into(),
-                                usage: None,
-                                diagnostic: Some(mj_core::diagnostic::TurnDiagnostic {
-                                    message, code: Some(stop_reason.into()),
-                                    http_status: None, reset_at: None,
-                                }),
-                            }).await?;
-                            if inferred_finished {
-                                detach_prompt_reply(
-                                    connection,
-                                    prompt,
-                                    request_id,
-                                    stop_reason.to_owned(),
-                                );
-                            }
-                            attempt.finish("applied", if inferred_finished { "inferred_finished" } else { "awaiting_input" });
                             break;
                         }
                         verdict = async {

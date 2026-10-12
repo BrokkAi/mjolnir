@@ -78,7 +78,8 @@ pub struct LaunchSpec {
     /// process environment, which is what every launch does; a test sets it
     /// directly so it does not have to reach for a global.
     pub turn_context: mj_transcript::turn_context::TurnContext,
-    /// None resolves the optional classifier from the local environment.
+    /// Retained for source compatibility. Active ACP turns never consult Jev;
+    /// completed-turn classification belongs to the durable relay coordinator.
     pub verdict: Option<VerdictSource>,
     pub stall_policy: Option<mj_core::activity::StallPolicy>,
 }
