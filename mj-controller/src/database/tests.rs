@@ -2087,6 +2087,46 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
 }
 
 #[test]
+fn bulk_materialized_activity_matches_session_summaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    for session_id in ["running", "idle", "without-projection"] {
+        save_session_to(&database, &session(session_id, "project-1")).unwrap();
+    }
+    open(&database)
+        .unwrap()
+        .execute(
+            "DELETE FROM materialized_sessions WHERE session_id = 'without-projection'",
+            [],
+        )
+        .unwrap();
+
+    let mut running = materialized_session("running");
+    running.last_activity_at_ms = Some(2_000);
+    running.execution = MaterializedExecutionState::Running {
+        started_at_ms: 1_900,
+    };
+    save_materialized_session_to(&database, &running).unwrap();
+
+    let mut idle = materialized_session("idle");
+    idle.last_activity_at_ms = Some(3_000);
+    idle.execution = MaterializedExecutionState::Idle;
+    save_materialized_session_to(&database, &idle).unwrap();
+
+    let activity = load_materialized_activity_from(&database).unwrap();
+    for session_id in ["running", "idle"] {
+        let summary = load_materialized_session_summary_from(&database, session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            activity.get(session_id),
+            Some(&(summary.last_activity_at_ms, summary.execution))
+        );
+    }
+    assert!(!activity.contains_key("without-projection"));
+}
+
+#[test]
 fn queued_prompt_loader_does_not_deserialize_transcript_history() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
