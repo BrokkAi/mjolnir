@@ -108,7 +108,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
         };
         let choice = |value: &str| SessionConfigChoice {
             value: value.into(),
@@ -144,11 +144,7 @@ mod tests {
     fn defaults_and_eligibility_change_views_without_changing_profile_identity() {
         let (mut config, snapshot) = fixture();
         let original = config.profiles_discovery_key();
-        config.profiles.get_mut("parent").unwrap().subagents =
-            crate::subagent::SubagentPolicy::SingleModel {
-                model: "a".into(),
-                effort: None,
-            };
+
         config.subagents.max_concurrent = 99;
         config
             .profiles

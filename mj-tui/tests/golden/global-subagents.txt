@@ -1,0 +1,167 @@
+=== global task choices (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
+│hel ───────────────  │ Set both task types to enable Mjolnir sub-agents. Parents choose a task type per spawn.      │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │   Maximum concurrent children                                                             6  │                     │
+│  │                  │   Additional eligible profiles                                           0 of 3 selected  ›  │                     │
+│                     │   Straightforward                                                             2 settings  ›  │                     │
+│                     │   Subtle                                                                      2 settings  ›  │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                                                                                                                                          │
+│                                                                                                                                          │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+
+=== straightforward (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward                                                      │                     │
+│hel ───────────────  │ Work with a clear method. Choose a model and its effort.                                     │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │   Model                                                                            shared ▾  │                     │
+│  │                  │   Effort                                                                             high ▾  │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                                                                                                                                          │
+│                                                                                                                                          │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+
+=== subtle (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Subtle                                                               │                     │
+│hel ───────────────  │ Work needing judgment. Choose a smarter model or higher effort than Straightforward.         │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │   Model                                                                           smarter ▾  │                     │
+│  │                  │   Effort                                                                             high ▾  │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                                                                                                                                          │
+│                                                                                                                                          │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys
+
+=== cleared choice (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                                                                                                                  │
+╰───────────────────                                                                                                                       │
+╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
+│ Create   Open   Fi  │ Settings › Sub-agents › Straightforward                                                      │                     │
+│hel ───────────────  │ Work with a clear method. Choose a model and its effort.                                     │                     │
+│› ■ ACP pretty name  │                                                                                              │                     │
+│  Stopped  podman    │                                                                                              │                     │
+│  │ No messages yet  │   Model                                                                           Not set ▾  │                     │
+│  │                  │   Effort                                                                  Harness default ▾  │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │                                                                                              │                     │
+│                     │                                                                                              │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▪ ╮
+│                     │   Back     Save and Close                                                                    │                     │
+│                     ╰ ↑↓ select · Double-click/Enter opens · Tab moves · Esc back ─────────────────────────────────╯                     │
+│                                                                                                                                          │
+│                                                                                                                                          │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys

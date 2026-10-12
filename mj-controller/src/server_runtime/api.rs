@@ -49,6 +49,10 @@ pub type SessionStateSource = Arc<dyn Fn(&str) -> Option<SessionState> + Send + 
 /// built in a test without one. Startup admission and status also go through
 /// this runtime, keeping their durable owner shared by every control surface.
 pub trait ExportRuntime: Send + Sync {
+    fn subagent_config(&self) -> mj_core::config::SubagentConfig {
+        Default::default()
+    }
+
     fn revisions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
         None
     }
@@ -214,6 +218,10 @@ pub trait ExportRuntime: Send + Sync {
 }
 
 impl ExportRuntime for RuntimeState {
+    fn subagent_config(&self) -> mj_core::config::SubagentConfig {
+        self.with_config(|config| config.subagents.clone())
+    }
+
     fn agent_mailboxes_enabled(&self) -> bool {
         self.with_config(mj_core::config::Config::agent_mailboxes_enabled)
     }
@@ -833,51 +841,12 @@ impl ApiBackend {
         let request_created_at_ms = request.created_at_ms;
         match &request.action {
             SubagentToolAction::ListProfiles => {
-                let parent = self
-                    .exports
-                    .session_record(parent_session_id)
-                    .context("parent session disappeared")?;
-                anyhow::ensure!(
-                    parent.subagents == Some(mj_core::subagent::SubagentPolicy::AllModels),
-                    "list_profiles is unavailable for this session's subagent policy"
-                );
-                // The catalogue discovers every enabled profile in the
-                // background, so this normally only ranks and merges what it
-                // holds; a discovery still running is waited for.
-                let candidates = self
-                    .subagent_candidates(parent.last_profile.clone())
-                    .await?;
-                let profiles =
-                    crate::server::api::merge_same_models(candidates.offered, &parent.last_profile)
-                        .into_iter()
-                        .map(|candidate| {
-                            serde_json::json!({
-                                "profile_id":candidate.profile_id,
-                                "harness":candidate.harness.id(),
-                                "default_model":candidate.choices.model,
-                                "models":candidate.choices.models,
-                                "efforts":candidate.choices.efforts,
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                if !candidates.unavailable.is_empty() {
-                    let unavailable = candidates
-                        .unavailable
-                        .into_iter()
-                        .map(|(profile_id, reason)| {
-                            serde_json::json!({"profile_id":profile_id,"reason":reason})
-                        })
-                        .collect::<Vec<_>>();
-                    return Ok(serde_json::json!({"profiles":profiles,"unavailable":unavailable}));
-                }
-                Ok(serde_json::json!({"profiles":profiles}))
+                anyhow::bail!("list_profiles is no longer available")
             }
             SubagentToolAction::Spawn {
                 task_name,
                 instructions,
-                profile_id,
-                model,
-                effort,
+                task_type,
                 working_directory,
                 context,
                 files,
@@ -894,14 +863,7 @@ impl ApiBackend {
                         &backend,
                         &parent.last_profile,
                         &parent.subagents.clone().unwrap_or_default(),
-                        profile_id.as_deref(),
-                        model.as_deref(),
-                        effort.as_deref(),
-                        crate::server::api::AdaptiveEffortContext {
-                            parent_session_id,
-                            task_name,
-                            instructions,
-                        },
+                        *task_type,
                     )
                     .await
                     .map_err(|failure| anyhow::anyhow!(failure.message))?;
@@ -2656,6 +2618,10 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
+        Box::pin(async move { Ok(self.exports.subagent_config()) })
+    }
+
     fn wait_revision(&self, session_id: &str) -> Result<Option<u64>> {
         Ok(crate::database::committed_state()?.map(|committed| {
             committed

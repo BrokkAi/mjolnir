@@ -175,15 +175,7 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     let policy = session.subagents.clone().unwrap_or_default();
     let mut delegation = match &policy {
         SubagentPolicy::Native => "Native".to_owned(),
-        SubagentPolicy::AllModels => "Mjolnir, all models".to_owned(),
-        SubagentPolicy::SingleModel { model, effort } => match effort.as_deref() {
-            Some(mj_core::subagent::ADAPTIVE_EFFORT) => format!(
-                "Mjolnir, {model} ({})",
-                mj_core::subagent::ADAPTIVE_EFFORT_LABEL
-            ),
-            Some(effort) => format!("Mjolnir, {model} ({effort})"),
-            None => format!("Mjolnir, {model}"),
-        },
+        SubagentPolicy::Mjolnir => "Mjolnir".to_owned(),
         SubagentPolicy::None => "None".to_owned(),
     };
     let total = dashboard.subagent_count_for(&session.id);
@@ -1560,10 +1552,7 @@ mod tests {
         append_golden_state(&mut output, "session action menu", 120, 40, &lines);
 
         let mut session = running_session();
-        session.subagents = Some(SubagentPolicy::SingleModel {
-            model: "gpt-5".into(),
-            effort: Some(mj_core::subagent::ADAPTIVE_EFFORT.into()),
-        });
+        session.subagents = Some(SubagentPolicy::Mjolnir);
         session.container_cpus = Some("4".into());
         session.container_memory = Some("8g".into());
         let mut dashboard = dashboard_with_session(session);

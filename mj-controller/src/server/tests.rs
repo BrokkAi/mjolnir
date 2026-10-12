@@ -92,7 +92,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
@@ -2666,7 +2666,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
@@ -4355,7 +4355,7 @@ if (movePathContains({{repository:'repo',path:'.agents/build'}}, {{repository:'o
 fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_stops() {
     let source = format!(
         "{}\n{}\n{}",
-        viewer_source("function profileSubagents(", "function targetIsBare("),
+        viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
         viewer_source(
             "function workingChildCount(",
             "function sessionInWorkspace("
@@ -4367,7 +4367,7 @@ fn viewer_move_sends_only_a_changed_delegation_policy_and_counts_children_it_sto
     );
     let setup = r#"
 let newDraft = null;
-const snapshot = { profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }] };
+const snapshot = { subagents_configured: true, profiles: [{ id: "codex", harness_kind: "codex" }, { id: "kimi", harness_kind: "kimi" }] };
 const sessions = {
   parent: { id: "parent", subagent_session_ids: ["parked", "running", "gone"] },
   parked: { id: "parked", lifecycle: "live", chat_phase: "idle" },
@@ -4382,12 +4382,12 @@ const draft = { profileId: "codex", storedSubagents: { mode: "native" }, subagen
 assert(moveSubagentChange(draft) === null, "an untouched policy must keep the session's own");
 snapshot.profiles[0].subagents = { mode: "single_model", model: "chosen", effort: "high" };
 assert(moveSubagentChange(draft) === null, "changing profile defaults must retain the session policy");
-draft.subagents = { mode: "single_model", model: "explicit", effort: "low" };
-assert(moveSubagentChange(draft).model === "explicit", "an explicit session edit is submitted");
+draft.subagents = { mode: "mjolnir" };
+assert(moveSubagentChange(draft).mode === "mjolnir", "an explicit session edit is submitted");
 draft.subagents = structuredClone(draft.storedSubagents);
 draft.profileId = "kimi";
 assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
-draft.storedSubagents = { mode: "all_models" };
+draft.storedSubagents = { mode: "mjolnir" };
 draft.subagents = structuredClone(draft.storedSubagents);
 assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
 assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");
@@ -4399,13 +4399,10 @@ assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its ta
 }
 
 #[test]
-fn viewer_move_controls_preserve_legacy_and_keep_models_available_while_efforts_load() {
+fn viewer_move_controls_use_global_availability_and_two_delegation_choices() {
     let source = format!(
         "{}\n{}",
-        viewer_source(
-            "function subagentChoiceApplies(",
-            "function profileSubagents("
-        ),
+        viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
         viewer_source(
             "function moveSubagentChange(",
             "function moveStoppedChildren("
@@ -4418,74 +4415,23 @@ fn viewer_move_controls_preserve_legacy_and_keep_models_available_while_efforts_
 import {{ installDocument, elements, check, checkEqual }} from './test-dom.js';
 installDocument();
 let newDraft = null;
-const snapshot = {{ profiles: [{{ id: 'parent', harness_kind: 'codex', subagent_discovery_key: 'installation-1', capabilities_key:'installation-1', subagent_profile_ids:['parent'] }}], profile_capabilities: {{ profiles: {{}} }} }};
+const snapshot = {{ subagents_configured: false, profiles: [{{ id:'parent', harness_kind:'codex' }}] }};
 function el(tag, className = '', text = '') {{ const node = document.createElement(tag); node.className = className; node.textContent = text; return node; }}
-const pending = [];
-function request(url, options) {{ return new Promise((resolve, reject) => pending.push({{ url, resolve, reject, options }})); }}
 {source}
-const draft = {{ profileId: 'parent', storedSubagents: {{mode:'all_models'}}, subagents: {{mode:'all_models'}}, subagentDiscovery: null }};
+const draft = {{ profileId:'parent', storedSubagents:{{mode:'native'}}, subagents:{{mode:'native'}} }};
 let edits = 0;
 function render() {{ const body = el('div'); renderSubagentFields(body, draft, 'move', () => {{}}, () => edits++); return elements(body, 'select'); }}
 let fields = render();
-check(fields[0].childNodes.some(node => node.value === 'all_models'), 'legacy policy is visible when recorded');
-check(moveSubagentChange(draft) === null, 'opening controls preserves legacy policy');
-fields[0].value = 'native'; fields[0].onchange();
+checkEqual(fields.length, 1, 'only delegation picker remains');
+checkEqual(fields[0].childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'native,mjolnir', 'two choices');
+check(fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'unconfigured Mjolnir disabled');
+snapshot.subagents_configured = true;
 fields = render();
-check(!fields[0].childNodes.some(node => node.value === 'all_models'), 'All models cannot be newly selected');
-fields[0].value = 'single_model'; fields[0].onchange();
-fields = render();
-checkEqual(pending.length, 0, 'opening during hydration issues no query');
-check(fields[1].disabled, 'model picker waits on published hydration');
-const choice = value => ({{value, name:value}});
-snapshot.profile_capabilities.profiles['installation-1'] = {{
-  choices: {{status:'ready', value:{{model:'a', models:[choice('a'), choice('b')], efforts:[choice('low')]}}}},
-  efforts: {{a:{{status:'pending'}}, b:{{status:'ready',value:[choice('medium')]}}}}
-}};
-fields = render();
-fields[1].value = 'a'; fields[1].onchange(); fields = render();
-checkEqual(pending.length, 0, 'model selection joins background effort hydration');
-check(!fields[1].disabled, 'models stay available while efforts hydrate');
-check(fields[2].disabled, 'efforts wait for their publication');
-check(!fields[2].childNodes.some(node => node.value === 'adaptive'), 'adaptive is omitted without a published effort');
-snapshot.profile_capabilities.profiles['installation-1'].efforts.a = {{status:'ready',value:[choice('low'),choice('high')]}};
-fields = render();
-let effortOptions = fields[2].childNodes.filter(node => node.tagName === 'OPTION');
-checkEqual(effortOptions[1].value, 'adaptive', 'adaptive is the first available effort');
-checkEqual(effortOptions[1].textContent, 'Adaptive (Jev chooses per task)', 'adaptive explains that Jev chooses the effort');
-checkEqual(effortOptions[2].value, 'low', 'advertised efforts follow adaptive');
-fields[2].value = 'adaptive'; fields[2].onchange();
-checkEqual(draft.subagents.effort, 'adaptive', 'adaptive is selectable');
-checkEqual(subagentSelectionError(draft), '', 'adaptive passes effort validation when the model offers efforts');
-snapshot.profile_capabilities.profiles['installation-1'].efforts.a = {{status:'ready',value:[]}};
-draft.subagents.effort = null;
-fields = render();
-effortOptions = fields[2].childNodes.filter(node => node.tagName === 'OPTION');
-check(!effortOptions.some(node => node.value === 'adaptive'), 'adaptive is omitted when the model has no efforts');
-draft.subagents.effort = 'adaptive';
-fields = render();
-effortOptions = fields[2].childNodes.filter(node => node.tagName === 'OPTION');
-check(effortOptions.some(node => node.value === 'adaptive' && node.textContent === 'adaptive (unavailable)'), 'a stored adaptive value is marked unavailable');
-checkEqual(subagentSelectionError(draft), 'The selected effort is unavailable for this model.', 'adaptive requires at least one model effort');
-snapshot.profile_capabilities.profiles['installation-1'].efforts.a = {{status:'ready',value:[choice('low'),choice('high')]}};
-fields = render();
-fields[2].value = 'high'; fields[2].onchange(); render();
-checkEqual(pending.length, 0, 'effort edit uses published cache');
-snapshot.profiles[0].subagents = {{ mode:'single_model', model:'creation-default', effort:'low' }};
-render();
-checkEqual(draft.subagents.model, 'a', 'saving profile defaults retains session draft');
-fields[0].value = 'native'; fields[0].onchange(); fields = render();
-fields[0].value = 'single_model'; fields[0].onchange(); fields = render();
-check(!fields[1].disabled, 'policy round trip retains globally warmed models');
-fields[1].value = 'b'; fields[1].onchange(); fields = render();
-checkEqual(draft.subagentDiscovery.options.efforts[0].value, 'medium', 'all model efforts were warmed');
-checkEqual(pending.length, 0, 'toggles and model changes never discover');
-snapshot.profiles[0].capabilities_key = 'installation-2';
-snapshot.profiles[0].subagent_discovery_key = 'installation-2';
-fields = render();
-check(fields[1].disabled, 'new installation waits for its own shared hydration');
-checkEqual(pending.length, 0, 'changed installation is hydrated by the daemon');
-checkEqual(moveSubagentChange(draft).model, 'b', 'explicit session choice is submitted');
-check(edits >= 4, 'controls report explicit edits');
+check(!fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'configured Mjolnir available');
+fields[0].value = 'mjolnir'; fields[0].onchange();
+checkEqual(moveSubagentChange(draft).mode, 'mjolnir', 'explicit policy submitted');
+checkEqual(subagentSelectionError(draft), '', 'configured choice valid');
+checkEqual(edits, 1, 'edit reported');
 "#
         ),
     );

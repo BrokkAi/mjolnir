@@ -25,7 +25,7 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         )
         .optional()?;
     state.last_subagent_policy = remembered
-        .map(|json| serde_json::from_str(&json))
+        .map(|json| mj_core::subagent::parse_stored_policy(&json))
         .transpose()?
         .unwrap_or_default();
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
@@ -1217,7 +1217,7 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
         subagents: row
             .get::<_, Option<String>>(24)?
             .map(|json| {
-                serde_json::from_str(&json).map_err(|error| {
+                mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(24, Type::Text, Box::new(error))
                 })
             })

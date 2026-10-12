@@ -233,7 +233,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         );
     }
 
-    spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
+    spec.subagent_policy = mj_core::subagent::SubagentPolicy::Mjolnir;
     spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
     let names = |request: &serde_json::Value| -> Vec<String> {
         request
@@ -283,7 +283,7 @@ fn guardian_preapproves_only_owned_mcp_on_every_session_open() {
         ] {
             for role in [
                 SubagentMcpRole::Parent,
-                SubagentMcpRole::FixedParent,
+                SubagentMcpRole::Parent,
                 SubagentMcpRole::Child,
             ] {
                 let mut spec = reload_fallback_spec(harness);
@@ -717,7 +717,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
             "{harness:?} without a socket must keep its native tools: {meta}"
         );
 
-        spec.subagent_policy = mj_core::subagent::SubagentPolicy::AllModels;
+        spec.subagent_policy = mj_core::subagent::SubagentPolicy::Mjolnir;
         spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Parent));
         let meta = serde_json::Value::Object(session_request_meta(&spec, true).unwrap());
         let hidden = match harness {
@@ -733,10 +733,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         assert_eq!(hidden, Some(&expected), "{harness:?}: {meta}");
         for policy in [
             mj_core::subagent::SubagentPolicy::None,
-            mj_core::subagent::SubagentPolicy::SingleModel {
-                model: "chosen".into(),
-                effort: None,
-            },
+            mj_core::subagent::SubagentPolicy::Mjolnir,
         ] {
             spec.subagent_policy = policy;
             spec.subagent_mcp_socket = None;

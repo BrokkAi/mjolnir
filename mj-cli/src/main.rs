@@ -266,14 +266,13 @@ struct CheckpointArgs {
 struct MoveArgs {
     /// Destination delegation policy. Omit to retain the session's policy,
     /// or the recorded policy when retrying a sealed Move.
-    #[arg(long, value_parser = ["native", "single-model", "none"])]
+    #[arg(long)]
     subagents: Option<String>,
-    /// Fixed child model, required with --subagents single-model.
-    #[arg(long, requires = "subagents")]
+    /// Removed: configure global task types in config.toml.
+    #[arg(long, hide = true)]
     subagent_model: Option<String>,
-    /// Fixed child reasoning effort, or `adaptive` for a per-task Jev choice
-    /// when available.
-    #[arg(long, requires = "subagents")]
+    /// Removed: configure global task types in config.toml.
+    #[arg(long, hide = true)]
     subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
     #[arg(long)]

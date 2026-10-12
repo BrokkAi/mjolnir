@@ -1455,6 +1455,19 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ))?;
     }
 
+    // Breaking: older readers cannot decode the new mjolnir policy or task_type
+    // spawn actions; older writers can discard those durable routing choices.
+    if version < 81 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE schema_compatibility SET minimum_compatible_version = 81 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (81, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 81;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2303,7 +2316,7 @@ mod reader_tests {
 
     /// The oldest executable revision that can still read and write a store at
     /// `SCHEMA_VERSION`. Migration 79 preserves native cache placement.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 79;
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 81;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -2383,7 +2396,7 @@ mod reader_tests {
         let state = load_state_from(&path).unwrap();
         assert_eq!(
             state.sessions["all"].subagents,
-            Some(SubagentPolicy::AllModels)
+            Some(SubagentPolicy::Mjolnir)
         );
         assert_eq!(
             state.sessions["native"].subagents,

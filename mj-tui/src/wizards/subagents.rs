@@ -7,225 +7,86 @@ pub(crate) struct SubagentDiscovery {
 }
 
 /// The delegation choice on a review step: the policy being drafted, its
-/// open combo box, and the model discovery a single-model policy needs. Move carries one initialized from its session record.
+/// open combo box, and global configuration availability. Move initializes it
+/// from the session record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentDraft {
     pub(crate) policy: SubagentPolicy,
+    chosen_policy: Option<SubagentPolicy>,
     pub(crate) combo: ComboBoxState<WizardControl>,
     pub(crate) discovery: Option<SubagentDiscovery>,
-    models: Vec<mj_core::acp::SessionConfigChoice>,
 }
 
 impl SubagentDraft {
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
-            policy,
+            policy: if policy.uses_mjolnir() {
+                SubagentPolicy::Mjolnir
+            } else {
+                SubagentPolicy::Native
+            },
             ..Self::default()
         }
     }
 
     pub(crate) fn policies(&self) -> Vec<String> {
-        let mut labels = vec![
-            "Native".into(),
-            "Mjolnir, single model".into(),
-            "None".into(),
-        ];
-        if self.policy == SubagentPolicy::AllModels {
-            labels.push("Mjolnir, all models (legacy)".into());
-        }
-        labels
+        vec!["Native".into(), "Mjolnir".into()]
     }
-
     pub(crate) fn policy_index(&self) -> usize {
-        match self.policy {
-            SubagentPolicy::Native => 0,
-            SubagentPolicy::SingleModel { .. } => 1,
-            SubagentPolicy::None => 2,
-            SubagentPolicy::AllModels => 3,
-        }
+        usize::from(self.policy.uses_mjolnir())
     }
-
-    pub(crate) fn options(&self) -> Option<&SubagentOptions> {
-        self.discovery.as_ref()?.result.as_ref()?.as_ref().ok()
-    }
-
-    pub(crate) fn error(&self) -> Option<String> {
-        if !matches!(self.policy, SubagentPolicy::SingleModel { .. }) {
-            return None;
-        }
-        match self
-            .discovery
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
+        self.discovery
+            .as_ref()?
+            .result
+            .as_ref()?
             .as_ref()
-            .and_then(|discovery| discovery.result.as_ref())
-        {
-            None => Some("Loading eligible models and efforts…".into()),
-            Some(Err(error)) => Some(error.clone()),
-            Some(Ok(options)) => options.validate(&self.policy).err(),
-        }
+            .err()
+            .map(String::as_str)
     }
-
-    fn model_values(&self) -> Vec<Option<String>> {
-        let model = match &self.policy {
-            SubagentPolicy::SingleModel { model, .. } => {
-                (!model.is_empty()).then_some(model.as_str())
-            }
-            _ => None,
-        };
-        crate::widgets::config_choice_values(model, &self.models)
-    }
-
-    fn effort_values(&self) -> Vec<Option<String>> {
-        let effort = match &self.policy {
-            SubagentPolicy::SingleModel { effort, .. } => effort.as_deref(),
-            _ => None,
-        };
-        crate::widgets::subagent_effort_choice_values(
-            effort,
-            self.options().map_or(&[], |o| &o.efforts),
-        )
-    }
-
-    pub(crate) fn models_ready(&self) -> bool {
-        !self.models.is_empty()
-    }
-
-    pub(crate) fn models(&self) -> Vec<String> {
-        self.model_values()
-            .into_iter()
-            .map(|value| match value {
-                None => "Select model".into(),
-                Some(value) => crate::widgets::config_choice_label(
-                    Some(&value),
-                    &self.models,
-                    self.options().is_some(),
-                ),
+    pub(crate) fn error(&self) -> Option<String> {
+        self.policy
+            .uses_mjolnir()
+            .then(|| {
+                self.discovery
+                    .as_ref()?
+                    .result
+                    .as_ref()?
+                    .as_ref()
+                    .err()
+                    .cloned()
             })
-            .collect()
-    }
-
-    pub(crate) fn efforts(&self) -> Vec<String> {
-        let offered = self.options().map_or(&[][..], |o| o.efforts.as_slice());
-        self.effort_values()
-            .into_iter()
-            .map(|value| match value {
-                None => if self.options().is_none() {
-                    "Loading efforts…"
-                } else if offered.is_empty() {
-                    "Harness default"
-                } else {
-                    "Select effort"
-                }
-                .into(),
-                Some(value) => crate::widgets::config_choice_label(
-                    Some(&value),
-                    offered,
-                    self.options().is_some(),
-                ),
-            })
-            .collect()
-    }
-
-    pub(crate) fn model_index(&self) -> usize {
-        let SubagentPolicy::SingleModel { model, .. } = &self.policy else {
-            return 0;
-        };
-        self.model_values()
-            .iter()
-            .position(|value| value.as_deref() == Some(model))
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn effort_index(&self) -> usize {
-        let SubagentPolicy::SingleModel { effort, .. } = &self.policy else {
-            return 0;
-        };
-        self.effort_values()
-            .iter()
-            .position(|value| value.as_deref() == effort.as_deref())
-            .unwrap_or(0)
-    }
-
-    /// Commits the policy row of the combo box. Returns whether it changed.
-    pub(crate) fn select_policy(&mut self, index: usize) -> bool {
-        if self.policy_index() == index {
-            return false;
-        }
-        self.policy = match index {
-            1 => SubagentPolicy::SingleModel {
-                model: String::new(),
-                effort: None,
-            },
-            2 => SubagentPolicy::None,
-            _ => SubagentPolicy::Native,
-        };
-        self.discovery = None;
-        true
-    }
-
-    /// Returns whether the model changed.
-    pub(crate) fn select_model(&mut self, index: usize) -> bool {
-        let model = self
-            .model_values()
-            .get(index)
-            .cloned()
             .flatten()
-            .unwrap_or_default();
-        if matches!(&self.policy, SubagentPolicy::SingleModel { model: selected, .. } if selected == &model)
-        {
+    }
+    pub(crate) fn select_policy(&mut self, index: usize) -> bool {
+        if index == 1 && self.unavailable_reason().is_some() {
             return false;
         }
-        self.policy = SubagentPolicy::SingleModel {
-            model,
-            effort: None,
+        let policy = if index == 1 {
+            SubagentPolicy::Mjolnir
+        } else {
+            SubagentPolicy::Native
         };
-        self.discovery = None;
-        true
+        let changed = self.policy != policy;
+        self.chosen_policy = Some(policy.clone());
+        self.policy = policy;
+        changed
     }
-
-    /// Returns whether the effort changed.
-    pub(crate) fn select_effort(&mut self, index: usize) -> bool {
-        let effort = self.effort_values().get(index).cloned().flatten();
-        match &mut self.policy {
-            SubagentPolicy::SingleModel {
-                effort: selected, ..
-            } if *selected != effort => {
-                *selected = effort;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Opens the combo box behind `id`. Returns false for another control.
     pub(crate) fn activate(&mut self, id: WizardControl) -> bool {
-        let selected = match id {
-            WizardControl::Subagents => self.policy_index(),
-            WizardControl::SubagentModel => self.model_index(),
-            WizardControl::SubagentEffort => self.effort_index(),
-            _ => return false,
-        };
-        self.combo.open(id, selected);
+        if id != WizardControl::Subagents {
+            return false;
+        }
+        self.combo.open(id, self.policy_index());
         true
     }
-
-    /// Applies a committed combo box row. Returns `None` for an interaction
-    /// that is not one of these controls, otherwise whether the policy
-    /// changed.
     pub(crate) fn apply(&mut self, interaction: &Interaction<WizardControl>) -> Option<bool> {
         match interaction {
             Interaction::ComboBoxCommit(WizardControl::Subagents, selected) => {
                 Some(self.select_policy(*selected))
             }
-            Interaction::ComboBoxCommit(WizardControl::SubagentModel, selected) => {
-                Some(self.select_model(*selected))
-            }
-            Interaction::ComboBoxCommit(WizardControl::SubagentEffort, selected) => {
-                Some(self.select_effort(*selected))
-            }
             _ => None,
         }
     }
-
     pub(crate) fn declare(&self, form: &mut Dialog<WizardControl>) {
         form.declare_with_enabled(
             WizardControl::Subagents,
@@ -238,48 +99,52 @@ impl SubagentDraft {
             },
             true,
         );
-        if matches!(self.policy, SubagentPolicy::SingleModel { .. }) {
-            form.declare_with_enabled(
-                WizardControl::SubagentModel,
-                ControlKind::ComboBox {
-                    len: self.models().len(),
-                    selected: self
-                        .combo
-                        .selection(WizardControl::SubagentModel, self.model_index()),
-                    expanded: self.combo.is_open(WizardControl::SubagentModel),
-                },
-                self.models_ready(),
-            );
-            form.declare_with_enabled(
-                WizardControl::SubagentEffort,
-                ControlKind::ComboBox {
-                    len: self.efforts().len(),
-                    selected: self
-                        .combo
-                        .selection(WizardControl::SubagentEffort, self.effort_index()),
-                    expanded: self.combo.is_open(WizardControl::SubagentEffort),
-                },
-                self.options().is_some(),
-            );
-        }
+        form.set_row_enabled(
+            WizardControl::Subagents,
+            vec![true, self.unavailable_reason().is_none()],
+        );
     }
-
-    fn update_choices(
+    pub(crate) fn refresh_create(
         &mut self,
         profile: &str,
         config: &Config,
         snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+        remembered: &SubagentPolicy,
     ) {
-        let SubagentPolicy::SingleModel { model, .. } = &self.policy else {
-            return;
+        self.update_choices(profile, config, snapshot);
+        // Keep the user's intent separate from the available displayed policy.
+        let desired = self.chosen_policy.as_ref().unwrap_or(remembered);
+        let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_none() {
+            SubagentPolicy::Mjolnir
+        } else {
+            SubagentPolicy::Native
         };
-        let model = (!model.is_empty()).then_some(model.as_str());
-        self.models = snapshot
-            .options(config, profile, None)
-            .map(|options| options.models)
-            .unwrap_or_default();
+        if self.policy != policy {
+            self.policy = policy;
+            self.combo = ComboBoxState::default();
+        }
+    }
+
+    pub(crate) fn update_choices(
+        &mut self,
+        profile: &str,
+        config: &Config,
+        _snapshot: &mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
+    ) {
         self.discovery = Some(SubagentDiscovery {
-            result: snapshot.options(config, profile, model).map(Ok),
+            result: Some(
+                if !config
+                    .profiles
+                    .get(profile)
+                    .is_some_and(|p| p.kind.supports_delegation_tools())
+                {
+                    Err("Mjolnir sub-agents need a Claude or Codex profile".into())
+                } else if config.subagents.is_configured() {
+                    Ok(SubagentOptions::default())
+                } else {
+                    Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())
+                },
+            ),
         });
     }
 }
@@ -288,25 +153,39 @@ impl DashboardState {
     /// The review step's delegation draft and the profile it is for, when
     /// the open wizard offers the choice.
     fn review_subagent_draft(&mut self) -> Option<(&mut SubagentDraft, String)> {
-        let applies = matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review && wizard.subagent_choice_applies(self));
+        let applies = matches!(&self.mode, Mode::New(_))
+            || matches!(&self.mode, Mode::Resume(wizard) if wizard.step == WizardStep::Review && wizard.subagent_choice_applies(self));
         if !applies {
             return None;
         }
         let profile = match &self.mode {
+            Mode::New(wizard) => self
+                .config
+                .enabled_profiles()
+                .nth(wizard.profile)?
+                .0
+                .to_owned(),
             Mode::Resume(wizard) => wizard.destination_profile(self),
             _ => unreachable!("checked above"),
         };
         match &mut self.mode {
+            Mode::New(wizard) => Some((&mut *wizard.subagents, profile)),
             Mode::Resume(wizard) => Some((&mut *wizard.subagents, profile)),
             _ => None,
         }
     }
 
     pub(crate) fn take_subagent_discovery(&mut self) -> Option<DashboardAction> {
+        let creating = matches!(&self.mode, Mode::New(_));
+        let remembered = self.state.last_subagent_policy.clone();
         let config = self.config.clone();
         let snapshot = self.profile_capabilities.clone();
         let (draft, profile) = self.review_subagent_draft()?;
-        draft.update_choices(&profile, &config, &snapshot);
+        if creating {
+            draft.refresh_create(&profile, &config, &snapshot, &remembered);
+        } else {
+            draft.update_choices(&profile, &config, &snapshot);
+        }
         None
     }
 }
@@ -319,14 +198,11 @@ impl ResumeWizard {
             .then(|| self.subagents.policy.clone())
     }
 
-    /// Move offers the delegation choice when its destination profile is
-    /// Claude or Codex. A plain resume keeps the session's own policy.
+    /// Move always shows delegation, including the reason Mjolnir is unavailable.
+    /// A plain resume keeps the session's own policy.
     pub(crate) fn subagent_choice_applies(&self, dashboard: &DashboardState) -> bool {
+        let _ = dashboard;
         self.moving
-            && dashboard
-                .resume_wizard_profiles(self)
-                .get(self.profile)
-                .is_some_and(|(_, kind)| kind.supports_delegation_tools())
     }
 
     /// The policy a Move request carries: `None` keeps the session's own, so
@@ -336,7 +212,12 @@ impl ResumeWizard {
             .session_record(&self.session_id)
             .and_then(|session| session.subagents.clone())
             .unwrap_or_default();
-        (self.subagent_choice_applies(dashboard) && self.subagents.policy != stored)
+        let displayed = if stored.uses_mjolnir() {
+            SubagentPolicy::Mjolnir
+        } else {
+            SubagentPolicy::Native
+        };
+        (self.subagent_choice_applies(dashboard) && self.subagents.policy != displayed)
             .then(|| self.subagents.policy.clone())
     }
 }

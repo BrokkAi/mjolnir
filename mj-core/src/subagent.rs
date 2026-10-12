@@ -4,75 +4,64 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// The effort value that asks Jev to choose each child's effort from the
-/// spawn brief. The daemon resolves it to one of the model's advertised
-/// efforts before the child starts; it is never sent to a harness.
-pub const ADAPTIVE_EFFORT: &str = "adaptive";
-
-/// Human-readable label for [`ADAPTIVE_EFFORT`] in pickers and summaries.
-pub const ADAPTIVE_EFFORT_LABEL: &str = "Adaptive (Jev chooses per task)";
-
-/// A session's delegation policy. Single-model selectors belong to the user,
-/// never to the agent calling spawn.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+/// A session's delegation policy. Global task choices are owned by configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SubagentPolicy {
     #[default]
     Native,
-    AllModels,
-    SingleModel {
-        model: String,
-        effort: Option<String>,
-    },
+    Mjolnir,
     None,
+}
+
+impl<'de> Deserialize<'de> for SubagentPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "mode", rename_all = "snake_case")]
+        enum Wire {
+            Native,
+            #[serde(alias = "all_models", alias = "single_model")]
+            Mjolnir,
+            None,
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Native => Self::Native,
+            Wire::Mjolnir => Self::Mjolnir,
+            Wire::None => Self::None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentTaskType {
+    #[default]
+    Straightforward,
+    Subtle,
+}
+
+impl SubagentTaskType {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Straightforward => "straightforward",
+            Self::Subtle => "subtle",
+        }
+    }
 }
 
 impl SubagentPolicy {
     pub fn is_native(&self) -> bool {
         matches!(self, Self::Native)
     }
-
-    /// Profile setup offers native delegation or one explicitly chosen model.
-    /// Legacy session policies remain readable, and children still use None.
-    pub fn validate_profile(&self, kind: crate::config::HarnessKind) -> anyhow::Result<()> {
-        match self {
-            Self::Native => Ok(()),
-            Self::SingleModel { model, effort } => {
-                anyhow::ensure!(
-                    kind.supports_delegation_tools(),
-                    "Mjolnir subagents require a Claude or Codex profile"
-                );
-                anyhow::ensure!(!model.trim().is_empty(), "select a subagent model");
-                anyhow::ensure!(
-                    effort.as_ref().is_none_or(|value| !value.trim().is_empty()),
-                    "subagent effort cannot be empty"
-                );
-                Ok(())
-            }
-            Self::AllModels | Self::None => {
-                anyhow::bail!("profile subagents must be native or single_model")
-            }
-        }
-    }
-
     pub fn uses_mjolnir(&self) -> bool {
-        matches!(self, Self::AllModels | Self::SingleModel { .. })
+        matches!(self, Self::Mjolnir)
     }
-
     pub fn suppresses_native(&self) -> bool {
-        !matches!(self, Self::Native)
+        !self.is_native()
     }
-
     pub fn parent_role(&self) -> Option<SubagentMcpRole> {
-        match self {
-            Self::AllModels => Some(SubagentMcpRole::Parent),
-            Self::SingleModel { .. } => Some(SubagentMcpRole::FixedParent),
-            _ => None,
-        }
+        self.uses_mjolnir().then_some(SubagentMcpRole::Parent)
     }
-
-    /// Children and unsupported parent harnesses cannot acquire delegation
-    /// tools. Claude/Codex children still receive their separate handback tool.
     pub fn for_launch(&self, harness: crate::config::HarnessKind, is_child: bool) -> Self {
         if !harness.supports_delegation_tools() {
             Self::Native
@@ -97,7 +86,7 @@ pub fn deserialize_optional_policy<'de, D: serde::Deserializer<'de>>(
     }
     Ok(
         Option::<Stored>::deserialize(deserializer)?.map(|stored| match stored {
-            Stored::Legacy(true) => SubagentPolicy::AllModels,
+            Stored::Legacy(true) => SubagentPolicy::Mjolnir,
             Stored::Legacy(false) => SubagentPolicy::Native,
             Stored::Policy(policy) => policy,
         }),
@@ -110,7 +99,15 @@ pub fn deserialize_launch_policy<'de, D: serde::Deserializer<'de>>(
     Ok(deserialize_optional_policy(deserializer)?.unwrap_or_default())
 }
 
-/// The refusal code for a single-model choice discovery does not offer. A
+/// Read a policy JSON column using the same legacy decoder as durable records.
+pub fn parse_stored_policy(json: &str) -> serde_json::Result<SubagentPolicy> {
+    let mut deserializer = serde_json::Deserializer::from_str(json);
+    let policy = deserialize_launch_policy(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(policy)
+}
+
+/// The refusal code for an unavailable global task choice. A
 /// client picks its own remedy from it: the daemon's message names no
 /// surface, and only the client knows whether the person has a Settings
 /// screen or command-line flags to change the choice with.
@@ -129,42 +126,21 @@ pub struct SubagentOptions {
 }
 
 impl SubagentOptions {
-    pub fn validate(&self, policy: &SubagentPolicy) -> Result<(), String> {
-        let SubagentPolicy::SingleModel { model, effort } = policy else {
-            return Ok(());
-        };
-        if model.is_empty() {
-            return Err(format!("Choose a subagent model. {ELIGIBILITY_NOTE}"));
-        }
-        if !self.models.iter().any(|choice| &choice.value == model) {
+    pub fn validate(&self, choice: &crate::config::SubagentChoice) -> Result<(), String> {
+        let crate::config::SubagentChoice { model, effort } = choice;
+        if model.trim().is_empty() || !self.models.iter().any(|choice| &choice.value == model) {
             return Err(format!(
                 "Selected subagent model {model:?} is unavailable.{} {ELIGIBILITY_NOTE}",
                 choice_list(" Available models", &self.models)
             ));
         }
-        if effort.as_deref() == Some(ADAPTIVE_EFFORT) {
-            if self.efforts.iter().all(|choice| {
-                choice.value.eq_ignore_ascii_case("default") || choice.value == ADAPTIVE_EFFORT
-            }) {
-                return Err(format!(
-                    "Subagent model {model:?} offers no configurable effort choice; adaptive effort needs at least one."
-                ));
-            }
+        if effort.is_none() {
             return Ok(());
         }
-        if self.efforts.is_empty() && effort.is_none() {
+        if effort.as_ref().is_some_and(|effort| {
+            effort != "adaptive" && self.efforts.iter().any(|choice| &choice.value == effort)
+        }) {
             return Ok(());
-        }
-        if effort
-            .as_ref()
-            .is_some_and(|effort| self.efforts.iter().any(|choice| &choice.value == effort))
-        {
-            return Ok(());
-        }
-        if self.efforts.is_empty() {
-            return Err(format!(
-                "Subagent model {model:?} offers no efforts; leave the effort unset."
-            ));
         }
         Err(format!(
             "Select an available effort for subagent model {model:?}.{} {ELIGIBILITY_NOTE}",
@@ -195,9 +171,6 @@ pub const MAX_WAIT_SECONDS: u64 = 3_600;
 
 /// Default `wait` duration before applying the caller harness's ceiling.
 pub const DEFAULT_WAIT_SECONDS: u64 = MAX_WAIT_SECONDS;
-
-/// The `spawn` model value that means "the model the parent is running now".
-pub const CURRENT_MODEL: &str = "current";
 
 /// `status` when this wait returned one or more previously unreported finishes.
 pub const WAIT_STATUS_REPORTED: &str = "reported";
@@ -383,12 +356,8 @@ pub enum SubagentToolAction {
     Spawn {
         task_name: String,
         instructions: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        profile_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        effort: Option<String>,
+        #[serde(default)]
+        task_type: SubagentTaskType,
         /// Absolute, or relative to the parent session's working directory.
         /// Empty means the parent's own working directory. The directory must
         /// exist on the target; no other restriction applies.
@@ -440,12 +409,17 @@ enum SubagentToolActionWire {
     Spawn {
         task_name: String,
         instructions: String,
+        #[serde(default)]
+        task_type: SubagentTaskType,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        profile_id: Option<String>,
+        #[serde(rename = "profile_id")]
+        _profile_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
+        #[serde(rename = "model")]
+        _model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        effort: Option<String>,
+        #[serde(rename = "effort")]
+        _effort: Option<String>,
         #[serde(default)]
         working_directory: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,18 +501,17 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
             SubagentToolActionWire::Spawn {
                 task_name,
                 instructions,
-                profile_id,
-                model,
-                effort,
+                task_type,
+                _profile_id: _,
+                _model: _,
+                _effort: _,
                 working_directory,
                 context,
                 files,
             } => Self::Spawn {
                 task_name,
                 instructions,
-                profile_id,
-                model,
-                effort,
+                task_type,
                 working_directory,
                 context,
                 files,
@@ -651,8 +624,9 @@ pub const SUBAGENT_MCP_SERVER: &str = "mj-agents";
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMcpRole {
     #[default]
+    #[serde(alias = "fixed_parent")]
     Parent,
-    FixedParent,
+
     MessageOnly,
     Child,
 }
@@ -662,7 +636,6 @@ impl SubagentMcpRole {
     pub fn id(self) -> &'static str {
         match self {
             Self::Parent => "parent",
-            Self::FixedParent => "fixed_parent",
             Self::MessageOnly => "message_only",
             Self::Child => "child",
         }
@@ -673,15 +646,7 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &[
-                "list_profiles",
-                "spawn",
-                "list_agents",
-                "send_message",
-                "wait",
-                "close",
-            ],
-            Self::FixedParent => &["spawn", "list_agents", "send_message", "wait", "close"],
+            Self::Parent => &["spawn", "list_agents", "send_message", "wait", "close"],
             Self::MessageOnly => &["send_message"],
             Self::Child => &["handback"],
         }
@@ -700,7 +665,7 @@ impl std::str::FromStr for SubagentMcpRole {
     fn from_str(value: &str) -> anyhow::Result<Self> {
         match value {
             "parent" => Ok(Self::Parent),
-            "fixed_parent" => Ok(Self::FixedParent),
+            "fixed_parent" => Ok(Self::Parent),
             "message_only" => Ok(Self::MessageOnly),
             "child" => Ok(Self::Child),
             other => anyhow::bail!("unknown sub-agent MCP role {other:?}"),
@@ -1340,11 +1305,10 @@ mod tests {
     fn only_child_mutations_hold_an_in_place_move_drain() {
         let mutations = [
             SubagentToolAction::Spawn {
+                task_type: SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
-                profile_id: None,
-                model: None,
-                effort: None,
+
                 working_directory: PathBuf::new(),
                 context: None,
                 files: Vec::new(),
@@ -1395,11 +1359,23 @@ mod tests {
         for (json, expected) in [
             (
                 r#"{"mjolnir_subagents":true}"#,
-                Some(SubagentPolicy::AllModels),
+                Some(SubagentPolicy::Mjolnir),
             ),
             (
                 r#"{"mjolnir_subagents":false}"#,
                 Some(SubagentPolicy::Native),
+            ),
+            (
+                r#"{"subagents":{"mode":"all_models"}}"#,
+                Some(SubagentPolicy::Mjolnir),
+            ),
+            (
+                r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"adaptive"}}"#,
+                Some(SubagentPolicy::Mjolnir),
+            ),
+            (
+                r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"high"}}"#,
+                Some(SubagentPolicy::Mjolnir),
             ),
             ("{}", None),
         ] {
@@ -1409,17 +1385,14 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<SubagentPolicy>("true").is_err());
-        let fixed = SubagentPolicy::SingleModel {
-            model: "chosen".into(),
-            effort: Some("high".into()),
-        };
+        let fixed = SubagentPolicy::Mjolnir;
         for harness in [
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
         ] {
             for policy in [
                 SubagentPolicy::Native,
-                SubagentPolicy::AllModels,
+                SubagentPolicy::Mjolnir,
                 fixed.clone(),
                 SubagentPolicy::None,
             ] {
@@ -2256,5 +2229,29 @@ mod tests {
                 "{stop_reason}"
             );
         }
+    }
+    #[test]
+    fn durable_legacy_spawn_selectors_are_ignored_and_task_type_defaults() {
+        let action: SubagentToolAction = serde_json::from_value(serde_json::json!({
+            "action": "spawn", "params": { "task_name":"legacy", "instructions":"report",
+                "profile_id":"old", "model":"old-model", "effort":"adaptive" }
+        }))
+        .unwrap();
+        let SubagentToolAction::Spawn { task_type, .. } = &action else {
+            panic!("spawn")
+        };
+        assert_eq!(*task_type, SubagentTaskType::Straightforward);
+        let encoded = serde_json::to_value(&action).unwrap();
+        for key in ["profile_id", "model", "effort"] {
+            assert!(encoded["params"].get(key).is_none());
+        }
+        assert_eq!(
+            serde_json::from_str::<SubagentMcpRole>("\"fixed_parent\"").unwrap(),
+            SubagentMcpRole::Parent
+        );
+        assert_eq!(
+            "fixed_parent".parse::<SubagentMcpRole>().unwrap(),
+            SubagentMcpRole::Parent
+        );
     }
 }

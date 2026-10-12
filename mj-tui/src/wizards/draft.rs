@@ -339,6 +339,9 @@ impl WizardDraft for NewWizard {
         dashboard: &mut DashboardState,
         id: WizardControl,
     ) -> Result<DashboardAction, Self> {
+        if self.step == WizardStep::Review && self.subagents.activate(id) {
+            return Ok(dashboard.keep(self));
+        }
         if self.step == WizardStep::NewBundle {
             return Ok(dashboard.activate_new_bundle_control(self, id));
         }
@@ -439,11 +442,22 @@ impl WizardDraft for NewWizard {
         true
     }
 
+    fn route_extra_interaction(
+        &mut self,
+        interaction: Option<Interaction<WizardControl>>,
+    ) -> Option<Interaction<WizardControl>> {
+        self.subagents.combo.route(interaction)
+    }
+
     fn apply_extra_interaction(
         &mut self,
         dashboard: &mut DashboardState,
         interaction: &Interaction<WizardControl>,
     ) {
+        if self.step == WizardStep::Review && self.subagents.apply(interaction).is_some() {
+            dashboard.record_event_handled();
+            return;
+        }
         match interaction {
             Interaction::Select(WizardControl::BundleList, selected) => {
                 if self.bundle != *selected {
@@ -615,6 +629,7 @@ impl WizardDraft for NewWizard {
         dashboard: &DashboardState,
         form: &mut Dialog<WizardControl>,
     ) -> bool {
+        self.subagents.declare(form);
         let target = &dashboard.config.targets[&nth_key(&dashboard.config.targets, self.target)];
         // Isolated targets have no worktree choice, so the control only
         // exists for a bare project directory.
@@ -629,7 +644,7 @@ impl WizardDraft for NewWizard {
         let ready = !is_bare_project_target(target)
             || self.selected_worktree_options(&dashboard.config).is_some()
             || self.remote_preflight_error.is_some();
-        ready && !self.remote_preflight_in_flight
+        ready && !self.remote_preflight_in_flight && self.subagents.error().is_none()
     }
 }
 

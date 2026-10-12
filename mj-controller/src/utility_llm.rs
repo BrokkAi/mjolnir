@@ -767,7 +767,7 @@ mod tests {
             ])
             .into(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let backend = backend_for_profile(&profile).unwrap().unwrap();
@@ -788,7 +788,7 @@ mod tests {
                 home: PathBuf::from("/profiles/codex"),
                 environment: Default::default(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         );
@@ -907,7 +907,7 @@ mod tests {
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         assert_eq!(utility_family(&profile), Some(UtilityFamily::DeepSeek));

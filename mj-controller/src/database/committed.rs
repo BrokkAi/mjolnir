@@ -384,7 +384,7 @@ pub(super) fn finish_operation(
                     )
                     .optional()?;
                 let policy = json
-                    .map(|json| serde_json::from_str(&json))
+                    .map(|json| mj_core::subagent::parse_stored_policy(&json))
                     .transpose()?
                     .unwrap_or_default();
                 if state.last_subagent_policy != policy {

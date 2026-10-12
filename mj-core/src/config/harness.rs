@@ -725,12 +725,9 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
-    /// Creation default copied into each new session; existing sessions own their policy.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::subagent::SubagentPolicy::is_native"
-    )]
-    pub subagents: crate::subagent::SubagentPolicy,
+    /// Consume legacy per-profile choices without migrating them to global settings.
+    #[serde(default, rename = "subagents", skip_serializing)]
+    pub legacy_subagents: Option<serde_json::Value>,
 }
 
 /// Inputs that change advertised models and efforts. Session defaults and UI
@@ -907,9 +904,6 @@ impl HarnessProfile {
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {
         validate_id("profile", id)?;
-        self.subagents
-            .validate_profile(self.kind)
-            .with_context(|| format!("profile {id:?}"))?;
         if self.kind.nested_home() {
             let leaf = self.kind.id();
             let name = self.kind.display_name();

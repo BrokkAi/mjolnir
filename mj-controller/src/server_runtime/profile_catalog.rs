@@ -628,7 +628,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -
                         home: std::path::PathBuf::from("/home/agent").join(id),
                         environment: Default::default(),
                         context_window_bytes: None,
-                        subagents: Default::default(),
+                        legacy_subagents: Default::default(),
                         guardian_review_model: None,
                     },
                 )
@@ -845,11 +845,7 @@ mod tests {
             .subagents
             .eligible_profiles
             .insert("helper".into(), true);
-        config.profiles.get_mut("parent").unwrap().subagents =
-            mj_core::subagent::SubagentPolicy::SingleModel {
-                model: "parent-model".into(),
-                effort: None,
-            };
+
         catalog.sync(&config);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(catalog.candidates("parent").unwrap().len(), 2);

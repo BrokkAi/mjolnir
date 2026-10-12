@@ -1598,7 +1598,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
             HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 kind,
                 home: PathBuf::from("/profiles/harness"),
@@ -1659,7 +1659,7 @@ fn new_session_profile_step_aligns_its_columns() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
@@ -1779,7 +1779,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
@@ -2753,7 +2753,7 @@ fn resume_profile_step_aligns_its_columns_and_explains_the_marker() {
         HarnessProfile {
             enabled: true,
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
             kind: HarnessKind::Kimi,
             home: PathBuf::from("/profiles/kimi"),
@@ -4980,11 +4980,8 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
     use mj_core::subagent::SubagentPolicy;
     for stored in [
         SubagentPolicy::Native,
-        SubagentPolicy::AllModels,
-        SubagentPolicy::SingleModel {
-            model: "recorded".into(),
-            effort: Some("low".into()),
-        },
+        SubagentPolicy::Mjolnir,
+        SubagentPolicy::Mjolnir,
     ] {
         let mut dashboard = dashboard_with_session(running_session());
         *dashboard.config = single_raw_config();
@@ -4992,15 +4989,7 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
         session.project_directory = Some("/work/project".into());
         session.target_template_id = "local".into();
         session.subagents = Some(stored.clone());
-        dashboard
-            .config
-            .profiles
-            .get_mut("claude-1")
-            .unwrap()
-            .subagents = SubagentPolicy::SingleModel {
-            model: "creation-default".into(),
-            effort: Some("high".into()),
-        };
+
         let DashboardAction::MoveSession {
             preparation_request_id: Some(request),
             subagents: Some(ref policy),
@@ -5136,12 +5125,12 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         let mut session = running_session();
         session.project_directory = Some("/work/project".into());
         session.target_template_id = "local".into();
-        session.subagents = Some(SubagentPolicy::AllModels);
+        session.subagents = Some(SubagentPolicy::Mjolnir);
         let mut dashboard = dashboard_with_session(session);
         *dashboard.config = single_raw_config();
         let DashboardAction::MoveSession {
             preparation_request_id: Some(request),
-            subagents: Some(SubagentPolicy::AllModels),
+            subagents: Some(SubagentPolicy::Mjolnir),
             ..
         } = dashboard.begin_move()
         else {
@@ -5156,7 +5145,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         };
         wizard.form.get_mut().focus(WizardControl::Subagents);
         let lines = captured_drawn(&mut dashboard, width, height);
-        let (label_x, y) = point(&lines, "Subagents");
+        let (label_x, y) = point(&lines, "Delegation");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
@@ -5176,14 +5165,14 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
-            SubagentPolicy::AllModels
+            SubagentPolicy::Mjolnir
         );
         assert!(
             resume_wizard(&dashboard).preparation.is_some(),
             "dismissing preview keeps preparation"
         );
         let lines = captured_drawn(&mut dashboard, width, height);
-        let (label_x, y) = point(&lines, "Subagents");
+        let (label_x, y) = point(&lines, "Delegation");
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Up(MouseButton::Left),
@@ -5207,7 +5196,7 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         assert!(resume_wizard(&dashboard).preparation.is_none());
         assert_eq!(
             dashboard.state.sessions["session-1"].subagents,
-            Some(SubagentPolicy::AllModels),
+            Some(SubagentPolicy::Mjolnir),
             "draft does not change recorded policy"
         );
         let Some(DashboardAction::MoveSession {
@@ -5415,5 +5404,240 @@ fn golden_single_choice_fast_paths() {
         env!("CARGO_MANIFEST_DIR"),
         "single-choice-fast-paths",
         &take_golden_output(),
+    );
+}
+
+#[test]
+fn golden_create_delegation_availability_and_submission() {
+    use mj_core::config::SubagentChoice;
+    use mj_core::subagent::SubagentPolicy;
+    let mut output = String::new();
+    for configured in [false, true] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        if configured {
+            let choice = SubagentChoice {
+                model: "model".into(),
+                effort: None,
+            };
+            dashboard.config.subagents.straightforward = Some(choice.clone());
+            dashboard.config.subagents.subtle = Some(choice);
+        }
+        dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir;
+        dashboard.begin_new_wizard();
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new");
+        };
+        wizard.step = WizardStep::Review;
+        dashboard.take_subagent_discovery();
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            unreachable!()
+        };
+        assert_eq!(
+            wizard.subagents.policy,
+            if configured {
+                SubagentPolicy::Mjolnir
+            } else {
+                SubagentPolicy::Native
+            }
+        );
+        wizard.subagents.select_policy(0);
+        assert_eq!(wizard.subagents.select_policy(1), configured);
+        let screen = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(screen.contains("Delegation"));
+        if !configured {
+            assert!(screen.contains("Set up Mjolnir sub-agents"));
+        }
+        output.push_str(&format!("=== configured={configured} ===\n{screen}\n"));
+        let Mode::New(wizard) = &dashboard.mode else {
+            unreachable!()
+        };
+        let DashboardAction::CreateSession { subagents, .. } =
+            dashboard.create_session_action_without_closing(wizard)
+        else {
+            panic!("create");
+        };
+        assert_eq!(
+            subagents,
+            Some(if configured {
+                SubagentPolicy::Mjolnir
+            } else {
+                SubagentPolicy::Native
+            })
+        );
+    }
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "create-delegation", &output);
+}
+
+#[test]
+fn move_unconfigured_delegation_retains_legacy_none_until_changed() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut session = running_session();
+    session.project_directory = Some("/work/project".into());
+    session.target_template_id = "local".into();
+    session.subagents = Some(SubagentPolicy::None);
+    let mut dashboard = dashboard_with_session(session);
+    *dashboard.config = single_raw_config();
+    dashboard.begin_move();
+    dashboard.take_subagent_discovery();
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("move");
+    };
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::Native);
+    assert!(
+        wizard
+            .subagents
+            .unavailable_reason()
+            .unwrap()
+            .contains("Settings")
+    );
+    assert!(!wizard.subagents.select_policy(1));
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        unreachable!()
+    };
+    assert!(wizard.subagent_change(&dashboard).is_none());
+    assert!(
+        drawn(&mut dashboard, 140, 40)
+            .join("\n")
+            .contains("Set up Mjolnir sub-agents")
+    );
+}
+
+#[test]
+fn delegation_rejects_disabled_mjolnir_on_create_and_move() {
+    use mj_core::subagent::SubagentPolicy;
+    let mut draft = subagents::SubagentDraft::new(SubagentPolicy::Native);
+    let mut config = config();
+    draft.update_choices("claude-1", &config, &Default::default());
+    assert!(!draft.select_policy(1));
+    assert!(draft.unavailable_reason().unwrap().contains("Settings"));
+    config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Kimi;
+    draft.update_choices("claude-1", &config, &Default::default());
+    assert!(!draft.select_policy(1));
+    assert!(
+        draft
+            .unavailable_reason()
+            .unwrap()
+            .contains("Claude or Codex")
+    );
+}
+
+// Hard-won: P2 review: changing Create's profile stranded remembered Mjolnir on an unsupported harness.
+#[test]
+fn create_delegation_tracks_profile_availability_in_both_directions() {
+    use mj_core::config::SubagentChoice;
+    use mj_core::subagent::SubagentPolicy;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    let choice = SubagentChoice {
+        model: "model".into(),
+        effort: None,
+    };
+    dashboard.config.subagents.straightforward = Some(choice.clone());
+    dashboard.config.subagents.subtle = Some(choice);
+    dashboard.config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Grok;
+    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir;
+    dashboard.begin_new_wizard();
+    let supported = dashboard
+        .config
+        .enabled_profiles()
+        .position(|(id, _)| id == "codex-1")
+        .unwrap();
+    let unsupported = dashboard
+        .config
+        .enabled_profiles()
+        .position(|(id, _)| id == "claude-1")
+        .unwrap();
+    for (profile, expected) in [
+        (supported, SubagentPolicy::Mjolnir),
+        (unsupported, SubagentPolicy::Native),
+        (supported, SubagentPolicy::Mjolnir),
+    ] {
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            panic!("new");
+        };
+        WizardDraft::set_profile(wizard, profile);
+        dashboard.take_subagent_discovery();
+        let Mode::New(wizard) = &dashboard.mode else {
+            unreachable!()
+        };
+        assert_eq!(wizard.subagents.policy, expected);
+        assert!(wizard.subagents.error().is_none());
+    }
+    // Committing Native even when it is the displayed fallback is an explicit choice.
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    WizardDraft::set_profile(wizard, unsupported);
+    dashboard.take_subagent_discovery();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    wizard
+        .subagents
+        .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 0));
+    WizardDraft::set_profile(wizard, supported);
+    dashboard.take_subagent_discovery();
+    assert_eq!(
+        new_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Native
+    );
+}
+
+// Hard-won: P2 review: Create did not reconcile delegation after global availability changed.
+#[test]
+fn create_delegation_tracks_config_availability_without_overwriting_explicit_choices() {
+    use mj_core::config::SubagentChoice;
+    use mj_core::subagent::SubagentPolicy;
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir;
+    dashboard.begin_new_wizard();
+    let supported = dashboard
+        .config
+        .enabled_profiles()
+        .position(|(id, _)| id == "codex-1")
+        .unwrap();
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        panic!("new");
+    };
+    WizardDraft::set_profile(wizard, supported);
+    wizard.step = WizardStep::Review;
+    let choice = SubagentChoice {
+        model: "model".into(),
+        effort: None,
+    };
+    dashboard.config.subagents.straightforward = Some(choice.clone());
+    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.set_profile_capabilities(Default::default());
+    assert_eq!(
+        new_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Mjolnir
+    );
+    dashboard.config.subagents.subtle = None;
+    dashboard.set_profile_capabilities(Default::default());
+    assert_eq!(
+        new_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Native
+    );
+    assert!(new_wizard(&dashboard).subagents.error().is_none());
+    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.set_profile_capabilities(Default::default());
+    let Mode::New(wizard) = &mut dashboard.mode else {
+        unreachable!()
+    };
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::Mjolnir);
+    wizard
+        .subagents
+        .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 1));
+    dashboard.config.subagents.subtle = None;
+    dashboard.set_profile_capabilities(Default::default());
+    assert_eq!(
+        new_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Native
+    );
+    dashboard.config.subagents.subtle = Some(choice);
+    dashboard.state.last_subagent_policy = SubagentPolicy::Native;
+    dashboard.set_profile_capabilities(Default::default());
+    assert_eq!(
+        new_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Mjolnir
     );
 }

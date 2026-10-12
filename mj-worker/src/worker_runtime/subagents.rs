@@ -1124,10 +1124,7 @@ mod tests {
 
         for (role, old_root) in [
             (SubagentMcpRole::Parent, ".local/share/hel/profiles/session"),
-            (
-                SubagentMcpRole::FixedParent,
-                ".local/share/hel/workers/session",
-            ),
+            (SubagentMcpRole::Parent, ".local/share/hel/workers/session"),
             (SubagentMcpRole::Child, "/previous-target/workers/session"),
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -1256,7 +1253,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
         use mj_core::subagent::SubagentMcpRole;
         for role in [
             SubagentMcpRole::Parent,
-            SubagentMcpRole::FixedParent,
+            SubagentMcpRole::Parent,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
@@ -1445,11 +1442,10 @@ enabled = false
 
         let mutations = [
             SubagentToolAction::Spawn {
+                task_type: mj_core::subagent::SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
-                profile_id: None,
-                model: None,
-                effort: None,
+
                 working_directory: PathBuf::new(),
                 context: None,
                 files: Vec::new(),

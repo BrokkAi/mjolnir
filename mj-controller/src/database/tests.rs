@@ -759,7 +759,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        79
+        SCHEMA_VERSION
     );
     let events = events::load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100)
         .unwrap()
@@ -841,7 +841,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
-        79
+        SCHEMA_VERSION
     );
     assert_eq!(
         load_state_from(&path).unwrap().sessions["old-session"],
@@ -6327,10 +6327,7 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mj.sqlite3");
     let mut parent = session("fixed-parent", "project");
-    let fixed = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
-    };
+    let fixed = SubagentPolicy::Mjolnir;
     parent.subagents = Some(fixed.clone());
     save_new_session_to(&path, &parent, None).unwrap();
     let state = load_state_from(&path).unwrap();
@@ -6353,6 +6350,36 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
         load_state_from(&path).unwrap().sessions[&parent.id].subagents,
         Some(fixed)
     );
+    let connection = open(&path).unwrap();
+    for (json, expected) in [
+        (r#"{"mode":"all_models"}"#, SubagentPolicy::Mjolnir),
+        (
+            r#"{"mode":"single_model","model":"old","effort":"high"}"#,
+            SubagentPolicy::Mjolnir,
+        ),
+        (
+            r#"{"mode":"single_model","model":"old","effort":"adaptive"}"#,
+            SubagentPolicy::Mjolnir,
+        ),
+        ("true", SubagentPolicy::Mjolnir),
+        ("false", SubagentPolicy::Native),
+    ] {
+        connection
+            .execute(
+                "UPDATE sessions SET subagents=?1 WHERE session_id=?2",
+                params![json, parent.id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE subagent_preference SET policy=?1 WHERE singleton=1",
+                [json],
+            )
+            .unwrap();
+        let state = load_state_from(&path).unwrap();
+        assert_eq!(state.sessions[&parent.id].subagents, Some(expected.clone()));
+        assert_eq!(state.last_subagent_policy, expected);
+    }
 }
 
 /// A converted session's bundle may already be an alias of another project in

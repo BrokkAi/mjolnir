@@ -47,7 +47,16 @@ impl DashboardState {
                     .position(|id| id == "localhost")
                     .unwrap_or(0)
             });
+        let profile_id = self.config.enabled_profiles().nth(profile).unwrap().0;
+        let mut delegation = subagents::SubagentDraft::new(self.state.last_subagent_policy.clone());
+        delegation.refresh_create(
+            profile_id,
+            &self.config,
+            &self.profile_capabilities,
+            &self.state.last_subagent_policy,
+        );
         self.mode = Mode::New(NewWizard {
+            subagents: Box::new(delegation),
             worktree_options: None,
             create_managed_worktree: false,
             workspace_id: self.active_workspace_id.clone().unwrap_or_default(),

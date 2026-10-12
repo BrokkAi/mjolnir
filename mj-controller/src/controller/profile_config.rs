@@ -52,59 +52,50 @@ pub(crate) async fn discover_for(
     .await
 }
 
-/// Validates a newly selected top-level policy, not a recorded resume policy.
-/// Multi-model is retired for new selections. Only Claude and
-/// Codex take Mjolnir's delegation tools, and a single-model policy must name
-/// a model and effort that discovery offers now.
+/// Validate both global task choices against this parent's eligible profiles.
 pub async fn validate_session_subagent_policy(
     config: &Config,
     profile_id: &str,
     policy: &mj_core::subagent::SubagentPolicy,
 ) -> Result<()> {
-    let kind = config
-        .enabled_profile(profile_id)
-        .context("parent profile unavailable")?
-        .kind;
-    refuse_unsupported_policy(kind, policy)?;
-    if let mj_core::subagent::SubagentPolicy::SingleModel { model, .. } = policy {
-        let options =
-            subagent_options_for(config.clone(), profile_id.to_owned(), Some(model.clone()))
-                .await?;
-        refuse_unavailable_choice(&options, policy)?;
-    }
-    Ok(())
-}
-
-/// These two failures name something in the request the caller can change, so
-/// they are refusals: the HTTP API answers 422 with the sentence, where an
-/// unmarked error would be a 500 that hides it in the daemon log.
-fn refuse_unsupported_policy(
-    kind: mj_core::config::HarnessKind,
-    policy: &mj_core::subagent::SubagentPolicy,
-) -> Result<()> {
-    if *policy == mj_core::subagent::SubagentPolicy::AllModels {
-        return Err(anyhow::Error::new(mj_core::refusal::Refusal::unusable(
-            "Mjolnir multi-model subagents are no longer available for new selections; use native, single_model, or none",
-        )));
-    }
-    if kind.supports_delegation_tools() || *policy == mj_core::subagent::SubagentPolicy::Native {
-        return Ok(());
-    }
-    Err(anyhow::Error::new(mj_core::refusal::Refusal::unusable(
-        "subagent policies are supported only by Claude and Codex",
-    )))
-}
-
-fn refuse_unavailable_choice(
-    options: &mj_core::subagent::SubagentOptions,
-    policy: &mj_core::subagent::SubagentPolicy,
-) -> Result<()> {
-    options.validate(policy).map_err(|message| {
+    let refuse = |message: String| {
         anyhow::Error::new(
             mj_core::refusal::Refusal::unusable(message)
                 .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
         )
-    })
+    };
+    let kind = config
+        .enabled_profile(profile_id)
+        .context("parent profile unavailable")?
+        .kind;
+    if !kind.supports_delegation_tools() && !policy.is_native() {
+        return Err(refuse("Mjolnir sub-agents are supported only by Claude and Codex; configure [subagents.straightforward] and [subagents.subtle] choices".into()));
+    }
+    if !policy.uses_mjolnir() {
+        return Ok(());
+    }
+    if !config.subagents.is_configured() {
+        return Err(refuse("Mjolnir requires configured [subagents.straightforward] and [subagents.subtle] choices".into()));
+    }
+    for task_type in [
+        mj_core::subagent::SubagentTaskType::Straightforward,
+        mj_core::subagent::SubagentTaskType::Subtle,
+    ] {
+        let choice = config
+            .subagents
+            .choice(task_type)
+            .expect("configured task choices");
+        let options = subagent_options_for(
+            config.clone(),
+            profile_id.to_owned(),
+            Some(choice.model.clone()),
+        )
+        .await?;
+        options
+            .validate(choice)
+            .map_err(|message| refuse(format!("[subagents.{}]: {message}", task_type.id())))?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn subagent_options_with<F, Fut>(
@@ -606,12 +597,7 @@ fn store(
 mod tests {
     use super::*;
     use mj_core::refusal::Refusal;
-    use mj_core::subagent::{SubagentOptions, SubagentPolicy};
     use std::cell::{Cell, RefCell};
-
-    fn refusal_message(error: &anyhow::Error) -> Option<String> {
-        Refusal::of(error).map(|refusal| refusal.message().to_owned())
-    }
 
     #[tokio::test]
     async fn unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings() {
@@ -640,10 +626,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
-            subagents: SubagentPolicy::SingleModel {
-                model: "chosen".into(),
-                effort: Some("high".into()),
-            },
+            legacy_subagents: None,
         };
         let key = fingerprint(&profile);
         let choice = |value: &str| mj_core::acp::SessionConfigChoice {
@@ -670,75 +653,6 @@ mod tests {
         assert!(!Config::load().unwrap().profiles.contains_key("unsaved"));
     }
 
-    // Hard-won: 11060042: unsupported delegation policy was not refused with its actual cause
-    #[test]
-    fn a_policy_on_a_harness_without_delegation_is_refused_with_its_message() {
-        let error =
-            refuse_unsupported_policy(mj_core::config::HarnessKind::Grok, &SubagentPolicy::None)
-                .unwrap_err();
-        assert_eq!(
-            refusal_message(&error).as_deref(),
-            Some("subagent policies are supported only by Claude and Codex")
-        );
-        assert!(
-            refuse_unsupported_policy(mj_core::config::HarnessKind::Grok, &SubagentPolicy::Native)
-                .is_ok()
-        );
-    }
-
-    // Hard-won: 11060042: unavailable model or effort was not refused with the specific selection error
-    #[test]
-    fn an_unavailable_model_or_effort_is_refused_with_its_message() {
-        let unavailable = SubagentPolicy::SingleModel {
-            model: "fake-child-model".into(),
-            effort: None,
-        };
-        let error =
-            refuse_unavailable_choice(&SubagentOptions::default(), &unavailable).unwrap_err();
-        let message = refusal_message(&error).expect("a refusal, not an internal error");
-        assert!(
-            message.contains("\"fake-child-model\" is unavailable"),
-            "{message}"
-        );
-        // Clients choose the remedy from the code, not from the sentence.
-        assert_eq!(
-            Refusal::of(&error).and_then(|refusal| refusal.code()),
-            Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
-        );
-
-        // A model that is offered but a missing effort is refused the same way.
-        let choice = |value: &str| mj_core::acp::SessionConfigChoice {
-            value: value.into(),
-            name: value.into(),
-            description: None,
-        };
-        let options = SubagentOptions {
-            models: vec![choice("haiku")],
-            efforts: vec![choice("high")],
-            unavailable: Vec::new(),
-        };
-        let adaptive = SubagentPolicy::SingleModel {
-            model: "haiku".into(),
-            effort: Some(mj_core::subagent::ADAPTIVE_EFFORT.into()),
-        };
-        assert!(options.validate(&adaptive).is_ok());
-        let no_efforts = SubagentOptions {
-            efforts: Vec::new(),
-            ..options.clone()
-        };
-        let unavailable_adaptive = no_efforts.validate(&adaptive).unwrap_err();
-        assert!(
-            unavailable_adaptive.contains("adaptive effort needs at least one"),
-            "{unavailable_adaptive}"
-        );
-        let policy = SubagentPolicy::SingleModel {
-            model: "haiku".into(),
-            effort: Some("low".into()),
-        };
-        let error = refuse_unavailable_choice(&options, &policy).unwrap_err();
-        assert!(refusal_message(&error).is_some(), "{error:#}");
-    }
-
     #[test]
     fn harness_home_files_do_not_invalidate_configured_capabilities() {
         let home = tempfile::tempdir().unwrap();
@@ -748,7 +662,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let key = || fingerprint(&profile);
@@ -791,15 +705,11 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let original = fingerprint(&profile);
-        for effort in ["low", "high"] {
-            profile.subagents = SubagentPolicy::SingleModel {
-                model: "chosen".into(),
-                effort: Some(effort.into()),
-            };
+        for _ in 0..2 {
             profile.context_window_bytes = Some(42);
             profile.guardian_review_model = Some("session".into());
             assert_eq!(fingerprint(&profile), original);
@@ -821,7 +731,7 @@ mod tests {
             home: root.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let resolve = |environment: BTreeMap<String, String>| {
@@ -1052,7 +962,7 @@ mod tests {
             home: home.path().into(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let mut choices = ProfileConfig {
@@ -1067,5 +977,42 @@ mod tests {
         assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
         assert_eq!(choices.models.len(), 1);
         assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
+    }
+    #[tokio::test]
+    async fn create_and_move_mjolnir_policy_refuse_unconfigured_and_unsupported_parents() {
+        for kind in [
+            mj_core::config::HarnessKind::Codex,
+            mj_core::config::HarnessKind::Grok,
+        ] {
+            let mut config = Config::default();
+            config.profiles.insert(
+                "parent".into(),
+                HarnessProfile {
+                    enabled: true,
+                    kind,
+                    home: "/fixture".into(),
+                    environment: Default::default(),
+                    context_window_bytes: None,
+                    guardian_review_model: None,
+                    legacy_subagents: None,
+                },
+            );
+            let error = validate_session_subagent_policy(
+                &config,
+                "parent",
+                &mj_core::subagent::SubagentPolicy::Mjolnir,
+            )
+            .await
+            .unwrap_err();
+            let refusal = Refusal::of(&error).unwrap();
+            assert_eq!(
+                refusal.code(),
+                Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
+            );
+            assert!(
+                refusal.message().contains("[subagents.straightforward]")
+                    && refusal.message().contains("[subagents.subtle]")
+            );
+        }
     }
 }
