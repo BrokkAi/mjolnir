@@ -6328,10 +6328,11 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     let path = directory.path().join("mj.sqlite3");
     let mut parent = session("fixed-parent", "project");
     let fixed = SubagentPolicy::Mjolnir {
-        choice: Some(mj_core::config::SubagentChoice {
+        straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "gpt-6-luna".into(),
             effort: Some("max".into()),
-        }),
+        })),
+        subtle: None,
     };
     parent.subagents = Some(fixed.clone());
     save_new_session_to(&path, &parent, None).unwrap();
@@ -6359,17 +6360,32 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     for (json, expected) in [
         (
             r#"{"mode":"all_models"}"#,
-            SubagentPolicy::Mjolnir { choice: None },
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
         ),
         (
             r#"{"mode":"single_model","model":"old","effort":"high"}"#,
-            SubagentPolicy::Mjolnir { choice: None },
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
         ),
         (
             r#"{"mode":"single_model","model":"old","effort":"adaptive"}"#,
-            SubagentPolicy::Mjolnir { choice: None },
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
         ),
-        ("true", SubagentPolicy::Mjolnir { choice: None }),
+        (
+            "true",
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
         ("false", SubagentPolicy::Native),
     ] {
         connection

@@ -4980,12 +4980,16 @@ fn raw_move_keeps_review_and_session_policy_when_both_destination_pickers_are_sk
     use mj_core::subagent::SubagentPolicy;
     for stored in [
         SubagentPolicy::Native,
-        SubagentPolicy::Mjolnir { choice: None },
         SubagentPolicy::Mjolnir {
-            choice: Some(mj_core::config::SubagentChoice {
+            straightforward: None,
+            subtle: None,
+        },
+        SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(mj_core::config::SubagentChoice {
                 model: "gpt-6-luna".into(),
                 effort: Some("max".into()),
-            }),
+            })),
+            subtle: None,
         },
     ] {
         let mut dashboard = dashboard_with_session(running_session());
@@ -5129,7 +5133,10 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         let mut session = running_session();
         session.project_directory = Some("/work/project".into());
         session.target_template_id = "local".into();
-        session.subagents = Some(SubagentPolicy::Mjolnir { choice: None });
+        session.subagents = Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        });
         let mut dashboard = dashboard_with_session(session);
         *dashboard.config = single_raw_config();
         let DashboardAction::MoveSession {
@@ -5169,7 +5176,10 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         dashboard.handle_key(key(KeyCode::Esc));
         assert_eq!(
             resume_wizard(&dashboard).subagents.policy,
-            SubagentPolicy::Mjolnir { choice: None }
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None
+            }
         );
         assert!(
             resume_wizard(&dashboard).preparation.is_some(),
@@ -5200,7 +5210,10 @@ fn move_combobox_mouse_selection_preserves_record_until_explicit_commit_and_repr
         assert!(resume_wizard(&dashboard).preparation.is_none());
         assert_eq!(
             dashboard.state.sessions["session-1"].subagents,
-            Some(SubagentPolicy::Mjolnir { choice: None }),
+            Some(SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None
+            }),
             "draft does not change recorded policy"
         );
         let Some(DashboardAction::MoveSession {
@@ -5426,7 +5439,10 @@ fn golden_create_delegation_availability_and_submission() {
             dashboard.config.subagents.straightforward = Some(choice.clone());
             dashboard.config.subagents.subtle = Some(choice);
         }
-        dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir { choice: None };
+        dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
         dashboard.begin_new_wizard();
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new");
@@ -5439,7 +5455,10 @@ fn golden_create_delegation_availability_and_submission() {
         assert_eq!(
             wizard.subagents.policy,
             if configured {
-                SubagentPolicy::Mjolnir { choice: None }
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }
             } else {
                 SubagentPolicy::Native
             }
@@ -5463,7 +5482,10 @@ fn golden_create_delegation_availability_and_submission() {
         assert_eq!(
             subagents,
             Some(if configured {
-                SubagentPolicy::Mjolnir { choice: None }
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }
             } else {
                 SubagentPolicy::Native
             })
@@ -5538,7 +5560,10 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
     dashboard.config.subagents.straightforward = Some(choice.clone());
     dashboard.config.subagents.subtle = Some(choice);
     dashboard.config.profiles.get_mut("claude-1").unwrap().kind = HarnessKind::Grok;
-    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir { choice: None };
+    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    };
     dashboard.begin_new_wizard();
     let supported = dashboard
         .config
@@ -5551,9 +5576,21 @@ fn create_delegation_tracks_profile_availability_in_both_directions() {
         .position(|(id, _)| id == "claude-1")
         .unwrap();
     for (profile, expected) in [
-        (supported, SubagentPolicy::Mjolnir { choice: None }),
+        (
+            supported,
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
         (unsupported, SubagentPolicy::Native),
-        (supported, SubagentPolicy::Mjolnir { choice: None }),
+        (
+            supported,
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
     ] {
         let Mode::New(wizard) = &mut dashboard.mode else {
             panic!("new");
@@ -5592,7 +5629,10 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     use mj_core::config::SubagentChoice;
     use mj_core::subagent::SubagentPolicy;
     let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir { choice: None };
+    dashboard.state.last_subagent_policy = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    };
     dashboard.begin_new_wizard();
     let supported = dashboard
         .config
@@ -5613,7 +5653,10 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
-        SubagentPolicy::Mjolnir { choice: None }
+        SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        }
     );
     dashboard.config.subagents.subtle = None;
     dashboard.set_profile_capabilities(Default::default());
@@ -5629,7 +5672,10 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     };
     assert_eq!(
         wizard.subagents.policy,
-        SubagentPolicy::Mjolnir { choice: None }
+        SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        }
     );
     wizard
         .subagents
@@ -5645,6 +5691,9 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
-        SubagentPolicy::Mjolnir { choice: None }
+        SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        }
     );
 }

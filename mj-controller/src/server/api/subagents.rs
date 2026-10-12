@@ -92,15 +92,13 @@ pub(crate) async fn resolve_subagent_policy_selection(
         ));
     }
     let config = backend.subagent_config().await?;
-    if policy.override_choice().is_none() && !config.is_configured() {
-        return Err(ApiFailure::conflict(
-            "Configure [subagents.straightforward] and [subagents.subtle] before spawning Mjolnir sub-agents",
-        ));
-    }
     let choice = policy
-        .override_choice()
+        .override_choice(task_type)
         .or_else(|| config.choice(task_type))
-        .expect("validated sub-agent choice");
+        .ok_or_else(|| ApiFailure::conflict(format!(
+            "Configure [subagents.{}] or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
+            task_type.id(), task_type.id()
+        )))?;
     if choice.effort.as_deref() == Some("adaptive") {
         return Err(ApiFailure::bad_request(
             "adaptive sub-agent effort is not supported",
@@ -120,8 +118,8 @@ pub(crate) async fn resolve_subagent_policy_selection(
     )
     .await
     .map_err(|error| {
-        let context = if policy.override_choice().is_some() {
-            "session sub-agent override".to_owned()
+        let context = if policy.override_choice(task_type).is_some() {
+            format!("session --subagent-{} override", task_type.id())
         } else {
             format!("[subagents.{}]", task_type.id())
         };
@@ -1114,7 +1112,10 @@ mod tests {
         let error = resolve_subagent_policy_selection(
             &backend,
             "parent",
-            &SubagentPolicy::Mjolnir { choice: None },
+            &SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             SubagentTaskType::Straightforward,
         )
         .await
@@ -1166,7 +1167,10 @@ mod tests {
             let selected = resolve_subagent_policy_selection(
                 &backend,
                 "parent",
-                &SubagentPolicy::Mjolnir { choice: None },
+                &SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
                 task_type,
             )
             .await
@@ -1185,39 +1189,42 @@ mod tests {
             config: Default::default(),
             candidates,
         });
-        for task_type in [SubagentTaskType::Straightforward, SubagentTaskType::Subtle] {
-            for (model, effort) in [("fixed", Some("high")), ("no-effort", None)] {
-                let policy = SubagentPolicy::Mjolnir {
-                    choice: Some(SubagentChoice {
-                        model: model.into(),
-                        effort: effort.map(str::to_owned),
-                    }),
-                };
-                let selected =
-                    resolve_subagent_policy_selection(&unconfigured, "parent", &policy, task_type)
-                        .await
-                        .unwrap();
-                assert_eq!(
-                    (
-                        selected.profile_id.as_str(),
-                        selected.model.as_str(),
-                        selected.effort.as_deref()
-                    ),
-                    ("best", model, effort)
-                );
-            }
+        let mixed_policy = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: Some(Box::new(SubagentChoice {
+                model: "fixed".into(),
+                effort: Some("high".into()),
+            })),
+        };
+        for (task_type, model, effort) in [
+            (SubagentTaskType::Straightforward, "no-effort", None),
+            (SubagentTaskType::Subtle, "fixed", Some("high")),
+        ] {
+            let selected =
+                resolve_subagent_policy_selection(&backend, "parent", &mixed_policy, task_type)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                (
+                    selected.profile_id.as_str(),
+                    selected.model.as_str(),
+                    selected.effort.as_deref()
+                ),
+                ("best", model, effort)
+            );
         }
         let error = resolve_subagent_policy_selection(
             &unconfigured,
             "parent",
-            &SubagentPolicy::Mjolnir { choice: None },
+            &SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             SubagentTaskType::Subtle,
         )
         .await
         .unwrap_err();
-        assert!(
-            error.message.contains("[subagents.straightforward]")
-                && error.message.contains("[subagents.subtle]")
-        );
+        assert!(error.message.contains("[subagents.subtle]"));
+        assert!(error.message.contains("--subagent-subtle"));
     }
 }

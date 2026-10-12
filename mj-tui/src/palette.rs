@@ -176,16 +176,33 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     let mut delegation = match &policy {
         SubagentPolicy::Native => "Native".to_owned(),
         SubagentPolicy::Mjolnir {
-            choice: Some(choice),
+            straightforward,
+            subtle,
         } => {
-            let effort = choice
-                .effort
-                .as_deref()
-                .map(|effort| format!(", {effort}"))
-                .unwrap_or_default();
-            format!("Mjolnir ({}{effort})", choice.model)
+            let label = |name: &str, choice: Option<&mj_core::config::SubagentChoice>| {
+                choice.map(|choice| {
+                    let effort = choice
+                        .effort
+                        .as_deref()
+                        .map(|effort| format!(", {effort}"))
+                        .unwrap_or_default();
+                    format!("{name}: {}{effort}", choice.model)
+                })
+            };
+            let overrides = [
+                label("straightforward", straightforward.as_deref()),
+                label("subtle", subtle.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+            if overrides.is_empty() {
+                "Mjolnir".to_owned()
+            } else {
+                format!("Mjolnir ({overrides})")
+            }
         }
-        SubagentPolicy::Mjolnir { choice: None } => "Mjolnir".to_owned(),
         SubagentPolicy::None => "None".to_owned(),
     };
     let total = dashboard.subagent_count_for(&session.id);
@@ -1562,7 +1579,10 @@ mod tests {
         append_golden_state(&mut output, "session action menu", 120, 40, &lines);
 
         let mut session = running_session();
-        session.subagents = Some(SubagentPolicy::Mjolnir { choice: None });
+        session.subagents = Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        });
         session.container_cpus = Some("4".into());
         session.container_memory = Some("8g".into());
         let mut dashboard = dashboard_with_session(session);

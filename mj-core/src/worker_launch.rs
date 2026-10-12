@@ -683,27 +683,43 @@ mod tests {
             (
                 serde_json::json!({"mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"}),
                 SubagentPolicy::Mjolnir {
-                    choice: Some(crate::config::SubagentChoice {
+                    straightforward: Some(Box::new(crate::config::SubagentChoice {
                         model: "gpt-6-luna".into(),
                         effort: Some("max".into()),
-                    }),
+                    })),
+                    subtle: Some(Box::new(crate::config::SubagentChoice {
+                        model: "gpt-6-luna".into(),
+                        effort: Some("max".into()),
+                    })),
                 },
             ),
             (
                 serde_json::json!({"mode":"all_models"}),
-                SubagentPolicy::Mjolnir { choice: None },
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
             ),
             (
                 serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
-                SubagentPolicy::Mjolnir { choice: None },
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
             ),
             (
                 serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"adaptive"}),
-                SubagentPolicy::Mjolnir { choice: None },
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
             ),
             (
                 serde_json::json!(true),
-                SubagentPolicy::Mjolnir { choice: None },
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
             ),
             (serde_json::json!(false), SubagentPolicy::Native),
         ] {

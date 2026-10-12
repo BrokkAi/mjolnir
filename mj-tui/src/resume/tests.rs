@@ -314,10 +314,14 @@ fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
 fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
     use mj_core::subagent::SubagentPolicy;
     let policy = SubagentPolicy::Mjolnir {
-        choice: Some(mj_core::config::SubagentChoice {
+        straightforward: Some(Box::new(mj_core::config::SubagentChoice {
             model: "gpt-6-luna".into(),
             effort: Some("max".into()),
-        }),
+        })),
+        subtle: Some(Box::new(mj_core::config::SubagentChoice {
+            model: "gpt-6-sol".into(),
+            effort: None,
+        })),
     };
     for retained in [None, Some(SubagentPolicy::Native)] {
         let mut session = running_session();

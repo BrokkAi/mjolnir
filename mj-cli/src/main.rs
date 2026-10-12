@@ -269,11 +269,23 @@ struct MoveArgs {
     /// or the recorded policy when retrying a sealed Move.
     #[arg(long)]
     subagents: Option<String>,
-    /// Override the configured model for both task types of this session's Mjolnir sub-agents.
+    /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
+    subagent_straightforward: Option<String>,
+    /// Override straightforward sub-agent effort (requires --subagent-straightforward).
+    #[arg(long)]
+    subagent_straightforward_effort: Option<String>,
+    /// Override the configured model for subtle Mjolnir sub-agents.
+    #[arg(long)]
+    subagent_subtle: Option<String>,
+    /// Override subtle sub-agent effort (requires --subagent-subtle).
+    #[arg(long)]
+    subagent_subtle_effort: Option<String>,
+    /// Retired; use the four per-type sub-agent flags.
+    #[arg(long, hide = true)]
     subagent_model: Option<String>,
-    /// Override effort for both task types of this session's Mjolnir sub-agents (requires --subagent-model).
-    #[arg(long)]
+    /// Retired; use the four per-type sub-agent flags.
+    #[arg(long, hide = true)]
     subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
     #[arg(long)]
@@ -817,6 +829,10 @@ async fn run_command(
 async fn move_session(args: MoveArgs) -> Result<()> {
     let subagents = api_commands::subagent_policy(
         args.subagents.as_deref(),
+        args.subagent_straightforward.as_deref(),
+        args.subagent_straightforward_effort.as_deref(),
+        args.subagent_subtle.as_deref(),
+        args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
     )?;

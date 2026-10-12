@@ -2396,7 +2396,10 @@ mod reader_tests {
         let state = load_state_from(&path).unwrap();
         assert_eq!(
             state.sessions["all"].subagents,
-            Some(SubagentPolicy::Mjolnir { choice: None })
+            Some(SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None
+            })
         );
         assert_eq!(
             state.sessions["native"].subagents,

@@ -1251,7 +1251,7 @@ Working: /actual/checkout · branch: feature-x · shared folder
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
-action: GoLaunch { recipe: GoRecipe { profile_id: "codex-1", target_id: "podman", bundle_id: Some("hel"), project_directory: None, create_managed_worktree: Some(false), subagents: Some(Mjolnir { choice: None }), additional_mounts: [], resource_allocation: None } }
+action: GoLaunch { recipe: GoRecipe { profile_id: "codex-1", target_id: "podman", bundle_id: Some("hel"), project_directory: None, create_managed_worktree: Some(false), subagents: Some(Mjolnir { straightforward: None, subtle: None }), additional_mounts: [], resource_allocation: None } }
 
 === failed destroy transition and recovery guidance (100x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation  Transition · Destroying ─ ◇   ⋯───╮

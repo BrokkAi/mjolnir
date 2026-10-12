@@ -1357,17 +1357,20 @@ test('delegation reflects unavailable configuration and rechecks it before submi
   }
 });
 
-test('Move retains the session model override without global configuration', () => {
+test('Move retains per-type session overrides without global configuration', () => {
   const context = delegationContext('codex', false);
   Object.assign(context, { targetLaunchable: () => true, selectedWorkspaceId: () => 'test' });
   vm.runInContext(sourceBetween('function freshMoveDraft(', '\n/// The delegation policy a Move'), context);
-  for (const policy of [{ mode: 'mjolnir', model: 'gpt-6-luna' }, { mode: 'mjolnir', model: 'gpt-6-luna', effort: 'max' }]) {
+  for (const policy of [
+    { mode: 'mjolnir', subtle: { model: 'gpt-6-luna' } },
+    { mode: 'mjolnir', straightforward: { model: 'gpt-6-sol', effort: 'high' }, subtle: { model: 'gpt-6-luna', effort: 'max' } },
+  ]) {
     const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: policy });
     const body = makeNode();
     context.renderSubagentFields(body, draft, 'move-session', () => {});
     const select = body.children[0].children[1];
     assert.equal(select.children[1].disabled, false);
-    assert.match(select.children[1].textContent, /gpt-6-luna/);
+    assert.match(select.children[1].textContent, /subtle: gpt-6-luna/);
     select.onchange();
     assert.equal(context.moveSubagentChange(draft), null);
     assert.deepEqual(JSON.parse(JSON.stringify(draft.subagents)), policy);

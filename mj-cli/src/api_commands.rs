@@ -140,11 +140,23 @@ pub(crate) struct NewArgs {
     /// Omitted uses Native.
     #[arg(long)]
     subagents: Option<String>,
-    /// Override the configured model for both task types of this session's Mjolnir sub-agents.
+    /// Override the configured model for straightforward Mjolnir sub-agents.
     #[arg(long)]
+    subagent_straightforward: Option<String>,
+    /// Override straightforward sub-agent effort (requires --subagent-straightforward).
+    #[arg(long)]
+    subagent_straightforward_effort: Option<String>,
+    /// Override the configured model for subtle Mjolnir sub-agents.
+    #[arg(long)]
+    subagent_subtle: Option<String>,
+    /// Override subtle sub-agent effort (requires --subagent-subtle).
+    #[arg(long)]
+    subagent_subtle_effort: Option<String>,
+    /// Retired; use the four per-type sub-agent flags.
+    #[arg(long, hide = true)]
     subagent_model: Option<String>,
-    /// Override effort for both task types of this session's Mjolnir sub-agents (requires --subagent-model).
-    #[arg(long)]
+    /// Retired; use the four per-type sub-agent flags.
+    #[arg(long, hide = true)]
     subagent_effort: Option<String>,
     /// Review every turn of this session with this model, even when
     /// `[review]` is off. Without a `[review]` profile, Auto picks a profile
@@ -981,6 +993,10 @@ pub(crate) async fn workspaces_create(args: WorkspaceCreateArgs) -> Result<()> {
 fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     subagent_policy(
         args.subagents.as_deref(),
+        args.subagent_straightforward.as_deref(),
+        args.subagent_straightforward_effort.as_deref(),
+        args.subagent_subtle.as_deref(),
+        args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
     )
@@ -988,31 +1004,56 @@ fn new_subagent_policy(args: &NewArgs) -> Result<Option<mj_core::subagent::Subag
 
 pub(crate) fn subagent_policy(
     mode: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
+    straightforward: Option<&str>,
+    straightforward_effort: Option<&str>,
+    subtle: Option<&str>,
+    subtle_effort: Option<&str>,
+    retired_model: Option<&str>,
+    retired_effort: Option<&str>,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
     const REMEDY: &str = "Configure [subagents.straightforward] and [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
-    if effort.is_some() && model.is_none() {
-        bail!("--subagent-effort requires --subagent-model");
+    if retired_model.is_some() || retired_effort.is_some() {
+        bail!(
+            "--subagent-model and --subagent-effort are retired; use --subagent-straightforward, --subagent-straightforward-effort, --subagent-subtle, and --subagent-subtle-effort"
+        );
     }
-    if effort == Some("adaptive") {
+    if straightforward_effort.is_some() && straightforward.is_none() {
+        bail!("--subagent-straightforward-effort requires --subagent-straightforward");
+    }
+    if subtle_effort.is_some() && subtle.is_none() {
+        bail!("--subagent-subtle-effort requires --subagent-subtle");
+    }
+    if straightforward_effort == Some("adaptive") || subtle_effort == Some("adaptive") {
         bail!("adaptive sub-agent effort is not supported");
     }
-    if let Some(model) = model {
+    if straightforward.is_some() || subtle.is_some() {
         if mode.is_some_and(|mode| mode != "mjolnir") {
-            bail!("--subagent-model requires --subagents mjolnir or an omitted --subagents");
+            bail!(
+                "per-type sub-agent overrides require --subagents mjolnir or an omitted --subagents"
+            );
         }
         return Ok(Some(SubagentPolicy::Mjolnir {
-            choice: Some(mj_core::config::SubagentChoice {
-                model: model.to_owned(),
-                effort: effort.map(str::to_owned),
+            straightforward: straightforward.map(|model| {
+                Box::new(mj_core::config::SubagentChoice {
+                    model: model.to_owned(),
+                    effort: straightforward_effort.map(str::to_owned),
+                })
+            }),
+            subtle: subtle.map(|model| {
+                Box::new(mj_core::config::SubagentChoice {
+                    model: model.to_owned(),
+                    effort: subtle_effort.map(str::to_owned),
+                })
             }),
         }));
     }
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
-        Some("mjolnir") => Some(SubagentPolicy::Mjolnir { choice: None }),
+        Some("mjolnir") => Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        }),
         // Not offered in Create or Move: benchmarks use it for solo lanes.
         Some("none") => Some(SubagentPolicy::None),
         None => None,
@@ -2750,6 +2791,10 @@ mod tests {
                 Some(Command::New(args)) => new_subagent_policy(&args),
                 Some(Command::Move(args)) => subagent_policy(
                     args.subagents.as_deref(),
+                    args.subagent_straightforward.as_deref(),
+                    args.subagent_straightforward_effort.as_deref(),
+                    args.subagent_subtle.as_deref(),
+                    args.subagent_subtle_effort.as_deref(),
                     args.subagent_model.as_deref(),
                     args.subagent_effort.as_deref(),
                 ),
@@ -2766,45 +2811,68 @@ mod tests {
             );
             assert_eq!(
                 parse(&["--subagents", "mjolnir"]).unwrap(),
-                Some(SubagentPolicy::Mjolnir { choice: None })
+                Some(SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None
+                })
             );
             assert_eq!(
                 parse(&["--subagents", "none"]).unwrap(),
                 Some(SubagentPolicy::None)
             );
             for mode in [None, Some("mjolnir")] {
-                for effort in [None, Some("max")] {
-                    let mut args = vec!["--subagent-model", "gpt-6-luna"];
-                    if let Some(mode) = mode {
-                        args.extend(["--subagents", mode]);
-                    }
-                    if let Some(effort) = effort {
-                        args.extend(["--subagent-effort", effort]);
-                    }
-                    assert_eq!(
-                        parse(&args).unwrap(),
-                        Some(SubagentPolicy::Mjolnir {
-                            choice: Some(mj_core::config::SubagentChoice {
-                                model: "gpt-6-luna".into(),
-                                effort: effort.map(str::to_owned)
-                            })
-                        })
-                    );
+                let mut args = vec![
+                    "--subagent-subtle",
+                    "gpt-6-luna",
+                    "--subagent-subtle-effort",
+                    "max",
+                ];
+                if let Some(mode) = mode {
+                    args.extend(["--subagents", mode]);
                 }
+                assert_eq!(
+                    parse(&args).unwrap(),
+                    Some(SubagentPolicy::Mjolnir {
+                        straightforward: None,
+                        subtle: Some(Box::new(mj_core::config::SubagentChoice {
+                            model: "gpt-6-luna".into(),
+                            effort: Some("max".into())
+                        })),
+                    })
+                );
             }
             for args in [
-                &["--subagent-effort", "max"][..],
-                &["--subagent-model", "model", "--subagent-effort", "adaptive"],
+                &["--subagent-straightforward-effort", "max"][..],
+                &[
+                    "--subagent-subtle",
+                    "model",
+                    "--subagent-subtle-effort",
+                    "adaptive",
+                ],
+                &["--subagent-model", "model"],
                 &["--mj-subagents"],
                 &["--native-subagents"],
                 &["--subagents", "all-models"],
                 &["--subagents", "single-model"],
-                &["--subagents", "native", "--subagent-model", "model"],
-                &["--subagents", "native", "--subagent-effort", "high"],
-                &["--subagents", "none", "--subagent-model", "model"],
-                &["--subagents", "none", "--subagent-effort", "high"],
+                &[
+                    "--subagents",
+                    "native",
+                    "--subagent-straightforward",
+                    "model",
+                ],
+                &["--subagents", "native", "--subagent-subtle-effort", "high"],
+                &["--subagents", "none", "--subagent-straightforward", "model"],
             ] {
                 assert!(parse(args).is_err());
+            }
+            let retired = parse(&["--subagent-model", "model"]).unwrap_err();
+            for flag in [
+                "--subagent-straightforward",
+                "--subagent-straightforward-effort",
+                "--subagent-subtle",
+                "--subagent-subtle-effort",
+            ] {
+                assert!(retired.to_string().contains(flag), "{retired}");
             }
         }
     }

@@ -836,7 +836,10 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         launch_branch: None,
         checkout: None,
         publication: None,
-        subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }),
+        subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        }),
         create_managed_worktree: None,
         container_workspace: None,
         build_cache: None,

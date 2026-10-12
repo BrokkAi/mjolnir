@@ -12,8 +12,8 @@ pub(crate) struct SubagentDiscovery {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentDraft {
     pub(crate) policy: SubagentPolicy,
-    chosen_policy: Option<SubagentPolicy>,
-    mjolnir_override: Option<mj_core::config::SubagentChoice>,
+    chosen_policy: Option<Box<SubagentPolicy>>,
+    last_mjolnir_policy: Option<Box<SubagentPolicy>>,
     pub(crate) combo: ComboBoxState<WizardControl>,
     pub(crate) discovery: Option<SubagentDiscovery>,
 }
@@ -21,7 +21,7 @@ pub(crate) struct SubagentDraft {
 impl SubagentDraft {
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
-            mjolnir_override: policy.override_choice().cloned(),
+            last_mjolnir_policy: policy.uses_mjolnir().then(|| Box::new(policy.clone())),
             policy: if policy.uses_mjolnir() {
                 policy
             } else {
@@ -32,15 +32,35 @@ impl SubagentDraft {
     }
 
     pub(crate) fn policies(&self) -> Vec<String> {
-        let mjolnir = if let Some(choice) = &self.mjolnir_override {
-            let effort = choice
-                .effort
-                .as_deref()
-                .map(|effort| format!(", {effort}"))
-                .unwrap_or_default();
-            format!("Mjolnir ({}{effort})", choice.model)
-        } else {
+        let remembered = self.last_mjolnir_policy.as_deref().unwrap_or(&self.policy);
+        let label = |name: &str, choice: Option<&mj_core::config::SubagentChoice>| {
+            choice.map(|choice| {
+                let effort = choice
+                    .effort
+                    .as_deref()
+                    .map(|effort| format!(", {effort}"))
+                    .unwrap_or_default();
+                format!("{name}: {}{effort}", choice.model)
+            })
+        };
+        let overrides = [
+            label(
+                "straightforward",
+                remembered.override_choice(mj_core::subagent::SubagentTaskType::Straightforward),
+            ),
+            label(
+                "subtle",
+                remembered.override_choice(mj_core::subagent::SubagentTaskType::Subtle),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ");
+        let mjolnir = if overrides.is_empty() {
             "Mjolnir".into()
+        } else {
+            format!("Mjolnir ({overrides})")
         };
         vec!["Native".into(), mjolnir]
     }
@@ -75,14 +95,21 @@ impl SubagentDraft {
             return false;
         }
         let policy = if index == 1 {
-            SubagentPolicy::Mjolnir {
-                choice: self.mjolnir_override.clone(),
-            }
+            self.last_mjolnir_policy
+                .as_deref()
+                .cloned()
+                .unwrap_or(SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                })
         } else {
             SubagentPolicy::Native
         };
         let changed = self.policy != policy;
-        self.chosen_policy = Some(policy.clone());
+        self.chosen_policy = Some(Box::new(policy.clone()));
+        if policy.uses_mjolnir() {
+            self.last_mjolnir_policy = Some(Box::new(policy.clone()));
+        }
         self.policy = policy;
         changed
     }
@@ -127,7 +154,11 @@ impl SubagentDraft {
     ) {
         self.update_choices(profile, config, snapshot);
         // Keep the user's intent separate from the available displayed policy.
-        let desired = self.chosen_policy.as_ref().unwrap_or(remembered);
+        let desired = self
+            .chosen_policy
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| remembered.clone());
         let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_none() {
             desired.clone()
         } else {
@@ -136,6 +167,9 @@ impl SubagentDraft {
         if self.policy != policy {
             self.policy = policy;
             self.combo = ComboBoxState::default();
+        }
+        if desired.uses_mjolnir() {
+            self.last_mjolnir_policy = Some(Box::new(desired));
         }
     }
 
@@ -153,7 +187,21 @@ impl SubagentDraft {
                     .is_some_and(|p| p.kind.supports_delegation_tools())
                 {
                     Err("Mjolnir sub-agents need a Claude or Codex profile".into())
-                } else if self.mjolnir_override.is_some() || config.subagents.is_configured() {
+                } else if (self
+                    .last_mjolnir_policy
+                    .as_deref()
+                    .unwrap_or(&self.policy)
+                    .override_choice(mj_core::subagent::SubagentTaskType::Straightforward)
+                    .is_some()
+                    || config.subagents.straightforward.is_some())
+                    && (self
+                        .last_mjolnir_policy
+                        .as_deref()
+                        .unwrap_or(&self.policy)
+                        .override_choice(mj_core::subagent::SubagentTaskType::Subtle)
+                        .is_some()
+                        || config.subagents.subtle.is_some())
+                {
                     Ok(SubagentOptions::default())
                 } else {
                     Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())

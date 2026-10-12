@@ -1488,7 +1488,10 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
         state: State::default(),
     };
     let mut options = launch_options(Vec::new());
-    options.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
+    options.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     let id = controller
         .register_session_with_resources("codex", "project", "podman", "delegating", options)
         .unwrap();
@@ -1549,7 +1552,10 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
     });
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
     parent.target = Some(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
@@ -1675,7 +1681,10 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
         let mut session = super::test_support::checkpoint_test_session(id);
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.path().to_path_buf());
-        session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
+        session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        });
         session.target = Some(TargetLocator::LocalBare {
             worker_root: mj_core::config::data_dir().join("workers").join(id),
         });
@@ -1938,7 +1947,10 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
                 // this column (see `update_lifecycle_fields`); this test
                 // reloads the controller before registering a child, and the
                 // child registration below needs the parent's own choice.
-                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
                 ..launch_options(Vec::new())
             },
         )
@@ -2262,7 +2274,10 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
     let mut controller = Controller {
         config: registration_config(),
         state: State {
-            last_subagent_policy: SubagentPolicy::Mjolnir { choice: None },
+            last_subagent_policy: SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             ..Default::default()
         },
     };
@@ -2279,7 +2294,10 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         controller.state.sessions[&native].subagents,
         Some(SubagentPolicy::Native)
     );
-    let fixed = SubagentPolicy::Mjolnir { choice: None };
+    let fixed = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    };
     let mut mjolnir_options = launch_options(Vec::new());
     mjolnir_options.subagents = Some(fixed.clone());
     let single = controller
@@ -2345,15 +2363,24 @@ fn registration_defaults_to_native_instead_of_the_last_session() {
         Some(SubagentPolicy::Native)
     );
     let mut legacy = controller.state.sessions[&native].clone();
-    legacy.subagents = Some(SubagentPolicy::Mjolnir { choice: None });
+    legacy.subagents = Some(SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     crate::database::save_resumed_session(&legacy, None).unwrap();
     let restarted = Controller::load().unwrap();
     assert_eq!(
         restarted.state.sessions[&native].subagents,
-        Some(SubagentPolicy::Mjolnir { choice: None })
+        Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        })
     );
     assert_eq!(
         restarted.state.sessions[&single].subagents,
-        Some(SubagentPolicy::Mjolnir { choice: None })
+        Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        })
     );
 }

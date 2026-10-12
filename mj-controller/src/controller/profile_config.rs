@@ -74,26 +74,20 @@ pub async fn validate_session_subagent_policy(
     if !policy.uses_mjolnir() {
         return Ok(());
     }
-    if let Some(choice) = policy.override_choice() {
-        let options = subagent_options_for(
-            config.clone(),
-            profile_id.to_owned(),
-            Some(choice.model.clone()),
-        )
-        .await?;
-        return options.validate(choice).map_err(refuse);
-    }
-    if !config.subagents.is_configured() {
-        return Err(refuse("Mjolnir requires configured [subagents.straightforward] and [subagents.subtle] choices".into()));
-    }
     for task_type in [
         mj_core::subagent::SubagentTaskType::Straightforward,
         mj_core::subagent::SubagentTaskType::Subtle,
     ] {
-        let choice = config
-            .subagents
-            .choice(task_type)
-            .expect("configured task choices");
+        let choice = policy
+            .override_choice(task_type)
+            .or_else(|| config.subagents.choice(task_type))
+            .ok_or_else(|| {
+                refuse(format!(
+                    "Mjolnir requires [subagents.{}] or --subagent-{} <MODEL>",
+                    task_type.id(),
+                    task_type.id()
+                ))
+            })?;
         let options = subagent_options_for(
             config.clone(),
             profile_id.to_owned(),
@@ -654,6 +648,10 @@ mod tests {
         let mut draft = Config::default();
         draft.profiles.insert("unsaved".into(), profile);
         assert!(!draft.subagents.is_configured());
+        draft.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "chosen".into(),
+            effort: Some("high".into()),
+        });
         for (model, effort, available) in [
             ("chosen", Some("high"), true),
             ("chosen", None, true),
@@ -662,10 +660,11 @@ mod tests {
             ("chosen", Some("adaptive"), false),
         ] {
             let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
-                choice: Some(mj_core::config::SubagentChoice {
+                straightforward: None,
+                subtle: Some(Box::new(mj_core::config::SubagentChoice {
                     model: model.into(),
                     effort: effort.map(str::to_owned),
-                }),
+                })),
             };
             let result = validate_session_subagent_policy(&draft, "unsaved", &policy).await;
             if available {
@@ -678,6 +677,37 @@ mod tests {
                 );
             }
         }
+        validate_session_subagent_policy(
+            &draft,
+            "unsaved",
+            &mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: Some(Box::new(mj_core::config::SubagentChoice {
+                    model: "chosen".into(),
+                    effort: None,
+                })),
+            },
+        )
+        .await
+        .unwrap();
+        draft.subagents.straightforward = None;
+        let missing = validate_session_subagent_policy(
+            &draft,
+            "unsaved",
+            &mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: Some(Box::new(mj_core::config::SubagentChoice {
+                    model: "chosen".into(),
+                    effort: None,
+                })),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            Refusal::of(&missing).unwrap().code(),
+            Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
+        );
         let options = subagent_options_for(draft, "unsaved".into(), Some("chosen".into()))
             .await
             .unwrap();
@@ -1034,7 +1064,10 @@ mod tests {
             let error = validate_session_subagent_policy(
                 &config,
                 "parent",
-                &mj_core::subagent::SubagentPolicy::Mjolnir { choice: None },
+                &mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
             )
             .await
             .unwrap_err();
@@ -1043,10 +1076,12 @@ mod tests {
                 refusal.code(),
                 Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
             );
-            assert!(
-                refusal.message().contains("[subagents.straightforward]")
-                    && refusal.message().contains("[subagents.subtle]")
-            );
+            if kind.supports_delegation_tools() {
+                assert!(refusal.message().contains("[subagents.straightforward]"));
+                assert!(refusal.message().contains("--subagent-straightforward"));
+            } else {
+                assert!(refusal.message().contains("Claude and Codex"));
+            }
         }
     }
 }

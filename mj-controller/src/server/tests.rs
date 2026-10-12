@@ -4387,7 +4387,7 @@ assert(moveSubagentChange(draft).mode === "mjolnir", "an explicit session edit i
 draft.subagents = structuredClone(draft.storedSubagents);
 draft.profileId = "kimi";
 assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
-draft.storedSubagents = { mode: "mjolnir" };
+draft.storedSubagents = { mode: "mjolnir", straightforward: { model: "gpt-6-sol", effort: "high" }, subtle: { model: "gpt-6-luna" } };
 draft.subagents = structuredClone(draft.storedSubagents);
 assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
 assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");

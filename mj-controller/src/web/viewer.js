@@ -1742,14 +1742,19 @@ const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir']];
 const SUBAGENT_SETUP_REASON = "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 
 function delegationPolicy(policy) {
-  if (policy?.mode === 'mjolnir' && policy.model) {
-    return { mode: 'mjolnir', model: policy.model, ...(policy.effort != null ? { effort: policy.effort } : {}) };
+  if (policy?.mode === 'mjolnir') {
+    const legacy = policy.model ? { model: policy.model, ...(policy.effort != null ? { effort: policy.effort } : {}) } : null;
+    const choice = (value) => value && value.model
+      ? { model: value.model, ...(value.effort != null ? { effort: value.effort } : {}) } : legacy;
+    const straightforward = choice(policy.straightforward);
+    const subtle = choice(policy.subtle);
+    return { mode: 'mjolnir', ...(straightforward ? { straightforward } : {}), ...(subtle ? { subtle } : {}) };
   }
   return { mode: ['mjolnir', 'single_model', 'all_models'].includes(policy?.mode) ? 'mjolnir' : 'native' };
 }
 
 function mjolnirAvailable(draft) {
-  return (snapshot?.subagents_configured === true || !!draft?.subagents?.model || !!draft?.storedSubagents?.model) && subagentChoiceApplies(draft);
+  return (snapshot?.subagents_configured === true || !!draft?.subagents?.straightforward || !!draft?.subagents?.subtle || !!draft?.storedSubagents?.straightforward || !!draft?.storedSubagents?.subtle) && subagentChoiceApplies(draft);
 }
 
 function subagentSelectionError(draft) {
@@ -1768,8 +1773,11 @@ function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}
   select.id = `${prefix}-subagents`;
   const available = mjolnirAvailable(draft);
   for (const [value, title] of SUBAGENT_MODES) {
-    const override = value === 'mjolnir' && draft.subagents?.model;
-    const text = override ? `${title} (${draft.subagents.model}${draft.subagents.effort ? `, ${draft.subagents.effort}` : ''})` : title;
+    const overrides = value === 'mjolnir' ? ['straightforward', 'subtle'].flatMap((type) => {
+      const choice = draft.subagents?.[type];
+      return choice ? [`${type}: ${choice.model}${choice.effort ? `, ${choice.effort}` : ''}`] : [];
+    }) : [];
+    const text = overrides.length ? `${title} (${overrides.join('; ')})` : title;
     const option = el('option', '', text);
     option.value = value;
     option.disabled = value === 'mjolnir' && !available;

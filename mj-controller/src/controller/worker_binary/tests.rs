@@ -474,7 +474,10 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session.harness_kind = HarnessKind::Claude;
         session.subagents = choice.map(|enabled| {
             if enabled {
-                mj_core::subagent::SubagentPolicy::Mjolnir { choice: None }
+                mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }
             } else {
                 mj_core::subagent::SubagentPolicy::Native
             }
@@ -494,7 +497,10 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let mut codex = claude(None);
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
-    codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir { choice: None });
+    codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     assert!(subagent_tools_enabled(&codex, false));
 }
 
@@ -5213,9 +5219,15 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         std::fs::write(&source, "User instructions without final newline").unwrap();
         for policy in [
             SubagentPolicy::Native,
-            SubagentPolicy::Mjolnir { choice: None },
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             SubagentPolicy::None,
-            SubagentPolicy::Mjolnir { choice: None },
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
         ] {
             let stage = tempfile::tempdir().unwrap();
             let destination = stage.path().join(harness.agent_instructions_file());
