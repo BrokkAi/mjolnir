@@ -264,7 +264,8 @@ struct CheckpointArgs {
         .multiple(true)
 ))]
 struct MoveArgs {
-    /// Destination delegation policy. Omit to retain the session's policy,
+    /// Destination delegation policy: native, mjolnir, or none (no
+    /// delegation tools). Omit to retain the session's policy,
     /// or the recorded policy when retrying a sealed Move.
     #[arg(long)]
     subagents: Option<String>,

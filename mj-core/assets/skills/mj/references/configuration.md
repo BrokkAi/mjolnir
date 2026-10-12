@@ -490,8 +490,9 @@ as locating code, running commands or tests, or implementing a settled design;
 bugs. A subtle task gets a smarter, more expensive agent. Judge difficulty,
 not brief length. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
-Children cannot delegate. `mj new --subagents native|mjolnir` defaults to Native;
-`mj move --subagents native|mjolnir` retains the recorded policy when omitted.
+Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
+Native; `mj move --subagents native|mjolnir|none` retains the recorded policy when
+omitted. `none` (CLI only) gives a Claude or Codex session no delegation tools.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |

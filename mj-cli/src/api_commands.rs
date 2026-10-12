@@ -136,7 +136,8 @@ pub(crate) struct NewArgs {
     /// Harness reasoning effort to select before the first prompt.
     #[arg(long)]
     effort: Option<String>,
-    /// Delegation policy: native or mjolnir. Omitted uses Native.
+    /// Delegation policy: native, mjolnir, or none (no delegation tools).
+    /// Omitted uses Native.
     #[arg(long)]
     subagents: Option<String>,
     /// Removed: configure global task types in config.toml.
@@ -998,8 +999,12 @@ pub(crate) fn subagent_policy(
     Ok(match mode {
         Some("native") => Some(SubagentPolicy::Native),
         Some("mjolnir") => Some(SubagentPolicy::Mjolnir),
+        // Not offered in Create or Move: benchmarks use it for solo lanes.
+        Some("none") => Some(SubagentPolicy::None),
         None => None,
-        Some(other) => bail!("unknown subagents mode {other:?}; use native or mjolnir. {REMEDY}"),
+        Some(other) => {
+            bail!("unknown subagents mode {other:?}; use native, mjolnir or none. {REMEDY}")
+        }
     })
 }
 
@@ -2717,7 +2722,7 @@ mod tests {
     }
 
     #[test]
-    fn new_subagent_policy_rejects_legacy_flags_and_requires_fixed_model() {
+    fn new_subagent_policy_accepts_native_mjolnir_and_none_and_rejects_legacy_flags() {
         let parse = |extra: &[&str]| {
             let mut argv = vec![
                 "mj",
@@ -2746,12 +2751,15 @@ mod tests {
             parse(&["--subagents", "mjolnir"]).unwrap(),
             Some(SubagentPolicy::Mjolnir)
         );
+        assert_eq!(
+            parse(&["--subagents", "none"]).unwrap(),
+            Some(SubagentPolicy::None)
+        );
         for args in [
             &["--mj-subagents"][..],
             &["--native-subagents"],
             &["--subagents", "all-models"],
             &["--subagents", "single-model"],
-            &["--subagents", "none"],
             &["--subagents", "native", "--subagent-model", "model"],
             &["--subagents", "native", "--subagent-effort", "high"],
             &["--subagents", "none", "--subagent-model", "model"],
