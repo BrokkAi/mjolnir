@@ -175,15 +175,34 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     let policy = session.subagents.clone().unwrap_or_default();
     let mut delegation = match &policy {
         SubagentPolicy::Native => "Native".to_owned(),
-        SubagentPolicy::AllModels => "Mjolnir, all models".to_owned(),
-        SubagentPolicy::SingleModel { model, effort } => match effort.as_deref() {
-            Some(mj_core::subagent::ADAPTIVE_EFFORT) => format!(
-                "Mjolnir, {model} ({})",
-                mj_core::subagent::ADAPTIVE_EFFORT_LABEL
-            ),
-            Some(effort) => format!("Mjolnir, {model} ({effort})"),
-            None => format!("Mjolnir, {model}"),
-        },
+        SubagentPolicy::Mjolnir {
+            straightforward,
+            subtle,
+        } => {
+            let label = |name: &str, choice: Option<&mj_core::config::SubagentChoice>| {
+                choice.map(|choice| {
+                    let effort = choice
+                        .effort
+                        .as_deref()
+                        .map(|effort| format!(", {effort}"))
+                        .unwrap_or_default();
+                    format!("{name}: {}{effort}", choice.model)
+                })
+            };
+            let overrides = [
+                label("straightforward", straightforward.as_deref()),
+                label("subtle", subtle.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+            if overrides.is_empty() {
+                "Mjolnir".to_owned()
+            } else {
+                format!("Mjolnir ({overrides})")
+            }
+        }
         SubagentPolicy::None => "None".to_owned(),
     };
     let total = dashboard.subagent_count_for(&session.id);
@@ -1560,9 +1579,9 @@ mod tests {
         append_golden_state(&mut output, "session action menu", 120, 40, &lines);
 
         let mut session = running_session();
-        session.subagents = Some(SubagentPolicy::SingleModel {
-            model: "gpt-5".into(),
-            effort: Some(mj_core::subagent::ADAPTIVE_EFFORT.into()),
+        session.subagents = Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
         });
         session.container_cpus = Some("4".into());
         session.container_memory = Some("8g".into());

@@ -192,9 +192,8 @@ action: None
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
 │ Create   Open   Filter: _____________││                                                          │
-│No sessions yet                       ││                     ✦  M J O L N I R                     │
+│No se                                                                                             │
 │Creat                                                                                             │
-│                                                                                                  │
 │       ╭ × New session · 4/4 review ──────────────────────────────────────────────────────╮       │
 │       │                                                                                  │       │
 │       │ Profile: claude-1                                                                │       │
@@ -202,15 +201,16 @@ action: None
 │       │ Target: podman (local Podman)                                                    │       │
 │       │ Compute: 8 CPU / 32.0G                                                           │       │
 │       │                                                                                  │       │
-│       │ Attached directories: 0                                                          │  ─────╯
+│       │ Attached directories: 0                                                          │       │
+│       │                                                                                  │  ─────╯
 │       │                                                                                  │  ─────╮
-│       │                                                                                  │       │
-│       │                                                                                  │  d    │
-│       │   Cancel     Back     Add directory…     Create                                  │  ─────╯
-│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▪ ╮
-│                                                                                                  │
+│       │ Delegation Native ▾                                                              │       │
+│       │ Set up Mjolnir sub-agents in Settings -> Sub-agents                              │  d    │
+│       │                                                                                  │  ─────╯
+│       │   Cancel     Back     Add directory…     Create                                  │     ▪ ╮
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯       │
 │                                                                                             ─────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────── ▁   ▪ ╮
+│                                                                                                ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets    │
 │                                      ││  claude-1  Claude Code  refreshing…                      │
 │                                      ││  codex-1   Codex        refreshing…                      │

@@ -1729,6 +1729,7 @@ function freshDraft() {
     resourceLoading: false,
     resourceError: '',
   };
+  draft.subagents = mjolnirAvailable(draft) ? delegationPolicy(snapshot?.last_subagent_policy) : { mode: 'native' };
   setNewTargetSizing(draft, draft.targetId);
   return draft;
 }
@@ -1739,133 +1740,70 @@ function subagentChoiceApplies(draft = newDraft) {
   return kind === 'claude' || kind === 'codex';
 }
 
-const SUBAGENT_MODES = [
-  ['native', 'Native'],
-  ['single_model', 'Mjolnir, single model'], ['none', 'None'],
-];
+const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir']];
+const SUBAGENT_SETUP_REASON = "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 
-function subagentDiscoveryKey(draft) {
-  const inputs = snapshot?.profiles.find(profile => profile.id === draft.profileId)?.subagent_discovery_key || '';
-  return JSON.stringify([draft.profileId, draft.subagents.model || null, inputs]);
+function delegationPolicy(policy) {
+  if (policy?.mode === 'mjolnir') {
+    const legacy = policy.model ? { model: policy.model, ...(policy.effort != null ? { effort: policy.effort } : {}) } : null;
+    const choice = (value) => value && value.model
+      ? { model: value.model, ...(value.effort != null ? { effort: value.effort } : {}) } : legacy;
+    const straightforward = choice(policy.straightforward);
+    const subtle = choice(policy.subtle);
+    return { mode: 'mjolnir', ...(straightforward ? { straightforward } : {}), ...(subtle ? { subtle } : {}) };
+  }
+  return { mode: ['mjolnir', 'single_model', 'all_models'].includes(policy?.mode) ? 'mjolnir' : 'native' };
+}
+
+function mjolnirAvailable(draft) {
+  return (snapshot?.subagents_configured === true || !!draft?.subagents?.straightforward || !!draft?.subagents?.subtle || !!draft?.storedSubagents?.straightforward || !!draft?.storedSubagents?.subtle) && subagentChoiceApplies(draft);
 }
 
 function subagentSelectionError(draft) {
-  if (!draft || !subagentChoiceApplies(draft) || !moveSubagentChange(draft) || draft.subagents.mode !== 'single_model') return '';
-  const discovery = draft.subagentDiscovery;
-  if (!discovery || discovery.key !== subagentDiscoveryKey(draft) || discovery.loading) return 'Loading eligible models and efforts…';
-  if (discovery.error) return discovery.error;
-  if (!discovery.options.models.some(choice => choice.value === draft.subagents.model)) return `Select an available subagent model${draft.subagents.model ? ` (${draft.subagents.model} is unavailable)` : ''}.`;
-  const efforts = discovery.options.efforts;
-  if (
-    efforts.length &&
-    draft.subagents.effort !== 'adaptive' &&
-    !efforts.some(choice => choice.value === draft.subagents.effort)
-  ) return 'Select an available effort for this model.';
-  if (!efforts.length && draft.subagents.effort != null) return 'The selected effort is unavailable for this model.';
-  return '';
+  if (!draft || draft.subagents?.mode !== 'mjolnir' || mjolnirAvailable(draft)) return '';
+  // An unchanged Move preserves the stored policy, including legacy sessions.
+  if (draft.storedSubagents && !moveSubagentChange(draft)) return '';
+  return SUBAGENT_SETUP_REASON;
 }
 
-// Project the daemon's shared catalog. Rendering never issues discovery.
-function updateSubagentOptions(draft) {
-  const key = subagentDiscoveryKey(draft);
-  const parent = snapshot?.profiles.find(profile => profile.id === draft.profileId);
-  const candidates = parent?.subagent_profile_ids || [draft.profileId];
-  const options = { models: [], efforts: [], unavailable: [] };
-  let modelsReady = true, loading = false;
-  const merge = (into, choices) => {
-    for (const choice of choices || []) if (!into.some(existing => existing.value === choice.value)) into.push(choice);
-  };
-  for (const id of candidates) {
-    const profile = snapshot?.profiles.find(profile => profile.id === id);
-    const entry = snapshot?.profile_capabilities?.profiles?.[profile?.capabilities_key];
-    if (!entry || entry.choices.status === 'pending') { modelsReady = false; loading = true; continue; }
-    if (entry.choices.status === 'failed') { options.unavailable.push(`${id}: ${entry.choices.value}`); continue; }
-    const choices = entry.choices.value;
-    merge(options.models, choices.models);
-    if (draft.subagents.model && choices.models.some(choice => choice.value === draft.subagents.model)) {
-      const efforts = entry.efforts[draft.subagents.model];
-      if (!efforts || efforts.status === 'pending') loading = true;
-      else if (efforts.status === 'failed') options.unavailable.push(`${id}: ${efforts.value}`);
-      else merge(options.efforts, efforts.value);
-    }
-  }
-  draft.subagentDiscovery = { key, loading, modelsReady, options, error: '' };
-}
-
-function subagentSelect(body, label, id, choices, selected, onChange, disabled = false) {
+// Create and Move share the same delegation choices. A disabled Mjolnir
+// option remains visible so the setup path is discoverable.
+function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
   const field = el('label', 'field');
-  field.append(document.createTextNode(label));
+  field.append(document.createTextNode('Delegation'));
   const select = el('select');
-  select.id = id;
-  for (const [value, title] of choices) {
-    const option = el('option', '', title);
+  select.id = `${prefix}-subagents`;
+  const available = mjolnirAvailable(draft);
+  for (const [value, title] of SUBAGENT_MODES) {
+    const overrides = value === 'mjolnir' ? ['straightforward', 'subtle'].flatMap((type) => {
+      const choice = draft.subagents?.[type];
+      return choice ? [`${type}: ${choice.model}${choice.effort ? `, ${choice.effort}` : ''}`] : [];
+    }) : [];
+    const text = overrides.length ? `${title} (${overrides.join('; ')})` : title;
+    const option = el('option', '', text);
     option.value = value;
+    option.disabled = value === 'mjolnir' && !available;
     select.append(option);
   }
-  select.value = selected;
-  select.disabled = disabled;
-  select.onchange = () => onChange(select.value);
+  select.value = draft.subagents.mode;
+  select.disabled = draft.queueLocked === true;
+  select.onchange = () => {
+    if (select.value !== draft.subagents.mode) {
+      draft.subagents = select.value === 'mjolnir' && draft.storedSubagents?.mode === 'mjolnir'
+        ? { ...draft.storedSubagents } : { mode: select.value };
+    }
+    onChange();
+    rerender();
+  };
   field.append(select);
   body.append(field);
+  if (!available) body.append(el('p', 'dim', SUBAGENT_SETUP_REASON));
 }
 
-/// The delegation fields for a Move draft. `prefix` keeps the
-/// element ids of the two forms apart; `onChange` runs after an edit, before
-/// `rerender`.
-function renderSubagentFields(body, draft, prefix, rerender, onChange = () => {}) {
-  subagentSelect(body, 'Subagents', `${prefix}-subagents`, draft.subagents.mode === 'all_models' ? [...SUBAGENT_MODES, ['all_models', 'Mjolnir, all models (legacy)']] : SUBAGENT_MODES, draft.subagents.mode, mode => {
-    draft.subagentDiscovery = null;
-    draft.subagents = mode === 'single_model' ? { mode, model: '', effort: null } : { mode };
-    onChange();
-    rerender();
-  });
-  if (draft.subagents.mode !== 'single_model') return;
-  updateSubagentOptions(draft);
-  const discovery = draft.subagentDiscovery;
-  const options = discovery.options;
-  const models = [['', 'Select model'], ...(options?.models || []).map(choice => [choice.value, choice.name])];
-  if (draft.subagents.model && !models.some(([value]) => value === draft.subagents.model)) models.push([draft.subagents.model, `${draft.subagents.model} (unavailable)`]);
-  subagentSelect(body, 'Model', `${prefix}-subagent-model`, models, draft.subagents.model, model => {
-    draft.subagents = { mode: 'single_model', model, effort: null };
-    onChange();
-    rerender();
-  }, !discovery.modelsReady);
-  const efforts = options?.efforts || [];
-  const choices = [['', efforts.length ? 'Select effort' : 'Harness default']];
-  if (efforts.length && !efforts.some(choice => choice.value === 'adaptive')) {
-    choices.push(['adaptive', 'Adaptive (Jev chooses per task)']);
-  }
-  choices.push(...efforts.map(choice => [choice.value, choice.name]));
-  if (draft.subagents.effort && !choices.some(([value]) => value === draft.subagents.effort)) choices.push([draft.subagents.effort, `${draft.subagents.effort} (unavailable)`]);
-  subagentSelect(body, 'Effort', `${prefix}-subagent-effort`, choices, draft.subagents.effort || '', effort => {
-    draft.subagents.effort = effort || null;
-    onChange();
-    rerender();
-  }, discovery.loading || !options || !efforts.length);
-  body.append(el('p', 'dim', 'Choose a model and effort from eligible profiles. Configure profiles in Settings → Profiles and additional eligible profiles in Settings → Sub-agents. This session’s own profile is always eligible.'));
-  const error = subagentSelectionError(draft);
-  if (error) body.append(el('p', 'dim', error));
-  for (const error of options?.unavailable || []) body.append(el('p', 'dim', error));
-
-}
-
-function profileSubagents(profileId) {
-  return snapshot?.profiles.find(profile => profile.id === profileId)?.subagents || { mode: 'native' };
-}
-
-// What the review says about delegation: the policy the new session will get.
-function subagentPolicyLabel(policy) {
-  if (policy?.mode === 'single_model') {
-    return `Single model: ${policy.model || 'none chosen'}${policy.effort ? ` · ${policy.effort}` : ''}`;
-  }
-  return SUBAGENT_MODES.find(([value]) => value === policy?.mode)?.[1] || 'Native';
-}
-
-// The daemon's refusal names the problem and no surface. A browser user can
-// only change the profile's default, so that is the remedy added here.
-function newSessionFailure(err, profileId) {
+// The daemon names the unavailable configuration; clients add their remedy.
+function newSessionFailure(err) {
   if (err.code === 'subagent_choice_unavailable') {
-    return `${err.message} Change the default in Settings → Agent Profiles → ${profileId} → Sub-agents, or choose another account.`;
+    return `${err.message} ${SUBAGENT_SETUP_REASON}.`;
   }
   return err.message;
 }
@@ -1940,7 +1878,7 @@ function renderNewForm() {
         ? snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories
         : newDraft.projectPicker.mode === 'home' ? [snapshot.bundles, [...recentProjectIds()].sort()] : null,
     ] : null,
-    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, profileSubagents(newDraft.profileId)] : null,
+    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, snapshot.subagents_configured, subagentChoiceApplies(newDraft)] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -1977,6 +1915,7 @@ function renderNewForm() {
       describe(select.value);
       select.onchange = () => {
         newDraft.profileId = select.value;
+        if (!mjolnirAvailable(newDraft)) newDraft.subagents = { mode: 'native' };
         describe(select.value);
       };
       field.append(select, description);
@@ -2069,7 +2008,6 @@ function renderNewForm() {
       const review = el('dl', 'review');
       const rows = [
         ['Account', newDraft.profileId],
-        ...(subagentChoiceApplies(newDraft) ? [['Subagents', subagentPolicyLabel(profileSubagents(newDraft.profileId))]] : []),
         ['Where to run', newDraft.targetId],
         ...(newDraft.resourceAllocation?.kind === 'container'
           ? [['Container size', `${newDraft.resourceAllocation.cpus} CPU · ${memoryGiBText(newDraft.resourceAllocation.memory_bytes)} GiB memory`]]
@@ -2099,6 +2037,7 @@ function renderNewForm() {
       });
       title.querySelector('input').placeholder = derivedTitle();
       body.append(review, title);
+      renderSubagentFields(body, newDraft, 'new', renderNewForm);
       const worktree = el('label', 'field-inline');
       const checkbox = el('input');
       checkbox.type = 'checkbox';
@@ -2127,7 +2066,7 @@ function renderNewForm() {
   newNextButton.hidden = step.key === 'project' && !targetIsBare(newDraft.targetId);
   const sizingError = step.key === 'target' ? newResourceAllocationError(newDraft) : '';
   newNextButton.disabled = busy || checking || Boolean(sizingError)
-    || (step.key === 'review' && !newDraft.preflighted && !newDraft.preflightError);
+    || (step.key === 'review' && ((!newDraft.preflighted && !newDraft.preflightError) || Boolean(subagentSelectionError(newDraft))));
   newBackButton.disabled ||= newDraft.committing === true;
   for (const input of newStep.querySelectorAll('input, select, button')) input.disabled = input.disabled || busy;
   if (focused?.id && !caret && !busy) document.getElementById(focused.id)?.focus({ preventScroll: true });
@@ -2873,6 +2812,8 @@ async function advanceNew() {
 async function commitNew() {
   const draft = newDraft;
   if (!draft || draft.committing || !draft.preflighted || pendingNewPreflight === draft || draft.preflightError) return;
+  const delegationError = subagentSelectionError(draft);
+  if (delegationError) { newError.textContent = delegationError; return; }
   const bare = targetIsBare(newDraft.targetId);
   const body = {
     action: 'new',
@@ -2882,7 +2823,7 @@ async function commitNew() {
     target_id: newDraft.targetId,
     project_directory: bare ? newDraft.projectDirectory : null,
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
-    subagents: profileSubagents(draft.profileId),
+    subagents: draft.subagents,
   };
   const kind = targetResourceKind(draft.targetId);
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
@@ -2900,7 +2841,7 @@ async function commitNew() {
     if (newDraft !== draft) return;
     navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
   } catch (err) {
-    if (newDraft === draft) newError.textContent = newSessionFailure(err, draft.profileId);
+    if (newDraft === draft) newError.textContent = newSessionFailure(err);
   } finally {
     draft.committing = false;
     if (newDraft === draft) renderNewForm();
@@ -3856,9 +3797,8 @@ function freshMoveDraft(session) {
     workspaceSelection: { exclusions: [], acknowledge_large_transfer: false },
     // The session's own policy; the prepare request names a policy only
     // when the draft differs from it.
-    storedSubagents: session.subagents || { mode: 'native' },
-    subagents: structuredClone(recovery?.subagents || session.subagents || { mode: 'native' }),
-    subagentDiscovery: null,
+    storedSubagents: delegationPolicy(session.subagents),
+    subagents: delegationPolicy(recovery?.subagents || session.subagents),
   };
 }
 
@@ -4031,11 +3971,9 @@ function renderMoveForm() {
     }
     moveStep.append(targetPicker);
 
-    if (subagentChoiceApplies(draft)) {
-      renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
-        draft.preparation = null;
-      });
-    }
+    renderSubagentFields(moveStep, draft, `move-${session.id}`, () => { if (moveDraft === draft) renderMoveForm(); }, () => {
+      draft.preparation = null;
+    });
     moveStep.append(el('p', 'dim', 'Move keeps the existing environment when the target (or another bare target on the same machine), attached directories, and resource sizing stay the same, and rebuilds a fresh environment otherwise. Existing resource sizing and attached directories are retained. When the environment is rebuilt, installed packages and files outside the declared workspace are not migrated.'));
     const clearResources = el('label', 'field-inline');
     const clearResourcesInput = document.createElement('input');
@@ -4082,7 +4020,7 @@ function renderMoveForm() {
     }
     if (preparation.selection.subagents) {
       const mode = SUBAGENT_MODES.find(([value]) => value === preparation.selection.subagents.mode)?.[1] || preparation.selection.subagents.mode;
-      moveStep.append(el('p', 'dim', `Subagents: ${mode}${preparation.selection.subagents.model ? ` (${preparation.selection.subagents.model})` : ''}.`));
+      moveStep.append(el('p', 'dim', `Delegation: ${mode}.`));
     }
     const stoppedChildren = moveStoppedChildren(session);
     if (stoppedChildren) {
@@ -4183,7 +4121,7 @@ async function prepareMove() {
       draft.filePage = assessment.required_bytes + assessment.files.reduce((sum, file) => sum + file.bytes, 0) >= 1e9;
     }
   } catch (error) {
-    moveError.textContent = error.message;
+    moveError.textContent = newSessionFailure(error);
   } finally {
     draft.preparing = false;
     if (moveDraft === draft) renderMoveForm();
@@ -4212,7 +4150,7 @@ async function commitMove() {
     announce(`Moving ${draft.sessionId}`);
     navigate({ name: 'dashboard', workspaceId: draft.workspaceId });
   } catch (error) {
-    moveError.textContent = error.message;
+    moveError.textContent = newSessionFailure(error);
   } finally {
     draft.committing = false;
     if (moveDraft === draft) renderMoveForm();

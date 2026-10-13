@@ -135,6 +135,20 @@ struct RecordingExports {
 }
 
 impl ExportRuntime for RecordingExports {
+    fn subagent_config(&self) -> mj_core::config::SubagentConfig {
+        mj_core::config::SubagentConfig {
+            straightforward: Some(mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: Some("low".into()),
+            }),
+            subtle: Some(mj_core::config::SubagentChoice {
+                model: "nova".into(),
+                effort: Some("high".into()),
+            }),
+            ..Default::default()
+        }
+    }
+
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         (session_id == self.parent.id).then(|| self.parent.clone())
     }
@@ -232,21 +246,16 @@ const SAME_MODELS: &[(&str, &[&str])] = &[
     ("deepseek", &["flash"]),
 ];
 
-fn spawn_with(
-    profile_id: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> mj_core::subagent::SubagentToolRequest {
+fn spawn_with() -> mj_core::subagent::SubagentToolRequest {
     mj_core::subagent::SubagentToolRequest {
         originating_command_id: None,
         request_id: "request-1".into(),
         created_at_ms: 0,
         action: mj_core::subagent::SubagentToolAction::Spawn {
+            task_type: mj_core::subagent::SubagentTaskType::Straightforward,
             task_name: "audit deps".into(),
             instructions: "check the lockfile".into(),
-            profile_id: profile_id.map(str::to_owned),
-            model: model.map(str::to_owned),
-            effort: effort.map(str::to_owned),
+
             working_directory: Default::default(),
             context: None,
             files: Vec::new(),
@@ -260,10 +269,7 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     let (backend, exports) = selection_backend(SAME_MODELS, None).await;
 
     let result = backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(None, Some("luna"), Some("low")),
-        )
+        .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
 
     assert!(
@@ -285,9 +291,8 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
 /// hidden behind a same-harness profile with more quota.
 // Hard-won: 435b4ed9: one same-harness profile hid models offered by another profile.
 #[tokio::test]
-async fn list_profiles_merges_profiles_offering_the_same_models() {
+async fn legacy_list_profiles_is_refused() {
     let (backend, _) = selection_backend(SAME_MODELS, None).await;
-
     let result = backend
         .execute_subagent_tool(
             "parent-1".into(),
@@ -299,17 +304,7 @@ async fn list_profiles_merges_profiles_offering_the_same_models() {
             },
         )
         .await;
-
-    assert!(!result.is_error, "{}", result.message);
-    let answer: serde_json::Value = serde_json::from_str(&result.message).unwrap();
-    let listed = answer["profiles"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|profile| profile["profile_id"].as_str().unwrap().to_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(listed, vec!["deepseek", "codex-high"]);
-    assert!(answer.get("unavailable").is_none(), "{answer}");
+    assert!(result.is_error && result.message.contains("no longer available"));
 }
 
 /// One login that cannot be discovered drops out on its own; it neither fails
@@ -319,27 +314,12 @@ async fn a_profile_that_cannot_be_discovered_is_left_out_not_fatal() {
     let offers: &[(&str, &[&str])] = &[("parent", &["luna"]), ("deepseek", &["flash"])];
     let (backend, exports) = selection_backend(offers, None).await;
 
-    let listed = backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: "request-1".into(),
-                created_at_ms: 0,
-                action: mj_core::subagent::SubagentToolAction::ListProfiles,
-            },
-        )
-        .await;
-    assert!(!listed.is_error, "{}", listed.message);
-    let answer: serde_json::Value = serde_json::from_str(&listed.message).unwrap();
-    assert_eq!(answer["unavailable"][0]["profile_id"], "codex-high");
-    assert_eq!(answer["profiles"].as_array().unwrap().len(), 2);
+    let candidates = backend.subagent_candidates("parent".into()).await.unwrap();
+    assert_eq!(candidates.unavailable[0].0, "codex-high");
+    assert_eq!(candidates.offered.len(), 2);
 
     backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(None, Some("luna"), Some("low")),
-        )
+        .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
     assert_eq!(exports.registered().profile_id, "parent");
 }
@@ -823,6 +803,20 @@ impl SessionControlBackend for WaitPromptControl {
 struct ParentExports(SessionRecord);
 
 impl ExportRuntime for ParentExports {
+    fn subagent_config(&self) -> mj_core::config::SubagentConfig {
+        mj_core::config::SubagentConfig {
+            straightforward: Some(mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: None,
+            }),
+            subtle: Some(mj_core::config::SubagentChoice {
+                model: "nova".into(),
+                effort: None,
+            }),
+            ..Default::default()
+        }
+    }
+
     fn session_record(&self, session_id: &str) -> Option<SessionRecord> {
         (session_id == self.0.id).then(|| self.0.clone())
     }
@@ -842,7 +836,10 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         launch_branch: None,
         checkout: None,
         publication: None,
-        subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+        subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        }),
         create_managed_worktree: None,
         container_workspace: None,
         build_cache: None,
@@ -909,17 +906,14 @@ async fn spawn_refuses_a_model_no_eligible_profile_offers() {
     let warmed = calls.load(std::sync::atomic::Ordering::SeqCst);
 
     let result = spawn_backend(catalog)
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(None, Some("no-such-model"), None),
-        )
+        .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
 
     assert!(result.is_error, "the spawn should have been refused");
     assert!(
         result
             .message
-            .contains("no eligible profile offers model \"no-such-model\""),
+            .contains("no eligible profile offers model \"luna\""),
         "{}",
         result.message
     );
@@ -945,10 +939,7 @@ async fn spawn_over_a_cold_catalogue_waits_for_the_background_discovery() {
     catalog.sync(&test_config(&[("parent", HarnessKind::Codex)], &[]));
 
     let result = spawn_backend(catalog)
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(None, Some("no-such-model"), None),
-        )
+        .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
 
     assert!(
@@ -1922,7 +1913,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     let mut rejected = mj_core::credentials::RejectedLogins::default();
@@ -1943,44 +1934,16 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
     );
     let (backend, exports) = selection_backend_refusing(SAME_MODELS, None, rejected).await;
 
-    let pinned = backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(Some("codex-high"), Some("luna"), Some("low")),
-        )
-        .await;
-    assert!(pinned.is_error, "{}", pinned.message);
+    let candidates = backend.subagent_candidates("parent".into()).await.unwrap();
+    assert_eq!(candidates.unavailable[0].0, "codex-high");
     assert!(
-        pinned.message.contains(
-            "the login is no longer valid; run `mj login --profile codex-high` and spawn again"
-        ),
-        "{}",
-        pinned.message
-    );
-    assert!(exports.registered.lock().unwrap().is_none());
-
-    let listed = backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            mj_core::subagent::SubagentToolRequest {
-                originating_command_id: None,
-                request_id: "request-2".into(),
-                created_at_ms: 0,
-                action: mj_core::subagent::SubagentToolAction::ListProfiles,
-            },
-        )
-        .await;
-    let answer: serde_json::Value = serde_json::from_str(&listed.message).unwrap();
-    assert_eq!(
-        answer["unavailable"][0]["profile_id"], "codex-high",
-        "{answer}"
+        candidates.unavailable[0]
+            .1
+            .contains("mj login --profile codex-high")
     );
 
     backend
-        .execute_subagent_tool(
-            "parent-1".into(),
-            spawn_with(None, Some("luna"), Some("low")),
-        )
+        .execute_subagent_tool("parent-1".into(), spawn_with())
         .await;
     assert_eq!(exports.registered().profile_id, "parent");
 }
@@ -4184,6 +4147,43 @@ async fn durable_wait(backend: &Arc<ApiBackend>, request_id: &str) -> serde_json
         .unwrap();
     assert!(!answer.result.is_error, "{}", answer.result.message);
     serde_json::from_str(&answer.result.message).unwrap()
+}
+
+// Hard-won: 8c73d3a8f: steering must retire the old wait without consuming a later child report.
+#[tokio::test]
+async fn worker_completed_wait_is_retired_without_collecting_child_reports() {
+    if !isolated_parked_test("worker_completed_wait_is_retired_without_collecting_child_reports") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child("child-1", "task-1", "still collectible", 3, 9, 7);
+    let mut view = ready_view("model");
+    let yielded = serde_json::json!({"status": "interrupted", "agents": [], "waited_seconds": 1});
+    view.snapshot
+        .as_mut()
+        .unwrap()
+        .subagent_results
+        .push(mj_core::subagent::SubagentToolResult {
+            request_id: "yielded-wait".into(),
+            completed_at_ms: mj_core::clock::epoch_millis(),
+            is_error: false,
+            message: yielded.to_string(),
+        });
+    // A replacement daemon sees the worker's completed answer before it
+    // attempts to resume the durable wait. Even a ready report stays unread.
+    let (backend, _, _, _) = wait_prompt_backend(view);
+    assert_eq!(durable_wait(&backend, "yielded-wait").await, yielded);
+    assert!(
+        crate::database::load_subagent("child-1")
+            .unwrap()
+            .unwrap()
+            .reported_finish
+            .is_none()
+    );
+    assert_eq!(durable_wait(&backend, "yielded-wait").await, yielded);
+    let next = durable_wait(&backend, "next-wait").await;
+    assert_eq!(next["agents"][0]["output"], "still collectible");
 }
 
 /// A wait commits its report marker with the durable result. Replaying the

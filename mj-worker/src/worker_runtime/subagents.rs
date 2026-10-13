@@ -629,6 +629,7 @@ impl SubagentEndpoint {
         let mut waiter = self.register_waiter(request_id);
         self.await_result_registered(request_id, deadline, &mut waiter)
             .await
+            .unwrap()
     }
 
     fn register_waiter(&self, request_id: &str) -> LiveWaiter {
@@ -646,20 +647,90 @@ impl SubagentEndpoint {
         request_id: &str,
         deadline: Instant,
         waiter: &mut LiveWaiter,
-    ) -> Option<SubagentToolResult> {
+    ) -> Result<Option<SubagentToolResult>> {
+        // Subscribe before checking: a steer admitted between the check and
+        // sleep remains visible even if the daemon is being replaced.
+        let mut relay_changes = self.relay.as_ref().map(|relay| {
+            relay
+                .lock()
+                .expect("relay lock poisoned")
+                .subscribe_changes()
+        });
         loop {
             let notified = self.completed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if let Some(result) = self.cached_result(request_id) {
                 waiter.finish();
-                return Some(result);
+                return Ok(Some(result));
+            }
+            if let Some(result) = self.yield_wait_for_steering(request_id, waiter)? {
+                return Ok(Some(result));
             }
             tokio::select! {
                 _ = &mut notified => {}
-                _ = sleep_until(deadline) => return waiter.finish_and_take_result(),
+                _ = sleep_until(deadline) => return Ok(waiter.finish_and_take_result()),
+                _ = async {
+                    match relay_changes.as_mut() {
+                        Some(changes) => { let _ = changes.changed().await; }
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
         }
+    }
+
+    fn yield_wait_for_steering(
+        &self,
+        request_id: &str,
+        waiter: &mut LiveWaiter,
+    ) -> Result<Option<SubagentToolResult>> {
+        let Some(relay) = &self.relay else {
+            return Ok(None);
+        };
+        let relay = relay.lock().expect("relay lock poisoned");
+        let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
+        // This lock also owns daemon completion. Exactly one result wins;
+        // neither an arriving report nor a steering wake can overwrite it.
+        if let Some(result) = state.results.get(request_id).cloned() {
+            LiveWaiter::remove_from(&mut waiter.active, request_id, &mut state);
+            return Ok(Some(result));
+        }
+        let Some(request) = state.requests.get(request_id) else {
+            return Ok(None);
+        };
+        if !matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::WaitAgents
+        ) || !request
+            .originating_command_id
+            .as_deref()
+            .is_some_and(|turn| relay.boundary_steer_needs_turn(turn))
+        {
+            return Ok(None);
+        }
+        let now = mj_core::clock::epoch_millis();
+        let waited_seconds = now.saturating_sub(request.created_at_ms).max(0) as u64 / 1_000;
+        let payload = serde_json::json!({
+            "status": "interrupted",
+            "waited_seconds": waited_seconds,
+            "agents": [],
+            "next_action": "A user correction is waiting at this tool boundary. Read it before calling wait again. Your children continue working; their reports have not been collected by this reply.",
+        });
+        let result = SubagentToolResult {
+            request_id: request_id.to_owned(),
+            completed_at_ms: now,
+            is_error: false,
+            message: payload.to_string(),
+        };
+        // Publish the worker's answer durably so the daemon retires its wait
+        // too. A later daemon report was NOT delivered by this answer: its
+        // receipt must restore any child report markers it tentatively set.
+        self.store_result(&mut state, result.clone(), false)?;
+        LiveWaiter::remove_from(&mut waiter.active, request_id, &mut state);
+        drop(state);
+        self.completed.notify_waiters();
+        Ok(Some(result))
     }
 
     #[cfg(test)]
@@ -773,6 +844,19 @@ impl SubagentEndpoint {
             return Ok(true);
         }
         let delivered = state.live_waiters.get(&request_id).copied().unwrap_or(0) > 0;
+        self.store_result(&mut state, result, delivered)?;
+        drop(state);
+        self.completed.notify_waiters();
+        Ok(delivered)
+    }
+
+    fn store_result(
+        &self,
+        state: &mut QueueState,
+        result: SubagentToolResult,
+        delivered: bool,
+    ) -> Result<()> {
+        let request_id = result.request_id.clone();
         let mut next = state.clone();
         next.requests.remove(&request_id);
         next.results.insert(request_id.clone(), result);
@@ -794,9 +878,7 @@ impl SubagentEndpoint {
         }
         self.persist(&next)?;
         *state = next;
-        drop(state);
-        self.completed.notify_waiters();
-        Ok(delivered)
+        Ok(())
     }
 
     fn persist(&self, state: &QueueState) -> Result<()> {
@@ -1042,10 +1124,7 @@ mod tests {
 
         for (role, old_root) in [
             (SubagentMcpRole::Parent, ".local/share/hel/profiles/session"),
-            (
-                SubagentMcpRole::FixedParent,
-                ".local/share/hel/workers/session",
-            ),
+            (SubagentMcpRole::Parent, ".local/share/hel/workers/session"),
             (SubagentMcpRole::Child, "/previous-target/workers/session"),
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -1174,7 +1253,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
         use mj_core::subagent::SubagentMcpRole;
         for role in [
             SubagentMcpRole::Parent,
-            SubagentMcpRole::FixedParent,
+            SubagentMcpRole::Parent,
             SubagentMcpRole::MessageOnly,
             SubagentMcpRole::Child,
         ] {
@@ -1363,11 +1442,10 @@ enabled = false
 
         let mutations = [
             SubagentToolAction::Spawn {
+                task_type: mj_core::subagent::SubagentTaskType::Straightforward,
                 task_name: "task".into(),
                 instructions: "work".into(),
-                profile_id: None,
-                model: None,
-                effort: None,
+
                 working_directory: PathBuf::new(),
                 context: None,
                 files: Vec::new(),
@@ -1604,6 +1682,198 @@ enabled = false
             }
         }
         drop(clients);
+    }
+
+    // Hard-won: 8c73d3a8f: Claude's hour-long wait prevented its steering hook from running.
+    #[tokio::test]
+    async fn claude_steering_wakes_the_socket_wait_without_a_daemon_or_lost_reports() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use mj_core::config::HarnessKind;
+        use mj_core::relay::{RelayResponsePayload, SteeringStatus};
+
+        for steer_before_wait in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut owner = crate::relay::DurableRelay::open_for_harness(
+                root.path(),
+                "session-123",
+                "test",
+                HarnessKind::Claude,
+            )
+            .unwrap();
+            owner.set_steering_delivery_mode(HarnessKind::Claude, true);
+            owner.set_automatic_steering(true);
+            submit_relay(&mut owner, "prompt-first", prompt("work"));
+            owner.claim_pending_commands(true).unwrap();
+            let relay = Arc::new(Mutex::new(owner));
+            let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+            endpoint.relay = Some(relay.clone());
+            endpoint.harness = Some(HarnessKind::Claude);
+            let steer = || {
+                let mut owner = relay.lock().unwrap();
+                owner.set_steering_supported(Some(true));
+                submit_relay(&mut owner, "correction", prompt("change direction"));
+                assert!(owner.claim_pending_commands(true).unwrap().is_empty());
+            };
+            if steer_before_wait {
+                steer();
+            }
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let service = endpoint.clone();
+            let task = tokio::spawn(async move { serve_one(server, service).await });
+            let mut wait = request("waiting");
+            wait.created_at_ms = mj_core::clock::epoch_millis();
+            wait.action = SubagentToolAction::WaitAgents;
+            let mut body = serde_json::to_vec(&wait).unwrap();
+            body.push(b'\n');
+            client.write_all(&body).await.unwrap();
+            if !steer_before_wait {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while endpoint.snapshot().0.is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(!task.is_finished());
+                steer();
+            }
+            let mut line = String::new();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                BufReader::new(client).read_line(&mut line),
+            )
+            .await
+            .expect("steering must yield the wait, not wait an hour")
+            .unwrap();
+            task.await.unwrap().unwrap();
+            let reply: SocketReply = serde_json::from_str(&line).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(&reply.result.unwrap().message).unwrap();
+            assert_eq!(payload["status"], "interrupted");
+            assert!(endpoint.state.lock().unwrap().live_waiters.is_empty());
+            assert!(
+                endpoint.snapshot().0.is_empty(),
+                "the yielded request must retire"
+            );
+
+            // A late daemon report was not part of this answer. Its delivery
+            // receipt must leave that report available for the parent's next wait.
+            assert!(!endpoint.complete(done("waiting")).unwrap());
+            let recovered = SubagentEndpoint::open(root.path()).unwrap();
+            assert!(!recovered.complete(done("waiting")).unwrap());
+            assert!(recovered.snapshot().0.is_empty());
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&recovered.snapshot().1[0].message)
+                    .unwrap()["status"],
+                "interrupted"
+            );
+            let mut owner = relay.lock().unwrap();
+            assert_eq!(
+                owner.operational_state().steering.unwrap().status,
+                SteeringStatus::Pending
+            );
+            let RelayResponsePayload::MailboxDrained {
+                lease_id: Some(lease),
+                text: Some(text),
+                count: 1,
+            } = owner.drain_mailbox("PostToolBatch").unwrap()
+            else {
+                panic!("steer must remain for the hook")
+            };
+            assert!(text.contains("change direction"));
+            let acknowledged = owner.handle(crate::relay::test_support::relay_request(
+                "hook-ack",
+                mj_core::relay::RelayRequest::AckMailbox { lease_id: lease },
+            ));
+            assert!(matches!(
+                acknowledged.body,
+                mj_core::relay::RelayResponseBody::Ok {
+                    payload: RelayResponsePayload::MailboxAcknowledged { acknowledged: true }
+                }
+            ));
+            assert_eq!(
+                owner.operational_state().steering.unwrap().status,
+                SteeringStatus::Applied
+            );
+            assert!(matches!(
+                owner.drain_mailbox("PostToolBatch").unwrap(),
+                RelayResponsePayload::MailboxDrained { count: 0, .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn steering_yield_preserves_a_report_that_completed_first_and_ignores_other_requests() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use mj_core::config::HarnessKind;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut owner = crate::relay::DurableRelay::open_for_harness(
+            root.path(),
+            "session-123",
+            "test",
+            HarnessKind::Claude,
+        )
+        .unwrap();
+        owner.set_steering_delivery_mode(HarnessKind::Claude, true);
+        owner.set_steering_supported(Some(true));
+        owner.set_automatic_steering(true);
+        submit_relay(&mut owner, "prompt-first", prompt("work"));
+        owner.claim_pending_commands(true).unwrap();
+        let relay = Arc::new(Mutex::new(owner));
+        let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+        endpoint.relay = Some(relay.clone());
+        let mut wait = request("report-first");
+        wait.action = SubagentToolAction::WaitAgents;
+        endpoint.enqueue(wait).unwrap();
+        let mut waiter = endpoint.register_waiter("report-first");
+        assert!(endpoint.complete(done("report-first")).unwrap());
+        {
+            let mut owner = relay.lock().unwrap();
+            submit_relay(&mut owner, "correction", prompt("change direction"));
+            owner.claim_pending_commands(true).unwrap();
+        }
+        assert_eq!(
+            endpoint
+                .await_result_registered(
+                    "report-first",
+                    Instant::now() + Duration::from_secs(2),
+                    &mut waiter
+                )
+                .await
+                .unwrap(),
+            Some(done("report-first"))
+        );
+        for (id, action, origin) in [
+            (
+                "mutation",
+                SubagentToolAction::CloseAgent {
+                    child_session_id: "child".into(),
+                },
+                "prompt-first",
+            ),
+            ("stale", SubagentToolAction::WaitAgents, "old-turn"),
+        ] {
+            let mut other = request(id);
+            other.action = action;
+            endpoint.enqueue(other).unwrap();
+            endpoint
+                .state
+                .lock()
+                .unwrap()
+                .requests
+                .get_mut(id)
+                .unwrap()
+                .originating_command_id = Some(origin.into());
+            let mut waiter = endpoint.register_waiter(id);
+            assert!(
+                endpoint
+                    .yield_wait_for_steering(id, &mut waiter)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(endpoint.complete(done(id)).unwrap());
+        }
     }
 
     #[test]
@@ -2140,7 +2410,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
                     started + deadline_budget,
                     waiter.as_mut().expect("a waiting request has a waiter"),
                 )
-                .await
+                .await?
         }
     };
     let result = result.or_else(|| {

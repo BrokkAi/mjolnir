@@ -16,6 +16,22 @@ pub(super) struct ChildWaitFeed {
 }
 
 impl ChildWaitFeed {
+    /// The worker can finish a wait itself to yield to steering. Its durable
+    /// answer is authoritative; the daemon must retire that wait too.
+    pub(super) fn completed_result(
+        &self,
+        request_id: &str,
+    ) -> Option<mj_core::subagent::SubagentToolResult> {
+        self.parent
+            .as_ref()?
+            .view()
+            .snapshot?
+            .subagent_results
+            .iter()
+            .find(|result| result.request_id == request_id)
+            .cloned()
+    }
+
     fn committed(&self) -> Result<Option<Arc<crate::database::CommittedState>>> {
         self.durable
             .as_ref()

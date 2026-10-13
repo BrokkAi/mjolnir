@@ -264,16 +264,28 @@ struct CheckpointArgs {
         .multiple(true)
 ))]
 struct MoveArgs {
-    /// Destination delegation policy. Omit to retain the session's policy,
+    /// Destination delegation policy: native, mjolnir, or none (no
+    /// delegation tools). Omit to retain the session's policy,
     /// or the recorded policy when retrying a sealed Move.
-    #[arg(long, value_parser = ["native", "single-model", "none"])]
+    #[arg(long)]
     subagents: Option<String>,
-    /// Fixed child model, required with --subagents single-model.
-    #[arg(long, requires = "subagents")]
+    /// Override the configured model for straightforward Mjolnir sub-agents.
+    #[arg(long)]
+    subagent_straightforward: Option<String>,
+    /// Override straightforward sub-agent effort (requires --subagent-straightforward).
+    #[arg(long)]
+    subagent_straightforward_effort: Option<String>,
+    /// Override the configured model for subtle Mjolnir sub-agents.
+    #[arg(long)]
+    subagent_subtle: Option<String>,
+    /// Override subtle sub-agent effort (requires --subagent-subtle).
+    #[arg(long)]
+    subagent_subtle_effort: Option<String>,
+    /// Retired; use the four per-type sub-agent flags.
+    #[arg(long, hide = true)]
     subagent_model: Option<String>,
-    /// Fixed child reasoning effort, or `adaptive` for a per-task Jev choice
-    /// when available.
-    #[arg(long, requires = "subagents")]
+    /// Retired; use the four per-type sub-agent flags.
+    #[arg(long, hide = true)]
     subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
     #[arg(long)]
@@ -494,10 +506,13 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn install_panic_logging() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "Mjolnir panicked");
-        default_hook(info);
+    // A default hook writes to detached stderr, which may itself be full.
+    let _ = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        logging::panic_log(&format!(
+            "Mjolnir panicked: {}",
+            mj_core::logging::panic_message(info)
+        ));
     }));
 }
 
@@ -817,6 +832,10 @@ async fn run_command(
 async fn move_session(args: MoveArgs) -> Result<()> {
     let subagents = api_commands::subagent_policy(
         args.subagents.as_deref(),
+        args.subagent_straightforward.as_deref(),
+        args.subagent_straightforward_effort.as_deref(),
+        args.subagent_subtle.as_deref(),
+        args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
     )?;

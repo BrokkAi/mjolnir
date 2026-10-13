@@ -943,20 +943,20 @@ pub(super) async fn load_materialized_activity(
         .cloned()
         .collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        session_ids
+        let activity_by_session = crate::database::load_materialized_activity()?;
+        Ok(session_ids
             .into_iter()
             .map(|session_id| {
-                crate::database::load_materialized_session_summary(&session_id).map(|summary| {
-                    let activity = summary
-                        .map(|summary| MaterializedActivity {
-                            last_activity_at_ms: summary.last_activity_at_ms,
-                            execution: summary.execution,
-                        })
-                        .unwrap_or_default();
-                    (session_id, activity)
-                })
+                let activity = activity_by_session
+                    .get(&session_id)
+                    .map(|(last_activity_at_ms, execution)| MaterializedActivity {
+                        last_activity_at_ms: *last_activity_at_ms,
+                        execution: *execution,
+                    })
+                    .unwrap_or_default();
+                (session_id, activity)
             })
-            .collect()
+            .collect::<std::collections::BTreeMap<_, _>>())
     })
     .await
     .context("materialized activity startup task failed")?

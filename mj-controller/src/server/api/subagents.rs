@@ -1,7 +1,5 @@
 use super::*;
 
-use mj_core::subagent::CURRENT_MODEL;
-
 pub(super) const MAX_SUBAGENT_CONTEXT_BYTES: usize = 256 * 1024;
 
 pub(super) async fn spawn_subagent(
@@ -27,14 +25,7 @@ pub(super) async fn spawn_subagent(
         &backend,
         &parent.profile_id,
         &parent.subagents,
-        request.profile_id.as_deref(),
-        request.model.as_deref(),
-        request.effort.as_deref(),
-        AdaptiveEffortContext {
-            parent_session_id: &parent_session_id,
-            task_name: &request.task_name,
-            instructions: &initial_prompt,
-        },
+        request.task_type.unwrap_or_default(),
     )
     .await?;
 
@@ -88,158 +79,52 @@ pub(crate) struct SubagentSelection {
     pub fast_mode: bool,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct AdaptiveEffortContext<'a> {
-    pub(crate) parent_session_id: &'a str,
-    pub(crate) task_name: &'a str,
-    pub(crate) instructions: &'a str,
-}
-
+/// Resolve the session override or global task choice, preserving quota ranking.
 pub(crate) async fn resolve_subagent_policy_selection(
     backend: &Arc<dyn SubagentBackend>,
     parent_profile: &str,
     policy: &mj_core::subagent::SubagentPolicy,
-    profile_id: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-    adaptive_context: AdaptiveEffortContext<'_>,
+    task_type: mj_core::subagent::SubagentTaskType,
 ) -> Result<SubagentSelection, ApiFailure> {
-    use mj_core::subagent::SubagentPolicy;
-    match policy {
-        SubagentPolicy::AllModels => {
-            resolve_subagent_selection(
-                backend,
-                parent_profile,
-                profile_id,
-                model,
-                effort,
-                adaptive_context,
-            )
-            .await
-        }
-        SubagentPolicy::SingleModel {
-            model: fixed_model,
-            effort: fixed_effort,
-        } => {
-            if profile_id.is_some() || model.is_some() || effort.is_some() {
-                return Err(ApiFailure::bad_request(
-                    "single-model spawn does not accept profile_id, model, or effort",
-                ));
-            }
-            let effort_requirement = match fixed_effort.as_deref() {
-                Some(mj_core::subagent::ADAPTIVE_EFFORT) => EffortRequirement::Adaptive,
-                Some(effort) => EffortRequirement::Exact(effort),
-                None => EffortRequirement::NoChoices,
-            };
-            resolve_model_profile_selection_matching(
-                backend,
-                None,
-                fixed_model,
-                effort_requirement,
-                None,
-                ModelProfileCandidateSource::Subagents { parent_profile },
-                Some(adaptive_context),
-            )
-            .await
-            .map_err(|error| {
-                if error.status == StatusCode::BAD_REQUEST {
-                    ApiFailure::conflict(format!(
-                        "No eligible profile offers the fixed subagent model {fixed_model:?} with effort {fixed_effort:?}. {}",
-                        error.message
-                    ))
-                } else {
-                    error
-                }
-            })
-        }
-        _ => Err(ApiFailure::conflict(
+    if !policy.uses_mjolnir() {
+        return Err(ApiFailure::conflict(
             "this session does not allow Mjolnir sub-agents",
-        )),
+        ));
     }
-}
-
-/// Settle a spawn's profile, model and effort; both spawn paths use this.
-///
-/// The model is required, and [`CURRENT_MODEL`] names the parent's own. Unless
-/// the caller pins a profile, the child runs on the eligible profile that
-/// offers the model and has the most quota left, so a parent whose own login
-/// is nearly spent does not give its child the same empty allowance. An
-/// omitted effort follows the parent's when the chosen profile offers it.
-pub(crate) async fn resolve_subagent_selection(
-    backend: &Arc<dyn SubagentBackend>,
-    parent_profile: &str,
-    profile_id: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-    adaptive_context: AdaptiveEffortContext<'_>,
-) -> Result<SubagentSelection, ApiFailure> {
-    let model = model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .ok_or_else(|| {
-            ApiFailure::bad_request(format!(
-                "spawn needs a model: name one from list_profiles, or \"{CURRENT_MODEL}\" for \
-                 this session's own model"
-            ))
-        })?;
-    let parent_config = if model == CURRENT_MODEL || effort.is_none() {
-        backend
-            .session_handle(adaptive_context.parent_session_id.to_owned())
-            .await?
-            .and_then(|handle| handle.view().snapshot)
-            .map(|snapshot| snapshot.operational.config.clone())
-            .unwrap_or_default()
-    } else {
-        std::collections::BTreeMap::new()
-    };
-    let model = if model == CURRENT_MODEL {
-        parent_config.get("model").cloned().ok_or_else(|| {
-            ApiFailure::conflict(format!(
-                "this session's current model is unknown; name a model from list_profiles \
-                 instead of \"{CURRENT_MODEL}\""
-            ))
-        })?
-    } else {
-        model.to_owned()
-    };
-    resolve_subagent_model_profile_selection(
-        backend,
-        parent_profile,
-        profile_id,
-        &model,
-        effort,
-        parent_config.get("effort").map(String::as_str),
-        adaptive_context,
-    )
-    .await
-}
-
-/// Choose a profile from the eligible sub-agent set for an exact model and
-/// validate its effort.
-pub(crate) async fn resolve_subagent_model_profile_selection(
-    backend: &Arc<dyn SubagentBackend>,
-    parent_profile: &str,
-    profile_id: Option<&str>,
-    model: &str,
-    effort: Option<&str>,
-    inherited_effort: Option<&str>,
-    adaptive_context: AdaptiveEffortContext<'_>,
-) -> Result<SubagentSelection, ApiFailure> {
-    let requirement = match effort {
-        Some(mj_core::subagent::ADAPTIVE_EFFORT) => EffortRequirement::Adaptive,
-        Some(effort) => EffortRequirement::Exact(effort),
-        None => EffortRequirement::Any,
-    };
+    let config = backend.subagent_config().await?;
+    let choice = policy
+        .override_choice(task_type)
+        .or_else(|| config.choice(task_type))
+        .ok_or_else(|| ApiFailure::conflict(format!(
+            "Configure [subagents.{}] or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
+            task_type.id(), task_type.id()
+        )))?;
+    if choice.effort.as_deref() == Some("adaptive") {
+        return Err(ApiFailure::bad_request(
+            "adaptive sub-agent effort is not supported",
+        ));
+    }
     resolve_model_profile_selection_matching(
         backend,
-        profile_id,
-        model,
-        requirement,
-        inherited_effort,
+        None,
+        &choice.model,
+        choice
+            .effort
+            .as_deref()
+            .map(EffortRequirement::Exact)
+            .unwrap_or(EffortRequirement::Default),
+        None,
         ModelProfileCandidateSource::Subagents { parent_profile },
-        Some(adaptive_context),
     )
     .await
+    .map_err(|error| {
+        let context = if policy.override_choice(task_type).is_some() {
+            format!("session --subagent-{} override", task_type.id())
+        } else {
+            format!("[subagents.{}]", task_type.id())
+        };
+        ApiFailure::conflict(format!("{context}: {}", error.message))
+    })
 }
 
 /// Choose a profile for a user-created session from all enabled, usable
@@ -250,9 +135,9 @@ pub(crate) async fn resolve_session_model_profile_selection(
     model: &str,
     effort: Option<&str>,
 ) -> Result<SubagentSelection, ApiFailure> {
-    if effort == Some(mj_core::subagent::ADAPTIVE_EFFORT) {
+    if effort == Some("adaptive") {
         return Err(ApiFailure::bad_request(
-            "adaptive effort is only available when spawning a sub-agent",
+            "adaptive effort is no longer supported",
         ));
     }
     let requirement = effort
@@ -265,7 +150,6 @@ pub(crate) async fn resolve_session_model_profile_selection(
         requirement,
         None,
         ModelProfileCandidateSource::Session { ranking_anchor },
-        None,
     )
     .await
 }
@@ -295,8 +179,7 @@ impl<'a> ModelProfileCandidateSource<'a> {
 #[derive(Clone, Copy)]
 enum EffortRequirement<'a> {
     Any,
-    NoChoices,
-    Adaptive,
+    Default,
     Exact(&'a str),
 }
 
@@ -307,7 +190,6 @@ async fn resolve_model_profile_selection_matching(
     requirement: EffortRequirement<'_>,
     inherited_effort: Option<&str>,
     source: ModelProfileCandidateSource<'_>,
-    adaptive_context: Option<AdaptiveEffortContext<'_>>,
 ) -> Result<SubagentSelection, ApiFailure> {
     let candidates = match source {
         ModelProfileCandidateSource::Session { .. } => backend.session_profile_candidates().await?,
@@ -372,29 +254,8 @@ async fn resolve_model_profile_selection_matching(
             {
                 Some(requested.to_owned())
             }
-            EffortRequirement::NoChoices if efforts.is_empty() => None,
-            EffortRequirement::Adaptive => {
-                let context =
-                    adaptive_context.expect("adaptive effort resolution has the child task brief");
-                let resolved = crate::effort_verdict::resolve(
-                    context.parent_session_id,
-                    context.task_name,
-                    context.instructions,
-                    model,
-                    &efforts,
-                )
-                .await;
-                child_effort(model, &efforts, resolved.as_deref(), None)?
-            }
+            EffortRequirement::Default => None,
             EffortRequirement::Exact(_) => {
-                selection_errors.push(format!(
-                    "{} offers efforts: {}",
-                    candidate.profile_id,
-                    effort_names(&efforts)
-                ));
-                continue;
-            }
-            EffortRequirement::NoChoices => {
                 selection_errors.push(format!(
                     "{} offers efforts: {}",
                     candidate.profile_id,
@@ -416,17 +277,13 @@ async fn resolve_model_profile_selection_matching(
     }
     let required = match requirement {
         EffortRequirement::Exact(effort) => format!("effort {effort:?}"),
-        EffortRequirement::NoChoices => "no effort choices".to_owned(),
-        EffortRequirement::Adaptive => "adaptive effort".to_owned(),
+        EffortRequirement::Default => "harness default effort".to_owned(),
         EffortRequirement::Any => unreachable!("handled above"),
     };
     let unavailable_effort = match requirement {
         EffortRequirement::Exact(effort) if !offered_any_effort => format!(
             "model {model:?} offers no effort choices; requested effort {effort:?} is unavailable. "
         ),
-        EffortRequirement::Adaptive => {
-            format!("could not resolve adaptive effort for model {model:?}. ")
-        }
         _ => format!(
             "no {} profile offers model {model:?} with {required}. ",
             source.profile_description()
@@ -468,14 +325,6 @@ async fn model_efforts(
 }
 
 fn selection(profile_id: String, model: &str, effort: Option<String>) -> SubagentSelection {
-    let effort = effort.filter(|effort| {
-        if effort == mj_core::subagent::ADAPTIVE_EFFORT {
-            tracing::warn!(model, "refusing to pass adaptive effort to a child harness");
-            false
-        } else {
-            true
-        }
-    });
     SubagentSelection {
         profile_id,
         model: model.to_owned(),
@@ -558,8 +407,8 @@ fn child_effort(
 ) -> Result<Option<String>, ApiFailure> {
     let offers = |effort: &str| offered.iter().any(|choice| choice.value == effort);
     match requested {
-        Some(mj_core::subagent::ADAPTIVE_EFFORT) => Err(ApiFailure::bad_request(
-            "adaptive effort must be resolved before a child starts",
+        Some("adaptive") => Err(ApiFailure::bad_request(
+            "adaptive effort is no longer supported",
         )),
         Some(effort) if offered.is_empty() => Err(ApiFailure::bad_request(format!(
             "model {model:?} offers no effort choices; spawn it without effort, not {effort:?}"
@@ -574,7 +423,7 @@ fn child_effort(
         ))),
         Some(effort) => Ok(Some(effort.to_owned())),
         None => Ok(parent
-            .filter(|effort| *effort != mj_core::subagent::ADAPTIVE_EFFORT && offers(effort))
+            .filter(|effort| *effort != "adaptive" && offers(effort))
             .map(str::to_owned)),
     }
 }
@@ -644,6 +493,7 @@ pub(crate) fn rank_candidates(candidates: &mut [SubagentCandidate], ranking_anch
 /// that offer exactly the same models merged into the best-ranked of them.
 /// Several logins of one account type become one entry, and a profile that
 /// offers different models is never hidden behind another.
+#[cfg(test)]
 pub(crate) fn merge_same_models(
     mut candidates: Vec<SubagentCandidate>,
     parent_profile: &str,
@@ -929,6 +779,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            discovery_fails: false,
+            config: Default::default(),
             candidates: SubagentCandidates {
                 offered: vec![],
                 unavailable: vec![],
@@ -1058,10 +910,16 @@ mod tests {
     /// profile's candidates, and no live parent session (so effort inherits
     /// nothing and the parent's real model is never consulted).
     struct FakeSelectionBackend {
+        discovery_fails: bool,
+        config: mj_core::config::SubagentConfig,
         candidates: SubagentCandidates,
     }
 
     impl SubagentBackend for FakeSelectionBackend {
+        fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
+            Box::pin(async { Ok(self.config.clone()) })
+        }
+
         fn profile_config(
             &self,
             profile: String,
@@ -1069,6 +927,9 @@ mod tests {
             _refresh: bool,
         ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
             Box::pin(async move {
+                if self.discovery_fails {
+                    anyhow::bail!("model-specific probe failed: expired login");
+                }
                 let mut choices = self
                     .candidates
                     .offered
@@ -1179,101 +1040,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn fixed_spawn_ranks_only_profiles_supporting_the_exact_model_and_effort() {
-        use mj_core::subagent::SubagentPolicy;
-        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
-            candidates: SubagentCandidates {
-                offered: vec![
-                    candidate("parent", Some(2), &["fixed"]),
-                    candidate("best", Some(70), &["fixed"]),
-                    candidate("full-but-wrong-effort", Some(100), &["fixed"]),
-                ],
-                unavailable: vec![],
-            },
-        });
-        let policy = SubagentPolicy::SingleModel {
-            model: "fixed".into(),
-            effort: Some("high".into()),
-        };
-        let selected = resolve_subagent_policy_selection(
-            &backend,
-            "parent",
-            &policy,
-            None,
-            None,
-            None,
-            AdaptiveEffortContext {
-                parent_session_id: "s",
-                task_name: "task",
-                instructions: "assignment",
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            (
-                selected.profile_id.as_str(),
-                selected.model.as_str(),
-                selected.effort.as_deref()
-            ),
-            ("best", "fixed", Some("high"))
-        );
-        for (profile, model, effort) in [
-            (Some("best"), None, None),
-            (None, Some("fixed"), None),
-            (None, None, Some("high")),
-        ] {
-            assert!(
-                resolve_subagent_policy_selection(
-                    &backend,
-                    "parent",
-                    &policy,
-                    profile,
-                    model,
-                    effort,
-                    AdaptiveEffortContext {
-                        parent_session_id: "s",
-                        task_name: "task",
-                        instructions: "assignment",
-                    },
-                )
-                .await
-                .is_err()
-            );
-        }
-        for policy in [
-            SubagentPolicy::None,
-            SubagentPolicy::Native,
-            SubagentPolicy::SingleModel {
-                model: "missing".into(),
-                effort: Some("high".into()),
-            },
-            SubagentPolicy::SingleModel {
-                model: "fixed".into(),
-                effort: Some("ultra".into()),
-            },
-        ] {
-            assert!(
-                resolve_subagent_policy_selection(
-                    &backend,
-                    "parent",
-                    &policy,
-                    None,
-                    None,
-                    None,
-                    AdaptiveEffortContext {
-                        parent_session_id: "s",
-                        task_name: "task",
-                        instructions: "assignment",
-                    },
-                )
-                .await
-                .is_err()
-            );
-        }
-    }
-
     fn efforts(values: &[&str]) -> Vec<mj_core::acp::SessionConfigChoice> {
         values
             .iter()
@@ -1319,113 +1085,146 @@ mod tests {
             not_offered.message
         );
     }
-
-    // Hard-won: f67ed023: spawn accepted effort unsupported by the selected model
+    // Hard-won: discovery failures with omitted effort panicked instead of refusing the spawn.
     #[tokio::test]
-    async fn a_spawn_checks_effort_against_the_model_it_names() {
-        const CHILD_TEST: &str = "MJ_TEST_ADAPTIVE_SUBAGENT_NO_EFFORT";
-        if std::env::var_os(CHILD_TEST).is_none() {
-            let root = tempfile::tempdir().unwrap();
-            crate::controller::test_support::IsolatedTest::new(
-                crate::controller::test_support::test_name(
-                    module_path!(),
-                    "a_spawn_checks_effort_against_the_model_it_names",
-                ),
-            )
-            .env(CHILD_TEST, "1")
-            .env("MJ_INSTANCE", "adaptive-subagent-no-effort-test")
-            .env(mj_core::jev::DISABLED_ENVIRONMENT, "1")
-            .isolated_store(root.path())
-            .run();
-            return;
-        }
-        let _writer = crate::database::install_isolated_test_writer();
-        let mut claude = candidate("claude", Some(50), &["sonnet", "no-effort"]);
-        claude.choices.efforts = efforts(&["low", "medium", "high"]);
+    async fn default_effort_spawn_reports_all_failed_model_discoveries() {
+        use mj_core::config::{SubagentChoice, SubagentConfig};
+        use mj_core::subagent::{SubagentPolicy, SubagentTaskType};
+        let choice = SubagentChoice {
+            model: "no-effort".into(),
+            effort: None,
+        };
         let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            discovery_fails: true,
+            config: SubagentConfig {
+                straightforward: Some(choice.clone()),
+                subtle: Some(choice),
+                ..Default::default()
+            },
             candidates: SubagentCandidates {
-                offered: vec![claude],
-                unavailable: Vec::new(),
+                offered: vec![
+                    candidate("expired-first", Some(90), &["no-effort"]),
+                    candidate("expired-second", Some(50), &["no-effort"]),
+                ],
+                unavailable: vec![],
             },
         });
-        let refused = resolve_subagent_selection(
+        let error = resolve_subagent_policy_selection(
             &backend,
-            "claude",
-            None,
-            Some("no-effort"),
-            Some("low"),
-            AdaptiveEffortContext {
-                parent_session_id: "parent-session",
-                task_name: "task",
-                instructions: "assignment",
+            "parent",
+            &SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
             },
+            SubagentTaskType::Straightforward,
         )
         .await
         .unwrap_err();
-        assert!(
-            refused.message.contains("offers no effort choices"),
-            "{}",
-            refused.message
-        );
-        let selection = resolve_subagent_selection(
-            &backend,
-            "claude",
-            None,
-            Some("no-effort"),
-            None,
-            AdaptiveEffortContext {
-                parent_session_id: "parent-session",
-                task_name: "task",
-                instructions: "assignment",
+        for detail in [
+            "[subagents.straightforward]",
+            "harness default effort",
+            "no-effort",
+            "expired-first",
+            "expired-second",
+            "expired login",
+        ] {
+            assert!(error.message.contains(detail), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn task_type_spawn_uses_global_choices_and_quota_ranked_eligible_profiles() {
+        use mj_core::config::{SubagentChoice, SubagentConfig};
+        use mj_core::subagent::{SubagentPolicy, SubagentTaskType};
+        let candidates = SubagentCandidates {
+            offered: vec![
+                candidate("parent", Some(2), &["fixed", "no-effort"]),
+                candidate("best", Some(70), &["fixed", "no-effort"]),
+                candidate("full-but-wrong-effort", Some(100), &["fixed"]),
+            ],
+            unavailable: vec![],
+        };
+        let config = SubagentConfig {
+            straightforward: Some(SubagentChoice {
+                model: "no-effort".into(),
+                effort: None,
+            }),
+            subtle: Some(SubagentChoice {
+                model: "fixed".into(),
+                effort: Some("high".into()),
+            }),
+            ..Default::default()
+        };
+        let backend: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            discovery_fails: false,
+            config,
+            candidates: candidates.clone(),
+        });
+        for (task_type, model, effort) in [
+            (SubagentTaskType::Straightforward, "no-effort", None),
+            (SubagentTaskType::Subtle, "fixed", Some("high")),
+        ] {
+            let selected = resolve_subagent_policy_selection(
+                &backend,
+                "parent",
+                &SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+                task_type,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                (
+                    selected.profile_id.as_str(),
+                    selected.model.as_str(),
+                    selected.effort.as_deref()
+                ),
+                ("best", model, effort)
+            );
+        }
+        let unconfigured: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            discovery_fails: false,
+            config: Default::default(),
+            candidates,
+        });
+        let mixed_policy = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: Some(Box::new(SubagentChoice {
+                model: "fixed".into(),
+                effort: Some("high".into()),
+            })),
+        };
+        for (task_type, model, effort) in [
+            (SubagentTaskType::Straightforward, "no-effort", None),
+            (SubagentTaskType::Subtle, "fixed", Some("high")),
+        ] {
+            let selected =
+                resolve_subagent_policy_selection(&backend, "parent", &mixed_policy, task_type)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                (
+                    selected.profile_id.as_str(),
+                    selected.model.as_str(),
+                    selected.effort.as_deref()
+                ),
+                ("best", model, effort)
+            );
+        }
+        let error = resolve_subagent_policy_selection(
+            &unconfigured,
+            "parent",
+            &SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
             },
+            SubagentTaskType::Subtle,
         )
         .await
-        .unwrap();
-        assert_eq!(selection.effort, None);
-        let adaptive = resolve_subagent_selection(
-            &backend,
-            "claude",
-            None,
-            Some("no-effort"),
-            Some(mj_core::subagent::ADAPTIVE_EFFORT),
-            AdaptiveEffortContext {
-                parent_session_id: "parent-session",
-                task_name: "narrow task",
-                instructions: "A small task for a model without effort choices.",
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(adaptive.effort, None);
-        let selection = resolve_subagent_selection(
-            &backend,
-            "claude",
-            None,
-            Some("sonnet"),
-            Some("low"),
-            AdaptiveEffortContext {
-                parent_session_id: "parent-session",
-                task_name: "task",
-                instructions: "assignment",
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(selection.effort.as_deref(), Some("low"));
-        let adaptive = resolve_subagent_selection(
-            &backend,
-            "claude",
-            None,
-            Some("sonnet"),
-            Some(mj_core::subagent::ADAPTIVE_EFFORT),
-            AdaptiveEffortContext {
-                parent_session_id: "parent-session",
-                task_name: "narrow task",
-                instructions: "A small task with an advertised effort ladder.",
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(adaptive.effort.as_deref(), Some("high"));
+        .unwrap_err();
+        assert!(error.message.contains("[subagents.subtle]"));
+        assert!(error.message.contains("--subagent-subtle"));
     }
 }

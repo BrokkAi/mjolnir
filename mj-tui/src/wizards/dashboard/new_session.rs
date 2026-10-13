@@ -326,15 +326,14 @@ impl DashboardState {
         Some(check)
     }
 
-    fn create_session_action_without_closing(&self, wizard: &NewWizard) -> DashboardAction {
+    pub(crate) fn create_session_action_without_closing(
+        &self,
+        wizard: &NewWizard,
+    ) -> DashboardAction {
         let target_template_id = nth_key(&self.config.targets, wizard.target);
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
         DashboardAction::CreateSession {
-            subagents: Some(
-                self.config.profiles[&nth_enabled_profile(&self.config, wizard.profile)]
-                    .subagents
-                    .clone(),
-            ),
+            subagents: Some(wizard.subagents.policy.clone()),
             create_managed_worktree: Some(
                 raw_project
                     && wizard.create_managed_worktree

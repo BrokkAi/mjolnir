@@ -99,7 +99,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         home: home.to_path_buf(),
         environment: environment.into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -128,7 +128,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     let every_name = CODEX_CREDENTIAL_ENVIRONMENT.map(str::to_owned).to_vec();
@@ -253,7 +253,7 @@ fn a_bedrock_codex_profile_uses_the_aws_chain_without_an_api_key_or_login_file()
         home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -296,7 +296,7 @@ fn an_inline_token_codex_profile_is_authenticated_without_a_login_file() {
         home: home.path().to_path_buf(),
         environment: BTreeMap::new().into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -616,7 +616,7 @@ fn sample_config() -> Config {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex-one"),
                 environment: BTreeMap::from([("RUST_LOG".into(), "info".into())]).into(),
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         )]),
@@ -1477,6 +1477,13 @@ fn a_legacy_subagents_enabled_key_still_loads_and_is_dropped_on_save() {
         Config::load_from(&path).unwrap().subagents.max_concurrent,
         4
     );
+    // A retained global section must drop the ignored key as well.
+    let saved = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("[subagents]", "[subagents]\nenabled = true");
+    std::fs::write(&path, saved).unwrap();
+    Config::load_from(&path).unwrap().save_to(&path).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("enabled"));
 }
 
 #[test]
@@ -2346,4 +2353,29 @@ fn a_version_14_file_follows_the_running_builds_default_image() {
         "{saved}"
     );
     assert!(saved.contains("example.invalid/agent:1"), "{saved}");
+}
+
+#[test]
+fn legacy_profile_subagents_load_without_migration_and_disappear_on_save() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    std::fs::write(&path, format!("version = {CONFIG_VERSION}\n[profiles.legacy]\nkind = \"codex\"\nhome = {:?}\nsubagents = {{ mode = \"single_model\", model = \"old\", effort = \"adaptive\" }}\n", root.path().to_string_lossy())).unwrap();
+    let config = Config::load_from(&path).unwrap();
+    assert!(!config.subagents.is_configured());
+    config.save_to(&path).unwrap();
+    assert!(
+        !std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("subagents")
+    );
+    let mut value = serde_json::to_value(&config).unwrap();
+    value["subagents"] = serde_json::json!({"straightforward":{"model":"chosen","effort":"adaptive"}, "subtle":{"model":"chosen"}});
+    let invalid: Config = serde_json::from_value(value).unwrap();
+    assert!(
+        invalid
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("adaptive")
+    );
 }

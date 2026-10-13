@@ -19,8 +19,13 @@ pub struct ViewerSnapshot {
     pub(crate) agent_mailboxes_enabled: bool,
     #[serde(default)]
     pub profile_capabilities: mj_core::profile_capabilities::ProfileCapabilitiesSnapshot,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "mj_core::subagent::deserialize_launch_policy"
+    )]
     pub last_subagent_policy: mj_core::subagent::SubagentPolicy,
+    #[serde(default)]
+    pub subagents_configured: bool,
     pub revision: u64,
     pub generated_at: String,
     /// Unix time in milliseconds, refreshed when serving the projection.
@@ -324,14 +329,7 @@ impl ViewerSnapshot {
             .map(|(id, profile)| ViewerProfile {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
-                subagents: profile.subagents.clone(),
-                subagent_discovery_key: config.subagent_discovery_key(id, None),
                 capabilities_key: profile.capabilities_key(id),
-                subagent_profile_ids: config
-                    .enabled_profiles()
-                    .filter(|(candidate, _)| config.subagents.profile_is_eligible(id, candidate))
-                    .map(|(candidate, _)| candidate.to_owned())
-                    .collect(),
                 quota: None,
             })
             .collect();
@@ -400,6 +398,7 @@ impl ViewerSnapshot {
             agent_mailboxes_enabled: config.agent_mailboxes_enabled(),
             profile_capabilities: Default::default(),
             last_subagent_policy: state.last_subagent_policy.clone(),
+            subagents_configured: config.subagents.is_configured(),
             revision,
             generated_at: now_unix().to_string(),
             server_time_ms: mj_core::clock::epoch_millis(),
@@ -908,14 +907,8 @@ pub struct ViewerBackgroundTask {
 pub struct ViewerProfile {
     pub id: String,
     #[serde(default)]
-    pub subagent_discovery_key: String,
-    #[serde(default)]
     pub capabilities_key: String,
-    #[serde(default)]
-    pub subagent_profile_ids: Vec<String>,
     pub harness_kind: String,
-    #[serde(default)]
-    pub subagents: mj_core::subagent::SubagentPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<ViewerQuota>,
 }

@@ -82,7 +82,7 @@ A failure is a JSON object with an `error` sentence:
 Some refusals also carry a `code` that names the reason, so a client can add
 advice that fits its own interface. The sentence names no interface. Today the
 only code is `subagent_choice_unavailable`: a new session asked for a
-single-model sub-agent model or effort that no eligible profile offers.
+global task-type sub-agent model or effort that no eligible profile offers.
 
 | Status | Meaning |
 | --- | --- |
@@ -405,23 +405,33 @@ workspaces, and invalid selections fail visibly. `at` cannot be combined with
 `subagents` sets the session's delegation policy:
 
 ```json
-{"subagents": {"mode": "single_model", "model": "<model-id>", "effort": "low"}}
+{"subagents": {"mode": "mjolnir"}}
 ```
 
-`mode` is `native` (the harness's own sub-agents), `single_model`, or `none`
-(delegation disabled). `single_model` requires `model`, which must be one of the
-eligible profiles' models, and takes an optional `effort`. Mjolnir selects an
-eligible profile offering that exact model and effort by remaining quota; a
-single model does not mean a single profile. The other modes take no other
-fields. The API spells the modes with underscores; `mj new --subagents` spells
-them with hyphens (`single-model`); both interfaces offer Native, single model,
-and None. An explicit policy overrides the profile for this session without
-changing the profile's settings. Existing sessions retain their recorded policy
-when profile defaults change or sessions resume; Move can explicitly change it.
-Only Claude and Codex sessions accept a mode other than `native`. When
-`subagents` is omitted, the session uses the selected profile’s creation default
-(Native when unset). An unsupported mode or an unavailable model answers
-`422` with the reason in the body.
+Choose `native` for harness delegation or `mjolnir` for Mjolnir-managed children.
+Omitted policy defaults to Native. Mjolnir requires a Claude or Codex parent and
+each task type needs either a global choice or a session override:
+
+```json
+{"subagents": {"mode": "mjolnir", "subtle": {"model": "gpt-6-luna", "effort": "max"}}}
+```
+
+`straightforward` and `subtle` independently override those task choices; an
+omitted type uses its global choice. A session may override one type and use
+global configuration for the other. Omit `effort` to use the harness default;
+`adaptive` is invalid. The selected model and effort must be available to the
+parent's eligible profiles.
+An unavailable choice answers `422` with code `subagent_choice_unavailable`.
+Move can explicitly change the policy; omission retains it. Legacy `none`
+policies and child sessions remain readable. Per-profile defaults are ignored.
+
+`POST /api/v1/sessions/{session_id}/subagents` starts a child with `task_name`
+and `instructions`. Optional `task_type` is `straightforward` or `subtle`;
+omission uses Straightforward for older callers. `working_directory` is
+optional. The daemon resolves the session override or global task choice and
+selects an eligible profile by quota. Spawn no longer accepts `profile_id`, `model`, or
+`effort` overrides. Without a session override, if global choices become unconfigured, spawn fails
+with a message naming the missing configuration section and matching CLI flag.
 
 `review` sets the session's own turn review, overriding `[review]` for this
 session only:
@@ -462,9 +472,9 @@ override either one:
 A size above the host's reported totals answers `400`, and so does either
 field on a target that is not a container target.
 
-`all_models` is retired for new sessions and explicit Move overrides, which
-answer `422` with supported alternatives. Existing multi-model sessions retain
-their recorded policy on resume and on a Move with no policy override.
+Legacy `all_models` and `single_model` policy values are read as `mjolnir`;
+legacy model and effort selectors are ignored. This also applies to recorded
+policies on resume and on a Move with no policy override.
 
 Session creation still returns its ID before preparation finishes. Wait for
 readiness or inspect the session's failure before prompting. Readiness guarantees

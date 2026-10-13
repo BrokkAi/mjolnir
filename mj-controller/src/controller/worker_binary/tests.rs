@@ -474,7 +474,10 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
         session.harness_kind = HarnessKind::Claude;
         session.subagents = choice.map(|enabled| {
             if enabled {
-                mj_core::subagent::SubagentPolicy::AllModels
+                mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }
             } else {
                 mj_core::subagent::SubagentPolicy::Native
             }
@@ -494,7 +497,10 @@ fn the_session_choice_decides_whether_mjolnir_replaces_native_delegation() {
     let mut codex = claude(None);
     codex.harness_kind = HarnessKind::Codex;
     assert!(!subagent_tools_enabled(&codex, false));
-    codex.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    codex.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     assert!(subagent_tools_enabled(&codex, false));
 }
 
@@ -518,7 +524,7 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         )])
         .into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     let failure = |kind| {
@@ -1907,7 +1913,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             home: directory.path().join(format!("{}-home", kind.id())),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let launch = |no_project_memory: bool| {
@@ -1983,7 +1989,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             home: directory.path().join(format!("{}-home", kind.id())),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -2064,7 +2070,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("ZAI_API_KEY".to_owned(), "coding-plan-key".to_owned())])
             .into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -2311,7 +2317,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         environment: BTreeMap::from([("DEEPSEEK_API_KEY".to_owned(), "deepseek-key".to_owned())])
             .into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -2397,7 +2403,7 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     let asked = std::cell::RefCell::new(Vec::new());
@@ -2462,7 +2468,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2494,7 +2500,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2539,7 +2545,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2579,7 +2585,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2686,7 +2692,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
 
@@ -2765,7 +2771,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -2827,7 +2833,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3042,7 +3048,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         ])
         .into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -3197,7 +3203,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     for (target, launch) in launches_on_every_target(&claude) {
@@ -3331,7 +3337,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         home: home.path().to_path_buf(),
         environment: aws_environment.clone().into(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3550,7 +3556,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
         home: PathBuf::from("/profiles/muse"),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3596,7 +3602,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -3629,7 +3635,7 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     stage_profile(&profile, staged.path()).unwrap();
@@ -3724,7 +3730,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
 
@@ -4456,7 +4462,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             home: home.path().to_path_buf(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
 
@@ -4546,7 +4552,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let canonical = profile.authentication_marker();
@@ -4666,7 +4672,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             home: home.clone(),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         };
         let marker = profile.authentication_marker();
@@ -4799,14 +4805,7 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         1,
         "{allow:?}"
     );
-    for tool in [
-        "list_profiles",
-        "spawn",
-        "list_agents",
-        "send_message",
-        "wait",
-        "close",
-    ] {
+    for tool in ["spawn", "list_agents", "send_message", "wait", "close"] {
         assert!(
             allow.contains(&format!("mcp__mj-agents__{tool}")),
             "{tool}: {allow:?}"
@@ -5220,11 +5219,14 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
         std::fs::write(&source, "User instructions without final newline").unwrap();
         for policy in [
             SubagentPolicy::Native,
-            SubagentPolicy::AllModels,
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             SubagentPolicy::None,
-            SubagentPolicy::SingleModel {
-                model: "model".into(),
-                effort: Some("high".into()),
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
             },
         ] {
             let stage = tempfile::tempdir().unwrap();
@@ -5233,7 +5235,7 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
             append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
             append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
             let actual = std::fs::read_to_string(&destination).unwrap();
-            let expected = if matches!(policy, SubagentPolicy::SingleModel { .. }) {
+            let expected = if matches!(policy, SubagentPolicy::Mjolnir { .. }) {
                 format!(
                     "User instructions without final newline\n\n{}",
                     mj_core::subagent::delegation_policy(9)

@@ -1157,13 +1157,12 @@ impl Controller {
             profile.enabled,
             "destination profile {profile_id:?} is disabled"
         );
-        if let Some(policy) = &selection.subagents
-            && policy != &source.subagents.clone().unwrap_or_default()
-        {
+        let policy = move_subagent_policy(source, &selection);
+        if policy.uses_mjolnir() || policy != source.subagents.clone().unwrap_or_default() {
             super::profile_config::validate_session_subagent_policy(
                 &self.config,
                 profile_id,
-                policy,
+                &policy,
             )
             .await?;
         }

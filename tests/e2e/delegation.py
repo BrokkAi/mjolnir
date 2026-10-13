@@ -37,7 +37,7 @@ def main():
                 "category": "model",
                 "type": "select",
                 "currentValue": "tiny",
-                "options": [{"value": "tiny", "name": "Tiny fixture"}],
+                "options": [{"value": "tiny", "name": "Tiny fixture"}, {"value": "subtle-fixture", "name": "Subtle fixture"}],
             }
         ]
         script = script.replace(
@@ -59,7 +59,7 @@ def main():
         options.append({
             "id": "effort", "name": "Reasoning effort", "category": "thought_level",
             "type": "select", "currentValue": "high",
-            "options": [{"value": "high", "name": "High fixture"}],
+            "options": [{"value": "high", "name": "High fixture"}, {"value": "low", "name": "Low fixture"}],
         })
         # Rebuild the inserted options with effort as well, so attribution is
         # checked against the harness's actual advertised turn configuration.
@@ -71,6 +71,19 @@ def main():
             '"outputTokens": 20, "_meta": {"mjolnir.dev/usage-scope": "turn"}}\n'
             '        report_execution("idle")',
         )
+        # Keep advertised current values in sync with the daemon's resolved choice.
+        script = script.replace(repr(options), "config_options")
+        script = script.replace('for line in sys.stdin:', 'config_options = ' + repr(options) + '\nfor line in sys.stdin:')
+        script = script.replace(
+            '        result = {"configOptions": config_options}',
+            '        params = message["params"]\n'
+            '        for option in config_options:\n'
+            '            if option["id"] == params["configId"]:\n'
+            '                option["currentValue"] = params["value"]\n'
+            '        result = {"configOptions": config_options}',
+        )
+        config = lab.config / "config.toml"
+        config.write_text(config.read_text() + '\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n[subagents.subtle]\nmodel = "subtle-fixture"\neffort = "low"\n')
         # This fixture never owns a native goal. Report that alongside every
         # execution update, including after loading a parked conversation.
         script = script.replace(
@@ -130,11 +143,7 @@ def main():
                 "--project-directory",
                 str(lab.project),
                 "--subagents",
-                "single-model",
-                "--subagent-model",
-                "tiny",
-                "--subagent-effort",
-                "high",
+                "mjolnir",
                 "--json",
             )
         )
@@ -239,6 +248,7 @@ def main():
             "spawn",
             {
                 "task_name": "fixture-child",
+                "task_type": "straightforward",
                 "instructions": "Return a short fixture report.",
             },
         )
@@ -400,6 +410,17 @@ def main():
         tool(parent, "wait_agents")
         wait_parked(legacy)
 
+        # Both global task types are resolved into the frozen child selection.
+        subtle = tool(parent, "spawn", {"task_name": "subtle-child", "instructions": "Return a judgment report.", "task_type": "subtle"})["child_session_id"]
+        wait_prompt(subtle, "Return a judgment report.")
+        with sqlite3.connect(lab.data / "mj.sqlite3") as database:
+            for session, model, effort in [(child, "tiny", "high"), (subtle, "subtle-fixture", "low")]:
+                row = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (session,)).fetchone()
+                assert row == (model, effort), (session, row)
+        tool(subtle, "handback", {"message": "subtle configured selection verified"})
+        tool(parent, "wait_agents")
+        wait_parked(subtle)
+
         # Simulate a daemon exiting after it records failed startup but before
         # confirming teardown. Recovery must stop and settle it, not start it.
         cli("daemon", "stop")
@@ -467,7 +488,7 @@ def main():
             raise RuntimeError("mj message prompt did not finish before teardown")
 
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
-        for session in [child, legacy, parent]:
+        for session in [child, legacy, subtle, parent]:
             cli("destroy", "--session", session)
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
@@ -481,10 +502,31 @@ def main():
         after = json.loads(cli("usage", "--parent", parent, "--json"))
         for key in ["totals", "coverage", "by_model"]:
             assert after[key] == retained[key], (key, retained, after)
-        assert {s["session_id"] for s in after["sessions"]} == {parent, child, legacy}, after
+        assert {s["session_id"] for s in after["sessions"]} == {parent, child, legacy, subtle}, after
         assert all(not s["operational_session_present"] for s in after["sessions"]), after
         cli("daemon", "restart")
         assert after == json.loads(cli("usage", "--parent", parent, "--json"))
+        # One task uses the session override while the other falls back to global config.
+        cli("daemon", "stop")
+        config.write_text(config.read_text().split("\n[subagents.straightforward]")[0]
+                          + '\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n')
+        cli("daemon", "restart")
+        overridden = json.loads(cli("new", "--workspace", "Delegation test", "--profile", "fake",
+            "--target", "localhost", "--project-directory", str(lab.project),
+            "--subagent-subtle", "tiny", "--subagent-subtle-effort", "low", "--json"))["session_id"]
+        for task_type in ["straightforward", "subtle"]:
+            override_child = tool(overridden, "spawn", {"task_name": f"override-{task_type}",
+                "instructions": "Report the session override.", "task_type": task_type})["child_session_id"]
+            wait_prompt(override_child, "Report the session override.")
+            with sqlite3.connect(lab.data / "mj.sqlite3") as database:
+                row = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (override_child,)).fetchone()
+                expected = ("tiny", "high") if task_type == "straightforward" else ("tiny", "low")
+                assert row == expected, (task_type, expected, row)
+            tool(override_child, "handback", {"message": "session override verified"})
+            tool(overridden, "wait_agents")
+            wait_parked(override_child)
+            cli("destroy", "--session", override_child)
+        cli("destroy", "--session", overridden)
         print(
             json.dumps(
                 {

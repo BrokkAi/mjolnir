@@ -815,6 +815,7 @@ struct FakeBackend {
     /// Candidate sets stay distinct to model session and sub-agent scope.
     session_model_candidates: Option<SubagentCandidates>,
     subagent_model_candidates: Option<SubagentCandidates>,
+    subagent_configuration: Option<mj_core::config::SubagentConfig>,
     start_status: Option<StartStatus>,
     /// The page and the limit the transcript handler asked for.
     transcript: Mutex<Option<TranscriptPage>>,
@@ -870,6 +871,25 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
+        Box::pin(async {
+            Ok(self
+                .subagent_configuration
+                .clone()
+                .unwrap_or(mj_core::config::SubagentConfig {
+                    straightforward: Some(mj_core::config::SubagentChoice {
+                        model: "kimi-code/k3".into(),
+                        effort: None,
+                    }),
+                    subtle: Some(mj_core::config::SubagentChoice {
+                        model: "kimi-code/k3".into(),
+                        effort: None,
+                    }),
+                    ..Default::default()
+                }))
+        })
+    }
+
     fn github_token(
         &self,
         _owner: Option<String>,
@@ -1890,11 +1910,11 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
         |snapshot| {
             snapshot.profiles.push(ViewerProfile {
                 id: "grok-main".into(),
-                subagent_discovery_key: String::new(),
+
                 capabilities_key: String::new(),
-                subagent_profile_ids: Vec::new(),
+
                 harness_kind: "grok".into(),
-                subagents: Default::default(),
+
                 quota: None,
             });
         },
@@ -2051,19 +2071,17 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
             snapshot.profiles.push(crate::server::ViewerProfile {
                 id: "quota-winner".into(),
                 harness_kind: "codex".into(),
-                subagent_discovery_key: String::new(),
+
                 capabilities_key: String::new(),
-                subagent_profile_ids: Vec::new(),
-                subagents: mj_core::subagent::SubagentPolicy::default(),
+
                 quota: None,
             });
             snapshot.profiles.push(crate::server::ViewerProfile {
                 id: "claude4".into(),
                 harness_kind: "claude".into(),
-                subagent_discovery_key: String::new(),
+
                 capabilities_key: String::new(),
-                subagent_profile_ids: Vec::new(),
-                subagents: mj_core::subagent::SubagentPolicy::default(),
+
                 quota: None,
             });
         },
@@ -2097,6 +2115,17 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 #[tokio::test]
 async fn subagent_model_selection_stays_within_eligible_profiles() {
     let backend: Arc<dyn SubagentBackend> = Arc::new(FakeBackend {
+        subagent_configuration: Some(mj_core::config::SubagentConfig {
+            straightforward: Some(mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: None,
+            }),
+            subtle: Some(mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: None,
+            }),
+            ..Default::default()
+        }),
         session_model_candidates: Some(SubagentCandidates {
             offered: vec![
                 model_candidate("codex-1", 5, "luna"),
@@ -2116,17 +2145,14 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
         ..FakeBackend::default()
     });
 
-    let selection = crate::server::api::resolve_subagent_selection(
+    let selection = crate::server::api::resolve_subagent_policy_selection(
         &backend,
         "codex-1",
-        None,
-        Some("luna"),
-        None,
-        crate::server::api::AdaptiveEffortContext {
-            parent_session_id: "parent-session",
-            task_name: "test task",
-            instructions: "test assignment",
+        &mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
         },
+        mj_core::subagent::SubagentTaskType::Straightforward,
     )
     .await
     .unwrap();
@@ -2188,10 +2214,9 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
             snapshot.profiles.push(crate::server::ViewerProfile {
                 id: id.into(),
                 harness_kind: "codex".into(),
-                subagent_discovery_key: String::new(),
+
                 capabilities_key: String::new(),
-                subagent_profile_ids: Vec::new(),
-                subagents: mj_core::subagent::SubagentPolicy::default(),
+
                 quota: None,
             });
         }
@@ -4278,7 +4303,10 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     let (app, _actions, snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
-            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::AllModels;
+            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            };
         });
     let parent = {
         let snapshot = snapshot_tx.borrow();
@@ -4307,7 +4335,7 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
             )))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"task_name":"probe","instructions":"say ready","model":"kimi-code/k3"}"#,
+                r#"{"task_name":"probe","instructions":"say ready"}"#,
             ))
             .unwrap(),
         )

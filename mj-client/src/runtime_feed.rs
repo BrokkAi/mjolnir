@@ -55,6 +55,10 @@ pub struct RuntimeMetadata {
     /// target looking user-written.
     #[serde(default)]
     pub default_targets: std::collections::BTreeSet<String>,
+    #[serde(
+        default,
+        deserialize_with = "mj_core::subagent::deserialize_launch_policy"
+    )]
     pub last_subagent_policy: SubagentPolicy,
     pub workspace_names: BTreeMap<String, String>,
     pub lifecycles: Vec<RuntimeLifecycleView>,

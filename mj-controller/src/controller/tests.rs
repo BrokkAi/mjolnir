@@ -23,7 +23,7 @@ fn registration_config() -> Config {
             home: PathBuf::from("/home/dev/.codex"),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1488,7 +1488,10 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
         state: State::default(),
     };
     let mut options = launch_options(Vec::new());
-    options.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    options.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     let id = controller
         .register_session_with_resources("codex", "project", "podman", "delegating", options)
         .unwrap();
@@ -1549,7 +1552,10 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
     });
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
     parent.target = Some(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
@@ -1675,7 +1681,10 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
         let mut session = super::test_support::checkpoint_test_session(id);
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.path().to_path_buf());
-        session.subagents = Some(mj_core::subagent::SubagentPolicy::AllModels);
+        session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        });
         session.target = Some(TargetLocator::LocalBare {
             worker_root: mj_core::config::data_dir().join("workers").join(id),
         });
@@ -1938,7 +1947,10 @@ fn saved_target_survives_config_removal_restart_and_failed_destroy() {
                 // this column (see `update_lifecycle_fields`); this test
                 // reloads the controller before registering a child, and the
                 // child registration below needs the parent's own choice.
-                subagents: Some(mj_core::subagent::SubagentPolicy::AllModels),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
                 ..launch_options(Vec::new())
             },
         )
@@ -2246,14 +2258,14 @@ fn a_configuration_that_cannot_load_is_a_refusal_not_an_internal_failure() {
 }
 
 #[test]
-fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
+fn registration_defaults_to_native_instead_of_the_last_session() {
     use mj_core::subagent::SubagentPolicy;
     const MARKER: &str = "MJ_TEST_PROFILE_SUBAGENT_DEFAULT_CHILD";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "registration_defaults_to_profile_policy_instead_of_the_last_session",
+            "registration_defaults_to_native_instead_of_the_last_session",
             directory.path(),
         );
         return;
@@ -2262,7 +2274,10 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
     let mut controller = Controller {
         config: registration_config(),
         state: State {
-            last_subagent_policy: SubagentPolicy::AllModels,
+            last_subagent_policy: SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             ..Default::default()
         },
     };
@@ -2279,24 +2294,14 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
         controller.state.sessions[&native].subagents,
         Some(SubagentPolicy::Native)
     );
-    let fixed = SubagentPolicy::SingleModel {
-        model: "chosen".into(),
-        effort: Some("high".into()),
+    let fixed = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
     };
-    controller
-        .config
-        .profiles
-        .get_mut("codex")
-        .unwrap()
-        .subagents = fixed.clone();
+    let mut mjolnir_options = launch_options(Vec::new());
+    mjolnir_options.subagents = Some(fixed.clone());
     let single = controller
-        .register_session_with_resources(
-            "codex",
-            "project",
-            "podman",
-            "single",
-            launch_options(Vec::new()),
-        )
+        .register_session_with_resources("codex", "project", "podman", "mjolnir", mjolnir_options)
         .unwrap();
     assert_eq!(
         controller.state.sessions[&single].subagents,
@@ -2320,16 +2325,15 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
         controller.state.sessions[&disabled].subagents,
         Some(SubagentPolicy::None)
     );
-    assert_eq!(controller.config.profiles["codex"].subagents, fixed.clone());
     assert_eq!(
         crate::database::load_state().unwrap().sessions[&native].subagents,
         Some(SubagentPolicy::Native)
     );
     let mut after = controller.config.clone();
-    after.profiles.get_mut("codex").unwrap().subagents = SubagentPolicy::SingleModel {
-        model: "next-default".into(),
-        effort: Some("low".into()),
-    };
+    after.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+        model: "next".into(),
+        effort: None,
+    });
     controller
         .state
         .validate_setup_update(&controller.config, &after)
@@ -2356,21 +2360,27 @@ fn registration_defaults_to_profile_policy_instead_of_the_last_session() {
         .unwrap();
     assert_eq!(
         controller.state.sessions[&new_session].subagents,
-        Some(after.profiles["codex"].subagents.clone())
+        Some(SubagentPolicy::Native)
     );
     let mut legacy = controller.state.sessions[&native].clone();
-    legacy.subagents = Some(SubagentPolicy::AllModels);
+    legacy.subagents = Some(SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     crate::database::save_resumed_session(&legacy, None).unwrap();
     let restarted = Controller::load().unwrap();
     assert_eq!(
         restarted.state.sessions[&native].subagents,
-        Some(SubagentPolicy::AllModels)
+        Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        })
     );
     assert_eq!(
         restarted.state.sessions[&single].subagents,
-        Some(SubagentPolicy::SingleModel {
-            model: "chosen".into(),
-            effort: Some("high".into())
+        Some(SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
         })
     );
 }

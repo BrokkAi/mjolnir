@@ -29,8 +29,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 container
 Container size
@@ -42,6 +40,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -49,8 +53,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":6,"memory_bytes":13421772800}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
@@ -86,8 +90,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 ec2
 EC2 size
@@ -99,6 +101,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -106,8 +114,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"ec2","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"aws-ec2","instance_type":"c7i.large","vcpus":2,"memory_bytes":4294967296}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"ec2","project_directory":null,"remote_repairs":[]}]
 request: GET /api/targets/*/resource-options ["ec2"]
@@ -190,13 +198,17 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 local
 Project files
 /work/linked
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 Create a separate session-owned clone on the selected or default branch.
@@ -204,8 +216,8 @@ Create a separate session-owned clone on the selected or default branch.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","remote_repairs":[]}]
 request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/linked","kind":"directories"}]
 project creation requests: 0
@@ -216,13 +228,17 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 local
 Project files
 /work/linked
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 Create a separate session-owned clone on the selected or default branch.
@@ -230,21 +246,19 @@ Create a separate session-owned clone on the selected or default branch.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","create_managed_worktree":true,"subagents":{"mode":"native"}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","remote_repairs":[]}]
 request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/linked","kind":"directories"}]
 project creation requests: 0
-=== review subagent policy Native (390x844) ===
+=== review delegation unconfigured (390x844) ===
 New session
 
 Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 container
 Container size
@@ -256,6 +270,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -263,19 +283,17 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
-=== profile subagent policy Native (390x844) ===
+=== delegation unconfigured (390x844) ===
 New session
 
 Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 container
 Container size
@@ -287,6 +305,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -294,20 +318,18 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
-=== review subagent policy None (390x844) ===
+=== review delegation configured selection (390x844) ===
 New session
 
 Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-None
 Where to run
 container
 Container size
@@ -319,6 +341,9 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -326,19 +351,17 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
-=== profile subagent policy None (390x844) ===
+=== delegation configured selection (390x844) ===
 New session
 
 Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-None
 Where to run
 container
 Container size
@@ -350,6 +373,9 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -357,20 +383,18 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
-=== review subagent policy Single model: model-a · high (390x844) ===
+=== review delegation remembered Mjolnir (390x844) ===
 New session
 
 Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Single model: model-a · high
 Where to run
 container
 Container size
@@ -382,6 +406,9 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -389,19 +416,17 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
-=== profile subagent policy Single model: model-a · high (390x844) ===
+=== delegation remembered Mjolnir (390x844) ===
 New session
 
 Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Single model: model-a · high
 Where to run
 container
 Container size
@@ -413,6 +438,9 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -420,135 +448,9 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"model-a","effort":"high"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
-project creation requests: 0
-=== review subagent policy Single model: haiku · low (390x844) ===
-New session
-
-Step 4 of 4 · Review
-
-Account
-alpha
-Subagents
-Single model: haiku · low
-Where to run
-container
-Container size
-8 CPU · 32 GiB memory
-Project
-existing
-Local changes
-Excluded (unpublished commits and dirty files)
-existing network source
-fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
-Title (optional)
-Create isolated checkout
-
-The target provides its own isolated workspace.
-
-Back
-Start
-Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
-project creation requests: 0
-=== profile subagent policy Single model: haiku · low (390x844) ===
-New session
-
-Step 4 of 4 · Review
-
-Account
-alpha
-Subagents
-Single model: haiku · low
-Where to run
-container
-Container size
-8 CPU · 32 GiB memory
-Project
-existing
-Local changes
-Excluded (unpublished commits and dirty files)
-existing network source
-fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
-Title (optional)
-Create isolated checkout
-
-The target provides its own isolated workspace.
-
-Back
-Start
-Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"haiku","effort":"low"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
-project creation requests: 0
-=== review subagent policy Single model: haiku (390x844) ===
-New session
-
-Step 4 of 4 · Review
-
-Account
-alpha
-Subagents
-Single model: haiku
-Where to run
-container
-Container size
-8 CPU · 32 GiB memory
-Project
-existing
-Local changes
-Excluded (unpublished commits and dirty files)
-existing network source
-fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
-Title (optional)
-Create isolated checkout
-
-The target provides its own isolated workspace.
-
-Back
-Start
-Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
-project creation requests: 0
-=== profile subagent policy Single model: haiku (390x844) ===
-New session
-
-Step 4 of 4 · Review
-
-Account
-alpha
-Subagents
-Single model: haiku
-Where to run
-container
-Container size
-8 CPU · 32 GiB memory
-Project
-existing
-Local changes
-Excluded (unpublished commits and dirty files)
-existing network source
-fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
-Title (optional)
-Create isolated checkout
-
-The target provides its own isolated workspace.
-
-Back
-Start
-Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"haiku","effort":null},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
 === review for harness without subagent support (390x844) ===
@@ -569,6 +471,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -576,8 +484,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
 === harness without subagent support (390x844) ===
@@ -598,6 +506,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -605,8 +519,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
@@ -617,8 +531,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 container
 Container size
@@ -630,6 +542,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -637,8 +555,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
 === managed worktree unavailable on local (390x844) ===
@@ -648,13 +566,17 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 local
 Project files
 /work/recent
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 Use the selected directory directly.
@@ -662,8 +584,8 @@ Use the selected directory directly.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/recent","remote_repairs":[]}]
 project creation requests: 0
 === managed worktree unavailable on remote (390x844) ===
@@ -673,13 +595,17 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 remote
 Project files
 /remote/recent
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 Use the selected directory directly.
@@ -687,8 +613,8 @@ Use the selected directory directly.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"remote","project_directory":"/remote/recent","remote_repairs":[]}]
 project creation requests: 0
 === recent and saved project choices (390x844) ===
@@ -724,8 +650,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 container
 Container size
@@ -737,6 +661,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -744,8 +674,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
 === empty and truncated GitHub results (390x844) ===
@@ -1034,8 +964,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Single model: removed · high
 Where to run
 container
 Container size
@@ -1047,6 +975,9 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -1054,8 +985,8 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
 === unavailable subagent model and Settings guidance (390x844) ===
@@ -1065,8 +996,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Single model: removed · high
 Where to run
 container
 Container size
@@ -1078,6 +1007,9 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -1086,10 +1018,10 @@ Back
 Start
 Cancel
 
-Selected subagent model "removed" is unavailable. Change the default in Settings → Agent Profiles → alpha → Sub-agents, or choose another account.
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
-action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"single_model","model":"removed","effort":"high"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+Selected subagent model "removed" is unavailable. Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents.
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0
 === generic launch error (390x844) ===
@@ -1099,8 +1031,6 @@ Step 4 of 4 · Review
 
 Account
 alpha
-Subagents
-Native
 Where to run
 container
 Container size
@@ -1112,6 +1042,12 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Delegation
+Native
+Mjolnir
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -1121,8 +1057,8 @@ Start
 Cancel
 
 boom
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
-subagent selector count: 0
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
 project creation requests: 0

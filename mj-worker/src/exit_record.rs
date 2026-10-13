@@ -29,6 +29,16 @@ pub fn reserve(root: &Path) -> Result<()> {
 
 /// Write the exit record: over a reservation in place, or as a new file.
 pub fn write(root: &Path, reason: &str, refusal: Option<&str>) -> Result<()> {
+    write_with_recent_log(root, reason, refusal, &[])
+}
+
+/// Include the newest diagnostics, fitting escaped JSON into the existing blocks.
+pub fn write_with_recent_log(
+    root: &Path,
+    reason: &str,
+    refusal: Option<&str>,
+    recent_log: &[String],
+) -> Result<()> {
     let path = root.join(mj_core::relay::WORKER_EXIT_FILE);
     let reserved = std::fs::metadata(&path)
         .ok()
@@ -36,26 +46,74 @@ pub fn write(root: &Path, reason: &str, refusal: Option<&str>) -> Result<()> {
         .map(|metadata| metadata.len() as usize)
         .filter(|length| *length > 0);
     let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let body = |reason: &str| -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec_pretty(&serde_json::json!({
+    let budget = reserved.unwrap_or(RESERVED_EXIT_RECORD_BYTES);
+    let mut reason = reason.to_owned();
+    let mut refusal = refusal.map(str::to_owned);
+    let mut recent_log = recent_log.to_vec();
+    let body = |reason: &str, refusal: &Option<String>, recent_log: &[String]| -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&serde_json::json!({
             "reason": reason,
             "refusal": refusal,
             "at": at,
             "version": env!("CARGO_PKG_VERSION"),
+            "recent_log": recent_log,
         }))?)
     };
+    // Keep reason/refusal first, but reserve most of the record for the tail.
+    // JSON escaping can make a bounded in-memory line six times larger on disk.
+    let shorten = |text: &mut String, limit: usize| {
+        if text.len() > limit {
+            text.truncate(text.floor_char_boundary(limit.saturating_sub(3)));
+            text.push('…');
+        }
+    };
+    if !recent_log.is_empty() {
+        shorten(&mut reason, budget / 8);
+        if let Some(refusal) = &mut refusal {
+            shorten(refusal, budget / 8);
+        }
+    }
+    let mut bytes = body(&reason, &refusal, &recent_log)?;
+    while bytes.len() > budget {
+        if let Some(first) = recent_log.first_mut() {
+            let excess = bytes.len() - budget;
+            // Trim by encoded JSON bytes, preserving the newest text even
+            // when control characters expand to six bytes each.
+            let mut encoded = 0;
+            let remove = first
+                .char_indices()
+                .find_map(|(index, character)| {
+                    encoded += match character {
+                        '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+                        character if character <= '\u{1f}' => 6,
+                        character => character.len_utf8(),
+                    };
+                    (encoded >= excess).then_some(index + character.len_utf8())
+                })
+                .unwrap_or(first.len());
+            first.drain(..remove);
+            if first.is_empty() {
+                recent_log.remove(0);
+            }
+        } else if reason.len() > 3 {
+            let limit = reason.len().saturating_sub((bytes.len() - budget).max(4));
+            shorten(&mut reason, limit);
+        } else if let Some(text) = &mut refusal {
+            if text.len() > 3 {
+                let limit = text.len().saturating_sub((bytes.len() - budget).max(4));
+                shorten(text, limit);
+            } else {
+                refusal = None;
+            }
+        } else {
+            anyhow::bail!("worker exit record reservation is too small ({budget} bytes)");
+        }
+        bytes = body(&reason, &refusal, &recent_log)?;
+    }
     let Some(reserved) = reserved else {
-        // Atomic, like the startup record: the controller parses what it reads.
-        return mj_core::config::atomic_write(&path, &body(reason)?)
+        return mj_core::config::atomic_write(&path, &bytes)
             .with_context(|| format!("write the worker exit record {}", path.display()));
     };
-    // The reason's start says what failed; shorten the tail to fit.
-    let mut kept = reason.len();
-    let mut bytes = body(reason)?;
-    while bytes.len() > reserved && kept > 0 {
-        kept = reason.floor_char_boundary(kept.saturating_sub(bytes.len() - reserved + 8));
-        bytes = body(&format!("{}…", &reason[..kept]))?;
-    }
     bytes.resize(reserved, b' ');
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -120,12 +178,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         reserve(root.path()).unwrap();
         let reason = format!("journal write failed: {}", "é".repeat(20_000));
-        write(root.path(), &reason, None).unwrap();
+        let tail = vec![format!("{}newest diagnostic\n", "\0\"é".repeat(5000))];
+        write_with_recent_log(root.path(), &reason, None, &tail).unwrap();
         let bytes = std::fs::read(root.path().join(mj_core::relay::WORKER_EXIT_FILE)).unwrap();
         assert_eq!(bytes.len(), RESERVED_EXIT_RECORD_BYTES);
         let record: Option<Record> = serde_json::from_slice(&bytes).unwrap();
         let record = record.unwrap();
         assert!(record.reason.starts_with("journal write failed: "));
         assert!(record.reason.ends_with('…'));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value["recent_log"][0]
+                .as_str()
+                .unwrap()
+                .ends_with("newest diagnostic\n")
+        );
     }
 }

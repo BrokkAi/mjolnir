@@ -181,7 +181,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             home: PathBuf::from("/home/example/.codex"),
             environment: Default::default(),
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -202,7 +202,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         .into_iter()
         .collect(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     assert!(crate::setup::harness_is_authenticated_with_executor(
@@ -329,7 +329,7 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
         home: directory.path().join("codex-home"),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     Config {
@@ -1534,7 +1534,7 @@ fn doctor_reports_an_inline_token_provider_as_usage_priced() {
         home: home.path().to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     };
     assert_eq!(
@@ -1562,7 +1562,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             home: "/profiles/plain".into(),
             environment: literal,
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );
@@ -1589,7 +1589,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             home: "/profiles/referenced".into(),
             environment: referenced,
             context_window_bytes: None,
-            subagents: Default::default(),
+            legacy_subagents: Default::default(),
             guardian_review_model: None,
         },
     );

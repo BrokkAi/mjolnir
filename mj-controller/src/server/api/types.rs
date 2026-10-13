@@ -365,11 +365,7 @@ pub struct SpawnSubagentRequest {
     pub task_name: String,
     pub instructions: String,
     #[serde(default)]
-    pub profile_id: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
+    pub task_type: Option<mj_core::subagent::SubagentTaskType>,
     #[serde(default)]
     pub working_directory: Option<PathBuf>,
 }

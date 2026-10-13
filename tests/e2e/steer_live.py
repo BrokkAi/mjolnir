@@ -267,7 +267,8 @@ class SteerLab:
             "hooks = true\n",
             encoding="utf-8",
         )
-        self.install_codex_test_wrapper()
+        if self.args.harness in ("both", "codex"):
+            self.install_codex_test_wrapper()
         (self.claude_home / "settings.json").write_text(json.dumps({
             "permissions": {"allow": ["Bash"]},
             "hooks": {
@@ -309,6 +310,12 @@ class SteerLab:
             "enabled = true\n"
             'bind = "127.0.0.1:0"\n'
             "tailscale_detect = false\n\n"
+            "[subagents.straightforward]\n"
+            'model = "opus"\n'
+            'effort = "low"\n\n'
+            "[subagents.subtle]\n"
+            'model = "opus"\n'
+            'effort = "low"\n\n'
             "[profiles.codex]\n"
             'kind = "codex"\n'
             f"home = {self.toml_string(codex_home)}\n"
@@ -340,7 +347,7 @@ class SteerLab:
             "claude_config_home_is_copy": claude_home.startswith(str(self.runtime)),
             "real_profile_paths_absent_from_config": True,
             "credential_files_copied": ["auth.json", ".credentials.json"],
-            "codex_hook_trust_bypass_scoped_to_test_cache": True,
+            "codex_hook_trust_bypass_scoped_to_test_cache": self.args.harness in ("both", "codex"),
         })
         (self.artifacts / "isolated-config.toml").write_text(config_text, encoding="utf-8")
 
@@ -432,12 +439,17 @@ class SteerLab:
             raise ScenarioFailure(f"isolated viewer login returned HTTP {status}")
         self.record("setup", "viewer-ready", {"viewer_url": self.viewer_url})
 
-    def create_session(self, harness: str, title: str) -> str:
+    def create_session(self, harness: str, title: str, *, delegation: bool = False) -> str:
+        delegation_args = (
+            ("--subagents", "mjolnir")
+            if delegation else ()
+        )
         output = self.cli(
             "new", "--workspace", self.workspace,
             "--profile", harness, "--target", "localhost",
             "--project-directory", str(self.project),
             "--no-review", "--title", title, "--json",
+            *delegation_args,
             timeout=max(self.args.timeout, 300), case=title,
         )
         value = json.loads(output)
@@ -965,6 +977,105 @@ class SteerLab:
             time.sleep(0.25)
         raise ScenarioFailure(f"{case}: no long response text appeared while the turn was running")
 
+    # Hard-won: 8c73d3a8f: Claude's subagent wait prevented the steering hook from running.
+    def run_subagent_wait(self) -> dict:
+        case = "claude-subagent-wait"
+        session = self.create_session("claude", case, delegation=True)
+        started = self.markers / "child-started"
+        release = self.markers / "child-release"
+        finished = self.markers / "child-finished"
+        nonce = "STEER_WAIT_" + uuid.uuid4().hex[:12].upper()
+        report = "CHILD_REPORT_" + uuid.uuid4().hex[:12].upper()
+        child_script = (
+            "import pathlib,time; "
+            f"pathlib.Path({str(started)!r}).write_text('started'); "
+            "deadline=time.monotonic()+240\n"
+            f"while not pathlib.Path({str(release)!r}).exists():\n"
+            "    if time.monotonic()>deadline: raise SystemExit('test release timed out')\n"
+            "    time.sleep(0.2)\n"
+            f"pathlib.Path({str(finished)!r}).write_text('finished')\n"
+        )
+        child_command = "python3 -c " + shlex.quote(child_script)
+        first_id = f"steer-live-{self.instance}-wait-first"
+        self.prompt(session, first_id, (
+            "This is a live steering regression. Spawn exactly one Mjolnir child named gate-child. "
+            "Give it these instructions: use Bash exactly once to run the following command in "
+            "the foreground, without a tool timeout shorter than 240 seconds, then call handback "
+            f"with exactly {report}:\n{child_command}\n"
+            "After spawning, call mj-agents.wait. Keep waiting until you collect the child's "
+            "report, then repeat its report marker once in your final answer. "
+            "If user input arrives while waiting, acknowledge it immediately before waiting again. "
+            "Do not run shell commands yourself, stop the child, or release its gate. "
+            "The test driver releases the child after checking your acknowledgment."
+        ), case)
+        worker_root = self.data / "workers" / session
+        child = None
+        seen_running = False
+        deadline = time.monotonic() + min(self.args.timeout, 180)
+        while time.monotonic() < deadline:
+            queue_path = worker_root / "subagents.json"
+            queue = json.loads(queue_path.read_text()) if queue_path.exists() else {}
+            for result in queue.get("results", {}).values():
+                payload = json.loads(result["message"])
+                if payload.get("task_name") == "gate-child":
+                    child = payload["child_session_id"]
+            waiting = any(
+                request["action"]["action"] == "wait_agents"
+                for request in queue.get("requests", {}).values()
+            )
+            if child and waiting and started.exists():
+                break
+            idle = self.session_view(session).get("is_idle")
+            if seen_running and idle:
+                self.save_api_evidence(session, case, self.history(session))
+                raise ScenarioFailure("parent finished before entering the child wait")
+            seen_running |= not idle
+            time.sleep(0.2)
+        else:
+            raise ScenarioFailure("parent did not wait on a running child")
+        before = self.row(self.snapshot(), session) or {}
+        active = before.get("active_prompt_id")
+        if active != first_id or finished.exists():
+            raise ScenarioFailure(f"invalid wait precondition: {before!r}")
+        self.record(case, "parent-waiting", {"session": session, "child": child, "active_prompt_id": active})
+        command_id = f"steer-live-{self.instance}-wait-correction"
+        submitted = time.monotonic()
+        self.prompt(session, command_id,
+                    f"Acknowledge this correction immediately by saying {nonce} exactly once, "
+                    "then continue waiting for the child's report. Do not stop the child.", case)
+        self.steer_queued_prompt(session, command_id, case)
+        while time.monotonic() - submitted < 60:
+            items = self.history(session)
+            row = self.row(self.snapshot(), session) or {}
+            steering = row.get("steering") or {}
+            if self.text_by_role(items, "agent").count(nonce) == 1:
+                if finished.exists() or self.session_view(child).get("is_idle"):
+                    raise ScenarioFailure("correction only arrived after the child finished")
+                if steering.get("status") != "applied" or row.get("active_prompt_id") != active:
+                    raise ScenarioFailure(f"correction was not steered into the original turn: {row!r}")
+                latency = time.monotonic() - submitted
+                self.record(case, "acknowledged-before-child-finished", {"seconds": latency, "steering": steering})
+                break
+            time.sleep(0.2)
+        else:
+            self.save_api_evidence(session, case, self.history(session))
+            raise ScenarioFailure("Claude did not acknowledge steering within 60 seconds while waiting")
+        release.write_text("release")
+        deadline = time.monotonic() + min(self.args.timeout, 180)
+        while time.monotonic() < deadline:
+            items = self.history(session)
+            text = self.text_by_role(items, "agent")
+            if self.session_view(session).get("is_idle") and report in text:
+                if text.count(nonce) != 1 or not finished.exists():
+                    raise ScenarioFailure("correction duplicated or child did not finish")
+                self.save_api_evidence(session, case, items)
+                summary = {"session_id": session, "child_session_id": child,
+                           "acknowledgment_seconds": latency, "child_report_collected": True}
+                self.record(case, "passed", summary)
+                return summary
+            time.sleep(0.3)
+        raise ScenarioFailure("child report was not collected after releasing the gate")
+
     def run(self) -> list[dict]:
         self.prepare()
         self.start()
@@ -980,6 +1091,8 @@ class SteerLab:
                 ))
         if self.args.scenario == "codex-midturn":
             results.append(self.run_text_only("codex", midturn_regression=True))
+        if self.args.scenario in ("all", "subagent-wait") and "claude" in harnesses:
+            results.append(self.run_subagent_wait())
         return results
 
     def cleanup(self) -> list[str]:
@@ -1051,26 +1164,26 @@ class SteerLab:
                 else:
                     overlay = container_store / "overlay"
                     if overlay.is_dir():
-                        children = sorted(overlay.iterdir())
-                        if children:
-                            try:
-                                result = subprocess.run(
-                                    [podman, "unshare", "rm", "-rf", "--", *map(str, children)],
-                                    env=self.env, capture_output=True, text=True, timeout=90,
+                        # Podman may create overlay/tempdirs during unshare startup.
+                        # Enumerate children inside that namespace after startup;
+                        # overlay itself can be a mount there, so remove it outside.
+                        try:
+                            result = subprocess.run(
+                                [podman, "unshare", "find", str(overlay),
+                                 "-mindepth", "1", "-maxdepth", "1",
+                                 "-exec", "rm", "-rf", "--", "{}", "+"],
+                                env=self.env, capture_output=True, text=True, timeout=90,
+                            )
+                        except Exception as error:
+                            errors.append(f"remove isolated Podman overlay: {error}")
+                        else:
+                            if result.returncode:
+                                errors.append(
+                                    "remove isolated Podman overlay: "
+                                    f"{result.stderr.strip() or result.stdout.strip()}"
                                 )
-                            except Exception as error:
-                                errors.append(f"remove isolated Podman overlay contents: {error}")
-                            else:
-                                if result.returncode:
-                                    errors.append(
-                                        "remove isolated Podman overlay contents: "
-                                        f"{result.stderr.strip() or result.stdout.strip()}"
-                                    )
-                        if not errors:
-                            try:
-                                overlay.rmdir()
-                            except OSError as error:
-                                errors.append(f"remove isolated Podman overlay directory: {error}")
+                        # Podman can recreate host-owned tempdirs when it exits.
+                        # Normal runtime teardown below removes that metadata.
                     if not errors:
                         self.record("cleanup", "isolated-podman-store-scoped", {
                             "store": str(container_store),
@@ -1119,7 +1232,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-home", type=Path, default=Path.home() / ".claude",
                         help="source home from which .credentials.json is copied")
     parser.add_argument("--harness", choices=("both", "codex", "claude"), default="both")
-    parser.add_argument("--scenario", choices=("all", "tool-boundary", "text-only", "codex-midturn"),
+    parser.add_argument("--scenario", choices=("all", "tool-boundary", "text-only", "codex-midturn", "subagent-wait"),
                         default="all")
     parser.add_argument("--instance", help="optional isolated instance label; default is unique")
     parser.add_argument("--artifacts", type=Path, required=True,
@@ -1136,6 +1249,8 @@ def main() -> int:
             raise SystemExit(f"does not exist: {path}")
     if args.scenario == "codex-midturn" and args.harness == "claude":
         raise SystemExit("codex-midturn requires --harness codex or both")
+    if args.scenario == "subagent-wait" and args.harness == "codex":
+        raise SystemExit("subagent-wait requires --harness claude or both")
     lab = SteerLab(args)
     error: BaseException | None = None
     results: list[dict] = []

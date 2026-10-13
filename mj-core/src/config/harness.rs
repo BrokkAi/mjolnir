@@ -725,12 +725,9 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
-    /// Creation default copied into each new session; existing sessions own their policy.
-    #[serde(
-        default,
-        skip_serializing_if = "crate::subagent::SubagentPolicy::is_native"
-    )]
-    pub subagents: crate::subagent::SubagentPolicy,
+    /// Consume legacy per-profile choices without migrating them to global settings.
+    #[serde(default, rename = "subagents", skip_serializing)]
+    pub legacy_subagents: Option<serde_json::Value>,
 }
 
 /// Inputs that change advertised models and efforts. Session defaults and UI
@@ -740,6 +737,20 @@ pub struct ProfileDiscoveryInputs {
     pub kind: HarnessKind,
     pub home: PathBuf,
     pub environment: BTreeMap<String, super::secrets::EnvironmentValue>,
+    /// The managed installation a probe actually runs. A harness upgrade
+    /// changes what it advertises, so a cached catalogue from an older pin
+    /// must never answer for this one.
+    pub managed_install: &'static str,
+}
+
+impl ProfileDiscoveryInputs {
+    /// Keys one configured profile's entry in every capability cache.
+    pub fn capabilities_key(&self, id: &str, enabled: bool) -> String {
+        use sha2::{Digest, Sha256};
+        let inputs = serde_json::to_vec(&("profile-capabilities-v2", id, enabled, self))
+            .expect("profile capability inputs serialize");
+        crate::hex::lower_hex(Sha256::digest(inputs))
+    }
 }
 
 /// The transcript budget a profile without an explicit `context_window_bytes`
@@ -758,21 +769,16 @@ impl HarnessProfile {
             kind: self.kind,
             home: self.home.clone(),
             environment: self.environment.sources().clone(),
+            managed_install: crate::harness_runtime::pin(self.kind).install_id,
         }
     }
 
     /// Stable identity of configured capabilities, independent of defaults,
     /// refreshed credentials and files the harness writes inside its home.
+    /// The managed pin is part of the identity because upgrading it changes
+    /// the models and efforts a probe reports.
     pub fn capabilities_key(&self, id: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let inputs = serde_json::to_vec(&(
-            "profile-capabilities-v1",
-            id,
-            self.enabled,
-            self.discovery_inputs(),
-        ))
-        .expect("profile capability inputs serialize");
-        crate::hex::lower_hex(Sha256::digest(inputs))
+        self.discovery_inputs().capabilities_key(id, self.enabled)
     }
 
     /// Discovery identifies an installation independently of user settings.
@@ -907,9 +913,6 @@ impl HarnessProfile {
 
     pub(super) fn validate(&self, id: &str) -> Result<()> {
         validate_id("profile", id)?;
-        self.subagents
-            .validate_profile(self.kind)
-            .with_context(|| format!("profile {id:?}"))?;
         if self.kind.nested_home() {
             let leaf = self.kind.id();
             let name = self.kind.display_name();
@@ -1142,5 +1145,38 @@ impl HarnessProfile {
                 (*name).to_owned()
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness_runtime::pin;
+
+    // Hard-won: 07c1bee37: cached Muse efforts survived the managed harness upgrade.
+    #[test]
+    fn a_managed_harness_upgrade_invalidates_discovered_capabilities() {
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: HarnessKind::Muse,
+            home: PathBuf::from("/profiles/muse"),
+            environment: Environment::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            legacy_subagents: None,
+        };
+        let inputs = profile.discovery_inputs();
+        assert_eq!(inputs.managed_install, pin(HarnessKind::Muse).install_id);
+        assert_eq!(
+            profile.capabilities_key("muse"),
+            inputs.capabilities_key("muse", true)
+        );
+        let mut upgraded = inputs.clone();
+        upgraded.managed_install = "muse-acp-next_muse-next";
+        assert_ne!(
+            inputs.capabilities_key("muse", true),
+            upgraded.capabilities_key("muse", true),
+            "a new managed installation advertises new models and efforts"
+        );
     }
 }

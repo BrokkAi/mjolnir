@@ -12,27 +12,15 @@ Profiles point at controller-side harness homes. They do not pin a model or
 reasoning effort. Choose those per session with `/model` and `/effort`, so the
 available choices can come from the provider's current catalog.
 
-In **Settings → Agent Profiles → a profile → Sub-agents**, choose creation
-defaults for delegation: Native or Mjolnir with a fixed model and effort.
-New sessions copy these defaults. Existing sessions retain their recorded
-policy when defaults are saved, after restarting or resuming, and when moving
-to another profile. **Move…** lets you explicitly edit a session's Subagents,
-Model, and Effort. Legacy All models policies are preserved when untouched;
-All models is unavailable for new selections.
+Configure Mjolnir sub-agents in **Settings → Sub-agents**. Set a model and,
+when offered, effort for both **Straightforward** and **Subtle** tasks. These
+choices apply globally. Choose a smarter model or higher effort for Subtle.
+Parents choose a task type each time they delegate work.
 
-When the selected model offers effort choices, a Mjolnir policy can use
-**Adaptive (Jev chooses per task)** to choose the child's effort based on the
-task it receives.
-Mjolnir sends Jev the clipped child task name and instructions, plus the child
-model ID. Jev chooses one of four levels:
-`medium`, `high`, `xhigh`, or `max`. Mjolnir maps that level by rank onto the
-efforts the model offers. It skips a `default` entry and, when a model offers
-more than four efforts, drops the lowest ones so the remaining choices fit
-the four-level ladder. The child starts with an effort the model actually
-offers. If Jev is disabled or cannot be reached, Mjolnir uses the `high` ladder
-level and maps it to an effort the model offers. Set `[jev] enabled = false`
-to turn off Jev requests; see
-[Security boundaries](/security/#what-leaves-this-machine-by-default).
+**Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
+requires a Claude or Codex profile and both task types to be configured.
+Existing sessions keep their recorded policy; leaving Move's choice unchanged
+retains it.
 
 ## Supported harnesses
 

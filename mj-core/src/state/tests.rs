@@ -283,7 +283,7 @@ fn sample_config() -> Config {
                 kind: HarnessKind::Codex,
                 home: PathBuf::from("/home/test/.codex"),
                 environment: Default::default(),
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         )]),
@@ -1551,11 +1551,10 @@ fn active_sessions_allow_creation_defaults_but_protect_their_profile_installatio
     let before = sample_config();
     let profile_id = &state.sessions.values().next().unwrap().last_profile;
     let mut after = before.clone();
-    after.profiles.get_mut(profile_id).unwrap().subagents =
-        crate::subagent::SubagentPolicy::SingleModel {
-            model: "creation-default".into(),
-            effort: Some("low".into()),
-        };
+    after.subagents.straightforward = Some(crate::config::SubagentChoice {
+        model: "chosen".into(),
+        effort: None,
+    });
     state.validate_setup_update(&before, &after).unwrap();
     for field in ["harness", "home", "environment", "remove"] {
         let mut changed = after.clone();
@@ -1573,6 +1572,72 @@ fn active_sessions_allow_creation_defaults_but_protect_their_profile_installatio
         assert!(
             state.validate_setup_update(&before, &changed).is_err(),
             "{field}"
+        );
+    }
+}
+
+#[test]
+fn session_and_remembered_policy_read_legacy_selector_and_boolean_json() {
+    use crate::subagent::SubagentPolicy;
+    for (policy, expected) in [
+        (
+            serde_json::json!({"mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"}),
+            SubagentPolicy::Mjolnir {
+                straightforward: Some(Box::new(crate::config::SubagentChoice {
+                    model: "gpt-6-luna".into(),
+                    effort: Some("max".into()),
+                })),
+                subtle: Some(Box::new(crate::config::SubagentChoice {
+                    model: "gpt-6-luna".into(),
+                    effort: Some("max".into()),
+                })),
+            },
+        ),
+        (
+            serde_json::json!({"mode":"all_models"}),
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
+        (
+            serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
+        (
+            serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"adaptive"}),
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
+        (
+            serde_json::json!(true),
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
+        (serde_json::json!(false), SubagentPolicy::Native),
+    ] {
+        let mut session = serde_json::to_value(sample_session()).unwrap();
+        session["subagents"] = policy.clone();
+        assert_eq!(
+            serde_json::from_value::<SessionRecord>(session)
+                .unwrap()
+                .subagents,
+            Some(expected.clone())
+        );
+        let mut state = serde_json::to_value(sample_state()).unwrap();
+        state["last_subagent_policy"] = policy;
+        assert_eq!(
+            serde_json::from_value::<State>(state)
+                .unwrap()
+                .last_subagent_policy,
+            expected
         );
     }
 }

@@ -22,6 +22,47 @@ pub fn load_materialized_session_summary(
     load_materialized_session_summary_from(&database_path(), session_id)
 }
 
+/// Load durable activity for every materialized session so startup does not read transcripts.
+pub fn load_materialized_activity()
+-> Result<BTreeMap<String, (Option<i64>, MaterializedExecutionState)>> {
+    load_materialized_activity_from(&database_path())
+}
+
+pub(super) fn load_materialized_activity_from(
+    path: &Path,
+) -> Result<BTreeMap<String, (Option<i64>, MaterializedExecutionState)>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let mut statement = connection.prepare(
+        "SELECT session_id, last_activity_at_ms, execution_state, running_started_at_ms
+         FROM materialized_sessions",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    rows.into_iter()
+        .map(
+            |(session_id, last_activity_at_ms, execution_state, running_started_at_ms)| {
+                Ok((
+                    session_id,
+                    (
+                        last_activity_at_ms,
+                        parse_materialized_execution(&execution_state, running_started_at_ms)?,
+                    ),
+                ))
+            },
+        )
+        .collect()
+}
+
 pub(super) fn load_materialized_session_summary_from(
     path: &Path,
     session_id: &str,

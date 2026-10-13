@@ -525,7 +525,7 @@ mod tests {
                     home,
                     environment: BTreeMap::from([("EXTRA".into(), "1".into())]).into(),
                     context_window_bytes: None,
-                    subagents: Default::default(),
+                    legacy_subagents: Default::default(),
                     guardian_review_model: None,
                 },
             );
@@ -780,7 +780,7 @@ mod tests {
                 home,
                 environment: BTreeMap::new().into(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

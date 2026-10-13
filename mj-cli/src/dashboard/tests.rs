@@ -80,7 +80,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
             mj_core::config::HarnessProfile {
                 enabled: true,
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 kind,
                 home: std::path::PathBuf::from("/profiles").join(id),

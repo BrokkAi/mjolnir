@@ -48,7 +48,9 @@ pub fn record_startup_step(root: &Path, step: &str) {
     static PROCESS_BIRTH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let process_birth = PROCESS_BIRTH.get_or_init(|| {
         mj_core::subprocess::process_birth_identity(std::process::id())
-            .map_err(|error| eprintln!("Mjolnir: could not record process identity: {error:#}"))
+            .map_err(|error| {
+                mj_core::diagnostic_stderr!("Mjolnir: could not record process identity: {error:#}")
+            })
             .ok()
     });
     let record = serde_json::json!({
@@ -62,10 +64,14 @@ pub fn record_startup_step(root: &Path, step: &str) {
     match serde_json::to_vec_pretty(&record) {
         Ok(bytes) => {
             if let Err(error) = mj_core::config::atomic_write(&path, &bytes) {
-                eprintln!("Mjolnir: could not record startup step {step}: {error}");
+                mj_core::diagnostic_stderr!(
+                    "Mjolnir: could not record startup step {step}: {error}"
+                );
             }
         }
-        Err(error) => eprintln!("Mjolnir: could not serialize startup step {step}: {error}"),
+        Err(error) => {
+            mj_core::diagnostic_stderr!("Mjolnir: could not serialize startup step {step}: {error}")
+        }
     }
 }
 
@@ -91,11 +97,15 @@ pub fn record_startup_failure(root: &Path, step: &str, error: &str) {
     match serde_json::to_vec_pretty(&record) {
         Ok(bytes) => {
             if let Err(write_error) = mj_core::config::atomic_write(&path, &bytes) {
-                eprintln!("Mjolnir: could not record startup failure at {step}: {write_error}");
+                mj_core::diagnostic_stderr!(
+                    "Mjolnir: could not record startup failure at {step}: {write_error}"
+                );
             }
         }
         Err(write_error) => {
-            eprintln!("Mjolnir: could not serialize startup failure at {step}: {write_error}");
+            mj_core::diagnostic_stderr!(
+                "Mjolnir: could not serialize startup failure at {step}: {write_error}"
+            );
         }
     }
 }

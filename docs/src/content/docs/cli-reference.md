@@ -147,8 +147,9 @@ Creates and verifies a recovery copy for an active session. It waits for a safe 
 mj move --session <id> [--target <target-id>] [--profile <profile-id>]
         [--queue discard|start] [--clear-resources] [--yes] [--json]
         [--prepare] [--allow-large-transfer] [--exclude <repository>:<path>]...
-        [--subagents native|single-model|none]
-        [--subagent-model <model>] [--subagent-effort <effort>]
+        [--subagents native|mjolnir|none]
+        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
+        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
 mj move-sources --session <id> [--cleanup <operation-id> --yes]
 ```
 
@@ -164,13 +165,16 @@ Move inherits the source resource sizing and attached directories by default.
 uses its configured defaults; attached directories remain part of the fixed
 workspace selection.
 
-`--subagents native` switches to the harness's native sub-agents;
-`--subagents none` disables delegation. For a Mjolnir child model, pass
-`--subagents single-model --subagent-model <model>` and optionally
-`--subagent-effort <effort>`. When the model offers efforts, use `adaptive`
-to let Jev choose one for each child task. Omitting these options retains the
-session's policy. A retry of a sealed Move retains its recorded policy; an
-explicit different policy is refused.
+`--subagents native` switches to harness delegation; `--subagents mjolnir`
+uses the global task choices in `[subagents.straightforward]` and
+`[subagents.subtle]`, or provide a session override for either type.
+`--subagent-straightforward M` and `--subagent-subtle M` independently override
+the matching task choice for this session; each unspecified type uses its global
+choice. Either override implies Mjolnir. The matching
+`--subagent-*-effort` flag requires its model flag. Omitted policy retains
+the session's override. `--subagents none` removes delegation tools entirely;
+it needs a Claude or Codex session. A retry of a sealed
+Move retains its recorded policy; an explicit different policy is refused.
 
 A session that works in a bare checkout on an SSH host cannot move to
 another machine. Its working tree is the checkout itself, so `--target` is
@@ -234,8 +238,9 @@ mj workspaces create <name> [--json]
 mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id>] [--bundle <id>]
        [--project-directory <path>] [--at <sha>] [--branch <name>] [--base <revision>]
        [--title <text>]
-       [--model <name>] [--effort <name>] [--subagents native|single-model|none]
-       [--subagent-model <name>] [--subagent-effort <name>]
+       [--model <name>] [--effort <name>] [--subagents native|mjolnir|none]
+       [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
+       [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
        [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
        [--no-review] [--no-project-memory] [--no-mailbox] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
@@ -287,17 +292,21 @@ cannot be combined with a session that runs directly in the selected directory.
   `--profile`; the saved default profile breaks quota ties. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
-- `mj new --subagents native|single-model|none` selects delegation
-  for Claude and Codex. Without this option, it uses the selected profile’s creation default,
-  which defaults to Native.
-  `single-model` requires `--subagent-model` and a corresponding
-  `--subagent-effort` when that model offers effort choices. Pass `adaptive`
-  to choose an effort for each child task. Mjolnir fixes every child's model
-  and effort and selects an eligible profile by quota.
-  `none` disables delegation; an explicit choice overrides the profile for this
-  session without changing its settings. `all-models` is no longer accepted.
-  The old `--mj-subagents` and
-  `--native-subagents` flags are no longer accepted.
+- `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
+  Native. `none` gives the session no delegation tools, native or Mjolnir; it
+  needs a Claude or Codex profile and is not offered in the TUI or browser. Mjolnir requires a Claude or Codex parent and both global task choices
+  in `[subagents.straightforward]` and `[subagents.subtle]`, unless that type
+  has a session override. Configure global defaults in config.toml or TUI
+  Settings → Sub-agents.
+  `--subagent-straightforward M` and `--subagent-subtle M` override only their
+  named task type; an unspecified type uses its global choice. Either implies
+  `--subagents mjolnir` and cannot be combined with `native` or `none`. Each
+  effort flag requires its matching model flag; omitted effort uses the harness
+  default and `adaptive` is invalid. The retired `--subagent-model` and
+  `--subagent-effort` flags fail with guidance to use the four per-type flags.
+  `single-model` and `all-models` remain rejected.
+  Each spawn selects `straightforward` or `subtle`;
+  Mjolnir chooses an eligible profile offering its model and effort by quota.
 - `mj new --review-model <name>`, `--review-effort <name>` and
   `--review-tier quick|extended` review every turn of the new session with
   that model or effort, even when `[review]` is off. The deprecated tier flag

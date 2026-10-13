@@ -3903,7 +3903,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             environment: environment.into_iter().collect(),
             context_window_bytes: None,
             guardian_review_model: None,
-            subagents: mj_core::subagent::SubagentPolicy::Native,
+            legacy_subagents: None,
         },
     );
     config.targets.insert(
@@ -4990,7 +4990,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 home: profile_home,
                 environment: Default::default(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

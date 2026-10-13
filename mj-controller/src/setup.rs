@@ -230,7 +230,7 @@ fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
         home: home.to_path_buf(),
         environment: Default::default(),
         context_window_bytes: None,
-        subagents: Default::default(),
+        legacy_subagents: Default::default(),
         guardian_review_model: None,
     }
 }
@@ -423,7 +423,7 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
                 home: home.path.clone(),
                 environment: Default::default(),
                 context_window_bytes: None,
-                subagents: Default::default(),
+                legacy_subagents: Default::default(),
                 guardian_review_model: None,
             },
         );

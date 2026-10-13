@@ -35,7 +35,7 @@ pub fn run(socket: &Path, hook_event: &str) -> Result<()> {
                 }
             }))?;
             if let Err(error) = acknowledge(socket, &lease_id) {
-                eprintln!(
+                mj_core::diagnostic_stderr!(
                     "Mjolnir mailbox hook: could not acknowledge delivered events: {error:#}"
                 );
             }
@@ -154,6 +154,6 @@ fn write_stdout(value: &serde_json::Value) -> Result<()> {
 }
 
 fn write_empty_with_diagnostic(message: &str) -> Result<()> {
-    eprintln!("Mjolnir mailbox hook: {message}");
+    mj_core::diagnostic_stderr!("Mjolnir mailbox hook: {message}");
     write_stdout(&json!({}))
 }

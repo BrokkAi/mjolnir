@@ -292,11 +292,14 @@ fn is_default_subagent_limit(value: &usize) -> bool {
 
 /// Global policy for Mjolnir-managed child agents.
 ///
-/// Delegation defaults belong to each HarnessProfile and are recorded in
-/// SessionRecord.subagents when a session is created, rather than a global switch.
+/// Sessions choose Native or Mjolnir; task model and effort choices are global.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SubagentConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub straightforward: Option<SubagentChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtle: Option<SubagentChoice>,
     /// Deprecated global switch retained for read compatibility with
     /// configurations written before the per-session choice existed. It is
     /// ignored and omitted from newly written configurations.
@@ -312,9 +315,19 @@ pub struct SubagentConfig {
     pub eligible_profiles: BTreeMap<String, bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentChoice {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
+            straightforward: None,
+            subtle: None,
             enabled: false,
             max_concurrent: default_subagent_limit(),
             eligible_profiles: BTreeMap::new(),
@@ -323,13 +336,43 @@ impl Default for SubagentConfig {
 }
 
 impl SubagentConfig {
+    pub fn choice(&self, task_type: crate::subagent::SubagentTaskType) -> Option<&SubagentChoice> {
+        match task_type {
+            crate::subagent::SubagentTaskType::Straightforward => self.straightforward.as_ref(),
+            crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
+        }
+    }
+    pub fn is_configured(&self) -> bool {
+        self.straightforward
+            .as_ref()
+            .is_some_and(|choice| !choice.model.trim().is_empty())
+            && self
+                .subtle
+                .as_ref()
+                .is_some_and(|choice| !choice.model.trim().is_empty())
+    }
     /// The deprecated `enabled` key is never written, so a section holding
     /// only that key is still a default section and stays out of the file.
     fn is_default(&self) -> bool {
-        self.max_concurrent == default_subagent_limit() && self.eligible_profiles.is_empty()
+        self.max_concurrent == default_subagent_limit()
+            && self.eligible_profiles.is_empty()
+            && self.straightforward.is_none()
+            && self.subtle.is_none()
     }
 
     fn validate(&self, profiles: &BTreeMap<String, HarnessProfile>) -> Result<()> {
+        for task_type in [
+            crate::subagent::SubagentTaskType::Straightforward,
+            crate::subagent::SubagentTaskType::Subtle,
+        ] {
+            if let Some(choice) = self.choice(task_type) {
+                anyhow::ensure!(
+                    choice.effort.as_deref() != Some("adaptive"),
+                    "[subagents.{}] adaptive effort is no longer supported",
+                    task_type.id()
+                );
+            }
+        }
         if !(1..=64).contains(&self.max_concurrent) {
             bail!("[subagents] `max_concurrent` must be between 1 and 64");
         }
@@ -421,7 +464,8 @@ impl MailboxConfig {
 }
 
 impl Config {
-    /// Identity of the configured profile list, excluding policies and UI defaults.
+    /// Identity of the configured profile list and the managed harness builds
+    /// its probes would run, excluding policies and UI defaults.
     pub fn profiles_discovery_key(&self) -> String {
         use sha2::{Digest, Sha256};
         let inputs: Vec<_> = self
@@ -480,7 +524,8 @@ impl Config {
     }
 }
 
-pub const CONFIG_VERSION: u32 = 16;
+// Breaking: older writers cannot preserve the global task-type tables.
+pub const CONFIG_VERSION: u32 = 17;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -837,8 +882,9 @@ impl TryFrom<StoredConfig> for Config {
             // machines from runtimes; version 13 adds automatic continuation;
             // version 14 moves the global cache opt-out onto machines; version
             // 15 stops writing the default image into a container target;
-            // 16 adds native tool cache storage.
-            version: if matches!(version, 1..=15) {
+            // 16 adds native tool cache storage; 17 replaces per-profile
+            // delegation selectors with global task choices, without migrating them.
+            version: if matches!(version, 1..=16) {
                 CONFIG_VERSION
             } else {
                 version

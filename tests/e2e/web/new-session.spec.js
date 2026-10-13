@@ -22,7 +22,7 @@ async function mount(page, {
   const state = {
     snapshot: {
       revision: 1, workspaces: [{ id: 'test', name: 'Test' }, { id: 'other', name: 'Other' }], sessions: [],
-      profiles,
+      profiles, subagents_configured: false, last_subagent_policy: { mode: 'native' },
       targets: targets || [
         containerTarget,
         { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older'] },
@@ -113,13 +113,6 @@ async function mount(page, {
       const result = await state.discover(body);
       if (result.error) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify(result) });
       return json(result);
-    }
-    if (pathname.endsWith('/subagent-options')) {
-      const model = new URL(route.request().url()).searchParams.get('model');
-      state.subagentRequests ||= [];
-      state.subagentRequests.push(model);
-      if (state.subagentOptions) return json(await state.subagentOptions(model));
-      return json({ models: [{ value: 'model-a', name: 'Model A' }, { value: 'model-b', name: 'Model B' }], efforts: model === 'model-a' ? [{ value: 'high', name: 'High' }] : [], unavailable: [] });
     }
     if (pathname === '/api/bundles') {
       state.creates.push(route.request().postDataJSON());
@@ -303,31 +296,44 @@ test('golden_viewer_new_session', async ({ context }) => {
     return startHeldLaunch(page, state);
   });
 
-  for (const [policy, label] of [
-    [undefined, 'Native'],
-    [{ mode: 'none' }, 'None'],
-    [{ mode: 'single_model', model: 'model-a', effort: 'high' }, 'Single model: model-a · high'],
-    [{ mode: 'single_model', model: 'haiku', effort: 'low' }, 'Single model: haiku · low'],
-    [{ mode: 'single_model', model: 'haiku', effort: null }, 'Single model: haiku'],
+  for (const [configured, remembered, selected, label] of [
+    [false, 'mjolnir', 'native', 'unconfigured'],
+    [true, 'native', 'mjolnir', 'configured selection'],
+    [true, 'mjolnir', 'mjolnir', 'remembered Mjolnir'],
   ]) {
-    await withNewSessionPage(context, {}, output, `profile subagent policy ${label}`, async (page, state) => {
-      if (policy) {
-        state.snapshot.profiles[0].subagents = policy;
-        await refresh(page, state);
-      }
+    await withNewSessionPage(context, {}, output, `delegation ${label}`, async (page, state) => {
+      state.snapshot.subagents_configured = configured;
+      state.snapshot.last_subagent_policy = { mode: remembered };
+      await refresh(page, state);
+      // Restart the draft so the remembered policy is read for this creation.
+      await page.evaluate(() => { location.hash = '#workspace/test'; });
+      await expect(page.locator('#new-page')).toBeHidden();
+      await page.evaluate(() => { location.hash = '#workspace/test/new'; });
       await projectStep(page, 'container');
       await page.getByRole('button', { name: 'existing', exact: true }).click();
       await expect(page.locator('#new-step')).not.toContainText('Checking project');
-      await captureNewSessionState(output, page, `review subagent policy ${label}`, state);
-      return startHeldLaunch(page, state);
+      const delegation = page.locator('#new-subagents');
+      await expect(delegation.locator('option[value="mjolnir"]')).toHaveJSProperty('disabled', !configured);
+      if (!configured) {
+        await expect(delegation).toHaveValue('native');
+        await expect(page.locator('#new-step')).toContainText("Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents");
+      } else if (remembered === 'mjolnir') await expect(delegation).toHaveValue('mjolnir');
+      else await delegation.selectOption(selected);
+      await captureNewSessionState(output, page, `review delegation ${label}`, state);
+      const release = await startHeldLaunch(page, state);
+      expect(state.actions[0].subagents).toEqual({ mode: selected });
+      return release;
     });
   }
 
   await withNewSessionPage(context, {}, output, 'harness without subagent support', async (page, state) => {
+    state.snapshot.subagents_configured = true;
+    await refresh(page, state);
     await page.locator('#new-profile').selectOption('gamma');
     await projectStep(page, 'container');
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    await expect(page.locator('#new-subagents option[value="mjolnir"]')).toHaveJSProperty('disabled', true);
     await captureNewSessionState(output, page, 'review for harness without subagent support', state);
     return startHeldLaunch(page, state);
   });
@@ -434,15 +440,16 @@ test('golden_viewer_new_session', async ({ context }) => {
     code: 'subagent_choice_unavailable',
   };
   await withNewSessionPage(context, {}, output, 'unavailable subagent model and Settings guidance', async (page, state) => {
-    state.snapshot.profiles[0].subagents = { mode: 'single_model', model: 'removed', effort: 'high' };
+    state.snapshot.subagents_configured = true;
     state.actionError = unavailable;
     await refresh(page, state);
     await projectStep(page, 'container');
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
+    await page.locator('#new-subagents').selectOption('mjolnir');
     await captureNewSessionState(output, page, 'review shows unavailable subagent policy', state);
     await page.locator('#new-next').click();
-    await expect(page.locator('#new-error')).toContainText('Settings → Agent Profiles → alpha → Sub-agents');
+    await expect(page.locator('#new-error')).toContainText("in mj's TUI Settings -> Sub-agents");
   });
 
   await withNewSessionPage(context, {}, output, 'generic launch error', async (page, state) => {
@@ -688,11 +695,11 @@ test('Review is usable during preflight, survives refresh, and gates submission'
   await expect(page.locator('#new-back')).toBeEnabled();
   const worktree = page.getByRole('checkbox', { name: 'Create isolated checkout' });
   await expect(worktree).toBeDisabled();
-  await expect(page.locator('#new-step')).toContainText('SubagentsNative');
+  await expect(page.locator('#new-subagents')).toHaveValue('native');
   await page.locator('#new-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   expect(state.actions).toHaveLength(0);
   await refresh(page, state);
-  await expect(page.locator('#new-step')).toContainText('SubagentsNative');
+  await expect(page.locator('#new-subagents')).toHaveValue('native');
   await expect(page.locator('#new-step')).toContainText('Checking project…');
   expect(state.preflights).toHaveLength(1);
   release();

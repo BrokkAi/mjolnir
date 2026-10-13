@@ -135,6 +135,9 @@ pub struct DurableRelay {
     /// steering because its bridge can cancel an in-flight tool hook.
     steering_delivery_mode: SteeringDeliveryMode,
     snapshot: RelaySnapshot,
+    /// Wake observers after durable publication; they ask this owner for the
+    /// current decision rather than maintaining another copy of relay state.
+    changes: tokio::sync::watch::Sender<()>,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
     /// retained in memory.
@@ -476,6 +479,7 @@ impl DurableRelay {
                 _ => SteeringDeliveryMode::Acp,
             },
             snapshot,
+            changes: tokio::sync::watch::channel(()).0,
             journal_spans,
             hot_events,
             replay_cursors: VecDeque::new(),

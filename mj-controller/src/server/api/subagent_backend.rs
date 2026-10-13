@@ -6,6 +6,10 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
+        Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
+    }
+
     /// Cheap token for this session's durable wait inputs. Backends without
     /// a committed publication leave filtering to the detailed observation.
     fn wait_revision(&self, _session_id: &str) -> AnyResult<Option<u64>> {

@@ -676,4 +676,57 @@ mod tests {
         let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
         assert_eq!(launch.harness_runtime, HarnessRuntimePolicy::Managed);
     }
+    #[test]
+    fn launch_policy_accepts_legacy_selectors_and_booleans() {
+        use crate::subagent::SubagentPolicy;
+        for (policy, expected) in [
+            (
+                serde_json::json!({"mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"}),
+                SubagentPolicy::Mjolnir {
+                    straightforward: Some(Box::new(crate::config::SubagentChoice {
+                        model: "gpt-6-luna".into(),
+                        effort: Some("max".into()),
+                    })),
+                    subtle: Some(Box::new(crate::config::SubagentChoice {
+                        model: "gpt-6-luna".into(),
+                        effort: Some("max".into()),
+                    })),
+                },
+            ),
+            (
+                serde_json::json!({"mode":"all_models"}),
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+            ),
+            (
+                serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"high"}),
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+            ),
+            (
+                serde_json::json!({"mode":"single_model", "model":"chosen", "effort":"adaptive"}),
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+            ),
+            (
+                serde_json::json!(true),
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
+            ),
+            (serde_json::json!(false), SubagentPolicy::Native),
+        ] {
+            let mut value = launch_json();
+            value["subagents"] = policy;
+            let launch: WorkerLaunchConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(launch.subagents, expected);
+        }
+    }
 }
