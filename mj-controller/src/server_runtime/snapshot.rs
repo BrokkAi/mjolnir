@@ -777,13 +777,13 @@ pub(super) fn viewer_snapshot_selected(
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
             session.capacity_retry = state.capacity_retry.clone();
-            session.retry_assessment_pending = state.retry_assessment_pending;
             session.quota_recovery = state
                 .continuation
                 .quota_recovery
                 .clone()
                 .filter(|r| !r.submitted);
             let activity = mj_client::usage_format::SessionActivity::of(state);
+            session.retry_assessment_pending = activity.checking_response;
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
             session.activity_details = Some(viewer_activity_details(&activity_details));

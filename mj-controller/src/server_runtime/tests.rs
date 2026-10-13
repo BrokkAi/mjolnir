@@ -676,6 +676,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     assert!(unknown.sessions[0].activity_details.is_none());
 }
 
+// Hard-won: b72adcc6f: the viewer must distinguish pending checks from failed assessments on idle sessions.
 #[test]
 fn golden_phone_session_snapshot() {
     use std::fmt::Write as _;
@@ -890,6 +891,41 @@ fn golden_phone_session_snapshot() {
         "1 session card",
         &session_card(&one.sessions.0["session-1"]),
     );
+    for (label, status) in [
+        (
+            "idle with a pending assessment",
+            mj_core::assessment::Status::Pending,
+        ),
+        (
+            "idle with a failed assessment",
+            mj_core::assessment::Status::Failed,
+        ),
+    ] {
+        let mut assessing = operational.clone();
+        let state = assessing.get_mut("session-1").unwrap();
+        let mut assessment = mj_core::assessment::TurnAssessment::pending(
+            "completed-turn".into(),
+            10,
+            1_000,
+            mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
+        );
+        assessment.status = status;
+        state.assessment = Some(Box::new(assessment));
+        state.retry_assessment_pending = true;
+        state.idle_since_ms = Some(1_000);
+        let snapshot = project(&controller, &one_workspace, &assessing, &no_native_agents);
+        let session = &snapshot.sessions.0["session-1"];
+        section(
+            &mut out,
+            label,
+            "1 session row and intern table",
+            &serde_json::json!({
+                "control_retry_assessment_pending": true,
+                "activity": session.activity,
+                "session": wire_row(session),
+            }),
+        );
+    }
     let mut busy = operational.clone();
     busy.get_mut("child-1").unwrap().harness_turn = Some(mj_core::relay::HarnessTurn {
         started_at_ms: 1_000,

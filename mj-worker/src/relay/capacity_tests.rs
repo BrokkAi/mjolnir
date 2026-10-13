@@ -429,6 +429,7 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
     assert!(relay.pending_replied_verdict().is_none());
 }
 
+// Hard-won: b72adcc6f: a retry stayed failed while a fresh assessment was pending.
 #[test]
 fn classification_transport_backoff_and_diagnostics_survive_restart() {
     let root = tempfile::tempdir().unwrap();
@@ -452,12 +453,35 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     let mut relay = open(root.path());
     assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &a);
     assert!(relay.pending_replied_verdict().is_none());
-    assert_eq!(a.evidence, Some(evidence));
+    assert_eq!(a.evidence, Some(evidence.clone()));
     let id = format!("assessment-{SESSION}-{revision}");
     let page = mj_core::jev::read(&root.path().join("jev-decisions"), SESSION, Some(&id)).unwrap();
     assert_eq!(page.decisions.len(), 1);
     assert_eq!(page.decisions[0].status, "failed");
     assert_eq!(page.decisions[0].action, "transport failed");
+
+    relay.prepare_pending_assessment().unwrap();
+    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &a);
+    let mut due = a.clone();
+    due.retry_at_ms = Some(0);
+    relay
+        .record_observation(RelayObservation::TurnAssessmentUpdated {
+            assessment: Box::new(due),
+        })
+        .unwrap();
+    relay.prepare_pending_assessment().unwrap();
+    let pending = relay.snapshot.assessment.clone().unwrap();
+    assert_eq!(pending.status, mj_core::assessment::Status::Pending);
+    assert_eq!(pending.retry_at_ms, None);
+    assert_eq!(pending.failures, a.failures);
+    assert_eq!(pending.revision, revision);
+    assert_eq!(relay.pending_replied_verdict().unwrap().1, evidence);
+    relay.prepare_pending_assessment().unwrap();
+    assert!(relay.pending_replied_verdict().is_none());
+    drop(relay);
+    let mut relay = open(root.path());
+    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &pending);
+    assert!(relay.pending_replied_verdict().is_some());
 }
 
 #[test]

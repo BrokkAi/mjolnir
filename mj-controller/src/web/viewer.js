@@ -1124,9 +1124,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
     const seconds = Math.max(0, Math.ceil((session.capacity_retry.retry_at_ms - now) / 1000));
     return `Provider unavailable · retrying in ${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
   }
-  // An assessment can remain pending or failed after the worker reports idle.
-  // The daemon's activity classification owns that decision.
-  if (session.retry_assessment_pending && !session.is_idle) return 'Checking response';
+  if (session.retry_assessment_pending) return 'Checking response';
   const details = session.activity_details || {};
   const kind = details.kind;
   const turnStarted = epochMs(details.turn_started_at_ms);

@@ -11,6 +11,14 @@ idle: false
 wide activity: [idle]
 compact activity: [idle]
 idle: true
+=== idle with a pending assessment (1 session row) ===
+wide activity: Checking response
+compact activity: Checking response
+assessment unresolved: true; idle: true; chat title: Checking response
+=== idle with a failed assessment (1 session row) ===
+wide activity: [idle]
+compact activity: [idle]
+assessment unresolved: true; idle: true; chat title: Idle
 === elapsed clock cells (11 values) ===
 0s -> 0s
 36s -> 36s
