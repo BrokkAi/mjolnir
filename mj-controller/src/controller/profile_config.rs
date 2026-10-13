@@ -337,8 +337,14 @@ pub(crate) async fn observe(
         };
         enrich_profile_config(profile, &mut choices)?;
         // Worker observations do not carry authentication provenance. Claude's
-        // setup-token and login catalogues differ, so only probes may cache it.
-        if profile.kind == mj_core::config::HarnessKind::Claude {
+        // setup-token and login catalogues differ, so only probes may cache
+        // it. Muse catalogues are never cached at all: its models and efforts
+        // change server-side without a managed-pin bump, so a cached copy
+        // hides options people expect.
+        if matches!(
+            profile.kind,
+            mj_core::config::HarnessKind::Claude | mj_core::config::HarnessKind::Muse
+        ) {
             return Ok(choices);
         }
         let fingerprint = fingerprint(profile);
@@ -414,6 +420,21 @@ fn discover_from_config(
         profile.kind,
         &mj_core::credentials::claude_oauth_token_path(profile_id),
     );
+    // Muse models and efforts change server-side without a managed-pin bump,
+    // so a cached catalogue hides options people expect. There is no point
+    // caching it: always probe the installation that actually runs, and never
+    // write the result back.
+    if profile.kind == mj_core::config::HarnessKind::Muse {
+        let mut choices = probe_profile(
+            profile_id,
+            profile,
+            environment.clone(),
+            model.clone(),
+            cancelled,
+        )?;
+        enrich_profile_config(profile, &mut choices)?;
+        return Ok(choices);
+    }
     let fingerprint = fingerprint(profile);
     resolve_cached(
         refresh,
@@ -1041,6 +1062,200 @@ mod tests {
         assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
         assert_eq!(choices.models.len(), 1);
         assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
+    }
+
+    /// Muse models and efforts change server-side without a managed-pin bump,
+    /// so caching a worker's observed catalogue hides options people expect.
+    /// Muse observations must leave the persistent cache untouched while other
+    /// harnesses keep caching theirs.
+    #[tokio::test]
+    async fn muse_worker_observations_are_never_cached() {
+        const CHILD: &str = "MJ_TEST_MUSE_OBSERVATIONS_UNCACHED";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "muse_worker_observations_are_never_cached",
+                ),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "muse-observations-uncached-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        use agent_client_protocol::schema::v1::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+            SessionConfigSelectOptions,
+        };
+        use mj_core::relay::{
+            RELAY_EVENT_GENESIS_DIGEST, RelayExecutionState, RelayOperationalState,
+        };
+
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        // A Muse home must end in /muse, its XDG configuration directory.
+        let home = root.path().join("muse");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            br#"{"model":"muse-spark-1.3-contributor"}"#,
+        )
+        .unwrap();
+        let profile = |kind: mj_core::config::HarnessKind| HarnessProfile {
+            enabled: true,
+            kind,
+            home: if kind == mj_core::config::HarnessKind::Muse {
+                home.clone()
+            } else {
+                root.path().into()
+            },
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            legacy_subagents: None,
+        };
+        let mut config = Config::default();
+        config
+            .profiles
+            .insert("muse".into(), profile(mj_core::config::HarnessKind::Muse));
+        config
+            .profiles
+            .insert("codex".into(), profile(mj_core::config::HarnessKind::Codex));
+        config.save().unwrap();
+
+        fn observed() -> RelayOperationalState {
+            RelayOperationalState {
+                assessment: None,
+                assessment_context: None,
+                turn_completion: None,
+                continuation: Default::default(),
+                relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
+                native_agents: Vec::new(),
+                steering: None,
+                cancelling_prompt_id: None,
+                clear_context: false,
+                clear_context_started_at_ms: None,
+                native_agent_count: 0,
+                expected_continuation: None,
+                inferred_idle_since_ms: None,
+                task_settled_at_ms: None,
+                background_needed: None,
+                goal: Default::default(),
+                capacity_retry: None,
+                retry_assessment_pending: false,
+                store_id: None,
+                idle_since_ms: None,
+                session_id: "observed".to_owned(),
+                execution: RelayExecutionState::Idle,
+                latest_ordinal: 0,
+                latest_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
+                acknowledged_through: 0,
+                acknowledged_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
+                recovery_floor_ordinal: 0,
+                recovery_floor_digest: RELAY_EVENT_GENESIS_DIGEST.to_owned(),
+                native_session_id: Some("observed".to_owned()),
+                native_continuity_lost: false,
+                replaced_unused_native_session_id: None,
+                checkpoint_only: false,
+                acp_ready: None,
+                harness_preparation: None,
+                agent_capabilities: None,
+                agent_info: None,
+                runtime: None,
+                steering_supported: None,
+                config_options: vec![
+                    SessionConfigOption::select(
+                        "effort".to_owned(),
+                        "Effort".to_owned(),
+                        "low".to_owned(),
+                        SessionConfigSelectOptions::Ungrouped(vec![
+                            SessionConfigSelectOption::new("low".to_owned(), "Low".to_owned()),
+                            SessionConfigSelectOption::new("high".to_owned(), "High".to_owned()),
+                        ]),
+                    )
+                    .category(SessionConfigOptionCategory::ThoughtLevel),
+                ],
+                modes: None,
+                available_commands: Vec::new(),
+                config: BTreeMap::new(),
+                active_prompt: None,
+                queued_prompts: Vec::new(),
+                active_user_shells: Vec::new(),
+                active_agent_terminals: Vec::new(),
+                checkpoint_barrier: None,
+                checkpoint_ready: None,
+                last_acp_activity_at_ms: None,
+                activity_turn_started_at_ms: None,
+                current_step_started_at_ms: None,
+                foreground_tool_started_at_ms: None,
+                tools_in_flight: Vec::new(),
+                activity: None,
+                harness_turn: None,
+                last_harness_turn_started_ordinal: None,
+                background_commands: Vec::new(),
+                background_work_known: None,
+            }
+        }
+
+        // A stale row from before the bypass must survive the observation
+        // byte-identical: nothing may refresh it, and no model-keyed row may
+        // appear beside it.
+        let stale = ProfileConfig {
+            model: Some("stale-model".into()),
+            models: Vec::new(),
+            efforts: Vec::new(),
+            observed_at: 1,
+        };
+        let muse_fingerprint = fingerprint(config.enabled_profile("muse").unwrap());
+        store("muse", &muse_fingerprint, &None, &stale).unwrap();
+        let cached_before =
+            crate::database::load_profile_config_cache("muse", "", &muse_fingerprint).unwrap();
+
+        assert!(
+            !observe(
+                "muse".into(),
+                String::new(),
+                observed(),
+                ObservationCheck::NoProbe,
+            )
+            .await
+            .unwrap(),
+            "a Muse observation caches nothing"
+        );
+        assert_eq!(
+            crate::database::load_profile_config_cache("muse", "", &muse_fingerprint).unwrap(),
+            cached_before,
+        );
+        assert!(
+            crate::database::load_profile_config_cache(
+                "muse",
+                "muse-spark-1.3-contributor",
+                &muse_fingerprint,
+            )
+            .unwrap()
+            .is_none(),
+            "a Muse observation stores no model-keyed row either"
+        );
+
+        // Other harnesses still cache worker observations.
+        assert!(
+            observe(
+                "codex".into(),
+                String::new(),
+                observed(),
+                ObservationCheck::NoProbe,
+            )
+            .await
+            .unwrap()
+        );
+        let codex_fingerprint = fingerprint(config.enabled_profile("codex").unwrap());
+        assert!(
+            crate::database::load_profile_config_cache("codex", "", &codex_fingerprint)
+                .unwrap()
+                .is_some()
+        );
     }
     #[tokio::test]
     async fn create_and_move_mjolnir_policy_refuse_unconfigured_and_unsupported_parents() {
