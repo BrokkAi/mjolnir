@@ -106,3 +106,36 @@ async fn stopping_timeout_retains_the_runtime_and_admission_until_actual_complet
     ));
     assert!(reserve("upgrade-after-stopping").is_some());
 }
+
+/// A reviewer role's home keeps the staged link to the profile's own login,
+/// so the reviewer's harness refreshes the one login every local session
+/// shares instead of a copy. Every other link is still copied as its target's
+/// content, so a role's home never points into a directory another role owns.
+#[test]
+fn a_role_home_keeps_the_login_link_and_copies_every_other_link() {
+    let root = tempfile::tempdir().unwrap();
+    let profile_login = root.path().join("profile-auth.json");
+    std::fs::write(&profile_login, "profile login").unwrap();
+    let shared = root.path().join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(shared.join("rule"), "rule").unwrap();
+    let stage = root.path().join("stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    let login = harness_authentication_marker(HarnessKind::Codex, &stage);
+    std::os::unix::fs::symlink(&profile_login, &login).unwrap();
+    std::os::unix::fs::symlink(&shared, stage.join("rules")).unwrap();
+
+    let role = root.path().join("role");
+    copy_tree(&stage, &role, &login).unwrap();
+
+    assert_eq!(
+        std::fs::read_link(role.join("auth.json")).unwrap(),
+        profile_login
+    );
+    let rules = std::fs::symlink_metadata(role.join("rules")).unwrap();
+    assert!(rules.is_dir() && !rules.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(role.join("rules/rule")).unwrap(),
+        "rule"
+    );
+}

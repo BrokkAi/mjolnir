@@ -189,6 +189,7 @@ impl Controller {
             &launch_path,
             &ownership_path,
             &profile_stage,
+            shared_profile_login(profile, backend).as_ref(),
         )?;
         if session.build_cache.is_some() {
             self.install_build_cache_shim(session, backend, &launch, executor)

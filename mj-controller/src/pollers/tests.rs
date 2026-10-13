@@ -1152,6 +1152,73 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
     }
 }
 
+/// A local Codex session whose login file links to the profile's own has no
+/// copy to reconcile, so the sync leaves its login file alone. A push would be
+/// refused at the link, and a pull could replace a login another Codex process
+/// just refreshed. A session staged with a copy is still reconciled, and a
+/// harness that cannot share its login keeps its sync whatever its file is.
+#[cfg(unix)]
+#[test]
+fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
+    let directory = tempfile::tempdir().unwrap();
+    for kind in [
+        mj_core::config::HarnessKind::Codex,
+        mj_core::config::HarnessKind::Claude,
+    ] {
+        let mut controller = podman_controller(SessionState::Running);
+        let home = directory.path().join(kind.id());
+        std::fs::create_dir_all(&home).unwrap();
+        let login = mj_core::config::harness_authentication_marker(kind, &home);
+        std::fs::write(&login, "{}").unwrap();
+        controller.config.profiles.insert(
+            kind.id().into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind,
+                home: home.clone(),
+                environment: Default::default(),
+                context_window_bytes: None,
+                legacy_subagents: Default::default(),
+                guardian_review_model: None,
+            },
+        );
+        controller.config.targets.insert(
+            "local-bare".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        let session = controller.state.sessions.first_value_mut().unwrap();
+        let worker_root = directory
+            .path()
+            .join("workers")
+            .join(kind.id())
+            .join(&session.id);
+        let staged = worker_root.join("profile");
+        std::fs::create_dir_all(&staged).unwrap();
+        session.harness_kind = kind;
+        session.last_profile = kind.id().into();
+        session.target_template_id = "local-bare".into();
+        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+            worker_root: worker_root.clone(),
+        });
+
+        let staged_login = mj_core::config::harness_authentication_marker(kind, &staged);
+        std::fs::write(&staged_login, "{}").unwrap();
+        let copied = credential_sync_targets(&controller);
+        assert_eq!(copied.len(), 1, "{kind:?}");
+        assert!(!copied[0].skips_login_file_sync, "{kind:?}");
+
+        std::fs::remove_file(&staged_login).unwrap();
+        std::os::unix::fs::symlink(&login, &staged_login).unwrap();
+        let linked = credential_sync_targets(&controller);
+        assert_eq!(linked.len(), 1, "{kind:?}");
+        assert_eq!(
+            linked[0].skips_login_file_sync,
+            kind.shares_local_login(),
+            "{kind:?}"
+        );
+    }
+}
+
 /// #1160: after `mj login` for codex4, the refreshed login has to reach every
 /// live session of the profile, including a sub-agent child that runs inside
 /// another session's container on a remote machine. Every such session is on

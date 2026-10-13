@@ -329,6 +329,19 @@ impl HarnessKind {
         }
     }
 
+    /// Whether sessions on this machine can share the profile's own login
+    /// file through a link instead of each holding a copy.
+    ///
+    /// A login that rotates its refresh token on every refresh has one valid
+    /// copy at a time, so copies refreshed independently make one another
+    /// stale. Codex is built for one file shared by several processes: it
+    /// reloads the file before it refreshes and uses a token another process
+    /// already saved, and it rewrites the file in place, which keeps a link
+    /// intact. Other harnesses are unverified and keep their copies.
+    pub const fn shares_local_login(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
     /// The harness's own command-line program, as found on `PATH`.
     pub const fn cli_binary_name(self) -> &'static str {
         match self {

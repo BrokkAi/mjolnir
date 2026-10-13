@@ -136,6 +136,28 @@ pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRec
     std::fs::symlink_metadata(worker_root.join("profile")).is_ok_and(|metadata| metadata.is_dir())
 }
 
+/// Whether a local session's login file is a link to its profile's own, which
+/// install makes for a harness that can share one (see
+/// [`mj_core::config::HarnessKind::shares_local_login`]). The credential sync
+/// has nothing to reconcile for such a session: both sides are one file.
+///
+/// The file itself is checked rather than the harness, so a session an earlier
+/// release staged with a copy keeps its sync until it is staged again.
+pub fn session_shares_profile_login(
+    session: &mj_core::state::SessionRecord,
+    harness: mj_core::config::HarnessKind,
+) -> bool {
+    let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+        return false;
+    };
+    harness.shares_local_login()
+        && std::fs::symlink_metadata(mj_core::config::harness_authentication_marker(
+            harness,
+            &worker_root.join("profile"),
+        ))
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
+
 /// The argument lists of every process running on this machine, or `None`
 /// when they cannot be listed. The same `ps` options work on Linux and macOS,
 /// and `-ww` keeps long arguments whole.

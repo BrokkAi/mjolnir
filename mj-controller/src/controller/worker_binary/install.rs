@@ -109,6 +109,100 @@ pub(super) fn append_staged_instructions(
     Ok(())
 }
 
+/// A profile's own login file that a worker on this machine links to instead
+/// of copying (see [`HarnessKind::shares_local_login`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::controller) struct SharedLogin {
+    /// Where the login file sits in a staged home.
+    pub(in crate::controller) name: &'static str,
+    /// The profile's login file the staged home links to.
+    pub(in crate::controller) file: PathBuf,
+}
+
+/// The login file a worker for `profile` on `backend` shares with the profile,
+/// or `None` when the worker keeps its own copy: on every other target, for a
+/// harness that cannot share one, and for a profile that signs in some other
+/// way than the harness's login file.
+pub(in crate::controller) fn shared_profile_login(
+    profile: &HarnessProfile,
+    backend: &targets::TargetLocator,
+) -> Option<SharedLogin> {
+    if !(mj_core::targets::HOST_RUNS_WORKERS
+        && matches!(backend, targets::TargetLocator::LocalBare { .. })
+        && profile.kind.shares_local_login()
+        && profile.auth_scheme().uses_native_login_file())
+    {
+        return None;
+    }
+    // A relative link would resolve against the worker's home, not the
+    // directory the profile home is relative to; without an absolute path the
+    // worker keeps a copy.
+    let file = std::path::absolute(profile.authentication_marker()).ok()?;
+    Some(SharedLogin {
+        name: profile.kind.credential_file_name(),
+        file,
+    })
+}
+
+/// Copy a staged home into a home on this machine, then link the login file
+/// when the worker shares the profile's own.
+///
+/// A link an earlier install left is removed before copying, whether or not
+/// this install shares the login: copying a file through it would write the
+/// stage over the profile's login.
+pub(super) fn install_local_profile_stage(
+    stage: &Path,
+    home: &Path,
+    shared_login: Option<&SharedLogin>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(stage)? {
+        let entry = entry?;
+        let destination = home.join(entry.file_name());
+        remove_link(&destination)?;
+        copy_profile_entry(&entry.path(), &destination)?;
+    }
+    if let Some(login) = shared_login {
+        link_shared_login(home, login)?;
+    }
+    Ok(())
+}
+
+/// Replace the login file in `home` with a link to the profile's own.
+pub(in crate::controller) fn link_shared_login(home: &Path, login: &SharedLogin) -> Result<()> {
+    let link = home.join(login.name);
+    match std::fs::remove_file(&link) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("remove staged login copy {}", link.display())));
+        }
+    }
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&login.file, &link);
+    // Only Unix machines run local workers (`HOST_RUNS_WORKERS`).
+    #[cfg(not(unix))]
+    let linked = Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "linking a staged login needs a Unix file system",
+    ));
+    linked.with_context(|| {
+        format!(
+            "link {} to the profile login {}",
+            link.display(),
+            login.file.display()
+        )
+    })
+}
+
+fn remove_link(path: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        std::fs::remove_file(path)
+            .with_context(|| format!("remove the earlier link {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub(super) fn copy_profile_entry(source: &Path, destination: &Path) -> Result<()> {
     copy_profile_entry_within(source, destination, &HashSet::new(), &[])
 }
@@ -601,6 +695,7 @@ pub(super) fn install_worker_files(
     launch_config: &Path,
     ownership: &Path,
     profile_stage: &Path,
+    shared_login: Option<&SharedLogin>,
 ) -> Result<()> {
     verify_worker_build(worker_binary)?;
     crate::target_storage::ensure_room_for(
@@ -624,13 +719,7 @@ pub(super) fn install_worker_files(
                     })?;
                 }
                 std::fs::create_dir_all(profile_home).context("create isolated local profile")?;
-                for entry in std::fs::read_dir(profile_stage)? {
-                    let entry = entry?;
-                    copy_profile_entry(
-                        &entry.path(),
-                        &Path::new(profile_home).join(entry.file_name()),
-                    )?;
-                }
+                install_local_profile_stage(profile_stage, Path::new(profile_home), shared_login)?;
             }
             for command in [
                 CommandSpec::new("mkdir", ["-p", worker_root])

@@ -1276,6 +1276,7 @@ fn install_on_ssh_host(
         &fixture.launch_config,
         &fixture.ownership,
         &fixture.profile_stage,
+        None,
     )
     .unwrap();
     rendered(&executor.commands.take())
@@ -1446,6 +1447,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.launch_config,
             &fixture.ownership,
             &fixture.profile_stage,
+            None,
         )?;
         let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
@@ -5295,4 +5297,55 @@ fn a_missing_pinned_copy_or_index_falls_back_to_a_full_pin() {
     verify_worker_build(&first).unwrap();
     std::fs::remove_dir_all(cache.join("index")).unwrap();
     assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
+}
+
+/// Installing links the login file to the profile's own, and installing again
+/// over that link, with or without sharing, never writes the stage's copy
+/// through it into the profile's login.
+#[cfg(unix)]
+#[test]
+fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_link() {
+    let profile = tempfile::tempdir().unwrap();
+    let profile_login = profile.path().join("auth.json");
+    std::fs::write(&profile_login, "profile login").unwrap();
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(stage.path().join("auth.json"), "staged copy").unwrap();
+    std::fs::write(stage.path().join("config.toml"), "staged config").unwrap();
+    let worker = tempfile::tempdir().unwrap();
+    let home = worker.path().join("profile");
+    std::fs::create_dir_all(&home).unwrap();
+    let login = SharedLogin {
+        name: "auth.json",
+        file: profile_login.clone(),
+    };
+
+    for _ in 0..2 {
+        install_local_profile_stage(stage.path(), &home, Some(&login)).unwrap();
+        assert_eq!(
+            std::fs::read_link(home.join("auth.json")).unwrap(),
+            profile_login
+        );
+        assert_eq!(
+            std::fs::read_to_string(&profile_login).unwrap(),
+            "profile login"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "staged config"
+        );
+    }
+
+    install_local_profile_stage(stage.path(), &home, None).unwrap();
+    let installed = home.join("auth.json");
+    assert!(
+        !std::fs::symlink_metadata(&installed)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&installed).unwrap(), "staged copy");
+    assert_eq!(
+        std::fs::read_to_string(&profile_login).unwrap(),
+        "profile login"
+    );
 }
