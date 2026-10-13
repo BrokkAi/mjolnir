@@ -93,7 +93,9 @@ impl WorkerRootOwner {
                 match std::fs::remove_file(self.root.join(name)) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error).context("clear previous worker diagnostics"),
+                    Err(error) => mj_core::diagnostic_stderr!(
+                        "Mjolnir: could not clear worker diagnostic {name}: {error}"
+                    ),
                 }
             }
         }
@@ -102,10 +104,22 @@ impl WorkerRootOwner {
             .write(true)
             .append(reexec)
             .truncate(!reexec)
-            .open(self.root.join("worker.log"))?;
+            .open(self.root.join("worker.log"));
+        let log = match log {
+            Ok(log) => log,
+            Err(error) => {
+                mj_core::diagnostic_stderr!(
+                    "Mjolnir: could not open worker.log; retaining inherited stderr: {error}"
+                );
+                return Ok(());
+            }
+        };
         // SAFETY: dup2 installs the open log as stderr; log remains valid here.
         if unsafe { libc::dup2(log.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
-            return Err(std::io::Error::last_os_error()).context("redirect owner worker log");
+            mj_core::diagnostic_stderr!(
+                "Mjolnir: could not redirect worker log: {}",
+                std::io::Error::last_os_error()
+            );
         }
         Ok(())
     }

@@ -506,10 +506,13 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn install_panic_logging() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "Mjolnir panicked");
-        default_hook(info);
+    // A default hook writes to detached stderr, which may itself be full.
+    let _ = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        logging::panic_log(&format!(
+            "Mjolnir panicked: {}",
+            mj_core::logging::panic_message(info)
+        ));
     }));
 }
 

@@ -383,7 +383,7 @@ pub async fn run_server_on_listener(
     let viewer_code = options.viewer_code.clone();
     let tls_config = options.tls_config.take();
     let app = router(options);
-    println!("Mjolnir viewer code: {viewer_code}");
+    mj_core::diagnostic_stdout!("Mjolnir viewer code: {viewer_code}");
     let listener = listener.into_std().context("prepare web viewer listener")?;
     let handle = axum_server::Handle::new();
     let shutdown_handle = handle.clone();
