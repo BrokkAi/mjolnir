@@ -66,6 +66,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     operation: options.operation || null,
     chat_phase: 'idle',
     is_idle: options.isIdle !== false,
+    retry_assessment_pending: Boolean(options.retryAssessmentPending),
     config_options: [],
     plan_mode_active: false,
     turn_review: null,
@@ -262,6 +263,7 @@ async function fixGoldenTime(page) {
   await page.clock.install({ time: new Date(SERVER_TIME_MS) });
 }
 
+// Hard-won: 87238fc70: a pending response assessment hid the daemon's confirmed idle state.
 test('golden_viewer_dashboard', async ({ context }) => {
   const { assertGolden } = await import('./golden.mjs');
   const output = [];
@@ -313,10 +315,11 @@ test('golden_viewer_dashboard', async ({ context }) => {
     }),
     session('beta-step', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 2_000, activityDetails: activity('step', { step_started_at_ms: SERVER_TIME_MS - 3_600_000 }), isIdle: false }),
     session('alpha-background', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 3_000, activityDetails: activity('background', { background_started_at_ms: SERVER_TIME_MS - 65_000, label: 'Indexing' }), isIdle: false }),
-    session('alpha-idle', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_000, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }) }),
+    session('alpha-idle', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_000, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }), retryAssessmentPending: true }),
     session('alpha-yesterday', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 86_465_000 }) }),
     session('lifecycle', 'project-lifecycle', 'Lifecycle', { activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
-    session('unknown-idle', 'project-unknown', 'Unknown', { activity: SERVER_TIME_MS - 6_000, activityDetails: activity('idle') }),
+    session('checking-response', 'project-checking', 'Checking', { activity: SERVER_TIME_MS - 5_500, activityDetails: activity('lifecycle', { label: 'Checking continuation' }), isIdle: false, retryAssessmentPending: true }),
+    session('unknown-idle', 'project-unknown', 'Unknown', { activity: SERVER_TIME_MS - 6_000, activityDetails: activity('idle'), retryAssessmentPending: true }),
   ]);
   await captureGoldenState(output, compactPage, 'compact cards with attention and activity clocks', await compactPage.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
