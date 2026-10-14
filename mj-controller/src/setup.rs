@@ -14,7 +14,9 @@ use mj_core::config::{
 };
 
 mod startup;
-pub use startup::{SetupReport, actionable_errors, run_setup, run_setup_command};
+pub use startup::{
+    SetupReport, actionable_errors, add_detected_profiles, run_setup, run_setup_command,
+};
 
 // Published from containers/Containerfile.agent-dev by
 // .github/workflows/publish-agent-dev-image.yml. It already carries Node, Rust,
