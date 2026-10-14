@@ -180,15 +180,15 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         }
     }
 
-    fn begin_resumable_move_work(&self) -> Result<()> {
+    fn begin_resumable_work(&self) -> Result<()> {
         let owner = self.state.owner();
         let active = owner
             .lifecycle
             .get(&self.session_id)
-            .context("Move lifecycle missing")?;
+            .context("resumable lifecycle missing")?;
         ensure!(
             self.operation_id.as_ref() == Some(&active.operation_id),
-            "Move lifecycle changed"
+            "resumable lifecycle changed"
         );
         active
             .upgrade_work
@@ -198,16 +198,16 @@ impl<E: CommandExecutor> CommandExecutor for DaemonStageReportingExecutor<E> {
         Ok(())
     }
 
-    fn end_resumable_move_work(&self) -> Result<()> {
-        let work = crate::upgrade::activity("Move control transition")?;
+    fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+        let work = crate::upgrade::activity_unless_draining(label)?;
         let owner = self.state.owner();
         let active = owner
             .lifecycle
             .get(&self.session_id)
-            .context("Move lifecycle missing")?;
+            .context("resumable lifecycle missing")?;
         ensure!(
             self.operation_id.as_ref() == Some(&active.operation_id),
-            "Move lifecycle changed"
+            "resumable lifecycle changed"
         );
         *active
             .upgrade_work

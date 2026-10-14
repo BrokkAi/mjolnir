@@ -12,9 +12,9 @@ impl Controller {
         operation: &mut MoveOperation,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        executor.begin_resumable_move_work()?;
+        executor.begin_resumable_work()?;
         let result = self.prepare_ec2_move_destination_inner(operation, executor);
-        let admission = executor.end_resumable_move_work();
+        let admission = executor.end_resumable_work("Move control transition");
         admission?;
         result
     }

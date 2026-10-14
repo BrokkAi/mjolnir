@@ -1984,6 +1984,7 @@ struct ParkingExports {
     records: std::sync::Mutex<BTreeMap<String, SessionRecord>>,
     unparks: std::sync::atomic::AtomicUsize,
     unpark_failure: Option<String>,
+    defer_unpark: std::sync::atomic::AtomicBool,
     mailboxes_enabled: bool,
 }
 
@@ -2007,6 +2008,7 @@ impl ParkingExports {
             records: std::sync::Mutex::new(records),
             unparks: Default::default(),
             unpark_failure: unpark_failure.map(str::to_owned),
+            defer_unpark: Default::default(),
             mailboxes_enabled,
         })
     }
@@ -2051,6 +2053,15 @@ impl ExportRuntime for ParkingExports {
         Box::pin(async move {
             self.unparks
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self
+                .defer_unpark
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(anyhow::Error::new(
+                    mj_core::refusal::Refusal::precondition("a daemon upgrade handoff is waiting")
+                        .with_code(crate::upgrade::HANDOFF_REFUSAL_CODE),
+                ));
+            }
             if let Some(failure) = &self.unpark_failure {
                 bail!("{failure}");
             }
@@ -4042,6 +4053,31 @@ async fn send_input_waits_out_a_park_that_holds_the_child() {
     let answer = send_input(&backend, "one more thing").await;
     assert!(!answer.is_error, "{}", answer.message);
     assert_eq!(delivered_prompts(&mut delivered), ["one more thing"]);
+}
+
+#[tokio::test]
+async fn queued_input_keeps_its_command_when_wake_admission_loses_to_handoff() {
+    if !isolated_parked_test("queued_input_keeps_its_command_when_wake_admission_loses_to_handoff")
+    {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let exports = ParkingExports::new(SessionState::Parked, None);
+    exports
+        .defer_unpark
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (backend, mut delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let answer = send_input(&backend, "continue after handoff").await;
+    assert!(!answer.is_error, "{}", answer.message);
+    assert_eq!(exports.unparks(), 2);
+    let (command_id, command) = delivered.try_recv().unwrap();
+    assert_eq!(command_id, "subagent-input-request");
+    let RelayCommand::Prompt { prompt } = command else {
+        panic!("expected queued input")
+    };
+    assert_eq!(prompt, [ContentBlock::from("continue after handoff")]);
+    assert!(delivered.try_recv().is_err(), "input must arrive once");
 }
 
 /// A restart that fails leaves the child parked, so the parent can try

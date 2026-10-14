@@ -303,12 +303,14 @@ impl LifecycleKind {
 ///
 /// A park needs the session actor: it takes the actor's connection to admit
 /// the park only while the worker is idle. Once the record says `Parked` the
-/// manager drops the session on its own. An unpark owns the target, so no
-/// actor races the worker it is starting.
+/// manager drops the session on its own. Once unpark commits an active record
+/// and boot intent, the actor can observe startup; WorkerPermit still prevents
+/// it from racing a process mutation by the wake owner.
 fn lifecycle_owns_worker_target(kind: LifecycleKind, state: Option<SessionState>) -> bool {
     match kind {
         LifecycleKind::Suspend => state == Some(SessionState::Destroying),
         LifecycleKind::Park => false,
+        LifecycleKind::Unpark => state == Some(SessionState::Parked),
         LifecycleKind::Move | LifecycleKind::Restart => !matches!(
             state,
             Some(

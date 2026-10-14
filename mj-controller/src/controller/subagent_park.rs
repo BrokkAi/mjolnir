@@ -20,7 +20,7 @@ use anyhow::{Context, Result, ensure};
 use mj_core::state::SessionState;
 
 use super::worker_binary::{
-    refresh_installed_worker_binary, replace_installed_worker_launch_config, stop_worker,
+    refresh_installed_worker_binary, replace_installed_worker_launch_config, start_worker_durably,
     stop_worker_after_target_recovery,
 };
 use super::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
@@ -199,27 +199,18 @@ impl Controller {
         .await
     }
 
-    /// Start a parked sub-agent's worker again in place and record it as
-    /// running.
-    ///
-    /// The worker binary and launch configuration are refreshed first when
-    /// this controller would now install different ones, then the restart
-    /// sequence runs: start the worker on its existing root, connect with the
-    /// long restart timeout, and wait until the harness has loaded its native
-    /// session and is idle. The container's start admission is held around
-    /// the harness start, as it is for a child's first start.
-    ///
-    /// A failure stops whatever was started and leaves the record `Parked`,
-    /// so the parent can try again. Nothing here connects a session actor:
-    /// the caller runs this while the daemon keeps the manager off the child,
-    /// and the manager attaches once the record says `Running`.
+    /// Accept a durable wake, launch the worker, and observe native readiness.
+    /// Preparation and readiness hold no daemon admission. Once the wake is
+    /// accepted, failure leaves its active record and boot intent for recovery;
+    /// it never stops a worker that may already have resumed accepted work.
     pub async fn unpark_subagent_worker(
         &self,
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         crate::worker_lifecycle::run(session_id, "unpark subagent worker", executor, async {
-            crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
+            let owner = crate::worker_lifecycle::require(session_id)?;
+            owner.verify_cached_target(&self.state)?;
             ensure!(
                 self.state.subagents.contains_key(session_id),
                 "session {session_id} is not a sub-agent"
@@ -243,88 +234,82 @@ impl Controller {
                 .into_iter()
                 .next()
                 .context("reconnect plan is empty")?;
-            let launch = self.current_worker_launch_config(session_id, &backend)?;
-            let started = async {
-                refresh_installed_worker_binary(executor, &backend, session_id)
-                    .context(RESTART_FROM_PARKED.replace)?;
-                replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
-                    .context("install the current Mjolnir worker launch configuration")?;
-                // Held across the harness start, which is the part that does not
-                // survive a crowd of children starting in one container.
-                let gate = super::provisioning::container_start_gate(&backend);
-                let _admitted = match &gate {
-                    Some(gate) => gate.acquire().await.ok(),
-                    None => None,
-                };
-                self.start_installed_worker(
-                    session_id,
-                    executor,
-                    InstalledWorkerRestart {
-                        backend: &backend,
-                        worker_root: &worker_root,
-                        reconnect: &reconnect,
-                        launch: Some(&launch),
-                        prepared: true,
-                        messages: &RESTART_FROM_PARKED,
-                    },
-                )
-                .await
-            }
-            .await;
-            let connection = match started {
-                Ok(connection) => connection,
-                Err(error) => {
-                    if let Err(stop_error) = stop_worker(
-                        &crate::worker_lifecycle::require(session_id)?,
-                        &failed_launch_cleanup_executor(),
-                        &backend,
-                        &worker_root,
-                    ) {
-                        tracing::warn!(
-                            session_id,
-                            error = format!("{stop_error:#}"),
-                            "could not stop the worker of a sub-agent whose restart failed"
-                        );
-                    }
-                    if let Some(failure) = error
-                        .downcast_ref::<crate::controller::HarnessPreparationFailure>()
-                    {
-                        let mut record = session.clone();
-                        record.state = SessionState::Error;
-                        record.last_error = Some(failure.to_string());
-                        record.updated_at = super::now();
-                        if let Err(record_error) =
-                            crate::database::save_lifecycle_session(&record)
-                        {
-                            return Err(error.context(format!(
-                                "also failed to record the sub-agent harness preparation failure: {record_error:#}"
-                            )));
-                        }
-                    }
-                    return Err(explain_process_exhaustion(error, &backend, session_id));
-                }
-            };
-            // The manager opens its own connection once the record says running.
-            drop(connection);
-            let mut record = session.clone();
-            record.state = SessionState::Running;
-            record.last_error = None;
-            record.updated_at = super::now();
-            if let Err(error) = crate::database::save_lifecycle_session(&record) {
-                if let Err(stop_error) = stop_worker(
-                    &crate::worker_lifecycle::require(session_id)?,
-                    &failed_launch_cleanup_executor(),
+            // An older failed wake may have left a parked record and boot
+            // intent. Only proved death permits retiring that intent.
+            if crate::database::load_worker_restart(session_id)?.is_some() {
+                let output = executor.execute(&super::worker_binary::worker_liveness_command(
                     &backend,
                     &worker_root,
-                ) {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{stop_error:#}"),
-                        "could not stop the worker of a sub-agent whose restart was not recorded"
-                    );
-                }
-                return Err(error.context("record the restarted sub-agent as running"));
+                ))?;
+                ensure!(
+                    output.status == 0 && String::from_utf8_lossy(&output.stdout).trim() == "dead",
+                    "parked sub-agent still has a live worker boot"
+                );
+                owner.settle_dead_restart(
+                    session
+                        .target
+                        .as_ref()
+                        .context("parked child has no target")?,
+                )?;
             }
+            let launch = self.current_worker_launch_config(session_id, &backend)?;
+            refresh_installed_worker_binary(executor, &backend, session_id)
+                .context(RESTART_FROM_PARKED.replace)?;
+            replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
+                .context("install the current Mjolnir worker launch configuration")?;
+            // Keep container startup concurrency bounded through native readiness,
+            // while cancellation releases this observation without stopping a worker.
+            let gate = super::provisioning::container_start_gate(&backend);
+            let _admitted = match &gate {
+                Some(gate) => {
+                    let acquiring = gate.acquire();
+                    tokio::pin!(acquiring);
+                    loop {
+                        ensure!(!executor.cancellation_requested(), "sub-agent wake cancelled");
+                        tokio::select! {
+                            permit = &mut acquiring => break Some(permit.context("container start admission closed")?),
+                            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                        }
+                    }
+                }
+                None => None,
+            };
+            ensure!(
+                !executor.cancellation_requested(),
+                "sub-agent wake cancelled"
+            );
+            executor.end_resumable_work("subagent unpark launch")?;
+            let target = session
+                .target
+                .as_ref()
+                .context("parked child has no target")?;
+            crate::database::begin_subagent_unpark(
+                session_id,
+                &crate::database::WorkerRestartIntent {
+                    operation_id: owner.operation_id().to_owned(),
+                    target: target.clone(),
+                    desired_build: String::new(),
+                },
+            )?;
+            start_worker_durably(&owner, target, executor, &backend, &worker_root)
+                .context(RESTART_FROM_PARKED.start)
+                .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
+            // The active record and boot intent are durable. Handoff may cancel
+            // this wait; the next daemon attaches to the same live worker.
+            executor.begin_resumable_work()?;
+            self.observe_started_worker(
+                session_id,
+                executor,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &worker_root,
+                    reconnect: &reconnect,
+                    launch: Some(&launch),
+                    prepared: true,
+                    messages: &RESTART_FROM_PARKED,
+                },
+            )
+            .await?;
             Ok(())
         })
         .await
@@ -333,7 +318,8 @@ impl Controller {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use agent_client_protocol::schema::v1::ContentBlock;
     use mj_core::relay::RelayCommand;
@@ -355,8 +341,12 @@ mod tests {
             return true;
         }
         let directory = tempfile::tempdir().unwrap();
+        let worker = directory.path().join("worker-source");
+        std::fs::write(&worker, mj_core::worker_build::WORKER_BUILD_STAMP).unwrap();
         IsolatedTest::new(test_name(module_path!(), test))
             .env(MARKER, "1")
+            .env("MJ_WORKER_BINARY", worker)
+            .env("MJ_INSTANCE", "durable-unpark-test")
             .isolated_store(directory.path())
             .run();
         false
@@ -445,6 +435,375 @@ mod tests {
             config: mj_core::config::Config::default(),
             state: crate::database::load_state().unwrap(),
         }
+    }
+
+    /// Target command boundaries are controlled; the store and relay journal
+    /// are real. A detached launch must already have its active record and intent.
+    struct WakeTarget {
+        cancelled: AtomicBool,
+        purposes: Mutex<Vec<String>>,
+        admission: Mutex<Option<crate::upgrade::Work>>,
+        gate: Arc<crate::upgrade::Gate>,
+        observing: tokio::sync::Notify,
+    }
+
+    impl WakeTarget {
+        fn new() -> Self {
+            Self {
+                cancelled: AtomicBool::new(false),
+                purposes: Mutex::new(Vec::new()),
+                admission: Mutex::new(None),
+                gate: Arc::new(crate::upgrade::Gate::default()),
+                observing: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    impl CommandExecutor for WakeTarget {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.purposes.lock().unwrap().push(command.purpose.clone());
+            if command.purpose == "start detached Mjolnir worker" {
+                assert!(!self.gate.try_close(), "launch must hold admission");
+                assert_eq!(
+                    crate::database::load_session_state(LATCH_RELAY_SESSION)?,
+                    Some(SessionState::Running)
+                );
+                assert!(crate::database::load_worker_restart(LATCH_RELAY_SESSION)?.is_some());
+                crate::database::set_session_draft_input(LATCH_RELAY_SESSION, "newer draft")?;
+            }
+            let stdout = if command.purpose == "detect target platform" {
+                format!(
+                    "{} {}\n",
+                    if cfg!(target_os = "macos") {
+                        "Darwin"
+                    } else {
+                        "Linux"
+                    },
+                    std::env::consts::ARCH
+                )
+                .into_bytes()
+            } else if command.purpose == "probe Mjolnir worker daemon liveness" {
+                b"alive\n".to_vec()
+            } else {
+                Vec::new()
+            };
+            Ok(CommandOutput {
+                status: 0,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+
+        fn cancellation_requested(&self) -> bool {
+            self.cancelled.load(Ordering::SeqCst)
+        }
+
+        fn begin_resumable_work(&self) -> Result<()> {
+            if self.admission.lock().unwrap().take().is_some() {
+                self.observing.notify_one();
+            }
+            Ok(())
+        }
+
+        fn end_resumable_work(&self, label: &'static str) -> Result<()> {
+            *self.admission.lock().unwrap() = Some(self.gate.enter(label)?);
+            Ok(())
+        }
+    }
+
+    fn waking_controller(root: &std::path::Path, startup_delay_ms: u64) -> Controller {
+        use std::os::unix::fs::PermissionsExt;
+        register_child(root);
+        let mut parent = crate::database::read_durable_session_record("parent-1")
+            .unwrap()
+            .unwrap();
+        parent.project_directory = Some(root.to_path_buf());
+        parent.target_template_id = "local-bare".into();
+        parent.target = Some(TargetLocator::LocalBare {
+            worker_root: root.join("parent-1"),
+        });
+        parent.no_project_memory = true;
+        crate::database::save_session(&parent).unwrap();
+        let mut child = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        child.state = SessionState::Parked;
+        child.target_template_id = "local-bare".into();
+        child.project_directory = Some(root.to_path_buf());
+        child.no_project_memory = true;
+        crate::database::save_session(&child).unwrap();
+        let worker_root = root.join(LATCH_RELAY_SESSION);
+        std::fs::create_dir_all(&worker_root).unwrap();
+        let relay = latch_relay_target(root, None, ReleaseSupport::Supported, true);
+        let mut script = String::from("#!/bin/sh\n");
+        for (key, value) in &relay.spec.env {
+            script.push_str(&format!("export {key}={}\n", targets::posix_quote(value)));
+        }
+        script.push_str(&format!(
+            "export MJ_TEST_LATCH_STARTUP_DELAY_MS={startup_delay_ms}\nexec {}\n",
+            targets::join_remote_command(
+                &[relay.spec.program.clone(),]
+                    .into_iter()
+                    .chain(relay.spec.args.iter().cloned())
+                    .collect::<Vec<_>>()
+            ),
+        ));
+        let worker = worker_root.join("hel");
+        std::fs::write(&worker, script).unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut controller = loaded_controller();
+        controller.config = crate::controller::test_support::resume_compatibility_config();
+        let home = root.join("profile");
+        std::fs::create_dir_all(&home).unwrap();
+        controller.config.profiles.insert(
+            "codex".into(),
+            mj_core::config::HarnessProfile {
+                enabled: true,
+                kind: mj_core::config::HarnessKind::Codex,
+                home,
+                environment: Default::default(),
+                context_window_bytes: None,
+                legacy_subagents: Default::default(),
+                guardian_review_model: None,
+                codex_profile: None,
+            },
+        );
+        controller
+    }
+
+    // Hard-won: a6ad3cc3c: unpark waited for a resumed provider retry to finish and then stopped it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unpark_accepts_native_readiness_while_durable_work_is_running() {
+        if !isolated("unpark_accepts_native_readiness_while_durable_work_is_running") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let controller = waking_controller(root.path(), 0);
+        let executor = WakeTarget::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            controller.unpark_subagent_worker(LATCH_RELAY_SESSION, &executor),
+        )
+        .await
+        .expect("a running turn must not delay readiness")
+        .unwrap();
+        assert!(executor.gate.try_close());
+        let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, SessionState::Running);
+        assert_eq!(record.draft_input, "newer draft");
+        assert!(
+            crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                .unwrap()
+                .is_none()
+        );
+        let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+            &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.active_prompt.unwrap().command_id,
+            "seed-running-prompt"
+        );
+        assert!(
+            !executor
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "stop Mjolnir worker daemon")
+        );
+    }
+
+    // Hard-won: a6ad3cc3c: readiness observation held daemon admission and cancellation stopped accepted worker work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_unpark_releases_handoff_and_its_next_actor_preserves_the_live_boot() {
+        if !isolated("slow_unpark_releases_handoff_and_its_next_actor_preserves_the_live_boot") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let controller = waking_controller(root.path(), 60_000);
+        let executor = Arc::new(WakeTarget::new());
+        let waking = tokio::spawn({
+            let executor = executor.clone();
+            async move {
+                controller
+                    .unpark_subagent_worker(LATCH_RELAY_SESSION, &*executor)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), executor.observing.notified())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE))
+                    .ok()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<mj_core::relay::RelaySnapshot>(&bytes).ok()
+                    })
+                    .is_some_and(|snapshot| snapshot.active_prompt.is_some())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            executor.gate.try_close(),
+            "harness readiness must not hold handoff"
+        );
+        executor.cancelled.store(true, Ordering::SeqCst);
+        let error = tokio::time::timeout(Duration::from_secs(10), waking)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert_eq!(
+            crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
+            Some(SessionState::Running)
+        );
+        assert_eq!(
+            crate::database::worker_restart_phase(LATCH_RELAY_SESSION).unwrap(),
+            Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+        );
+        let source_target = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap()
+            .target
+            .unwrap();
+        let snapshot: mj_core::relay::RelaySnapshot = serde_json::from_slice(
+            &std::fs::read(root.path().join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.active_prompt.unwrap().command_id,
+            "seed-running-prompt"
+        );
+        let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
+        target.worker_recovery = Some(crate::session_manager::WorkerRecoveryPlan {
+            source_target,
+            target: None,
+            workspace: None,
+            exit_record: None,
+            liveness_probe: CommandSpec::new("printf", ["alive\n"])
+                .purpose("probe Mjolnir worker daemon liveness"),
+            binary_refresh: None,
+            launch_refresh: None,
+            restart: targets::CommandPlan {
+                description: "a live wake must not be restarted".into(),
+                commands: vec![CommandSpec::new("false", std::iter::empty::<&str>())],
+            },
+        });
+        executor.cancelled.store(false, Ordering::SeqCst);
+        assert_eq!(
+            crate::session_manager::recover_worker_controlled(
+                target.worker_recovery.clone().unwrap(),
+                true,
+                Some(LATCH_RELAY_SESSION),
+                &*executor,
+            )
+            .unwrap(),
+            crate::session_manager::WorkerRecoveryOutcome::Starting
+        );
+        let channels = crate::session_manager::spawn_session_manager().unwrap();
+        channels.targets.send(vec![target]).unwrap();
+        let handle = channels
+            .control
+            .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
+            .await
+            .unwrap();
+        handle.sync_now().await.unwrap();
+        assert!(
+            crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            handle
+                .view()
+                .snapshot
+                .unwrap()
+                .operational
+                .native_session_is_ready()
+        );
+        assert_eq!(
+            executor
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| *p == "start detached Mjolnir worker")
+                .count(),
+            1
+        );
+        assert!(
+            !executor
+                .purposes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "stop Mjolnir worker daemon")
+        );
+        channels.shutdown.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn failed_wake_publication_rolls_back_its_boot_intent() {
+        if !isolated("failed_wake_publication_rolls_back_its_boot_intent") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let controller = waking_controller(root.path(), 0);
+        let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_wake BEFORE UPDATE OF state ON sessions
+             WHEN NEW.state='running' AND OLD.state='parked'
+             BEGIN SELECT RAISE(ABORT, 'wake publication failed'); END;",
+            )
+            .unwrap();
+        let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
+            LATCH_RELAY_SESSION,
+            "test wake transaction",
+        )
+        .unwrap()
+        .unwrap();
+        let error = owner
+            .scope_blocking(|| {
+                crate::database::begin_subagent_unpark(
+                    LATCH_RELAY_SESSION,
+                    &crate::database::WorkerRestartIntent {
+                        operation_id: owner.operation_id().into(),
+                        target: controller.state.sessions[LATCH_RELAY_SESSION]
+                            .target
+                            .clone()
+                            .unwrap(),
+                        desired_build: String::new(),
+                    },
+                )
+            })
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("wake publication failed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(),
+            Some(SessionState::Parked)
+        );
+        assert!(
+            crate::database::load_worker_restart(LATCH_RELAY_SESSION)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

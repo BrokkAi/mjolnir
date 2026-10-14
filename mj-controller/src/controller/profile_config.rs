@@ -586,6 +586,54 @@ mod tests {
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
 
+    // Hard-won: #1284: discovery staged Muse credentials outside its XDG home.
+    #[test]
+    #[ignore = "requires MJ_MUSE_TEST_HOME with a Muse login and MJ_WORKER_BINARY pointing to the current mj-worker build; discovers models without a provider turn"]
+    fn live_muse_profile_discovery_reads_staged_login_and_catalog() {
+        let account = std::path::PathBuf::from(
+            std::env::var_os("MJ_MUSE_TEST_HOME").expect("set authenticated Muse home"),
+        );
+        let isolated = tempfile::tempdir().unwrap();
+        let home = isolated.path().join("muse");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::copy(account.join("auth.json"), home.join("auth.json")).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"schema_version":1,"provider":"meta","model":"muse-spark-1.3"}"#,
+        )
+        .unwrap();
+        // The source home is isolated too: refreshing a staged login must
+        // never change the person's own credentials or session data.
+        let credentials = std::fs::read(home.join("auth.json")).unwrap();
+        let profile = HarnessProfile {
+            enabled: true,
+            kind: mj_core::config::HarnessKind::Muse,
+            home: home.clone(),
+            environment: Default::default(),
+            context_window_bytes: None,
+            guardian_review_model: None,
+            codex_profile: None,
+            legacy_subagents: None,
+        };
+        let choices = probe_profile(
+            "muse-discovery-1284-test",
+            &profile,
+            Default::default(),
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3"));
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "muse-spark-1.3")
+        );
+        assert!(!choices.efforts.is_empty());
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), credentials);
+    }
+
     #[tokio::test]
     async fn unsaved_profile_discovery_reads_the_owned_cache_without_saving_settings() {
         const CHILD: &str = "MJ_TEST_UNSAVED_PROFILE_DISCOVERY";

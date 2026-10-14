@@ -1332,8 +1332,8 @@ impl ApiBackend {
     /// Start a parked child's worker again and wait until its session can
     /// take a prompt. Returns whether there was a park to wait for or undo; a
     /// running child with no park in progress needs nothing and returns
-    /// false. A failure leaves the child parked, and its message says what
-    /// failed, including a container out of process slots.
+    /// false. Once wake is accepted, failures leave the active child available
+    /// for ordinary worker recovery.
     async fn unpark_child(&self, child_id: &str) -> Result<bool> {
         let parked = self
             .exports
@@ -1346,9 +1346,16 @@ impl ApiBackend {
         Arc::clone(&self.exports)
             .unpark_subagent(child_id.to_owned())
             .await
-            .context(
-                "could not start the parked sub-agent again; it is still parked, so you can retry",
-            )?;
+            .map_err(|error| {
+                let detail = if self.exports.session_record(child_id)
+                    .is_some_and(|record| record.state == SessionState::Parked)
+                {
+                    "could not start the parked sub-agent again; it is still parked, so you can retry"
+                } else {
+                    "could not finish starting the sub-agent; an accepted wake remains recoverable"
+                };
+                error.context(detail)
+            })?;
         if self
             .exports
             .session_record(child_id)

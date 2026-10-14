@@ -8,12 +8,11 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::session_manager::{SessionManagerControl, StandaloneSession};
 use crate::targets::{self, CommandExecutor, CommandSpec};
 use mj_core::config::HarnessKind;
-use mj_core::relay::RelayExecutionState;
 
 use super::Controller;
 use super::readiness::{connect_started_worker_with_timeout, wait_for_native_session};
@@ -25,7 +24,7 @@ use super::worker_binary::{
 };
 
 /// How long a restarted worker has to recover its journal, bind `control.sock`
-/// and report an idle ACP session. Journal recovery over a long transcript
+/// and report a ready ACP session. Journal recovery over a long transcript
 /// runs before the socket exists, so this has to outlast it.
 const WORKER_RESTART_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -293,7 +292,6 @@ impl Controller {
                 };
                 connection.set_project_memory_target(project_memory);
                 wait_for_native_session(&mut connection, executor, harness).await?;
-                wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT, executor).await?;
                 crate::database::finish_worker_restart(session_id, &operation_id)?;
                 lease.finish_replacement(connection);
                 Ok(WorkerUpgradeOutcome::Upgraded { build: installed })
@@ -362,8 +360,8 @@ impl Controller {
     /// The part of a restart after its stop: install the binary unless it is
     /// `prepared`, start the worker on the existing worker root, connect with
     /// the long restart timeout, and wait until its harness has loaded its
-    /// native session and gone idle. A parked sub-agent is started again with
-    /// exactly this sequence, since its worker was stopped when it was parked.
+    /// native session. A worker may already be executing durable work when
+    /// its native session becomes ready.
     pub(super) async fn start_installed_worker(
         &self,
         session_id: &str,
@@ -380,12 +378,6 @@ impl Controller {
                 messages,
             } = restart;
             let owner = crate::worker_lifecycle::require(session_id)?;
-            let session = self.state.sessions.get(session_id);
-            let harness = session
-                .map(|session| session.harness_kind)
-                .or_else(|| launch.map(|launch| launch.harness))
-                .unwrap_or(HarnessKind::Codex);
-            let observed_updated_at = session.map(|session| session.updated_at.clone());
             let target = self
                 .state
                 .sessions
@@ -422,7 +414,7 @@ impl Controller {
             }
             // Everything up to the first successful connection either fails with no
             // worker running or cannot tell: the marker covers all of it.
-            let mut connection = async {
+            async {
                 // Copy through hel.next and rename. scp/cp onto a still-mapped hel
                 // fails with ETXTBSY ("dest open ... Failure") even after SIGKILL,
                 // and prepare_worker_files writes that path in place.
@@ -444,135 +436,118 @@ impl Controller {
                     None => start_worker(&owner, executor, backend, worker_root),
                 };
                 started.context(messages.start)?;
-                // Journal recovery runs before the daemon binds control.sock. A long
-                // kimi session can take well over the ordinary 30s startup window.
-                match connect_started_worker_with_timeout(
-                    reconnect,
-                    session_id,
-                    executor,
-                    backend,
-                    worker_root,
-                    WORKER_RESTART_TIMEOUT,
-                )
-                .await
-                {
-                    Ok(connection) => Ok(connection),
-                    Err(error) => {
-                        Err(
-                            worker_probe_diagnosis(executor, backend, worker_root, error)
-                                .context(messages.connect),
-                        )
-                    }
-                }
+                Ok::<_, anyhow::Error>(())
             }
             .await
             .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
-            let project_memory = match self.project_memory_sync_target(session_id) {
-                Ok(target) => target,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id,
-                        error = format!("{error:#}"),
-                        "{}",
-                        messages.project_memory
-                    );
-                    None
-                }
-            };
-            connection.set_project_memory_target(project_memory);
-            // A worker answered, so a failure from here on only means "no worker"
-            // when the transport to it died again.
-            let readiness = async {
-                let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
-                if let Some(launch) = launch {
-                    anyhow::ensure!(
-                        checkpoint_only
-                            == (launch.run_mode
-                                == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
-                        "restarted worker did not enter the requested execution mode"
-                    );
-                }
-                if checkpoint_only {
-                    return Ok(());
-                }
-                wait_for_native_session(&mut connection, executor, harness)
-                    .await
-                    .context(messages.native_session)?;
-                wait_for_idle_projection(&mut connection, WORKER_RESTART_TIMEOUT, executor)
-                    .await
-                    .context("wait for ACP to go idle after worker restart")
-            }
+            self.observe_started_worker(
+                session_id,
+                executor,
+                InstalledWorkerRestart {
+                    backend,
+                    worker_root,
+                    reconnect,
+                    launch,
+                    prepared,
+                    messages,
+                },
+            )
             .await
-            .map_err(mark_if_transport_died);
-            if let Err(error) = readiness {
-                if let (Some(failure), Some(observed_updated_at)) = (
-                    error.downcast_ref::<super::readiness::HarnessPreparationFailure>(),
-                    observed_updated_at.as_deref(),
-                ) {
-                    self.persist_harness_preparation_failure(
-                        session_id,
-                        &failure.to_string(),
-                        observed_updated_at,
-                    )
-                    .await?;
-                }
-                return Err(error);
-            }
-            if target.is_some() {
-                crate::database::finish_worker_restart(session_id, owner.operation_id())?;
-            }
-            Ok(connection)
         })
         .await
     }
-}
 
-/// Wait until a restarted worker's projection stops moving and reports idle.
-///
-/// Three stable polls, not one: a worker that has just recovered its journal
-/// can report idle between two events it is still applying. "Idle" is the
-/// shared predicate, not the bare execution flag, so a foreground tool or a
-/// turn the projection has not caught up with keeps the restart from being
-/// declared ready underneath it. A synchronized active goal is the one
-/// deliberate exception: the restarted worker is meant to continue it.
-async fn wait_for_idle_projection(
-    relay: &mut StandaloneSession,
-    timeout: Duration,
-    executor: &impl CommandExecutor,
-) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut last_ordinal = None;
-    let mut stable_polls = 0_u8;
-    loop {
-        anyhow::ensure!(
-            !executor.cancellation_requested(),
-            "worker readiness wait cancelled"
-        );
-        let snapshot = relay.sync().await?;
-        let ordinal = snapshot.operational.latest_ordinal;
-        let goal_active =
-            snapshot.operational.goal.synchronized() && snapshot.operational.goal.active();
-        let idle = snapshot.operational.native_session_is_ready()
-            && (!snapshot.operational.has_work_in_flight() || goal_active);
-        if idle && (goal_active || last_ordinal == Some(ordinal)) {
-            stable_polls = stable_polls.saturating_add(1);
-            if stable_polls >= 3 {
-                return Ok(());
+    /// Observe a detached launch without requiring accepted work to finish.
+    /// The durable intent lets another daemon continue this observation.
+    pub(super) async fn observe_started_worker(
+        &self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        restart: InstalledWorkerRestart<'_>,
+    ) -> Result<StandaloneSession> {
+        let InstalledWorkerRestart {
+            backend,
+            worker_root,
+            reconnect,
+            launch,
+            messages,
+            ..
+        } = restart;
+        let owner = crate::worker_lifecycle::require(session_id)?;
+        let session = self.state.sessions.get(session_id);
+        let harness = session
+            .map(|session| session.harness_kind)
+            .or_else(|| launch.map(|launch| launch.harness))
+            .unwrap_or(HarnessKind::Codex);
+        let observed_updated_at = session.map(|session| session.updated_at.clone());
+        // Journal recovery runs before control.sock exists and can take minutes.
+        let mut connection = connect_started_worker_with_timeout(
+            reconnect,
+            session_id,
+            executor,
+            backend,
+            worker_root,
+            WORKER_RESTART_TIMEOUT,
+        )
+        .await
+        .map_err(|error| {
+            worker_probe_diagnosis(executor, backend, worker_root, error)
+                .context(messages.connect)
+                .context(WorkerRestartLeftNoWorker)
+        })?;
+        let project_memory = match self.project_memory_sync_target(session_id) {
+            Ok(target) => target,
+            Err(error) => {
+                tracing::warn!(
+                    session_id,
+                    error = format!("{error:#}"),
+                    "{}",
+                    messages.project_memory
+                );
+                None
             }
-        } else {
-            stable_polls = 0;
+        };
+        connection.set_project_memory_target(project_memory);
+        let readiness = async {
+            let checkpoint_only = connection.sync().await?.operational.checkpoint_only;
+            if let Some(launch) = launch {
+                anyhow::ensure!(
+                    checkpoint_only
+                        == (launch.run_mode
+                            == mj_core::worker_launch::WorkerRunMode::CheckpointOnly),
+                    "restarted worker did not enter the requested execution mode"
+                );
+            }
+            if !checkpoint_only {
+                wait_for_native_session(&mut connection, executor, harness)
+                    .await
+                    .context(messages.native_session)?;
+            }
+            Ok(())
         }
-        last_ordinal = Some(ordinal);
-        if snapshot.operational.execution == RelayExecutionState::Closed {
-            bail!("ACP runtime stopped before becoming idle");
+        .await
+        .map_err(mark_if_transport_died);
+        if let Err(error) = readiness {
+            if let (Some(failure), Some(observed_updated_at)) = (
+                error.downcast_ref::<super::readiness::HarnessPreparationFailure>(),
+                observed_updated_at.as_deref(),
+            ) {
+                self.persist_harness_preparation_failure(
+                    session_id,
+                    &failure.to_string(),
+                    observed_updated_at,
+                )
+                .await?;
+            }
+            return Err(error);
         }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "ACP runtime did not become idle after worker restart (execution={:?}, ordinal={ordinal})",
-                snapshot.operational.execution
-            );
+        if session
+            .and_then(|session| session.target.as_ref())
+            .is_some()
+        {
+            crate::database::finish_worker_restart(session_id, owner.operation_id())?;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        Ok(connection)
     }
 }
 

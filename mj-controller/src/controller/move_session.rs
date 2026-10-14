@@ -1543,9 +1543,9 @@ impl Controller {
                         .as_ref()
                         .is_some_and(|d| d.owns_resource()) =>
             {
-                executor.begin_resumable_move_work()?;
+                executor.begin_resumable_work()?;
                 let cleaned = self.cleanup_prepared_move_destination(operation, executor);
-                executor.end_resumable_move_work()?;
+                executor.end_resumable_work("Move control transition")?;
                 Err(match cleaned {
                     Ok(()) => error,
                     Err(cleanup_error) => error.context(format!("EC2 destination cleanup is pending and will retry automatically: {cleanup_error:#}")),

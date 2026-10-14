@@ -430,7 +430,19 @@ impl ApiBackend {
                     Controller::load()?.ensure_subagent_slot_available(&parent_id, Some(&child_id))
                 })
                 .await?;
-                self.unpark_child(child).await?;
+                match self.unpark_child(child).await {
+                    Err(error)
+                        if mj_core::refusal::Refusal::of(&error).is_some_and(|refusal| {
+                            refusal.code() == Some(crate::upgrade::HANDOFF_REFUSAL_CODE)
+                        }) =>
+                    {
+                        tracing::debug!(child, %error, "child wake admission deferred; retaining queued input");
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    result => {
+                        result?;
+                    }
+                }
                 continue;
             }
             let Some(mut handle) = self.session_handle(child.to_owned()).await? else {

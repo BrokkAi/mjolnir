@@ -6393,56 +6393,69 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn move_copy_releases_admission_and_control_transition_reacquires_it() {
-    let state = test_runtime_state();
-    let release = Arc::new(tokio::sync::Notify::new());
-    let started = Arc::new(tokio::sync::Notify::new());
-    let result = state
-        .start_or_join_lifecycle("move-copy-admission".into(), LifecycleKind::Move, {
-            let release = release.clone();
-            let started = started.clone();
-            move |state, session_id, _| async move {
-                let executor = DaemonStageReportingExecutor::new(
-                    crate::targets::ProcessExecutor,
-                    state.clone(),
-                    session_id.clone(),
-                );
-                assert!(
-                    state.owner().lifecycle[&session_id]
-                        .upgrade_work
-                        .lock()
-                        .unwrap()
-                        .is_some()
-                );
-                executor.begin_resumable_move_work()?;
-                assert!(
-                    state.owner().lifecycle[&session_id]
-                        .upgrade_work
-                        .lock()
-                        .unwrap()
-                        .is_none()
-                );
-                started.notify_one();
-                release.notified().await;
-                executor.end_resumable_move_work()?;
-                assert!(
-                    state.owner().lifecycle[&session_id]
-                        .upgrade_work
-                        .lock()
-                        .unwrap()
-                        .is_some()
-                );
-                Ok(DaemonLifecycleResult::Done)
-            }
-        })
-        .unwrap();
-    started.notified().await;
-    assert!(
-        state.owner().lifecycle["move-copy-admission"].is_running(),
-        "copy must keep lifecycle ownership while yielding upgrade admission"
-    );
-    release.notify_one();
-    RuntimeState::wait_lifecycle_result(result).await.unwrap();
+async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
+    for (id, kind, label) in [
+        (
+            "move-copy-admission",
+            LifecycleKind::Move,
+            "Move control transition",
+        ),
+        (
+            "unpark-admission",
+            LifecycleKind::Unpark,
+            "subagent unpark launch",
+        ),
+    ] {
+        let state = test_runtime_state();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let result = state
+            .start_or_join_lifecycle(id.into(), kind, {
+                let release = release.clone();
+                let started = started.clone();
+                move |state, session_id, _| async move {
+                    let executor = DaemonStageReportingExecutor::new(
+                        crate::targets::ProcessExecutor,
+                        state.clone(),
+                        session_id.clone(),
+                    );
+                    assert!(
+                        state.owner().lifecycle[&session_id]
+                            .upgrade_work
+                            .lock()
+                            .unwrap()
+                            .is_some()
+                    );
+                    executor.begin_resumable_work()?;
+                    assert!(
+                        state.owner().lifecycle[&session_id]
+                            .upgrade_work
+                            .lock()
+                            .unwrap()
+                            .is_none()
+                    );
+                    started.notify_one();
+                    release.notified().await;
+                    executor.end_resumable_work(label)?;
+                    assert!(
+                        state.owner().lifecycle[&session_id]
+                            .upgrade_work
+                            .lock()
+                            .unwrap()
+                            .is_some()
+                    );
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            })
+            .unwrap();
+        started.notified().await;
+        assert!(
+            state.owner().lifecycle[id].is_running(),
+            "resumable work must keep lifecycle ownership while yielding upgrade admission"
+        );
+        release.notify_one();
+        RuntimeState::wait_lifecycle_result(result).await.unwrap();
+    }
 }
 
 /// Changing a live session's workspace is published to every dashboard: the
