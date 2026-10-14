@@ -329,13 +329,12 @@ pub(crate) async fn observe(
             &state.config_options,
             state.modes.as_ref(),
         );
-        let mut choices = ProfileConfig {
+        let choices = ProfileConfig {
             model: facts.current_model().map(str::to_owned),
             models: mj_core::acp::session_config_choices(&state.config_options, "model"),
             efforts: mj_core::acp::session_config_choices(&state.config_options, "effort"),
             observed_at: chrono::Utc::now().timestamp(),
         };
-        enrich_profile_config(profile, &mut choices)?;
         // Worker observations do not carry authentication provenance. Claude's
         // setup-token and login catalogues differ, so only probes may cache
         // it. Muse catalogues are never cached at all: its models and efforts
@@ -425,15 +424,7 @@ fn discover_from_config(
     // caching it: always probe the installation that actually runs, and never
     // write the result back.
     if profile.kind == mj_core::config::HarnessKind::Muse {
-        let mut choices = probe_profile(
-            profile_id,
-            profile,
-            environment.clone(),
-            model.clone(),
-            cancelled,
-        )?;
-        enrich_profile_config(profile, &mut choices)?;
-        return Ok(choices);
+        return probe_profile(profile_id, profile, environment, model, cancelled);
     }
     let fingerprint = fingerprint(profile);
     resolve_cached(
@@ -448,15 +439,13 @@ fn discover_from_config(
             .transpose()
         },
         || {
-            let mut choices = probe_profile(
+            probe_profile(
                 profile_id,
                 profile,
                 environment.clone(),
                 model.clone(),
                 cancelled,
-            )?;
-            enrich_profile_config(profile, &mut choices)?;
-            Ok(choices)
+            )
         },
         |choices| {
             if model.is_none() || choices.model == model {
@@ -465,36 +454,6 @@ fn discover_from_config(
             store(profile_id, &fingerprint, &choices.model, choices)
         },
     )
-}
-
-/// Muse's ACP bridge reports effort choices but no model selector. Its native
-/// settings file is authoritative for the one model this profile will run, so
-/// publish that value rather than making callers create a session to learn it.
-fn enrich_profile_config(profile: &HarnessProfile, choices: &mut ProfileConfig) -> Result<()> {
-    if profile.kind != mj_core::config::HarnessKind::Muse || !choices.models.is_empty() {
-        return Ok(());
-    }
-    let path = profile.home.join("settings.json");
-    let metadata = std::fs::metadata(&path)
-        .with_context(|| format!("read Muse settings metadata {}", path.display()))?;
-    ensure!(metadata.len() <= 1024 * 1024, "Muse settings are too large");
-    let settings: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&path).with_context(|| format!("read Muse settings {}", path.display()))?,
-    )
-    .context("decode Muse settings")?;
-    let model = settings
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .context("Muse settings do not select a model")?;
-    choices.model = Some(model.to_owned());
-    choices.models.push(mj_core::acp::SessionConfigChoice {
-        value: model.to_owned(),
-        name: model.to_owned(),
-        description: Some("Configured by Muse Code settings".into()),
-    });
-    Ok(())
 }
 
 fn resolve_cached(
@@ -1037,36 +996,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn muse_discovery_publishes_the_model_selected_by_native_settings() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join("settings.json"),
-            br#"{"model":"muse-spark-1.3-contributor"}"#,
-        )
-        .unwrap();
-        let profile = HarnessProfile {
-            enabled: true,
-            kind: mj_core::config::HarnessKind::Muse,
-            home: home.path().into(),
-            environment: Default::default(),
-            context_window_bytes: None,
-            legacy_subagents: Default::default(),
-            guardian_review_model: None,
-        };
-        let mut choices = ProfileConfig {
-            model: Some(String::new()),
-            models: Vec::new(),
-            efforts: Vec::new(),
-            observed_at: 1,
-        };
-
-        enrich_profile_config(&profile, &mut choices).unwrap();
-
-        assert_eq!(choices.model.as_deref(), Some("muse-spark-1.3-contributor"));
-        assert_eq!(choices.models.len(), 1);
-        assert_eq!(choices.models[0].value, "muse-spark-1.3-contributor");
-    }
 
     /// Muse models and efforts change server-side without a managed-pin bump,
     /// so caching a worker's observed catalogue hides options people expect.
