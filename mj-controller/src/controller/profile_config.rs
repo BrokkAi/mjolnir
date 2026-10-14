@@ -548,7 +548,11 @@ fn probe_profile(
     }
     profile.ensure_ready(profile_id)?;
     let root = tempfile::tempdir().context("create private profile discovery directory")?;
-    let home = root.path().join("profile");
+    // Muse and OpenCode read `$XDG_CONFIG_HOME/<id>`, so their staged home
+    // must carry that leaf name or the harness never sees the staged login.
+    let home = profile
+        .kind
+        .home_from_environment(root.path().join("profile"));
     super::worker_binary::stage_profile(profile, &home)?;
     super::worker_binary::stage_codex_catalog(
         profile_id,
