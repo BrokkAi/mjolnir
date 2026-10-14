@@ -786,9 +786,10 @@ image = "ubuntu:24.04"
         let tools = storage.path().join("fixture-tools");
         fs::create_dir_all(&tools).unwrap();
         // The dashboard needs only these host commands: `uname` for platform
-        // detection and `git` to check a project directory.
+        // detection, `git` to check a project directory, and `sh`, which the
+        // daemon runs a local launch's harness preflight in.
         let host_path = std::env::var_os("PATH").unwrap_or_default();
-        for name in ["uname", "git"] {
+        for name in ["uname", "git", "sh"] {
             let command = std::env::split_paths(&host_path)
                 .map(|directory| directory.join(name))
                 .find(|path| path.is_file())
