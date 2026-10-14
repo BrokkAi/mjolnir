@@ -18,10 +18,13 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
+use chrono::Utc;
 use flate2::read::GzDecoder;
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::github_watch::service::github_rate_limit_retry_at;
 
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/BrokkAi/mjolnir/releases/latest";
 const NPM_LATEST_URL: &str = "https://registry.npmjs.org/@brokkai%2Fmjolnir/latest";
@@ -333,13 +336,65 @@ async fn latest_update(
 }
 
 async fn fetch_latest_release(sources: &UpdateSources) -> Result<GitHubRelease> {
-    let token = if is_github_api_url(&sources.latest_release) {
-        github_api_token().await
-    } else {
-        None
-    };
-    let body = fetch_text_authorized(&sources.latest_release, token.as_deref()).await?;
+    let url = &sources.latest_release;
+    let client = http_client(Duration::from_secs(5))?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if is_github_api_url(url)
+        && github_rate_limit_retry_at(response.status(), response.headers(), Utc::now()).is_some()
+    {
+        response = retry_with_github_credential(&client, url, response.status()).await?;
+    }
+    let body = success_text(url, response).await?;
     serde_json::from_str(&body).context("parse release body")
+}
+
+/// Whether `url` is GitHub's API over HTTPS, the only place the user's GitHub
+/// credential may be sent.
+fn is_github_api_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("api.github.com"))
+}
+
+/// Anonymous GitHub API calls share a limit of 60 an hour per IP address,
+/// which a shared NAT exhausts quickly. Only a lookup that limit refused
+/// borrows the credential the daemon uses (`GH_TOKEN`, `GITHUB_TOKEN`, or the
+/// GitHub CLI login): an ordinary launch never runs `gh`, and a stale token
+/// cannot break a check that works without one. The token goes in a header
+/// marked sensitive, never in a URL, an error, or a log line.
+async fn retry_with_github_credential(
+    client: &reqwest::Client,
+    url: &str,
+    anonymous_status: reqwest::StatusCode,
+) -> Result<reqwest::Response> {
+    let Some(credential) = super::backend::controller_github_credential().await else {
+        bail!(
+            "GitHub's anonymous rate limit is used up; run `gh auth login` or set GH_TOKEN \
+             so mj checks with your account (HTTP {anonymous_status})"
+        );
+    };
+    let source = credential.source;
+    let mut authorization =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {}", credential.token))
+            .with_context(|| format!("the GitHub token from {source} is not a valid header"))?;
+    authorization.set_sensitive(true);
+    let response = client
+        .get(url)
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .send()
+        .await
+        .with_context(|| format!("GET {url} with the GitHub token from {source}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        bail!("GitHub rejected the token from {source}; refresh or unset it (HTTP {status})");
+    }
+    if github_rate_limit_retry_at(status, response.headers(), Utc::now()).is_some() {
+        bail!("GitHub's rate limit is used up for the token from {source} too (HTTP {status})");
+    }
+    Ok(response)
 }
 
 async fn fetch_latest_managed_version(
@@ -375,70 +430,27 @@ async fn fetch_latest_managed_version(
 
 const CARGO_INDEX_URL: &str = "https://index.crates.io/br/ok/brokk-mjolnir";
 
-/// Anonymous GitHub API calls share a limit of 60 an hour per IP address,
-/// which a shared NAT exhausts quickly. A logged-in GitHub CLI, or
-/// `GH_TOKEN`/`GITHUB_TOKEN`, raises that limit. The token travels only to
-/// GitHub's API host over HTTPS, in a header marked sensitive; it never enters
-/// a URL, an error, or a log line.
-fn is_github_api_url(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("api.github.com"))
-}
-
-/// Looks up the same GitHub credential the daemon uses. `gh auth token` reads
-/// local state, but this check runs before the dashboard starts, so the lookup
-/// is time-boxed and a slow or missing CLI means an anonymous request.
-async fn github_api_token() -> Option<String> {
-    let lookup = tokio::task::spawn_blocking(super::backend::controller_github_token);
-    match tokio::time::timeout(Duration::from_secs(2), lookup).await {
-        Ok(Ok(token)) => token,
-        Ok(Err(error)) => {
-            tracing::debug!(%error, "GitHub token lookup task failed");
-            None
-        }
-        Err(_) => {
-            tracing::debug!("GitHub token lookup timed out");
-            None
-        }
-    }
+fn http_client(timeout: Duration) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build http client")
 }
 
 async fn fetch_text(url: &str) -> Result<String> {
-    fetch_text_authorized(url, None).await
+    let response = http_client(Duration::from_secs(5))?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    success_text(url, response).await
 }
 
-async fn fetch_text_authorized(url: &str, bearer: Option<&str>) -> Result<String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build http client")?;
-    let mut request = client.get(url);
-    if let Some(token) = bearer {
-        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-            .context("GitHub token is not a valid header value")?;
-        value.set_sensitive(true);
-        request = request.header(reqwest::header::AUTHORIZATION, value);
-    }
-    let resp = request.send().await.with_context(|| format!("GET {url}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let rate_limited = resp
-            .headers()
-            .get("x-ratelimit-remaining")
-            .is_some_and(|remaining| remaining == "0");
-        match (rate_limited, bearer) {
-            (true, None) => anyhow::bail!(
-                "GET {url}: HTTP {status}: GitHub API rate limit exceeded for anonymous \
-                 requests; run `gh auth login` or set GH_TOKEN to raise it"
-            ),
-            (true, Some(_)) => {
-                anyhow::bail!("GET {url}: HTTP {status}: GitHub API rate limit exceeded")
-            }
-            (false, _) => anyhow::bail!("GET {url}: HTTP {status}"),
-        }
-    }
-    resp.text().await.with_context(|| format!("read {url}"))
+async fn success_text(url: &str, response: reqwest::Response) -> Result<String> {
+    let status = response.status();
+    ensure!(status.is_success(), "GET {url}: HTTP {status}");
+    response.text().await.with_context(|| format!("read {url}"))
 }
 
 fn parse_homebrew_formula_version(formula: &str) -> Result<Version> {
@@ -577,29 +589,41 @@ pub enum StartupUpdateOutcome {
     Skipped,
     UpToDate,
     /// The channel only allows announcing the upgrade command; the user must
-    /// run it themselves.
-    Notified,
+    /// run it themselves. Carries the announcement.
+    Notified(String),
     Declined,
-    /// The check or the upgrade failed and this version keeps running. The
-    /// message belongs in the dashboard's notice bar: text printed before the
-    /// dashboard starts reads as though mj stopped.
+    /// The check, the prompt, or the upgrade failed and this version keeps
+    /// running. Carries the short notice; the full error is in the log.
+    Failed(String),
+}
+
+/// What the dashboard's notice bar says about this launch's update. Nothing
+/// is printed before the dashboard starts: a line left on the terminal while
+/// startup continues reads as though mj stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupUpdateNotice {
+    Available(String),
     Failed(String),
 }
 
 impl StartupUpdateOutcome {
+    /// The bar has one line, so the notice leads with the innermost cause,
+    /// which says what went wrong and what to do; the request chain around it
+    /// goes to the log.
     fn failed(what: &str, error: &anyhow::Error) -> Self {
         tracing::warn!(error = format!("{error:#}"), "{what} failed");
         Self::Failed(format!(
-            "{what} failed; running mj {}: {error:#}",
+            "{what} failed: {}. Still running mj {}.",
+            error.root_cause(),
             env!("CARGO_PKG_VERSION")
         ))
     }
 
-    /// The notice the dashboard shows for this outcome, if any.
-    pub fn dashboard_notice(self) -> Option<String> {
+    pub fn dashboard_notice(self) -> Option<StartupUpdateNotice> {
         match self {
-            Self::Failed(notice) => Some(notice),
-            Self::Skipped | Self::UpToDate | Self::Notified | Self::Declined => None,
+            Self::Notified(notice) => Some(StartupUpdateNotice::Available(notice)),
+            Self::Failed(notice) => Some(StartupUpdateNotice::Failed(notice)),
+            Self::Skipped | Self::UpToDate | Self::Declined => None,
         }
     }
 }
@@ -644,8 +668,10 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
 
     match update {
         AvailableUpdate::Direct(update) => {
-            if !prompt_for_update(&update.version, &InstallMethod::Direct).unwrap_or(false) {
-                return StartupUpdateOutcome::Declined;
+            match prompt_for_update(&update.version, &InstallMethod::Direct) {
+                Ok(true) => {}
+                Ok(false) => return StartupUpdateOutcome::Declined,
+                Err(error) => return StartupUpdateOutcome::failed("Upgrade prompt", &error),
             }
             // The success path re-execs and never returns; reaching the end
             // means the upgrade failed and the current process lives on.
@@ -656,8 +682,10 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
         }
         AvailableUpdate::Managed { version, method } => match method {
             InstallMethod::Npm | InstallMethod::Homebrew => {
-                if !prompt_for_update(&version, &method).unwrap_or(false) {
-                    return StartupUpdateOutcome::Declined;
+                match prompt_for_update(&version, &method) {
+                    Ok(true) => {}
+                    Ok(false) => return StartupUpdateOutcome::Declined,
+                    Err(error) => return StartupUpdateOutcome::failed("Upgrade prompt", &error),
                 }
                 let upgraded =
                     run_managed_upgrade(&version, &method).and_then(restart_current_process);
@@ -666,12 +694,10 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
                     Err(error) => StartupUpdateOutcome::failed("Upgrade", &error),
                 }
             }
-            InstallMethod::Npx | InstallMethod::Cargo { .. } => {
-                let notice = managed_update_notice(&version, &method, env!("CARGO_PKG_VERSION"))
-                    .expect("notice-only channels have an update command");
-                println!("{notice}");
-                StartupUpdateOutcome::Notified
-            }
+            InstallMethod::Npx | InstallMethod::Cargo { .. } => StartupUpdateOutcome::Notified(
+                managed_update_notice(&version, &method, env!("CARGO_PKG_VERSION"))
+                    .expect("notice-only channels have an update command"),
+            ),
             InstallMethod::Direct => {
                 unreachable!("direct installs never report managed updates")
             }
@@ -829,12 +855,7 @@ async fn download_apply_and_restart(update: &UpdateInfo) -> Result<()> {
 }
 
 async fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build http client")?;
-    let resp = client
+    let resp = http_client(Duration::from_secs(120))?
         .get(url)
         .send()
         .await

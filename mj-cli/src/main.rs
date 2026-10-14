@@ -38,6 +38,7 @@ use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::io::{self, Write};
 
 use mj_controller::controller::Controller;
+use mj_controller::controller::update::StartupUpdateNotice;
 use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
@@ -648,7 +649,7 @@ fn shutdown_dashboard_runtime(runtime: tokio::runtime::Runtime) {
 async fn run_command(
     command: Option<Command>,
     requested_workspace: Option<String>,
-    update_notice: Option<String>,
+    update_notice: Option<StartupUpdateNotice>,
 ) -> Result<DashboardExit> {
     match command {
         None => {
@@ -664,7 +665,8 @@ async fn run_command(
             let mode = tokio::task::spawn_blocking(move || go::prepare(args))
                 .await
                 .context("prepare fast start")??;
-            run_workspace_dashboard(None, false, Some((mode, setup)), update_notice).await
+            // `mj go` never runs the startup update check.
+            run_workspace_dashboard(None, false, Some((mode, setup)), None).await
         }
         Some(Command::Workspaces(args)) => match args.command {
             None => {
@@ -1273,7 +1275,7 @@ async fn run_workspace_dashboard(
     requested_workspace: Option<&str>,
     open_workspace_manager: bool,
     mut go: Option<(mj_tui::GoMode, bool)>,
-    update_notice: Option<String>,
+    update_notice: Option<StartupUpdateNotice>,
 ) -> Result<DashboardExit> {
     let resume = dashboard::UpgradeResume::load().await?;
     if resume.is_some() {
