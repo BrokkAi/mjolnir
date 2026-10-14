@@ -612,6 +612,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            codex_profile: None,
             legacy_subagents: None,
         };
         let choices = probe_profile(

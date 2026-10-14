@@ -15,7 +15,10 @@ A child waking from its parked state must not hold a Mjolnir upgrade while its w
 - [x] (2026-10-14) Implemented atomic durable wake admission, short launch ownership, native readiness without idle waits, and bounded cancellation without worker cleanup.
 - [x] (2026-10-14) Added passing isolated regressions for readiness during accepted work, handoff during slow native startup, next-actor recovery, and atomic publication rollback. Extended the shared admission ownership regression for Unpark.
 - [x] (2026-10-14) Ran affected unpark, shared admission, worker restart, parked-child error, and queued-input handoff tests successfully.
-- [ ] Merge current upstream, run final touched-crate suites and workspace clippy, and push master.
+- [x] (2026-10-14) Committed implementation as 5f246a135 and merged current origin/master as 4302dffe4; retained profile-staging changes and adapted new fixtures to codex_profile.
+- [x] (2026-10-14) Full final controller suite: 1,998 passed, 12 ignored. Full core suite: 500 passed, plus three integration tests and successful doc-test checks.
+- [x] (2026-10-14) All 14 isolated daemon startup/upgrade regressions pass. Workspace cargo clippy --all-targets -- -D warnings passes in the dev profile. Formatting and diff checks pass.
+- [ ] Push the validated master branch and record the confirmed remote outcome.
 
 ## Surprises & Discoveries
 
@@ -38,7 +41,7 @@ Normal session recovery excludes `Parked`; dropping a lifecycle hold while leavi
 ## Outcomes & Retrospective
 
 
-The two live-store/relay unpark regressions pass. Shared admission, worker restart compatibility, parked-child error reporting, and queued-input handoff deferral tests pass. A validated checkpoint is ready; upstream merge, final validation and push remain. The user authorized committing and pushing the current branch; it is master. Existing Cargo is the mbx wrapper, and target is its existing symlink under `/mnt/optane/mbx-targets`; leave both unchanged.
+The two live-store/relay unpark regressions pass. Shared admission, worker restart compatibility, parked-child error reporting, and queued-input handoff deferral tests pass. The implementation and upstream merge are committed. Final controller and core suites pass, including the isolated unpark, admission, rollback and input-delivery regressions. All 14 isolated CLI daemon startup/upgrade tests and workspace clippy with warnings denied pass. Formatting and diff checks pass. Only the authorized push and its recorded outcome remain. The user authorized committing and pushing the current branch; it is master. Existing Cargo is the mbx wrapper, and target is its existing symlink under `/mnt/optane/mbx-targets`; leave both unchanged.
 
 ## Context and Orientation
 
@@ -88,3 +91,5 @@ Live evidence: child `aebe025f996d728efed4e263546b4de8` restarted at 20:43:31 UT
 Use the existing `WorkerPermit`, `WorkerRestartIntent`, `start_worker_durably`, subprocess executor, session actor and database writer. Introduce no workspace crate, dependency, wire format or migration. Resumable executor hooks must retain operation identity checks and acquire named admission before a control transition.
 
 Revision note: Added an explicit handoff refusal code and an input-delivery regression so declined wake admission cannot permanently fail accepted queued input. Implementation retains the existing container startup slot through native readiness; that supervised observation now holds no daemon admission and never stops a live worker. This preserves startup concurrency while making handoff independent of readiness.
+
+Validation note: The final suites ran against upstream version 2.45.1. Both the wake fixture and the pre-existing Muse discovery fixture needed the new codex_profile field; defaults preserve their prior behavior. No schema migration, wire revision, build layout change or live installation was needed.
