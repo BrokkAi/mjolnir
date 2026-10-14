@@ -151,7 +151,7 @@ pub(super) fn load_materialized_session_summary_from(
         |row| row.get(0),
     )?;
     if let Some(ordinal) = outcome
-        .map(|json| serde_json::from_str::<MaterializedTurnOutcome>(&json))
+        .map(|json| deserialize_turn_outcome(&json))
         .transpose()?
         .as_ref()
         .and_then(MaterializedTurnOutcome::interruption_ordinal)
@@ -442,7 +442,7 @@ pub(super) fn read_materialized_turn_state(
             .transpose()
             .with_context(|| format!("parse active turn for session {session_id}"))?,
         last.as_deref()
-            .map(serde_json::from_str)
+            .map(deserialize_turn_outcome)
             .transpose()
             .with_context(|| format!("parse last turn outcome for session {session_id}"))?,
     )))
@@ -1414,7 +1414,7 @@ pub(super) fn read_materialized_session_fields(
             .with_context(|| format!("parse active turn for session {session_id}"))?,
         last_turn_outcome: last_turn_outcome_json
             .as_deref()
-            .map(serde_json::from_str)
+            .map(deserialize_turn_outcome)
             .transpose()
             .with_context(|| format!("parse last turn outcome for session {session_id}"))?,
     }))
@@ -1802,7 +1802,7 @@ impl ProjectionPage<'_> {
             events::insert_api_event(tx, session_id, *recorded_at_ms, event)?;
         }
         for turn in &self.pending_turns {
-            tx.execute("INSERT OR REPLACE INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![session_id, turn.command_id, turn.completed_ordinal, turn.turn_start_position, serde_json::to_string(turn)?])?;
+            tx.execute("INSERT OR REPLACE INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![session_id, turn.command_id, turn.completed_ordinal, turn.turn_start_position, serialize_turn_outcome(turn)?])?;
         }
         if let Some(cost) = &self.pending.provider_cost {
             tx.execute(
@@ -1832,7 +1832,7 @@ impl ProjectionPage<'_> {
             tx.execute(
                 "UPDATE materialized_sessions
                  SET last_turn_outcome_json = ?2 WHERE session_id = ?1",
-                params![session_id, serde_json::to_string(last_turn_outcome)?],
+                params![session_id, serialize_turn_outcome(last_turn_outcome)?],
             )?;
         }
         tx.execute(
