@@ -333,7 +333,12 @@ async fn latest_update(
 }
 
 async fn fetch_latest_release(sources: &UpdateSources) -> Result<GitHubRelease> {
-    let body = fetch_text(&sources.latest_release).await?;
+    let token = if is_github_api_url(&sources.latest_release) {
+        github_api_token().await
+    } else {
+        None
+    };
+    let body = fetch_text_authorized(&sources.latest_release, token.as_deref()).await?;
     serde_json::from_str(&body).context("parse release body")
 }
 
@@ -370,20 +375,68 @@ async fn fetch_latest_managed_version(
 
 const CARGO_INDEX_URL: &str = "https://index.crates.io/br/ok/brokk-mjolnir";
 
+/// Anonymous GitHub API calls share a limit of 60 an hour per IP address,
+/// which a shared NAT exhausts quickly. A logged-in GitHub CLI, or
+/// `GH_TOKEN`/`GITHUB_TOKEN`, raises that limit. The token travels only to
+/// GitHub's API host over HTTPS, in a header marked sensitive; it never enters
+/// a URL, an error, or a log line.
+fn is_github_api_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("api.github.com"))
+}
+
+/// Looks up the same GitHub credential the daemon uses. `gh auth token` reads
+/// local state, but this check runs before the dashboard starts, so the lookup
+/// is time-boxed and a slow or missing CLI means an anonymous request.
+async fn github_api_token() -> Option<String> {
+    let lookup = tokio::task::spawn_blocking(super::backend::controller_github_token);
+    match tokio::time::timeout(Duration::from_secs(2), lookup).await {
+        Ok(Ok(token)) => token,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "GitHub token lookup task failed");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("GitHub token lookup timed out");
+            None
+        }
+    }
+}
+
 async fn fetch_text(url: &str) -> Result<String> {
+    fetch_text_authorized(url, None).await
+}
+
+async fn fetch_text_authorized(url: &str, bearer: Option<&str>) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent(concat!("mj/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("build http client")?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+    let mut request = client.get(url);
+    if let Some(token) = bearer {
+        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("GitHub token is not a valid header value")?;
+        value.set_sensitive(true);
+        request = request.header(reqwest::header::AUTHORIZATION, value);
+    }
+    let resp = request.send().await.with_context(|| format!("GET {url}"))?;
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!("GET {url}: HTTP {status}");
+        let rate_limited = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .is_some_and(|remaining| remaining == "0");
+        match (rate_limited, bearer) {
+            (true, None) => anyhow::bail!(
+                "GET {url}: HTTP {status}: GitHub API rate limit exceeded for anonymous \
+                 requests; run `gh auth login` or set GH_TOKEN to raise it"
+            ),
+            (true, Some(_)) => {
+                anyhow::bail!("GET {url}: HTTP {status}: GitHub API rate limit exceeded")
+            }
+            (false, _) => anyhow::bail!("GET {url}: HTTP {status}"),
+        }
     }
     resp.text().await.with_context(|| format!("read {url}"))
 }
@@ -520,14 +573,35 @@ fn parse_version(raw: &str) -> Result<Version> {
 /// value: the process re-execs into the new binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupUpdateOutcome {
-    /// The check did not run (debug build, non-interactive, disabled, or it
-    /// failed without affecting the session).
+    /// The check did not run (debug build, non-interactive, or disabled).
     Skipped,
     UpToDate,
     /// The channel only allows announcing the upgrade command; the user must
     /// run it themselves.
     Notified,
     Declined,
+    /// The check or the upgrade failed and this version keeps running. The
+    /// message belongs in the dashboard's notice bar: text printed before the
+    /// dashboard starts reads as though mj stopped.
+    Failed(String),
+}
+
+impl StartupUpdateOutcome {
+    fn failed(what: &str, error: &anyhow::Error) -> Self {
+        tracing::warn!(error = format!("{error:#}"), "{what} failed");
+        Self::Failed(format!(
+            "{what} failed; running mj {}: {error:#}",
+            env!("CARGO_PKG_VERSION")
+        ))
+    }
+
+    /// The notice the dashboard shows for this outcome, if any.
+    pub fn dashboard_notice(self) -> Option<String> {
+        match self {
+            Self::Failed(notice) => Some(notice),
+            Self::Skipped | Self::UpToDate | Self::Notified | Self::Declined => None,
+        }
+    }
 }
 
 /// Checks the running install's channel for a newer release, asks before
@@ -564,11 +638,8 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
     let update = match latest_update(&UpdateSources::default(), &method).await {
         Ok(Some(update)) => update,
         Ok(None) => return StartupUpdateOutcome::UpToDate,
-        Err(error) => {
-            // A broken check must never keep someone out of mj.
-            eprintln!("mj: update check failed: {error:#}");
-            return StartupUpdateOutcome::Skipped;
-        }
+        // A broken check must never keep someone out of mj.
+        Err(error) => return StartupUpdateOutcome::failed("Update check", &error),
     };
 
     match update {
@@ -576,13 +647,12 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
             if !prompt_for_update(&update.version, &InstallMethod::Direct).unwrap_or(false) {
                 return StartupUpdateOutcome::Declined;
             }
-            if let Err(error) = download_apply_and_restart(&update).await {
-                eprintln!("mj: upgrade failed: {error:#}");
-                eprintln!("mj: continuing with {}", env!("CARGO_PKG_VERSION"));
+            // The success path re-execs and never returns; reaching the end
+            // means the upgrade failed and the current process lives on.
+            match download_apply_and_restart(&update).await {
+                Ok(()) => StartupUpdateOutcome::Skipped,
+                Err(error) => StartupUpdateOutcome::failed("Upgrade", &error),
             }
-            // The success path re-execs and never returns; reaching this
-            // line means the upgrade failed and the current process lives on.
-            StartupUpdateOutcome::Skipped
         }
         AvailableUpdate::Managed { version, method } => match method {
             InstallMethod::Npm | InstallMethod::Homebrew => {
@@ -591,11 +661,10 @@ pub async fn check_prompt_and_apply() -> StartupUpdateOutcome {
                 }
                 let upgraded =
                     run_managed_upgrade(&version, &method).and_then(restart_current_process);
-                if let Err(error) = upgraded {
-                    eprintln!("mj: upgrade failed: {error:#}");
-                    eprintln!("mj: continuing with {}", env!("CARGO_PKG_VERSION"));
+                match upgraded {
+                    Ok(()) => StartupUpdateOutcome::Skipped,
+                    Err(error) => StartupUpdateOutcome::failed("Upgrade", &error),
                 }
-                StartupUpdateOutcome::Skipped
             }
             InstallMethod::Npx | InstallMethod::Cargo { .. } => {
                 let notice = managed_update_notice(&version, &method, env!("CARGO_PKG_VERSION"))

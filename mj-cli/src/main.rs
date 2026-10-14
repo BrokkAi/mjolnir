@@ -466,18 +466,23 @@ fn run(cli: Cli) -> Result<()> {
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
-    if matches!(
+    let update_notice = if matches!(
         cli.command,
         None | Some(Command::Workspaces(WorkspacesArgs { command: None }))
     ) {
         // Interactive dashboard startup is the one place an update may be
         // checked, prompted for, and applied on every launch. The whole flow
         // finishes before daemon startup and the TUI takes over the terminal; a
-        // successful upgrade never returns because the process re-execs.
-        runtime.block_on(mj_controller::controller::update::check_prompt_and_apply());
-    }
+        // successful upgrade never returns because the process re-execs. A
+        // failure is reported inside the dashboard, which starts regardless.
+        runtime
+            .block_on(mj_controller::controller::update::check_prompt_and_apply())
+            .dashboard_notice()
+    } else {
+        None
+    };
     let daemon = matches!(cli.command, Some(Command::DaemonRun));
-    let result = runtime.block_on(run_command(cli.command, cli.workspace));
+    let result = runtime.block_on(run_command(cli.command, cli.workspace, update_notice));
     if daemon {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
@@ -643,9 +648,13 @@ fn shutdown_dashboard_runtime(runtime: tokio::runtime::Runtime) {
 async fn run_command(
     command: Option<Command>,
     requested_workspace: Option<String>,
+    update_notice: Option<String>,
 ) -> Result<DashboardExit> {
     match command {
-        None => run_workspace_dashboard(requested_workspace.as_deref(), false, None).await,
+        None => {
+            run_workspace_dashboard(requested_workspace.as_deref(), false, None, update_notice)
+                .await
+        }
         Some(Command::Go(args)) => {
             ensure!(
                 requested_workspace.is_none(),
@@ -655,10 +664,13 @@ async fn run_command(
             let mode = tokio::task::spawn_blocking(move || go::prepare(args))
                 .await
                 .context("prepare fast start")??;
-            run_workspace_dashboard(None, false, Some((mode, setup))).await
+            run_workspace_dashboard(None, false, Some((mode, setup)), update_notice).await
         }
         Some(Command::Workspaces(args)) => match args.command {
-            None => run_workspace_dashboard(requested_workspace.as_deref(), true, None).await,
+            None => {
+                run_workspace_dashboard(requested_workspace.as_deref(), true, None, update_notice)
+                    .await
+            }
             Some(WorkspacesCommand::List(args)) => api_commands::workspaces_list(args)
                 .await
                 .map(|()| DashboardExit::Normal),
@@ -1261,6 +1273,7 @@ async fn run_workspace_dashboard(
     requested_workspace: Option<&str>,
     open_workspace_manager: bool,
     mut go: Option<(mj_tui::GoMode, bool)>,
+    update_notice: Option<String>,
 ) -> Result<DashboardExit> {
     let resume = dashboard::UpgradeResume::load().await?;
     if resume.is_some() {
@@ -1347,6 +1360,7 @@ async fn run_workspace_dashboard(
                         go,
                         attachment.presence,
                         resume,
+                        update_notice,
                     )
                     .await
                 }

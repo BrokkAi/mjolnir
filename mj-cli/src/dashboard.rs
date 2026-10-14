@@ -512,6 +512,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     go: Option<(mj_tui::GoMode, bool)>,
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
     resume: Option<UpgradeResume>,
+    update_notice: Option<String>,
 ) -> Result<DashboardExit> {
     let DashboardScreen {
         terminal,
@@ -521,6 +522,9 @@ pub(crate) async fn run_dashboard_for_workspace(
     } = screen;
     let mut context = DashboardContext::open(loaded, terminal, events, daemon_presence)?;
     context.splash = splash;
+    if let Some(notice) = update_notice {
+        context.dashboard.set_failure_notice(notice);
+    }
     let automatic_setup = resume.is_none() && go.is_none() && !open_workspace_manager;
     if let Some(resume) = resume {
         context.restore_upgrade(resume).await;
