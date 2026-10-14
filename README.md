@@ -90,7 +90,9 @@ mj
 ```
 
 On first launch, Mjolnir automatically adds profiles for your installed agents
-and a bundle for the current GitHub repository. A brief welcome shows what it
+and a bundle for the current GitHub repository; every later launch adds
+profiles for agents installed since. To stop using an agent, disable its
+profile in Settings rather than removing it. A brief welcome shows what it
 found and any prerequisite errors. Press Continue, then `ctrl+b c` to create
 a session: pick an agent profile and where the session runs. Container images
 download in the background while you use the dashboard. Configure SSH and AWS

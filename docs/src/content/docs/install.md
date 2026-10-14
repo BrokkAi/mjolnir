@@ -190,7 +190,7 @@ cd path/to/your/repository
 mj
 ```
 
-The first interactive `mj` automatically discovers installed agents and the current GitHub repository. A brief welcome reports prerequisite errors, and container images download in the background. `mj setup` reruns discovery from the shell while preserving existing configuration. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
+The first interactive `mj` automatically discovers installed agents and the current GitHub repository, and every later launch adds profiles for newly installed agents. A brief welcome reports prerequisite errors, and container images download in the background. `mj setup` reruns discovery from the shell while preserving existing configuration. `mj go` is a shortcut for later: it remembers each folder's setup and returns to that folder's last conversation. The [quickstart](/quickstart/) walks through the first session. For unattended or advanced setup, see [configuration](/configuration/), [profiles](/profiles/), [targets](/targets/), and the complete [CLI reference](/cli-reference/).
 
 ## Uninstall
 
