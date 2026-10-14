@@ -14,7 +14,7 @@ Users can open Profiles → Usage by session in the terminal dashboard and compa
 - [x] (2026-10-14) Validate database accounting, HTTP filters, rendered output, filter interactions, scrolling, and stale response handling. Both new integration tests passed on the merged store format, and the final dialog golden passed.
 - [x] (2026-10-14) Run workspace clippy with warnings denied on the final implementation; complete the controller suite (1,995 passed and 11 ignored initially, with the one existing deadline test passing alone from the exact suite binary).
 - [x] (2026-10-14) Finish full core/TUI/CLI suites: core 500 unit and 3 scenario tests; TUI 522 passes and 2 ignores initially, with its 3 affected command-count/layout goldens updated and passing on exact reruns; CLI 212 unit tests plus all enabled integration/PTY suites passed.
-- [ ] Commit the upstream-reader, unknown-token, and discovery-golden corrections on hel4, then push to origin/master.
+- [x] (2026-10-14) Commit final corrections as 9b3528446, merge the additional upstream commits without changing the usage implementation, and push 3b79cfa13 to origin/master.
 
 ## Surprises & Discoveries
 
@@ -30,7 +30,7 @@ The report is implemented and validated on upstream 2.45.1. Profiles exposes Usa
 
 Both new store and HTTP integration tests passed, as did the dialog/menu goldens. Full core, controller, TUI, and CLI suites ran. The controller's existing mbx deadline test failed under the parallel run and passed alone from the exact suite binary in 2.38 seconds. Three TUI discovery goldens required the expected extra command/count/layout changes; all passed after updating those snapshots. All other enabled tests passed, including CLI upgrade, isolation, and PTY suites. Workspace clippy with warnings denied, rustfmt, and diff checks passed on the final implementation.
 
-Checkpoint 205cd5fa4 and upstream merge bca114ec3 are committed. The merge needed no manual conflict resolution. Upstream's revision 82 stores semantic turn records containing raw_outcome; the report now uses the existing database serialization helpers. No schema change, build-cache layout change, live instance operation, installation, or release is part of this feature. Final correction commit and authorized push remain.
+Checkpoint 205cd5fa4, upstream merge bca114ec3, and final correction 9b3528446 are committed. Upstream's revision 82 stores semantic turn records containing raw_outcome; the report uses the existing database serialization helpers. A push rejection required a second clean upstream merge, 3b79cfa13; the usage implementation and its validated goldens remained identical across that merge, and the push to origin/master succeeded. No schema change, build-cache layout change, live instance operation, installation, or release was part of this feature.
 
 ## Context and Orientation
 
@@ -77,3 +77,5 @@ Revision note: adopt upstream's persisted-turn interpretation helper after its s
 Revision note: distinguish a missing model token total from zero in the rendered breakdown. The final golden covers this partial-data case. Retrying an unchanged timing test uses the exact existing suite binary to preserve the original feature set and avoid redundant compilation.
 
 Revision note: final validation completed; refresh only the three existing discovery goldens affected by the new command, then commit and publish the validated result.
+
+Revision note: the authorized push succeeded after fetching and merging the concurrently advanced upstream. All feature work and validation are complete.
