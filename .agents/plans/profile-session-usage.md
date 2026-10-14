@@ -11,8 +11,10 @@ Users can open Profiles → Usage by session in the terminal dashboard and compa
 - [x] (2026-10-14) Locate the CPU report, durable usage records, retained child accounting, and shared dropdown controls.
 - [x] (2026-10-14) Implement report query, shared response types, and published standard price estimates, with no schema changes.
 - [x] (2026-10-14) Add the Profiles command and cancellable background loading with generation checks and serial 30-second refreshes.
-- [ ] Validate database accounting and HTTP filters (tests written, compiling); rendered output, filter interactions, and stale response handling passed the dialog golden, with a final rerun pending after scroll improvements.
-- [ ] Run full tests for touched crates and workspace clippy, commit on hel4, and push to origin/master.
+- [x] (2026-10-14) Validate database accounting, HTTP filters, rendered output, filter interactions, scrolling, and stale response handling. Both new integration tests passed on the merged store format, and the final dialog golden passed.
+- [x] (2026-10-14) Run workspace clippy with warnings denied on the final implementation; complete the controller suite (1,995 passed and 11 ignored initially, with the one existing deadline test passing alone from the exact suite binary).
+- [x] (2026-10-14) Finish full core/TUI/CLI suites: core 500 unit and 3 scenario tests; TUI 522 passes and 2 ignores initially, with its 3 affected command-count/layout goldens updated and passing on exact reruns; CLI 212 unit tests plus all enabled integration/PTY suites passed.
+- [ ] Commit the upstream-reader, unknown-token, and discovery-golden corrections on hel4, then push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -24,9 +26,11 @@ The three periods mean trailing one hour, seven days, and thirty days, measured 
 
 ## Outcomes & Retrospective
 
-The feature compiles, and workspace clippy passed with warnings denied. The expanded dashboard-dialogs golden passed the actual Profiles menu, profile and period dropdown interactions, suspension checkbox, load failure, and obsolete-response checks. The first retained-tree store integration test passed. Final store and HTTP tests, full suites, and commit/push remain in progress.
+The report is implemented and validated on upstream 2.45.1. Profiles exposes Usage by session with All/Hourly defaults, parent-profile and inactive-parent filters, complete retained sub-agent aggregation, model token/cost breakdowns, descending totals, cancellation, periodic refresh, and explicit unknown/partial data. Human-facing profile documentation explains its estimate limits.
 
-Both final usage integration tests and both dialog/menu goldens passed. A fetch found this branch 42 commits behind origin/master (including releases from 2.41.0 to 2.45.1). The validated feature is committed as a checkpoint before merging upstream on hel4. The superseded full-suite compilation is stopped so final validation can run against the merged result.
+Both new store and HTTP integration tests passed, as did the dialog/menu goldens. Full core, controller, TUI, and CLI suites ran. The controller's existing mbx deadline test failed under the parallel run and passed alone from the exact suite binary in 2.38 seconds. Three TUI discovery goldens required the expected extra command/count/layout changes; all passed after updating those snapshots. All other enabled tests passed, including CLI upgrade, isolation, and PTY suites. Workspace clippy with warnings denied, rustfmt, and diff checks passed on the final implementation.
+
+Checkpoint 205cd5fa4 and upstream merge bca114ec3 are committed. The merge needed no manual conflict resolution. Upstream's revision 82 stores semantic turn records containing raw_outcome; the report now uses the existing database serialization helpers. No schema change, build-cache layout change, live instance operation, installation, or release is part of this feature. Final correction commit and authorized push remain.
 
 ## Context and Orientation
 
@@ -67,3 +71,9 @@ Revision note: implementation is complete, first compile and dialog golden passe
 Revision note: workspace clippy passed, and human-facing profile documentation now explains the report. Integration coverage also ensures missing cache attribution cannot silently be priced as zero cache reads.
 
 Revision note: upstream integration is necessary before publication. Keep hel4, commit the validated checkpoint, merge origin/master without rebasing, resolve only overlap, and perform final validation on the resulting code.
+
+Revision note: adopt upstream's persisted-turn interpretation helper after its schema revision 82 change; no fallback reader or new migration is introduced.
+
+Revision note: distinguish a missing model token total from zero in the rendered breakdown. The final golden covers this partial-data case. Retrying an unchanged timing test uses the exact existing suite binary to preserve the original feature set and avoid redundant compilation.
+
+Revision note: final validation completed; refresh only the three existing discovery goldens affected by the new command, then commit and publish the validated result.

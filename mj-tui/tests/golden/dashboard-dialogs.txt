@@ -586,9 +586,9 @@ Ent                                                                             
 │    │Total $7.205+ · last hour · estimated API USD                                                               │    │
 │    │                                                                                                            │    │
 │    │Investigate recovery [codex]  $7.205+                                                                       │    │
-│    │    claude-opus-5-5  $7.100  0 tokens                                                                       │    │
-│    │    gpt-6-luna  $0.105  0 tokens                                                                            │    │
-│    │    custom-model  unpriced  0 tokens                                                                        │    │
+│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │    custom-model  unpriced  tokens unknown                                                                  │    │
 │    │    2 sub-agents · 3/5 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -624,9 +624,9 @@ Ent                                                                             
 │    │Total $7│claude-1  │ hour · estimated API USD                                                               │    │
 │    │        │codex     │                                                                                        │    │
 │    │Investig│codex-1   │ [codex]  $7.205+                                                                       │    │
-│    │    clau│codex-2   │ $7.100  0 tokens                                                                       │    │
-│    │    gpt-╰──────────╯05  0 tokens                                                                            │    │
-│    │    custom-model  unpriced  0 tokens                                                                        │    │
+│    │    clau│codex-2   │ $7.100  tokens unknown                                                                 │    │
+│    │    gpt-╰──────────╯05  tokens unknown                                                                      │    │
+│    │    custom-model  unpriced  tokens unknown                                                                  │    │
 │    │    2 sub-agents · 3/5 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
@@ -700,9 +700,9 @@ Ent                                                                             
 │    │Total $7.205+ · last 7 days · estimated API USD                                                             │    │
 │    │                                                                                                            │    │
 │    │Investigate recovery [codex]  $7.205+ · suspended                                                           │    │
-│    │    claude-opus-5-5  $7.100  0 tokens                                                                       │    │
-│    │    gpt-6-luna  $0.105  0 tokens                                                                            │    │
-│    │    custom-model  unpriced  0 tokens                                                                        │    │
+│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │    custom-model  unpriced  tokens unknown                                                                  │    │
 │    │    2 sub-agents · 3/5 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │

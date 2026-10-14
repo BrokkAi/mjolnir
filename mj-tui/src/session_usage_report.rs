@@ -296,9 +296,12 @@ pub(crate) fn render(
                 row_map.push(Some(row_keys.len()));
                 row_keys.push(UsageRow::Session(session.session_id.clone()));
                 for model in &session.models {
-                    let tokens = model.totals.get("total_tokens").map_or(0, |v| v.tokens);
+                    let tokens = model.totals.get("total_tokens").map_or_else(
+                        || "tokens unknown".to_owned(),
+                        |v| format!("{} tokens", v.tokens),
+                    );
                     let detail = format!(
-                        "{}  {tokens} tokens",
+                        "{}  {tokens}",
                         model
                             .cost_usd_ticks
                             .map_or_else(|| "unpriced".into(), dollars)

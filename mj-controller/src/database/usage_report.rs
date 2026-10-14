@@ -86,7 +86,7 @@ fn load_from(path: &Path, query: &SessionUsageQuery, now_ms: i64) -> Result<Sess
             })?;
             for row in rows {
                 let (body, selection) = row?;
-                let turn: MaterializedTurnOutcome = serde_json::from_str(&body)?;
+                let turn = deserialize_turn_outcome(&body)?;
                 estimate.coverage.recorded_turns += 1;
                 match turn.usage {
                     Some(usage) if usage.scope == UsageScope::Turn => {
@@ -196,7 +196,8 @@ mod tests {
             let command = format!("command-{seq}");
             let body = serde_json::json!({"command_id":command,"completed_ordinal":seq,"completed_at_ms":timestamp,
                 "outcome":{"kind":"completed","stop_reason":"EndTurn"},"usage":usage});
-            connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES (?1,?2,?3,?4)", params![session, command, seq, body.to_string()])?;
+            let turn: MaterializedTurnOutcome = serde_json::from_value(body)?;
+            connection.execute("INSERT INTO session_turn_usage(session_id,command_id,completed_ordinal,body) VALUES (?1,?2,?3,?4)", params![session, command, seq, serialize_turn_outcome(&turn)?])?;
             connection.execute(
                 "INSERT INTO session_turn_selections VALUES (?1,?2,?3,'high')",
                 params![session, command, model],
