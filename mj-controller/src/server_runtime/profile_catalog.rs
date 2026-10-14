@@ -468,7 +468,9 @@ impl ProfileCatalog {
         let cancellation = self.lock().definitions[&key.0].cancellation.clone();
         let mut revisions = self.revisions.subscribe();
         if live {
-            return self.fetch_live(&key, key.1.clone(), cancellation, &mut revisions).await;
+            return self
+                .fetch_live(&key, key.1.clone(), cancellation, &mut revisions)
+                .await;
         }
         loop {
             // Subscribe before inspecting ownership, so completion cannot be
@@ -934,16 +936,17 @@ mod tests {
         let key = config.profiles["muse"].capabilities_key("muse");
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let published = catalog
-                    .snapshot()
-                    .profiles
-                    .get(&key)
-                    .and_then(|entry| match &entry.choices {
-                        CapabilityState::Ready(choices) => {
-                            choices.models.first().map(|choice| choice.value.clone())
-                        }
-                        _ => None,
-                    });
+                let published =
+                    catalog
+                        .snapshot()
+                        .profiles
+                        .get(&key)
+                        .and_then(|entry| match &entry.choices {
+                            CapabilityState::Ready(choices) => {
+                                choices.models.first().map(|choice| choice.value.clone())
+                            }
+                            _ => None,
+                        });
                 if published.as_deref() == Some(first.as_str()) {
                     break;
                 }
@@ -962,8 +965,7 @@ mod tests {
         let codex_first = catalog.capabilities(&["codex".into()]).await.unwrap();
         let codex_second = catalog.capabilities(&["codex".into()]).await.unwrap();
         assert_eq!(
-            codex_first[0].models[0].value,
-            codex_second[0].models[0].value,
+            codex_first[0].models[0].value, codex_second[0].models[0].value,
             "other harnesses keep serving their warm entries"
         );
     }

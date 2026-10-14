@@ -633,7 +633,9 @@ mod tests {
     }
 
     // Hard-won: d7ca109e4: a panic hook writing to a full stderr must preserve the reserved record without aborting.
-    #[cfg(unix)]
+    // /dev/full exists only on Linux; macOS has no equivalent full device, so this
+    // real-disk worker check is scoped to Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn full_stderr_keeps_worker_diagnostics_alive_and_panic_records_the_tail() {
         const CHILD_ROOT: &str = "MJ_TEST_FULL_STDERR_ROOT";
