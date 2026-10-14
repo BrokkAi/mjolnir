@@ -8,8 +8,7 @@ use super::*;
 /// How long a whole park may run: an idle reservation, one stop, one write.
 const PARK_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long a whole unpark may run. It covers the harness start, which a
-/// worker restart allows 300 seconds for journal recovery alone.
+/// Preparation may download a harness; it holds no daemon handoff admission.
 const UNPARK_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl RuntimeState {
@@ -209,9 +208,8 @@ impl RuntimeState {
         }
     }
 
-    /// Start a parked sub-agent's worker again so it can take its parent's
-    /// next prompt, and wait until the session manager holds it. A child that
-    /// is already running needs nothing. On failure the child stays parked.
+    /// Accept a durable wake and launch the worker. Its actor observes startup
+    /// independently, including after daemon replacement.
     pub async fn unpark_subagent(self: &Arc<Self>, child_session_id: String) -> Result<()> {
         // A park still finishing would otherwise refuse this as a second
         // lifecycle operation; waiting for it keeps a `send_message` that raced
@@ -224,19 +222,27 @@ impl RuntimeState {
             self.run_lifecycle(
                 child_session_id.clone(),
                 LifecycleKind::Unpark,
-                // A close of the child cancels this: the child then stays
-                // parked and the close settles it.
+                // A close cancels preparation or readiness observation, then
+                // settles the child through its ordinary lifecycle.
                 |state, session_id, cancelled| async move {
-                    let _recovery_reservation = blocking({
+                    let executor = DaemonStageReportingExecutor::new(
+                        CancellableProcessExecutor::new(cancelled.clone())
+                            .with_deadline(UNPARK_TIMEOUT),
+                        state.clone(),
+                        session_id.clone(),
+                    );
+                    executor.begin_resumable_work()?;
+                    // Waiting for a cancelled recovery copy is interruptible
+                    // preparation, not an admitted database operation.
+                    let _recovery_reservation = tokio::task::spawn_blocking({
                         let observer = state.recovery_observer.clone();
                         let session_id = session_id.clone();
                         let cancelled = cancelled.clone();
                         move || reserve_recovery_or_cancel(&observer, &session_id, &cancelled)
                     })
-                    .await?;
+                    .await
+                    .context("reserve recovery for sub-agent wake")??;
                     let controller = blocking(Controller::load).await?;
-                    let executor =
-                        CancellableProcessExecutor::new(cancelled).with_deadline(UNPARK_TIMEOUT);
                     controller
                         .unpark_subagent_worker(&session_id, &executor)
                         .await?;

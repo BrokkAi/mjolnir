@@ -284,7 +284,7 @@ impl RuntimeState {
                             move |controller, executor, _manager| async move {
                                 let mut operation = crate::database::load_move_operation(&id)?
                                     .context("Move cleanup intent missing")?;
-                                executor.begin_resumable_move_work()?;
+                                executor.begin_resumable_work()?;
                                 let result = controller
                                     .cleanup_prepared_move_destination(&mut operation, &executor);
                                 operation.updated_at = chrono::Utc::now().to_rfc3339();
@@ -296,7 +296,7 @@ impl RuntimeState {
                                 } else {
                                     crate::database::save_move_operation(&operation)?;
                                 }
-                                executor.end_resumable_move_work()?;
+                                executor.end_resumable_work("Move control transition")?;
                                 result?;
                                 Ok(MoveOutcome {
                                     operation_id: operation.operation_id,
@@ -345,7 +345,7 @@ impl RuntimeState {
     /// It takes no upgrade admission of its own; the lifecycle's hold is the
     /// only one. That is what lets the slow path work as intended: it
     /// releases the lifecycle's hold around each resumable workspace copy
-    /// (`begin_resumable_move_work`), so a handoff does not wait for a copy,
+    /// (`begin_resumable_work`), so a handoff does not wait for a copy,
     /// the closing daemon cancels it, and the next daemon resumes the Move
     /// from its durable phase. An in-place Move copies nothing and never
     /// releases the hold, so a handoff waits for it to finish.
@@ -516,9 +516,10 @@ mod admission_tests {
                             session_id,
                             cancelled,
                             |_, executor, _| async move {
-                                executor.begin_resumable_move_work()?;
+                                executor.begin_resumable_work()?;
                                 let copied = executor.execute(&copy);
-                                let resumed = executor.end_resumable_move_work();
+                                let resumed =
+                                    executor.end_resumable_work("Move control transition");
                                 if copied.is_ok() && resumed.is_ok() {
                                     return Ok(outcome("completed"));
                                 }

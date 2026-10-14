@@ -85,12 +85,12 @@ struct Ec2 {
 }
 
 impl CommandExecutor for Ec2 {
-    fn begin_resumable_move_work(&self) -> Result<()> {
+    fn begin_resumable_work(&self) -> Result<()> {
         self.resumable.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    fn end_resumable_move_work(&self) -> Result<()> {
+    fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
         self.resumable.store(false, Ordering::SeqCst);
         ensure!(
             !self.handoff.load(Ordering::SeqCst),

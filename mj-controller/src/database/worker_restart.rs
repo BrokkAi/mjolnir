@@ -9,6 +9,20 @@ pub(crate) struct WorkerRestartIntent {
 }
 
 pub(crate) fn begin_worker_restart(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
+    begin_worker_restart_for(session_id, intent, false)
+}
+
+/// The wake and its boot owner become visible together. Recovery must never
+/// see a still-parked child whose worker has already accepted launch.
+pub(crate) fn begin_subagent_unpark(session_id: &str, intent: &WorkerRestartIntent) -> Result<()> {
+    begin_worker_restart_for(session_id, intent, true)
+}
+
+fn begin_worker_restart_for(
+    session_id: &str,
+    intent: &WorkerRestartIntent,
+    unpark: bool,
+) -> Result<()> {
     let _owner = crate::worker_lifecycle::require(session_id)?;
     let session_id = session_id.to_owned();
     let intent = intent.clone();
@@ -28,6 +42,17 @@ pub(crate) fn begin_worker_restart(session_id: &str, intent: &WorkerRestartInten
             claimed == 1,
             "another worker replacement already owns session {session_id}"
         );
+        if unpark {
+            ensure!(
+                tx.execute(
+                    "UPDATE sessions SET state='running', last_error=NULL, updated_at=?2
+                     WHERE session_id=?1 AND state='parked'
+                       AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
+                    params![session_id, chrono::Utc::now().to_rfc3339()],
+                )? == 1,
+                "only a parked sub-agent can accept a wake"
+            );
+        }
         tx.commit()?;
         Ok(())
     })

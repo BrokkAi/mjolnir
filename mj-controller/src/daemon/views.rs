@@ -124,7 +124,6 @@ impl RuntimeState {
                 LifecycleKind::Create
                     | LifecycleKind::Resume
                     | LifecycleKind::Restart
-                    | LifecycleKind::Unpark
                     | LifecycleKind::StartupCleanup
             ) {
                 startup_cleanup_deadline

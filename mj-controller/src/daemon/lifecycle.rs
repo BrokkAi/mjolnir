@@ -156,6 +156,8 @@ impl RuntimeState {
                     crate::upgrade::activity_unless_draining("failed startup cleanup")?
                 } else if kind == LifecycleKind::ForceDestroy {
                     crate::upgrade::destroy_activity(&session_id)?
+                } else if kind == LifecycleKind::Unpark {
+                    crate::upgrade::activity_unless_draining("subagent unpark admission")?
                 } else {
                     crate::upgrade::activity("session lifecycle")?
                 };

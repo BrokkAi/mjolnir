@@ -714,9 +714,9 @@ impl Controller {
         operation: &mut MoveOperation,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        executor.begin_resumable_move_work()?;
+        executor.begin_resumable_work()?;
         let result = self.capture_move_workspace_inner(operation, executor);
-        executor.end_resumable_move_work()?;
+        executor.end_resumable_work("Move control transition")?;
         result
     }
 
@@ -807,9 +807,9 @@ impl Controller {
         id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        executor.begin_resumable_move_work()?;
+        executor.begin_resumable_work()?;
         let result = self.restore_move_workspace_inner(id, executor);
-        executor.end_resumable_move_work()?;
+        executor.end_resumable_work("Move control transition")?;
         result
     }
 

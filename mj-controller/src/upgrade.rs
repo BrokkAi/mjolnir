@@ -25,6 +25,9 @@ const WAIT_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 /// The label a session destroy holds admission under.
 pub(crate) const DESTROY_LABEL: &str = "session destroy";
 
+/// A refused control admission has made no mutation and may wait for handoff.
+pub(crate) const HANDOFF_REFUSAL_CODE: &str = "daemon_handoff";
+
 /// How long a stop or handoff waits for destroys in flight before it goes
 /// ahead and abandons them. The client waits longer than this for the daemon
 /// to exit (`STOP_DRAIN_TIMEOUT`).
@@ -194,7 +197,11 @@ impl Gate {
     /// only once the handoff has happened.
     pub(crate) fn enter(self: &Arc<Self>, label: &'static str) -> anyhow::Result<Work> {
         let mut state = self.lock();
-        anyhow::ensure!(!state.closed, "daemon upgrade handoff is underway");
+        anyhow::ensure!(
+            !state.closed,
+            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
         Ok(self.register(&mut state, label))
     }
 
@@ -205,8 +212,16 @@ impl Gate {
         label: &'static str,
     ) -> anyhow::Result<Work> {
         let mut state = self.lock();
-        anyhow::ensure!(!state.closed, "daemon upgrade handoff is underway");
-        anyhow::ensure!(!state.draining(), "a daemon upgrade handoff is waiting");
+        anyhow::ensure!(
+            !state.closed,
+            mj_core::refusal::Refusal::precondition("daemon upgrade handoff is underway")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
+        anyhow::ensure!(
+            !state.draining(),
+            mj_core::refusal::Refusal::precondition("a daemon upgrade handoff is waiting")
+                .with_code(HANDOFF_REFUSAL_CODE)
+        );
         Ok(self.register(&mut state, label))
     }
 

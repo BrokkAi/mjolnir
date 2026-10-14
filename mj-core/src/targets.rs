@@ -615,11 +615,12 @@ pub trait CommandExecutor {
     /// to the lifecycle until queue admission completes.
     fn reserve_move_destination(&self) {}
 
-    /// The durable Move owns this interruptible copy; daemon handoff may resume it.
-    fn begin_resumable_move_work(&self) -> Result<()> {
+    /// Yield daemon admission for interruptible work recoverable after handoff.
+    fn begin_resumable_work(&self) -> Result<()> {
         Ok(())
     }
-    fn end_resumable_move_work(&self) -> Result<()> {
+    /// Reacquire named control admission before leaving resumable work.
+    fn end_resumable_work(&self, _label: &'static str) -> Result<()> {
         Ok(())
     }
 
