@@ -732,9 +732,7 @@ impl Controller {
         session_id: &str,
     ) -> Result<Option<String>> {
         if self.config.github.app.is_none() {
-            return tokio::task::spawn_blocking(controller_github_token)
-                .await
-                .context("GitHub token lookup task failed");
+            return Ok(controller_github_token().await);
         }
         self.github_app_token_for_session(session_id).await
     }
@@ -812,17 +810,13 @@ pub(crate) async fn github_token_for_session(
     github_app_configured: bool,
 ) -> Result<Option<String>> {
     if !github_app_configured {
-        return tokio::task::spawn_blocking(controller_github_token)
-            .await
-            .context("GitHub token lookup task failed");
+        return Ok(controller_github_token().await);
     }
     let controller = tokio::task::spawn_blocking(Controller::load)
         .await
         .context("load controller for GitHub credential sync")??;
     if controller.config.github.app.is_none() {
-        return tokio::task::spawn_blocking(controller_github_token)
-            .await
-            .context("GitHub token lookup task failed");
+        return Ok(controller_github_token().await);
     }
     controller.github_token_for_session(&session_id).await
 }
