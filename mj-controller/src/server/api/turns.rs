@@ -351,6 +351,13 @@ pub(super) async fn usage_tree(
     Ok(Json(tree))
 }
 
+pub(super) async fn usage_report(
+    State(state): State<ServerState>,
+    Query(query): Query<mj_core::usage::SessionUsageQuery>,
+) -> Result<Json<mj_core::usage::SessionUsageReport>, ApiFailure> {
+    Ok(Json(backend(&state)?.usage_report(query).await?))
+}
+
 pub(super) async fn transcript(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

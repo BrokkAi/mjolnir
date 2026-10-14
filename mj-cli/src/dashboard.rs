@@ -17,6 +17,7 @@ mod composer_drafts;
 mod help_search;
 pub(crate) mod io;
 mod read_receipts;
+mod usage_report;
 mod workspace_settings;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -413,6 +414,7 @@ pub(crate) struct DashboardContext {
     /// its debounced task the same way.
     sessions_text_request: Arc<std::sync::atomic::AtomicU64>,
     help_search: help_search::HelpSearch,
+    usage_report: usage_report::UsageReportLoader,
 
     pub(crate) dashboard_io_tx: UnboundedSender<DashboardIoUpdate>,
     dashboard_io: Feed<UnboundedReceiver<DashboardIoUpdate>>,
@@ -952,6 +954,9 @@ pub(crate) async fn run_dashboard_for_workspace(
             context.refresh_git_status();
             context
                 .help_search
+                .sync(&context.dashboard, &context.dashboard_io_tx);
+            context
+                .usage_report
                 .sync(&context.dashboard, &context.dashboard_io_tx);
         }
         if context
@@ -1716,6 +1721,7 @@ impl DashboardContext {
             wiki_search_task: None,
             sessions_text_request: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             help_search: help_search::HelpSearch::default(),
+            usage_report: usage_report::UsageReportLoader::default(),
             import_updates_tx,
             import_profiles: Feed::new(import_updates_rx),
             import_task_tx,

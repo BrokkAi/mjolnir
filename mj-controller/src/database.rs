@@ -46,6 +46,8 @@ mod legacy_schema;
 mod schema;
 mod usage;
 pub use usage::*;
+mod usage_report;
+pub use usage_report::load_session_usage_report;
 mod events;
 pub use events::*;
 

@@ -55,6 +55,10 @@ pub(crate) enum DashboardIoUpdate {
         generation: u64,
         result: std::result::Result<mj_core::help_search::HelpSearchResponse, String>,
     },
+    SessionUsageFinished {
+        generation: u64,
+        result: std::result::Result<mj_core::usage::SessionUsageReport, String>,
+    },
     RepositoryRemotesRepaired {
         generation: Option<u64>,
         retry: Box<DashboardAction>,
@@ -615,6 +619,10 @@ impl DashboardContext {
             }
             DashboardIoUpdate::HelpSearchFinished { generation, result } => {
                 self.dashboard.apply_help_search_result(generation, result);
+            }
+            DashboardIoUpdate::SessionUsageFinished { generation, result } => {
+                self.dashboard
+                    .apply_session_usage_result(generation, result);
             }
             DashboardIoUpdate::WorkspacePaneSizes { result } => match result {
                 Ok(layouts) => {

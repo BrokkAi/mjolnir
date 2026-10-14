@@ -498,3 +498,269 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰─────────                                                                                                    ─────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
 action: None
+
+=== Profiles menu with usage report (120x36) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                               ✦  M J O L N I R                               │
+│  │                                   ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                     ╭Profiles──────────────────────────────────╮                                     │
+│                                     │Refresh                                   │                                     │
+│                                     │Settings…                                 │                                     │
+│                                     │Usage by session…                         │                                     │
+│                                     ╰──────────────────────────────────────────╯                                     │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : palette · ? keys
+
+=== Usage by session loading (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile All ▾                                                                         Period Hourly ▾       │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │Loading usage…                                                                                              │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent                                                                                                                  eys
+
+=== Usage by session All with model costs (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile All ▾                                                                         Period Hourly ▾       │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total $7.205+ · last hour · estimated API USD                                                               │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  $7.205+                                                                       │    │
+│    │    claude-opus-5-5  $7.100  0 tokens                                                                       │    │
+│    │    gpt-6-luna  $0.105  0 tokens                                                                            │    │
+│    │    custom-model  unpriced  0 tokens                                                                        │    │
+│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent                                                                                                                  eys
+
+=== Usage profile dropdown (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile All ▾                                                                         Period Hourly ▾       │    │
+│ C  │        ╭Profile───╮                                                                                        │    │
+│he  │☐ Includ│All       │sessions                                                                                │    │
+│›   │        │claude    │                                                                                        │    │
+│    │Total $7│claude-1  │ hour · estimated API USD                                                               │    │
+│    │        │codex     │                                                                                        │    │
+│    │Investig│codex-1   │ [codex]  $7.205+                                                                       │    │
+│    │    clau│codex-2   │ $7.100  0 tokens                                                                       │    │
+│    │    gpt-╰──────────╯05  0 tokens                                                                            │    │
+│    │    custom-model  unpriced  0 tokens                                                                        │    │
+│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent                                                                                                                  eys
+
+=== Usage period dropdown (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile claude ▾                                                                      Period Hourly ▾       │    │
+│ C  │                                                                                             ╭Period───╮    │    │
+│he  │☐ Include suspended sessions                                                                 │Hourly   │    │    │
+│›   │                                                                                             │Weekly   │    │    │
+│    │Total $0.000 · last hour · estimated API USD                                                 │Monthly  │    │    │
+│    │                                                                                             ╰─────────╯    │    │
+│    │No sessions match these filters.                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent                                                                                                                  eys
+
+=== Usage weekly including suspended (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile claude ▾                                                                      Period Weekly ▾       │    │
+│ C  │                                                                                                            │    │
+│he  │☑ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total $7.205+ · last 7 days · estimated API USD                                                             │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  $7.205+ · suspended                                                           │    │
+│    │    claude-opus-5-5  $7.100  0 tokens                                                                       │    │
+│    │    gpt-6-luna  $0.105  0 tokens                                                                            │    │
+│    │    custom-model  unpriced  0 tokens                                                                        │    │
+│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent                                                                                                                  eys
+
+=== Usage report failure (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile claude ▾                                                                      Period Weekly ▾       │    │
+│ C  │                                                                                                            │    │
+│he  │☑ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │Usage load failed: test store unavailable                                                                   │    │
+│    │Use Refresh to retry.                                                                                       │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Usa

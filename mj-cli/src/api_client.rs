@@ -589,6 +589,18 @@ impl ApiClient {
             .await
     }
 
+    pub(crate) async fn usage_report(
+        &self,
+        query: &mj_core::usage::SessionUsageQuery,
+    ) -> Result<mj_core::usage::SessionUsageReport> {
+        let request = self
+            .http
+            .get(self.url("/usage/report"))
+            .query(query)
+            .timeout(REQUEST_TIMEOUT);
+        decode(self.send(request).await?).await
+    }
+
     pub(crate) async fn diff(
         &self,
         session_id: &str,

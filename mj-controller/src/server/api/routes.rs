@@ -14,6 +14,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             get(subagent_options),
         )
         .route("/options", get(options))
+        .route("/usage/report", get(usage_report))
         .route(
             "/sessions/{session_id}/config",
             axum::routing::patch(set_config),

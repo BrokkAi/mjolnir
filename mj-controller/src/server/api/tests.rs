@@ -20,6 +20,51 @@ use super::super::{
 
 const MAILBOX_EVENT_RETRY_CHILD: &str = "MJ_API_MAILBOX_EVENT_RETRY_CHILD";
 
+// HTTP contract integration: optional All and encoded profile names must reach
+// the same store query, with authentication and no caching on the report.
+#[tokio::test]
+async fn usage_report_http_contract_preserves_filters_and_requires_authentication() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |_| {});
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/usage/report")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    for path in [
+        "/api/v1/usage/report",
+        "/api/v1/usage/report?profile=account%2Bapi&period=monthly&include_suspended=true",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[API_VERSION_HEADER], API_VERSION);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let report: mj_core::usage::SessionUsageReport = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(report, mj_core::usage::SessionUsageReport::default());
+    }
+    assert_eq!(
+        *backend.usage_queries.lock().unwrap(),
+        vec![
+            mj_core::usage::SessionUsageQuery::default(),
+            mj_core::usage::SessionUsageQuery {
+                profile: Some("account+api".into()),
+                period: mj_core::usage::UsagePeriod::Monthly,
+                include_suspended: true
+            }
+        ]
+    );
+}
+
 fn error_event(seq: u64) -> crate::database::ApiEvent {
     crate::database::ApiEvent {
         seq,
@@ -801,6 +846,7 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    usage_queries: Mutex<Vec<mj_core::usage::SessionUsageQuery>>,
     workspaces: FakeWorkspaces,
     /// Successive answers to `turn_state`, newest last. The final entry
     /// repeats once exhausted, so a wait loop settles rather than spinning.
@@ -871,6 +917,13 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn usage_report(
+        &self,
+        query: mj_core::usage::SessionUsageQuery,
+    ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
+        self.usage_queries.lock().unwrap().push(query);
+        Box::pin(async { Ok(mj_core::usage::SessionUsageReport::default()) })
+    }
     fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
         Box::pin(async {
             Ok(self

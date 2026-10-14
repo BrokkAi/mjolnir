@@ -281,6 +281,16 @@ pub trait SubagentBackend: Send + Sync {
         })
     }
 
+    fn usage_report(
+        &self,
+        query: mj_core::usage::SessionUsageQuery,
+    ) -> BoxFuture<'_, AnyResult<mj_core::usage::SessionUsageReport>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::database::load_session_usage_report(&query))
+                .await?
+        })
+    }
+
     /// A unified diff of the session's work.
     fn diff(
         &self,

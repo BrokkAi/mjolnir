@@ -80,11 +80,11 @@ menu anchor: (47, 34, 47, 34)
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││╭Profiles──────╮ess      Weekly      Resets  5H Resets                                      │
-│                                            │││Refresh       │de Code  refreshing…                                                        │
-│                                            │││Settings…     │x        refreshing…                                                        │
-│                                            ││╰──────────────╯x        refreshing…                                                        │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            ││╭Profiles───────────╮    Weekly      Resets  5H Resets                                      │
+│                                            │││Refresh            │de  refreshing…                                                        │
+│                                            │││Settings…          │    refreshing…                                                        │
+│                                            │││Usage by session…  │    refreshing…                                                        │
+╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : palette · ? keys
 Targets Refresh action: RefreshAll
 === Targets after Refresh (140x40) ===
@@ -627,11 +627,11 @@ Profiles dot action: None
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││╭Profiles──────╮ess      Weekly      Resets  5H Resets                                      │
-│                                            │││Refresh       │de Code  refreshing…                                                        │
-│                                            │││Settings…     │x        refreshing…                                                        │
-│                                            ││╰──────────────╯x        refreshing…                                                        │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            ││╭Profiles───────────╮    Weekly      Resets  5H Resets                                      │
+│                                            │││Refresh            │de  refreshing…                                                        │
+│                                            │││Settings…          │    refreshing…                                                        │
+│                                            │││Usage by session…  │    refreshing…                                                        │
+╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 Profiles number 2 action: None
 === Profiles number 2: Settings…, profiles (140x40) ===
@@ -710,11 +710,11 @@ Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes
 │                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                            ││╭Profiles──────╮ess      Weekly      Resets  5H Resets                                      │
-│                                            │││Refresh       │de Code  refreshing…                                                        │
-│                                            │││Settings…     │x        refreshing…                                                        │
-│                                            ││╰──────────────╯x        refreshing…                                                        │
-╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            ││╭Profiles───────────╮    Weekly      Resets  5H Resets                                      │
+│                                            │││Refresh            │de  refreshing…                                                        │
+│                                            │││Settings…          │    refreshing…                                                        │
+│                                            │││Usage by session…  │    refreshing…                                                        │
+╰────────────────────────────────────────────╯╰╰───────────────────╯───────────────────────────────────────────────────────────────────────╯
 Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : palette · ? keys
 Profiles Escape action: None
 Profiles focus after Escape: Quota
