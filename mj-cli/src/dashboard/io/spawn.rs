@@ -491,6 +491,17 @@ pub(crate) fn spawn_first_run_setup(
                 },
             )?;
             let Some(summary) = result else {
+                // An existing installation still picks up agents installed
+                // since its last launch.
+                let added = setup::add_detected_profiles(&config_path, &executor, &|| {
+                    executor.is_cancelled()
+                })
+                .map_err(|error| format!("{error:#}"));
+                report(
+                    "detecting agent profiles",
+                    &progress,
+                    DashboardIoUpdate::StartupProfilesDetected(added),
+                );
                 return Ok(None);
             };
             report(
