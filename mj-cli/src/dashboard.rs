@@ -38,6 +38,7 @@ use mj_chat::selection::{
     FrameSurfaces, SelectionAction, SelectionRange, SelectionState, SurfaceId,
 };
 use mj_controller::controller::Controller;
+use mj_controller::controller::update::StartupUpdateNotice;
 use mj_controller::session_manager::{
     SessionManagerControl, SessionManagerShutdown, SessionManagerUpdates, ViewError,
 };
@@ -512,6 +513,7 @@ pub(crate) async fn run_dashboard_for_workspace(
     go: Option<(mj_tui::GoMode, bool)>,
     daemon_presence: watch::Receiver<crate::daemon::DaemonPresence>,
     resume: Option<UpgradeResume>,
+    mut update_notice: Option<StartupUpdateNotice>,
 ) -> Result<DashboardExit> {
     let DashboardScreen {
         terminal,
@@ -613,6 +615,18 @@ pub(crate) async fn run_dashboard_for_workspace(
         if !context.shutdown_requested {
             context.refresh_controller_derived_state();
             context.start_sessions_text_search();
+        }
+        // The startup update notice waits for the same settled surface as a
+        // hint, so its display time starts once it can be drawn rather than
+        // behind the splash, and it goes first so the hints wait for it.
+        if context.ready_for_a_hint()
+            && let Some(notice) = update_notice.take()
+        {
+            match notice {
+                StartupUpdateNotice::Available(text) => context.dashboard.set_notice(text),
+                StartupUpdateNotice::Failed(text) => context.dashboard.set_failure_notice(text),
+            }
+            pacer.mark_urgent();
         }
         // A hint that reaches the bar needs the frame that draws it, whatever
         // this wakeup was otherwise going to do: the next pass records it as

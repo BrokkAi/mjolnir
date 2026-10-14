@@ -2013,7 +2013,7 @@ impl ChildProgress {
     pub(crate) fn settled(report: ReportState) -> Self {
         Self {
             finished_span: None,
-            last_completed_ordinal: None,
+            last_completed_ordinal: Some(1),
             report,
             awaited_ordinal: None,
             answered_ordinal: None,
@@ -2023,13 +2023,16 @@ impl ChildProgress {
         }
     }
 
-    /// Whether the parent's newest prompt is still unanswered. `submitted` is
-    /// the first prompt's ordinal while its start follow-up remembers it.
+    /// Whether the child still owes its initial answer or the parent's newest
+    /// prompt. Registration publishes an idle child before startup or prompt
+    /// acceptance exists; only a recorded finished turn can end that wait.
+    /// `submitted` is the first prompt's ordinal while startup remembers it.
     fn awaiting_prompt(&self, submitted: Option<u64>) -> bool {
-        mj_core::subagent::prompt_unanswered(
-            self.awaited_ordinal.max(submitted),
-            self.answered_ordinal,
-        )
+        self.last_completed_ordinal.is_none()
+            || mj_core::subagent::prompt_unanswered(
+                self.awaited_ordinal.max(submitted),
+                self.answered_ordinal,
+            )
     }
 }
 

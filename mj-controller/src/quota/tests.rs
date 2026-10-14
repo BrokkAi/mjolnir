@@ -28,6 +28,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
 }
 

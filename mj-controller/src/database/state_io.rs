@@ -304,7 +304,7 @@ pub(super) fn write_materialized_session(
             materialized
                 .last_turn_outcome
                 .as_ref()
-                .map(serde_json::to_string)
+                .map(serialize_turn_outcome)
                 .transpose()?,
         ],
     )?;

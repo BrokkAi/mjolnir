@@ -484,7 +484,9 @@ mod tests {
     }
 
     // Hard-won: d7ca109e4: a real disk write error must not disconnect the daemon log channel.
-    #[cfg(unix)]
+    // /dev/full exists only on Linux; macOS has no equivalent full device, so the
+    // fake-writer test below covers this on the other Unix hosts.
+    #[cfg(target_os = "linux")]
     #[test]
     fn dev_full_keeps_the_daemon_log_thread_connected() {
         let sink = ResilientWriter::new(DeferredLogFile {

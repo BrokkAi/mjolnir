@@ -14,7 +14,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 
 use super::worker_binary::{
-    apply_staged_execution_setting, bridge_launch, container_upload_ownership_args, stage_profile,
+    apply_staged_execution_setting, bridge_launch, container_upload_ownership_args,
+    link_shared_login, shared_profile_login, stage_profile,
 };
 use super::{Controller, execute_checked};
 use crate::targets::{self, CommandExecutor, CommandSpec, ProcessExecutor};
@@ -115,6 +116,11 @@ impl Controller {
         {
             configure_staged_review_mcp(profile.kind, &local, mcp_servers)
                 .with_context(|| format!("configure reviewer MCP servers for {profile_id:?}"))?;
+        }
+        // `cp -R` copies the link as a link, and the worker keeps it when it
+        // copies the stage into each reviewer role's home.
+        if let Some(login) = shared_profile_login(profile, &backend) {
+            link_shared_login(&local, &login)?;
         }
         upload_reviewer_profile(executor, &backend, &worker_root, generation, &local)?;
 
@@ -527,6 +533,7 @@ mod tests {
                     context_window_bytes: None,
                     legacy_subagents: Default::default(),
                     guardian_review_model: None,
+                    codex_profile: None,
                 },
             );
         }
@@ -782,6 +789,7 @@ mod tests {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         );
         controller

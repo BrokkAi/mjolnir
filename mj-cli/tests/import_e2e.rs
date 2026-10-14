@@ -101,6 +101,7 @@ async fn imported_claude_session_resumes_natively_async() -> anyhow::Result<()> 
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         )]),
         bundles: BTreeMap::new(),
@@ -229,6 +230,7 @@ async fn imported_kimi_session_resumes_natively_async() -> anyhow::Result<()> {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         )]),
         bundles: BTreeMap::from([(
@@ -364,6 +366,7 @@ async fn imported_grok_session_resumes_natively_async() -> anyhow::Result<()> {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         )]),
         bundles: BTreeMap::from([(
@@ -606,6 +609,7 @@ async fn imported_codex_session_resumes_natively_async() -> anyhow::Result<()> {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         )]),
         bundles: BTreeMap::from([(

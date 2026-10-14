@@ -95,6 +95,7 @@ fn ssh_docker_registration_config() -> Config {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     config.bundles.insert(

@@ -526,6 +526,7 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let failure = |kind| {
         format!(
@@ -1276,6 +1277,7 @@ fn install_on_ssh_host(
         &fixture.launch_config,
         &fixture.ownership,
         &fixture.profile_stage,
+        None,
     )
     .unwrap();
     rendered(&executor.commands.take())
@@ -1446,6 +1448,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.launch_config,
             &fixture.ownership,
             &fixture.profile_stage,
+            None,
         )?;
         let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
@@ -1915,6 +1918,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let launch = |no_project_memory: bool| {
             let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -1991,6 +1995,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
         session.harness_kind = kind;
@@ -2072,7 +2077,46 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
+}
+
+/// `muse serve` never fetches its model list; it reads the list saved under
+/// `$XDG_DATA_HOME/muse/model-catalog` and otherwise offers one built-in
+/// model. The staged copy must land where the session's Muse looks.
+// Hard-won: c80d1f80: Muse sessions offered only Muse's one built-in model.
+#[test]
+fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("muse");
+    let saved = home.join(".data/muse/model-catalog/6d657461__p746268.json");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(&saved, br#"{"schema_version":2,"rows":[]}"#).unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Muse,
+        home: home.clone(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+        codex_profile: None,
+    };
+    let staged = tempfile::tempdir().unwrap();
+    let staged_home = staged.path().join("muse");
+
+    stage_profile(&profile, &staged_home).unwrap();
+
+    let mut environment = BTreeMap::new();
+    HarnessKind::Muse.configure_home_environment(&staged_home, &mut environment);
+    assert_eq!(
+        std::fs::read(
+            Path::new(&environment["XDG_DATA_HOME"])
+                .join("muse/model-catalog/6d657461__p746268.json")
+        )
+        .unwrap(),
+        std::fs::read(&saved).unwrap()
+    );
 }
 
 #[test]
@@ -2131,7 +2175,7 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
         assert!(config.contains(line), "missing {line:?} in {config}");
     }
     assert_eq!(
-        mj_core::codex_provider::codex_provider(staged.path())
+        mj_core::codex_provider::codex_provider(staged.path(), None)
             .unwrap()
             .unwrap()
             .model_catalog_json
@@ -2144,6 +2188,72 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
         !home.path().join("models.json").exists(),
         "the user's own profile home stays untouched"
     );
+}
+
+/// `codex app-server` refuses `--profile`, so the overlay must already be
+/// layered into the staged `config.toml`, deep-merged as `codex -p` merges it,
+/// and the overlay's provider must be the one the catalog is fetched from.
+/// Codex silently runs without a missing overlay; Mjolnir refuses instead.
+#[test]
+fn staging_a_codex_profile_overlay_layers_it_over_the_base_configuration() {
+    let home = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mut profile = zai_profile(home.path());
+    profile.codex_profile = Some("ds".to_owned());
+    let base = "model = \"gpt-5.5\"\n\n[mcp_servers.base]\ncommand = \"base-server\"\n\n[tui]\nnotifications = true\n";
+    std::fs::write(home.path().join("config.toml"), base).unwrap();
+    std::fs::write(
+        home.path().join("ds.config.toml"),
+        format!("{ZAI_CONFIG}\n[mcp_servers.overlay]\ncommand = \"overlay-server\"\n"),
+    )
+    .unwrap();
+    let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
+    let asked = std::cell::RefCell::new(Vec::new());
+
+    profile.ensure_ready("codex-ds").unwrap();
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_codex_catalog(
+        "codex-ds",
+        &profile,
+        staged.path(),
+        &|url, _| {
+            asked.borrow_mut().push(url.to_owned());
+            Ok(ZAI_CATALOG.as_bytes().to_vec())
+        },
+        &cache,
+    )
+    .unwrap();
+
+    assert_eq!(asked.into_inner(), ["https://api.z.ai/api/v1/models"]);
+    let config: toml::Table =
+        toml::from_str(&std::fs::read_to_string(staged.path().join("config.toml")).unwrap())
+            .unwrap();
+    assert_eq!(config["model"].as_str(), Some("glm-5.3"), "{config}");
+    assert_eq!(config["model_provider"].as_str(), Some("zai"), "{config}");
+    assert_eq!(
+        config["model_catalog_json"].as_str(),
+        Some("models.json"),
+        "{config}"
+    );
+    let servers = config["mcp_servers"].as_table().unwrap();
+    assert_eq!(
+        servers.keys().collect::<Vec<_>>(),
+        ["base", "overlay"],
+        "tables merge key by key: {config}"
+    );
+    assert_eq!(config["tui"]["notifications"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        base,
+        "the user's own configuration stays untouched"
+    );
+
+    profile.codex_profile = Some("missing".to_owned());
+    let refusal = format!("{:#}", profile.ensure_ready("codex-missing").unwrap_err());
+    assert!(refusal.contains("missing.config.toml"), "{refusal}");
+    let staged = tempfile::tempdir().unwrap();
+    assert!(stage_profile(&profile, staged.path()).is_err());
 }
 
 // Hard-won: ee59e57: a valid profile catalog key caused validation failure and a duplicate staged key
@@ -2319,6 +2429,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
 }
 
@@ -2405,6 +2516,7 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let asked = std::cell::RefCell::new(Vec::new());
 
@@ -2470,6 +2582,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2502,6 +2615,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2547,6 +2661,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2587,6 +2702,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2694,6 +2810,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -2773,6 +2890,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2835,6 +2953,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3050,6 +3169,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
 }
 
@@ -3205,6 +3325,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     for (target, launch) in launches_on_every_target(&claude) {
         if target == "localhost" {
@@ -3339,6 +3460,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     for (target, launch) in launches_on_every_target(&profile) {
@@ -3558,6 +3680,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     let (launch, _, _) = worker_launch_config(
@@ -3604,6 +3727,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3637,6 +3761,7 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
@@ -3732,6 +3857,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4464,6 +4590,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -4554,6 +4681,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let canonical = profile.authentication_marker();
         std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
@@ -4674,6 +4802,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let marker = profile.authentication_marker();
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
@@ -5295,4 +5424,55 @@ fn a_missing_pinned_copy_or_index_falls_back_to_a_full_pin() {
     verify_worker_build(&first).unwrap();
     std::fs::remove_dir_all(cache.join("index")).unwrap();
     assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
+}
+
+/// Installing links the login file to the profile's own, and installing again
+/// over that link, with or without sharing, never writes the stage's copy
+/// through it into the profile's login.
+#[cfg(unix)]
+#[test]
+fn installing_a_local_stage_links_the_login_and_never_writes_through_an_earlier_link() {
+    let profile = tempfile::tempdir().unwrap();
+    let profile_login = profile.path().join("auth.json");
+    std::fs::write(&profile_login, "profile login").unwrap();
+    let stage = tempfile::tempdir().unwrap();
+    std::fs::write(stage.path().join("auth.json"), "staged copy").unwrap();
+    std::fs::write(stage.path().join("config.toml"), "staged config").unwrap();
+    let worker = tempfile::tempdir().unwrap();
+    let home = worker.path().join("profile");
+    std::fs::create_dir_all(&home).unwrap();
+    let login = SharedLogin {
+        name: "auth.json",
+        file: profile_login.clone(),
+    };
+
+    for _ in 0..2 {
+        install_local_profile_stage(stage.path(), &home, Some(&login)).unwrap();
+        assert_eq!(
+            std::fs::read_link(home.join("auth.json")).unwrap(),
+            profile_login
+        );
+        assert_eq!(
+            std::fs::read_to_string(&profile_login).unwrap(),
+            "profile login"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "staged config"
+        );
+    }
+
+    install_local_profile_stage(stage.path(), &home, None).unwrap();
+    let installed = home.join("auth.json");
+    assert!(
+        !std::fs::symlink_metadata(&installed)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&installed).unwrap(), "staged copy");
+    assert_eq!(
+        std::fs::read_to_string(&profile_login).unwrap(),
+        "profile login"
+    );
 }

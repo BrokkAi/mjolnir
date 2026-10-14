@@ -1155,6 +1155,7 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
                             context_window_bytes: None,
                             legacy_subagents: Default::default(),
                             guardian_review_model: None,
+                            codex_profile: None,
                             kind: HarnessKind::Codex,
                             home: PathBuf::from("/home/agent").join(id),
                             environment: Default::default(),

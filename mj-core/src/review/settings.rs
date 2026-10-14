@@ -140,6 +140,7 @@ mod tests {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         assert_eq!(
             ReviewProvider::for_profile(&profile).unwrap(),

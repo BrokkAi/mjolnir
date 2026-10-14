@@ -556,6 +556,24 @@ async fn homebrew_formula_update_is_offered_when_newer() {
     );
 }
 
+#[test]
+fn github_token_is_offered_only_to_the_github_api_over_https() {
+    assert!(is_github_api_url(LATEST_RELEASE_URL));
+    for url in [
+        "http://api.github.com/repos/BrokkAi/mjolnir/releases/latest",
+        "https://api.github.com.example.net/repos/BrokkAi/mjolnir/releases/latest",
+        "https://api.github.com@example.net/releases/latest",
+        HOMEBREW_FORMULA_URL,
+        NPM_LATEST_URL,
+        CARGO_INDEX_URL,
+    ] {
+        assert!(
+            !is_github_api_url(url),
+            "{url} must not receive a GitHub token"
+        );
+    }
+}
+
 #[tokio::test]
 async fn failed_channel_fetch_is_reported_as_an_error() {
     // No route matches /npm, so the stub answers 404.

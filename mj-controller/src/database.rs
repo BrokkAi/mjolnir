@@ -31,7 +31,7 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 81;
+const SCHEMA_VERSION: i64 = 82;
 
 mod session_move;
 pub use session_move::*;
@@ -44,6 +44,8 @@ pub(crate) use mailbox::*;
 
 mod legacy_schema;
 mod schema;
+mod turn_outcome;
+use turn_outcome::{deserialize_turn_outcome, serialize_turn_outcome};
 mod usage;
 pub use usage::*;
 mod events;

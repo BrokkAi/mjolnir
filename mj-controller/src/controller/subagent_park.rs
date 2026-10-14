@@ -565,6 +565,7 @@ mod tests {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         );
         controller

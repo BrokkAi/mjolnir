@@ -354,6 +354,7 @@ mod delegation_replay_tests {
                 environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
+                codex_profile: None,
                 legacy_subagents: None,
             },
         );

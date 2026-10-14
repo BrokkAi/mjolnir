@@ -2267,6 +2267,7 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     // Checkpoint export must continue after its original template is removed.
@@ -2596,6 +2597,7 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     config.bundles.insert(
@@ -3037,6 +3039,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         );
         config
@@ -3376,6 +3379,7 @@ async fn close_cut_controller(
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     config.bundles.insert(

@@ -1,12 +1,15 @@
-//! Provider interpretation is refreshed in background, once per profile home.
+//! Provider interpretation is refreshed in background, once per Codex configuration.
 use super::*;
 use mj_core::config::{Config, HarnessKind};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// One Codex configuration: a home, and the profile overlay layered over it.
+type ConfigSource = (PathBuf, Option<String>);
+
 #[derive(Clone, Default)]
 pub(crate) struct ProviderAuthCache {
-    files: BTreeMap<PathBuf, (Option<String>, Option<bool>)>,
+    files: BTreeMap<ConfigSource, (mj_core::codex_provider::ConfigFiles, Option<bool>)>,
     pub(crate) schemes: BTreeMap<String, bool>,
     #[cfg(test)]
     parses: usize,
@@ -16,56 +19,67 @@ impl ProviderAuthCache {
     /// Called by the existing 500 ms background configuration refresh. A
     /// malformed provider is reported and excluded until its contents change.
     pub(crate) fn refresh(&mut self, config: &Config) -> bool {
-        let paths: BTreeSet<_> = config
+        let source = |profile: &mj_core::config::HarnessProfile| -> ConfigSource {
+            (profile.home.clone(), profile.codex_profile.clone())
+        };
+        let sources: BTreeSet<_> = config
             .profiles
             .values()
             .filter(|profile| profile.kind == HarnessKind::Codex)
-            .map(|profile| profile.home.join("config.toml"))
+            .map(source)
             .collect();
-        self.files.retain(|path, _| paths.contains(path));
-        for path in paths {
-            let text = match std::fs::read_to_string(&path) {
-                Ok(text) => Some(text),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        self.files.retain(|source, _| sources.contains(source));
+        for (home, overlay) in sources {
+            let described = mj_core::codex_provider::describe_config(&home, overlay.as_deref());
+            let files = match mj_core::codex_provider::ConfigFiles::read(&home, overlay.as_deref())
+            {
+                Ok(files) => files,
                 Err(error) => {
-                    tracing::warn!(%error, path = %path.display(), "cannot read credential provider configuration");
-                    self.files.remove(&path);
+                    tracing::warn!(error = %format!("{error:#}"), config = %described, "cannot read credential provider configuration");
+                    self.files.remove(&(home, overlay));
                     continue;
                 }
             };
+            let source = (home, overlay);
             if self
                 .files
-                .get(&path)
-                .is_some_and(|(previous, _)| *previous == text)
+                .get(&source)
+                .is_some_and(|(previous, _)| *previous == files)
             {
                 continue;
             }
-            let scheme = match &text {
-                Some(text) => {
+            // Layering and parsing failures are cached with the files that
+            // caused them, so each is reported once per change.
+            let scheme = match files.layer(&source.0) {
+                Ok(Some(text)) => {
                     #[cfg(test)]
                     {
                         self.parses += 1;
                     }
-                    match mj_core::codex_provider::parse_config(text, &path) {
+                    match mj_core::codex_provider::parse_config(&text, &described) {
                         Ok(provider) => {
                             Some(provider.is_some_and(|provider| provider.skips_login_file_sync()))
                         }
                         Err(error) => {
-                            tracing::warn!(%error, path = %path.display(), "invalid credential provider configuration");
+                            tracing::warn!(%error, config = %described, "invalid credential provider configuration");
                             None
                         }
                     }
                 }
-                None => Some(false),
+                Ok(None) => Some(false),
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), config = %described, "invalid credential provider configuration");
+                    None
+                }
             };
-            self.files.insert(path, (text, scheme));
+            self.files.insert(source, (files, scheme));
         }
         let schemes = config
             .profiles
             .iter()
             .filter_map(|(id, profile)| {
                 let scheme = if profile.kind == HarnessKind::Codex {
-                    self.files.get(&profile.home.join("config.toml"))?.1?
+                    self.files.get(&source(profile))?.1?
                 } else {
                     false
                 };
@@ -144,6 +158,34 @@ env_key = "FIXTURE_KEY"
         assert!(cache.refresh(&config));
         assert!(cache.schemes.values().all(|skip_sync| *skip_sync));
         assert_eq!(cache.parses, 4);
+        // A missing overlay is cached as a failure, so it is reported once
+        // rather than on every refresh, and picked up when the file appears.
+        let overlay: mj_core::config::HarnessProfile = serde_json::from_value(
+            serde_json::json!({"kind": "codex", "home": home.path(), "codex_profile": "ds"}),
+        )
+        .unwrap();
+        config.profiles.insert("third".into(), overlay);
+        assert!(!cache.refresh(&config));
+        assert!(!cache.schemes.contains_key("third"));
+        let source = (home.path().to_path_buf(), Some("ds".to_owned()));
+        assert_eq!(cache.files[&source].1, None, "the failure stays cached");
+        assert!(!cache.refresh(&config));
+        assert_eq!(
+            cache.parses, 4,
+            "an unchanged missing overlay is not retried"
+        );
+        std::fs::write(
+            home.path().join("ds.config.toml"),
+            "model_provider = \"custom\"\n\
+             [model_providers.custom]\n\
+             base_url = \"https://example.test/v1\"\n\
+             wire_api = \"responses\"\n\
+             env_key = \"FIXTURE_KEY\"\n",
+        )
+        .unwrap();
+        assert!(cache.refresh(&config));
+        assert!(cache.schemes["third"]);
+        assert_eq!(cache.parses, 5);
         config.profiles.clear();
         assert!(cache.refresh(&config));
         assert!(cache.files.is_empty());

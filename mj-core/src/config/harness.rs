@@ -329,6 +329,19 @@ impl HarnessKind {
         }
     }
 
+    /// Whether sessions on this machine can share the profile's own login
+    /// file through a link instead of each holding a copy.
+    ///
+    /// A login that rotates its refresh token on every refresh has one valid
+    /// copy at a time, so copies refreshed independently make one another
+    /// stale. Codex is built for one file shared by several processes: it
+    /// reloads the file before it refreshes and uses a token another process
+    /// already saved, and it rewrites the file in place, which keeps a link
+    /// intact. Other harnesses are unverified and keep their copies.
+    pub const fn shares_local_login(self) -> bool {
+        matches!(self, Self::Codex)
+    }
+
     /// The harness's own command-line program, as found on `PATH`.
     pub const fn cli_binary_name(self) -> &'static str {
         match self {
@@ -725,6 +738,11 @@ pub struct HarnessProfile {
     /// Mjolnir generates the catalog only for those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guardian_review_model: Option<String>,
+    /// A Codex profile overlay, `<home>/<name>.config.toml`, layered over the
+    /// home's `config.toml` as `codex --profile <name>` would layer it. See
+    /// [`crate::codex_provider::effective_config`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile: Option<String>,
     /// Consume legacy per-profile choices without migrating them to global settings.
     #[serde(default, rename = "subagents", skip_serializing)]
     pub legacy_subagents: Option<serde_json::Value>,
@@ -737,6 +755,11 @@ pub struct ProfileDiscoveryInputs {
     pub kind: HarnessKind,
     pub home: PathBuf,
     pub environment: BTreeMap<String, super::secrets::EnvironmentValue>,
+    /// The Codex profile overlay, which can change the provider and model.
+    /// Absent from the serialized inputs when unset, so the cache keys of
+    /// profiles without one are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_profile: Option<String>,
     /// The managed installation a probe actually runs. A harness upgrade
     /// changes what it advertises, so a cached catalogue from an older pin
     /// must never answer for this one.
@@ -769,6 +792,7 @@ impl HarnessProfile {
             kind: self.kind,
             home: self.home.clone(),
             environment: self.environment.sources().clone(),
+            codex_profile: self.codex_profile.clone(),
             managed_install: crate::harness_runtime::pin(self.kind).install_id,
         }
     }
@@ -782,8 +806,11 @@ impl HarnessProfile {
     }
 
     /// Discovery identifies an installation independently of user settings.
+    /// Each Codex profile overlay in a home is an installation of its own.
     pub fn same_installation(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.home == other.home
+        self.kind == other.kind
+            && self.home == other.home
+            && self.codex_profile == other.codex_profile
     }
 
     pub fn home_env(&self) -> &'static str {
@@ -794,13 +821,27 @@ impl HarnessProfile {
         self.kind.execution_enforcement(policy)
     }
 
-    /// The provider named in this profile's Codex `config.toml`, if any.
+    /// The provider named in this profile's Codex configuration, if any.
     /// Always `None` for another harness, or when Codex uses its default.
     pub fn codex_provider(&self) -> Result<Option<CodexProvider>> {
         if self.kind != HarnessKind::Codex {
             return Ok(None);
         }
-        crate::codex_provider::codex_provider(&self.home)
+        crate::codex_provider::codex_provider(&self.home, self.codex_profile.as_deref())
+    }
+
+    /// The Codex configuration this profile runs with, as staged into every
+    /// session home. `None` for another harness, or when there is none.
+    pub fn codex_config(&self) -> Result<Option<String>> {
+        if self.kind != HarnessKind::Codex {
+            return Ok(None);
+        }
+        crate::codex_provider::effective_config(&self.home, self.codex_profile.as_deref())
+    }
+
+    /// How this profile's Codex configuration is named in messages.
+    pub fn describe_codex_config(&self) -> String {
+        crate::codex_provider::describe_config(&self.home, self.codex_profile.as_deref())
     }
 
     /// How this profile proves it may talk to its service.
@@ -949,6 +990,17 @@ impl HarnessProfile {
         {
             bail!("profile {id:?}: `context_window_bytes` must be at least 32768");
         }
+        if let Some(name) = self.codex_profile.as_deref() {
+            if self.kind != HarnessKind::Codex {
+                bail!("profile {id:?}: `codex_profile` applies only to a Codex profile");
+            }
+            if !crate::codex_provider::is_overlay_name(name) {
+                bail!(
+                    "profile {id:?}: `codex_profile` {name:?} must be a plain name of ASCII letters, digits, '-' or '_', naming <home>/<name>{}",
+                    crate::codex_provider::OVERLAY_SUFFIX
+                );
+            }
+        }
         if let Some(reviewer) = self.guardian_review_model.as_deref() {
             if reviewer.trim().is_empty() {
                 bail!(
@@ -1015,7 +1067,7 @@ impl HarnessProfile {
             {
                 bail!(
                     "{} authenticates with {env_key}, which is set neither in the environment Mjolnir started with nor under [profiles.{id}.environment]; export {env_key} and run `mj daemon restart`, or put it in secrets.toml and add `{env_key} = {{ from_secret = \"{env_key}\" }}` under [profiles.{id}.environment]",
-                    self.home.join("config.toml").display()
+                    self.describe_codex_config()
                 );
             }
             if self.guardian_review_model.is_some()
@@ -1025,7 +1077,7 @@ impl HarnessProfile {
             {
                 bail!(
                     "`guardian_review_model` applies only to a Codex profile whose {} names a custom model provider, because Mjolnir generates the model catalog only for those",
-                    self.home.join("config.toml").display()
+                    self.describe_codex_config()
                 );
             }
             Ok(())
@@ -1163,6 +1215,7 @@ mod tests {
             environment: Environment::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            codex_profile: None,
             legacy_subagents: None,
         };
         let inputs = profile.discovery_inputs();
