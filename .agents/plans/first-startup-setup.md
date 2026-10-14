@@ -76,4 +76,4 @@ Revision note (2026-09-30): Record passing full workspace tests and the correcte
 
 Revision note (2026-09-30): Git confirmed `8119fe8f..0037300c HEAD -> master`. Mark delivery complete and preserve the validation record in this plan.
 
-Revision note (2026-10-14): Superseded in part by commit `1c14f7b9b`. Only the welcome dialog is one-time. Profile detection runs on every dashboard launch of an existing installation and adds agents installed since, by the user's explicit decision. Disabling a profile, not removing it, is how a user stops using an installed agent. Do not restore first-launch-only detection.
+Revision note (2026-10-14): Superseded in part by commit `1c14f7b9b`. Only the welcome dialog is one-time. Profile detection runs on every plain `mj` dashboard launch of an existing installation (`mj go`, `mj workspaces`, and upgrade relaunches skip it with the rest of automatic setup) and adds agents installed since, by the user's explicit decision. Disabling a profile, not removing it, is how a user stops using an installed agent. Do not restore first-launch-only detection.
