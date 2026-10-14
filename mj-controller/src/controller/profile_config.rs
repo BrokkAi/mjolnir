@@ -996,7 +996,6 @@ mod tests {
         );
     }
 
-
     /// Muse models and efforts change server-side without a managed-pin bump,
     /// so caching a worker's observed catalogue hides options people expect.
     /// Muse observations must leave the persistent cache untouched while other

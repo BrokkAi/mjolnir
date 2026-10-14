@@ -287,7 +287,11 @@ fn muse_data_dir(home: &Path) -> PathBuf {
     let user_home = dirs::home_dir();
     let own_home = absolute("XDG_CONFIG_HOME")
         .map(|config| kind.home_from_environment(config))
-        .or_else(|| user_home.as_ref().map(|user| user.join(kind.default_home_leaf())));
+        .or_else(|| {
+            user_home
+                .as_ref()
+                .map(|user| user.join(kind.default_home_leaf()))
+        });
     if own_home.as_deref() != Some(home) {
         return home.join(".data").join(kind.id());
     }

@@ -2077,6 +2077,43 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
     }
 }
 
+/// `muse serve` never fetches its model list; it reads the list saved under
+/// `$XDG_DATA_HOME/muse/model-catalog` and otherwise offers one built-in
+/// model. The staged copy must land where the session's Muse looks.
+// Hard-won: c80d1f80: Muse sessions offered only Muse's one built-in model.
+#[test]
+fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("muse");
+    let saved = home.join(".data/muse/model-catalog/6d657461__p746268.json");
+    std::fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    std::fs::write(&saved, br#"{"schema_version":2,"rows":[]}"#).unwrap();
+    let profile = HarnessProfile {
+        enabled: true,
+        kind: HarnessKind::Muse,
+        home: home.clone(),
+        environment: Default::default(),
+        context_window_bytes: None,
+        legacy_subagents: Default::default(),
+        guardian_review_model: None,
+    };
+    let staged = tempfile::tempdir().unwrap();
+    let staged_home = staged.path().join("muse");
+
+    stage_profile(&profile, &staged_home).unwrap();
+
+    let mut environment = BTreeMap::new();
+    HarnessKind::Muse.configure_home_environment(&staged_home, &mut environment);
+    assert_eq!(
+        std::fs::read(
+            Path::new(&environment["XDG_DATA_HOME"])
+                .join("muse/model-catalog/6d657461__p746268.json")
+        )
+        .unwrap(),
+        std::fs::read(&saved).unwrap()
+    );
+}
+
 #[test]
 fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from() {
     let home = tempfile::tempdir().unwrap();
