@@ -260,6 +260,18 @@ pub(in crate::controller) fn stage_profile(
         }
         Ok(())
     })?;
+    // `codex app-server` refuses `--profile`, so a Codex profile overlay
+    // reaches the session already layered into the staged `config.toml`.
+    if profile.codex_profile.is_some()
+        && let Some(config) = profile.codex_config()?
+    {
+        std::fs::write(destination.join("config.toml"), config).with_context(|| {
+            format!(
+                "stage Codex configuration {}",
+                profile.describe_codex_config()
+            )
+        })?;
+    }
     // `muse serve` never fetches its model list: it reads the list the
     // person's own `muse` last saved in its data directory, and without one
     // offers only its built-in model. A staged home starts with empty data, so

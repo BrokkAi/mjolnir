@@ -285,6 +285,7 @@ fn sample_config() -> Config {
                 environment: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         )]),
         bundles: BTreeMap::from([(

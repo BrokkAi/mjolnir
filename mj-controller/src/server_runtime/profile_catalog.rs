@@ -711,6 +711,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -
                         context_window_bytes: None,
                         legacy_subagents: Default::default(),
                         guardian_review_model: None,
+                        codex_profile: None,
                     },
                 )
             })

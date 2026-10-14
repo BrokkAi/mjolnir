@@ -183,6 +183,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     let subagent_checks = subagent_eligibility_checks(Ok(&config));
@@ -204,6 +205,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     assert!(crate::setup::harness_is_authenticated_with_executor(
         &claude,
@@ -331,6 +333,7 @@ fn a_config_without_a_bundle_is_ready_for_sessions() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     Config {
         profiles: [("work".to_owned(), profile)].into_iter().collect(),
@@ -1536,6 +1539,7 @@ fn doctor_reports_an_inline_token_provider_as_usage_priced() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     assert_eq!(
         profile_quota_source(&profile),
@@ -1564,6 +1568,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     let referenced = with_secret_resolver(
@@ -1591,6 +1596,7 @@ fn doctor_points_plain_text_credentials_at_the_secrets_file_and_checks_its_mode(
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     let mut target = container("ghcr.io/example/agent:latest");

@@ -597,6 +597,7 @@ fn an_api_key_profile_reports_that_it_has_no_interactive_login() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let error = login_command(&profile)
         .expect_err("API-key profiles have no login")
@@ -760,6 +761,7 @@ fn a_refused_login_is_known_until_the_login_file_changes() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let result = |reason, outcomes: Vec<CredentialSyncOutcome>, failure: Option<&str>| {
         CredentialSyncResult {

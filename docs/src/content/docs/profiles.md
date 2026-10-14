@@ -286,6 +286,42 @@ The setting applies only to a Codex profile with a custom provider, because
 Mjolnir generates a catalog only for those. Setting it on any other profile is a
 configuration error.
 
+## Codex profile files
+
+Codex reads profile files beside its `config.toml`: `codex -p ds` layers
+`$CODEX_HOME/ds.config.toml` over `config.toml`. Mjolnir offers each such file
+as a profile of its own, so you choose it when you create a session, in the
+**Profile** step or with `mj new --profile codex-ds`.
+
+Launching `mj` detects the files. For every `<name>.config.toml` in a detected
+Codex home it adds a profile named `codex-<name>` that uses the same home with
+`codex_profile` set. You can also write one yourself:
+
+```toml
+[profiles.codex-ds]
+kind = "codex"
+home = "/home/me/.codex"
+codex_profile = "ds"
+```
+
+The bridge Mjolnir runs Codex through starts `codex app-server`, which refuses
+`--profile`. So Mjolnir layers the file itself the way Codex does. Tables merge
+key by key at every depth, and any other value in the profile file replaces
+the one in `config.toml`. The merged result is written into each session's
+staged `config.toml`. Your own files are never edited.
+
+Everything Mjolnir reads from Codex's configuration uses the merged result: the
+model provider, how the profile authenticates, the provider's model catalog,
+quota, and the default model. A `ds.config.toml` that switches
+`model_provider` to a [custom provider](#codex-with-a-custom-provider) gets
+that provider's catalog and key handling, while the plain `codex` profile keeps
+its own.
+
+The name must be ASCII letters, digits, `-` or `_`, as `codex -p` requires.
+When the named file is missing or does not parse, the profile is unusable and
+`mj doctor` and every launch say so. Codex itself would quietly run without the
+file instead.
+
 ## Configure a profile
 
 The minimal shape is:
@@ -465,6 +501,8 @@ Mjolnir then adds its own files to the staged home:
   `mj-agents` MCP server in `.claude.json`, and an allow rule in
   `settings.json` for each of its tools, so Claude never asks before a
   sub-agent hands back its report or a parent starts or waits for one;
+- for a Codex profile with a [profile file](#codex-profile-files), that file
+  merged into `config.toml`;
 - for a Codex profile with a custom provider, the generated `models.json` and
   the `config.toml` line that points at it;
 - for Kimi Code on a target other than this machine, the `mj-memory` history

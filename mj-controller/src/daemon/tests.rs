@@ -3903,6 +3903,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             environment: environment.into_iter().collect(),
             context_window_bytes: None,
             guardian_review_model: None,
+            codex_profile: None,
             legacy_subagents: None,
         },
     );
@@ -4992,6 +4993,7 @@ fn seed_live_session(directory: &Path, relay_root: &Path) {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         );
         Ok(())

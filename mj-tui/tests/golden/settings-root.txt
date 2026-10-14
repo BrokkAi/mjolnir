@@ -442,9 +442,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │
   │ agents.                                                                                      │
   │                                                                                              │
-  │   claude-1                                               6 settings  ›     Add               │
-  │   codex-1                                                6 settings  ›     Remove            │
-  │   codex-2                                                6 settings  ›     Detect profiles   │
+  │   claude-1                                               7 settings  ›     Add               │
+  │   codex-1                                                7 settings  ›     Remove            │
+  │   codex-2                                                7 settings  ›     Detect profiles   │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

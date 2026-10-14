@@ -526,6 +526,7 @@ fn node_preflight_says_the_agent_is_not_installed_before_it_mentions_node() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let failure = |kind| {
         format!(
@@ -1917,6 +1918,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let launch = |no_project_memory: bool| {
             let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
@@ -1993,6 +1995,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let mut session = crate::controller::test_support::checkpoint_test_session(&session_id);
         session.harness_kind = kind;
@@ -2074,6 +2077,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
 }
 
@@ -2096,6 +2100,7 @@ fn staging_a_muse_profile_hands_its_saved_model_list_to_the_session_data_directo
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let staged = tempfile::tempdir().unwrap();
     let staged_home = staged.path().join("muse");
@@ -2170,7 +2175,7 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
         assert!(config.contains(line), "missing {line:?} in {config}");
     }
     assert_eq!(
-        mj_core::codex_provider::codex_provider(staged.path())
+        mj_core::codex_provider::codex_provider(staged.path(), None)
             .unwrap()
             .unwrap()
             .model_catalog_json
@@ -2183,6 +2188,72 @@ fn staging_a_custom_provider_profile_writes_a_catalog_the_session_can_pick_from(
         !home.path().join("models.json").exists(),
         "the user's own profile home stays untouched"
     );
+}
+
+/// `codex app-server` refuses `--profile`, so the overlay must already be
+/// layered into the staged `config.toml`, deep-merged as `codex -p` merges it,
+/// and the overlay's provider must be the one the catalog is fetched from.
+/// Codex silently runs without a missing overlay; Mjolnir refuses instead.
+#[test]
+fn staging_a_codex_profile_overlay_layers_it_over_the_base_configuration() {
+    let home = tempfile::tempdir().unwrap();
+    let staged = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mut profile = zai_profile(home.path());
+    profile.codex_profile = Some("ds".to_owned());
+    let base = "model = \"gpt-5.5\"\n\n[mcp_servers.base]\ncommand = \"base-server\"\n\n[tui]\nnotifications = true\n";
+    std::fs::write(home.path().join("config.toml"), base).unwrap();
+    std::fs::write(
+        home.path().join("ds.config.toml"),
+        format!("{ZAI_CONFIG}\n[mcp_servers.overlay]\ncommand = \"overlay-server\"\n"),
+    )
+    .unwrap();
+    let cache = IsolatedCatalogCache(cache.path().join("cache.sqlite3"));
+    let asked = std::cell::RefCell::new(Vec::new());
+
+    profile.ensure_ready("codex-ds").unwrap();
+    stage_profile(&profile, staged.path()).unwrap();
+    stage_codex_catalog(
+        "codex-ds",
+        &profile,
+        staged.path(),
+        &|url, _| {
+            asked.borrow_mut().push(url.to_owned());
+            Ok(ZAI_CATALOG.as_bytes().to_vec())
+        },
+        &cache,
+    )
+    .unwrap();
+
+    assert_eq!(asked.into_inner(), ["https://api.z.ai/api/v1/models"]);
+    let config: toml::Table =
+        toml::from_str(&std::fs::read_to_string(staged.path().join("config.toml")).unwrap())
+            .unwrap();
+    assert_eq!(config["model"].as_str(), Some("glm-5.3"), "{config}");
+    assert_eq!(config["model_provider"].as_str(), Some("zai"), "{config}");
+    assert_eq!(
+        config["model_catalog_json"].as_str(),
+        Some("models.json"),
+        "{config}"
+    );
+    let servers = config["mcp_servers"].as_table().unwrap();
+    assert_eq!(
+        servers.keys().collect::<Vec<_>>(),
+        ["base", "overlay"],
+        "tables merge key by key: {config}"
+    );
+    assert_eq!(config["tui"]["notifications"].as_bool(), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        base,
+        "the user's own configuration stays untouched"
+    );
+
+    profile.codex_profile = Some("missing".to_owned());
+    let refusal = format!("{:#}", profile.ensure_ready("codex-missing").unwrap_err());
+    assert!(refusal.contains("missing.config.toml"), "{refusal}");
+    let staged = tempfile::tempdir().unwrap();
+    assert!(stage_profile(&profile, staged.path()).is_err());
 }
 
 // Hard-won: ee59e57: a valid profile catalog key caused validation failure and a duplicate staged key
@@ -2358,6 +2429,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
 }
 
@@ -2444,6 +2516,7 @@ fn an_inline_token_provider_stages_its_catalog_and_guardian_reviewer() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let asked = std::cell::RefCell::new(Vec::new());
 
@@ -2509,6 +2582,7 @@ fn stage_grok_profile_copies_authentication_and_agent_identity() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2541,6 +2615,7 @@ fn stage_claude_profile_preserves_rollout_identity() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2586,6 +2661,7 @@ fn stage_claude_profile_follows_symlinked_entries() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2626,6 +2702,7 @@ fn staging_reproduces_the_skills_tree_the_sync_will_push() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2733,6 +2810,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -2812,6 +2890,7 @@ fn staging_and_sync_agree_on_linked_and_oversized_skills() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -2874,6 +2953,7 @@ fn stage_claude_profile_skips_dangling_allowlist_symlinks() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3089,6 +3169,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     }
 }
 
@@ -3244,6 +3325,7 @@ fn podman_harnesses_inherit_container_home_and_claude_gets_the_sandbox_marker() 
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     for (target, launch) in launches_on_every_target(&claude) {
         if target == "localhost" {
@@ -3378,6 +3460,7 @@ fn a_bedrock_codex_launch_passes_aws_settings_to_every_target() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     for (target, launch) in launches_on_every_target(&profile) {
@@ -3597,6 +3680,7 @@ fn raw_local_muse_launches_with_guardian_approvals() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     let (launch, _, _) = worker_launch_config(
@@ -3643,6 +3727,7 @@ fn stage_kimi_profile_preserves_device_identity() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -3676,6 +3761,7 @@ fn staged_kimi_profile_binds_history_tools_to_the_target_runtime() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     stage_profile(&profile, staged.path()).unwrap();
     let memory = ProjectMemoryLaunchConfig {
@@ -3771,6 +3857,7 @@ fn kimi_guidance_uses_agents_md_without_mutating_the_system_override() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     stage_profile(&profile, staged.path()).unwrap();
@@ -4503,6 +4590,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
 
         stage_profile(&profile, staged.path()).unwrap();
@@ -4593,6 +4681,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let canonical = profile.authentication_marker();
         std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
@@ -4713,6 +4802,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let marker = profile.authentication_marker();
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();

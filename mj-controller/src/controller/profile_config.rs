@@ -613,6 +613,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            codex_profile: None,
             legacy_subagents: None,
         };
         let key = fingerprint(&profile);
@@ -712,6 +713,7 @@ mod tests {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let key = || fingerprint(&profile);
 
@@ -755,6 +757,7 @@ mod tests {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let original = fingerprint(&profile);
         for _ in 0..2 {
@@ -781,6 +784,7 @@ mod tests {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         };
         let resolve = |environment: BTreeMap<String, String>| {
             let mut environment = environment;
@@ -1046,6 +1050,7 @@ mod tests {
             environment: Default::default(),
             context_window_bytes: None,
             guardian_review_model: None,
+            codex_profile: None,
             legacy_subagents: None,
         };
         let mut config = Config::default();
@@ -1205,6 +1210,7 @@ mod tests {
                     environment: Default::default(),
                     context_window_bytes: None,
                     guardian_review_model: None,
+                    codex_profile: None,
                     legacy_subagents: None,
                 },
             );

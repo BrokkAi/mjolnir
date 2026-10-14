@@ -28,6 +28,9 @@ pub use mj_client::target::DEFAULT_IMAGE;
 pub struct DiscoveredHome {
     pub kind: HarnessKind,
     pub path: PathBuf,
+    /// A Codex profile overlay in this home, `<path>/<name>.config.toml`.
+    /// Every overlay is offered as a profile of its own beside the home.
+    pub codex_profile: Option<String>,
     pub authenticated: bool,
 }
 
@@ -176,6 +179,7 @@ fn discover_installed_harnesses(
             Ok(output) if output.status == 0 => homes.push(DiscoveredHome {
                 kind,
                 path: home,
+                codex_profile: None,
                 authenticated: false,
             }),
             Ok(_) => {}
@@ -210,14 +214,26 @@ pub(crate) fn discover_harness_homes_with_executor(
     candidates
         .into_iter()
         .filter(|(kind, path, _)| seen.insert((*kind, path.clone())) && path.is_dir())
-        .map(|(kind, path, is_default_home)| DiscoveredHome {
-            authenticated: harness_is_authenticated_with(
-                &probe_profile(kind, &path),
-                is_default_home,
-                executor,
-            ),
-            kind,
-            path,
+        .flat_map(|(kind, path, is_default_home)| {
+            let overlays = match kind {
+                HarnessKind::Codex => mj_core::codex_provider::overlay_names(&path),
+                _ => Vec::new(),
+            };
+            std::iter::once(None)
+                .chain(overlays.into_iter().map(Some))
+                .map(move |codex_profile| {
+                    let profile = probe_profile(kind, &path, codex_profile.clone());
+                    DiscoveredHome {
+                        authenticated: harness_is_authenticated_with(
+                            &profile,
+                            is_default_home,
+                            executor,
+                        ),
+                        kind,
+                        path: path.clone(),
+                        codex_profile,
+                    }
+                })
         })
         .collect()
 }
@@ -225,7 +241,7 @@ pub(crate) fn discover_harness_homes_with_executor(
 /// A profile standing in for a home discovery found but the user has not
 /// configured. It carries no environment, so cloud backends must be configured
 /// explicitly before their authentication can be recognized.
-fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
+fn probe_profile(kind: HarnessKind, home: &Path, codex_profile: Option<String>) -> HarnessProfile {
     HarnessProfile {
         enabled: true,
         kind,
@@ -234,6 +250,7 @@ fn probe_profile(kind: HarnessKind, home: &Path) -> HarnessProfile {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile,
     }
 }
 
@@ -416,7 +433,11 @@ fn runtime_probe_from_check(kind: RuntimeKind, check: crate::doctor::DoctorCheck
 pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubRepository>) -> Config {
     let mut config = Config::default();
     for home in homes {
-        let id = unique_id(&config.profiles, home.kind.id());
+        let base = match &home.codex_profile {
+            Some(name) => format!("{}-{name}", home.kind.id()),
+            None => home.kind.id().to_owned(),
+        };
+        let id = unique_id(&config.profiles, &base);
         config.profiles.insert(
             id,
             HarnessProfile {
@@ -427,6 +448,7 @@ pub fn build_config(homes: &[DiscoveredHome], repository: Option<&GithubReposito
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: home.codex_profile.clone(),
             },
         );
     }
