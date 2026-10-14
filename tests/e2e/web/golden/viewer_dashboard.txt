@@ -594,6 +594,16 @@ codex
 
 Starting target
 
+checking-response
+⋯
+Checking
+·
+/work/project
+·
+codex
+
+Checking response
+
 unknown-idle
 ⋯
 Unknown
@@ -603,7 +613,7 @@ Unknown
 codex
 
 Idle
-layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"A long session title that occupies one ellipsized line on a narrow phone screen","attention":[{"text":"!","label":"Error"},{"text":"?","label":"Input needed"},{"text":"2","label":"2 queued prompts"}],"meta":["Beta","/work/attention","codex"],"activity":"Turn 1m05s · Step 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"beta-step","attention":[],"meta":["Beta","/work/project","codex"],"activity":"Step 1h00m","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-background","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Indexing 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-idle","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-yesterday","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since yesterday 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"lifecycle","attention":[],"meta":["Lifecycle","/work/project","codex"],"activity":"Starting target","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"unknown-idle","attention":[],"meta":["Unknown","/work/project","codex"],"activity":"Idle","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}}]}
+layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"A long session title that occupies one ellipsized line on a narrow phone screen","attention":[{"text":"!","label":"Error"},{"text":"?","label":"Input needed"},{"text":"2","label":"2 queued prompts"}],"meta":["Beta","/work/attention","codex"],"activity":"Turn 1m05s · Step 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"beta-step","attention":[],"meta":["Beta","/work/project","codex"],"activity":"Step 1h00m","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-background","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Indexing 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-idle","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-yesterday","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since yesterday 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"lifecycle","attention":[],"meta":["Lifecycle","/work/project","codex"],"activity":"Starting target","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"checking-response","attention":[],"meta":["Checking","/work/project","codex"],"activity":"Checking response","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"unknown-idle","attention":[],"meta":["Unknown","/work/project","codex"],"activity":"Idle","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}}]}
 === flat live dashboard sorted by latest message (390x844) ===
 Browser tests
 Other workspace

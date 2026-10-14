@@ -823,7 +823,9 @@ pub async fn run_daemon_owned(
     // startup as another death. Replacing it with a reservation also keeps
     // room for this life's record: a worker that stops on a full disk can
     // still say so.
-    crate::exit_record::reserve(&root)?;
+    if let Err(error) = crate::exit_record::reserve(&root) {
+        mj_core::diagnostic_stderr!("Mjolnir: could not reserve worker exit record: {error:#}");
+    }
 
     if restarting
         && durable_relay.operational_state().execution

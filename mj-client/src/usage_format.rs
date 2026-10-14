@@ -79,7 +79,12 @@ impl SessionActivity {
     pub fn of(operational: &mj_core::relay::RelayOperationalState) -> Self {
         Self {
             pursuing_goal: operational.goal.active(),
-            checking_response: operational.retry_assessment_pending,
+            // The control flag also holds waits open after a failed request.
+            // Only pending assessments belong in the activity display.
+            checking_response: operational.retry_assessment_pending
+                && operational.assessment.as_ref().is_none_or(|assessment| {
+                    assessment.status == mj_core::assessment::Status::Pending
+                }),
             capacity_retry: operational.capacity_retry.clone(),
             quota_recovery: operational
                 .continuation
@@ -927,6 +932,7 @@ mod tests {
         assert_eq!(activity.display_clock(60, Some(10), None, false), "Closed");
     }
 
+    // Hard-won: b72adcc6f: hiding assessments on idle sessions also hid genuine pending checks.
     #[test]
     fn golden_cli_dashboard_session_activity() {
         use std::fmt::Write as _;
@@ -1021,6 +1027,41 @@ mod tests {
             &activity,
         );
         writeln!(out, "idle: {}", activity.is_idle(None)).unwrap();
+
+        let mut snapshot = mj_core::relay::RelaySnapshot::new("assessment-session".into());
+        snapshot.idle_since_ms = Some(1_000);
+        let mut assessment = mj_core::assessment::TurnAssessment::pending(
+            "completed-turn".into(),
+            10,
+            1_000,
+            mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
+        );
+        for (label, status) in [
+            (
+                "idle with a pending assessment",
+                mj_core::assessment::Status::Pending,
+            ),
+            (
+                "idle with a failed assessment",
+                mj_core::assessment::Status::Failed,
+            ),
+        ] {
+            assessment.status = status;
+            snapshot.assessment = Some(assessment.clone());
+            let operational: mj_core::relay::RelayOperationalState =
+                serde_json::from_value(serde_json::to_value(snapshot.operational_state()).unwrap())
+                    .unwrap();
+            let activity = SessionActivity::of(&operational);
+            row(&mut out, label, 10, None, None, &activity);
+            writeln!(
+                out,
+                "assessment unresolved: {}; idle: {}; chat title: {}",
+                operational.retry_assessment_pending,
+                activity.is_idle(None),
+                activity.display_clock(10, None, None, true)
+            )
+            .unwrap();
+        }
 
         writeln!(out, "=== elapsed clock cells (11 values) ===").unwrap();
         for (seconds, expected) in [

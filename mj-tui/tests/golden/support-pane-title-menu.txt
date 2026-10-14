@@ -264,9 +264,9 @@ Profiles Settings… action: None
 │hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
 │› · ACP pretty name  │ agents.                                                                                      │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                                               6 settings  ›     Add               │                     │
-│  │                  │   codex-1                                                6 settings  ›     Remove            │                     │
-│                     │   codex-2                                                6 settings  ›     Detect profiles   │                     │
+│  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
+│  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
+│                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -643,9 +643,9 @@ Profiles number 2 action: None
 │hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
 │› · ACP pretty name  │ agents.                                                                                      │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                                               6 settings  ›     Add               │                     │
-│  │                  │   codex-1                                                6 settings  ›     Remove            │                     │
-│                     │   codex-2                                                6 settings  ›     Detect profiles   │                     │
+│  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
+│  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
+│                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -812,9 +812,9 @@ Profiles Enter setup action: None
 │hel ───────────────  │ Add a profile for each agent you want to run, or use Detect profiles to find installed       │                     │
 │› · ACP pretty name  │ agents.                                                                                      │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                                               6 settings  ›     Add               │                     │
-│  │                  │   codex-1                                                6 settings  ›     Remove            │                     │
-│                     │   codex-2                                                6 settings  ›     Detect profiles   │                     │
+│  │ No messages yet  │   claude-1                                               7 settings  ›     Add               │                     │
+│  │                  │   codex-1                                                7 settings  ›     Remove            │                     │
+│                     │   codex-2                                                7 settings  ›     Detect profiles   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

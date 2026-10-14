@@ -124,6 +124,47 @@ fn run_setup_with_discovery(
     }))
 }
 
+/// Adds a profile for every agent installed since the configuration was last
+/// written, the same additive merge as Settings' Detect profiles. Each launch
+/// of an existing installation runs this, so a newly installed agent appears
+/// without a trip to Settings. This runs on every launch by the user's
+/// decision; a removed profile for an installed agent returns, exactly as it
+/// does from Settings' Detect profiles, and disabling the profile is how a
+/// user stops using an agent. Returns the identifiers it added.
+pub fn add_detected_profiles(
+    config_path: &Path,
+    executor: &impl CommandExecutor,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<String>> {
+    add_profiles_for(config_path, &discover_profiles(executor), cancelled)
+}
+
+fn add_profiles_for(
+    config_path: &Path,
+    homes: &[DiscoveredHome],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<String>> {
+    let discovered = super::profiles_config(homes);
+    ensure!(!cancelled(), "profile detection cancelled");
+    // Leave the file untouched on the common launch that finds nothing new.
+    if Config::load_from(config_path)?
+        .setup_additions(&discovered)
+        .profiles
+        .is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let (_, added) = Config::update_to(config_path, |latest| {
+        // Choose identifiers against the latest file under its lock, so a
+        // concurrent Settings save is preserved.
+        let additions = latest.setup_additions(&discovered).profiles;
+        let added = additions.keys().cloned().collect();
+        latest.profiles.extend(additions);
+        Ok(added)
+    })?;
+    Ok(added)
+}
+
 fn acquire_setup_lock(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);

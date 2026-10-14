@@ -129,6 +129,17 @@ impl DurableRelay {
             }
         }
         self.reask_background_after_restart()?;
+        if let Some(mut assessment) = self.snapshot.assessment.clone().filter(|assessment| {
+            assessment.status == mj_core::assessment::Status::Failed
+                && assessment.needs_classification(epoch_millis())
+        }) {
+            // A failed request stays failed during backoff. Requeueing it is
+            // the durable transition that makes the next check pending again.
+            assessment.status = mj_core::assessment::Status::Pending;
+            assessment.reason = "awaiting_classification".into();
+            assessment.retry_at_ms = None;
+            self.store_assessment(assessment)?;
+        }
         let Some(mut a) = self
             .snapshot
             .assessment

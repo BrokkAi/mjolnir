@@ -464,7 +464,8 @@ impl MailboxConfig {
 }
 
 impl Config {
-    /// Identity of the configured profile list, excluding policies and UI defaults.
+    /// Identity of the configured profile list and the managed harness builds
+    /// its probes would run, excluding policies and UI defaults.
     pub fn profiles_discovery_key(&self) -> String {
         use sha2::{Digest, Sha256};
         let inputs: Vec<_> = self

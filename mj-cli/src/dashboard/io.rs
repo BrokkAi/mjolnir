@@ -287,6 +287,7 @@ pub(crate) enum DashboardIoUpdate {
     FirstRunStarted,
     FirstRunConfigured(mj_controller::setup::SetupReport),
     FirstRunChecked(std::result::Result<Option<Vec<String>>, String>),
+    StartupProfilesDetected(std::result::Result<Vec<String>, String>),
     SetupSaved {
         generation: u64,
         result: std::result::Result<Config, String>,
@@ -1336,6 +1337,15 @@ impl DashboardContext {
             DashboardIoUpdate::FirstRunConfigured(report) => {
                 self.dashboard.welcome_configured(report.summary())
             }
+            DashboardIoUpdate::StartupProfilesDetected(result) => match result {
+                Ok(added) if added.is_empty() => {}
+                Ok(added) => self
+                    .dashboard
+                    .set_notice(format!("Added agent profiles: {}.", added.join(", "))),
+                Err(error) => self
+                    .dashboard
+                    .set_failure_notice(format!("Detecting agent profiles failed: {error}")),
+            },
             DashboardIoUpdate::FirstRunChecked(result) => match result {
                 Ok(Some(errors)) => self.dashboard.welcome_checked(errors),
                 Ok(None) => {}
@@ -2610,6 +2620,7 @@ mod tests {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
             },
         );
         config.bundles.insert(

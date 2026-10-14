@@ -22,6 +22,47 @@ pub fn load_materialized_session_summary(
     load_materialized_session_summary_from(&database_path(), session_id)
 }
 
+/// Load durable activity for every materialized session so startup does not read transcripts.
+pub fn load_materialized_activity()
+-> Result<BTreeMap<String, (Option<i64>, MaterializedExecutionState)>> {
+    load_materialized_activity_from(&database_path())
+}
+
+pub(super) fn load_materialized_activity_from(
+    path: &Path,
+) -> Result<BTreeMap<String, (Option<i64>, MaterializedExecutionState)>> {
+    let mut reader = open_reader(path)?;
+    let connection = reader.transaction()?;
+    let mut statement = connection.prepare(
+        "SELECT session_id, last_activity_at_ms, execution_state, running_started_at_ms
+         FROM materialized_sessions",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    rows.into_iter()
+        .map(
+            |(session_id, last_activity_at_ms, execution_state, running_started_at_ms)| {
+                Ok((
+                    session_id,
+                    (
+                        last_activity_at_ms,
+                        parse_materialized_execution(&execution_state, running_started_at_ms)?,
+                    ),
+                ))
+            },
+        )
+        .collect()
+}
+
 pub(super) fn load_materialized_session_summary_from(
     path: &Path,
     session_id: &str,
@@ -110,7 +151,7 @@ pub(super) fn load_materialized_session_summary_from(
         |row| row.get(0),
     )?;
     if let Some(ordinal) = outcome
-        .map(|json| serde_json::from_str::<MaterializedTurnOutcome>(&json))
+        .map(|json| deserialize_turn_outcome(&json))
         .transpose()?
         .as_ref()
         .and_then(MaterializedTurnOutcome::interruption_ordinal)
@@ -401,7 +442,7 @@ pub(super) fn read_materialized_turn_state(
             .transpose()
             .with_context(|| format!("parse active turn for session {session_id}"))?,
         last.as_deref()
-            .map(serde_json::from_str)
+            .map(deserialize_turn_outcome)
             .transpose()
             .with_context(|| format!("parse last turn outcome for session {session_id}"))?,
     )))
@@ -1373,7 +1414,7 @@ pub(super) fn read_materialized_session_fields(
             .with_context(|| format!("parse active turn for session {session_id}"))?,
         last_turn_outcome: last_turn_outcome_json
             .as_deref()
-            .map(serde_json::from_str)
+            .map(deserialize_turn_outcome)
             .transpose()
             .with_context(|| format!("parse last turn outcome for session {session_id}"))?,
     }))
@@ -1761,7 +1802,7 @@ impl ProjectionPage<'_> {
             events::insert_api_event(tx, session_id, *recorded_at_ms, event)?;
         }
         for turn in &self.pending_turns {
-            tx.execute("INSERT OR REPLACE INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![session_id, turn.command_id, turn.completed_ordinal, turn.turn_start_position, serde_json::to_string(turn)?])?;
+            tx.execute("INSERT OR REPLACE INTO session_turn_usage(session_id, command_id, completed_ordinal, turn_start_position, body) VALUES (?1, ?2, ?3, ?4, ?5)", params![session_id, turn.command_id, turn.completed_ordinal, turn.turn_start_position, serialize_turn_outcome(turn)?])?;
         }
         if let Some(cost) = &self.pending.provider_cost {
             tx.execute(
@@ -1791,7 +1832,7 @@ impl ProjectionPage<'_> {
             tx.execute(
                 "UPDATE materialized_sessions
                  SET last_turn_outcome_json = ?2 WHERE session_id = ?1",
-                params![session_id, serde_json::to_string(last_turn_outcome)?],
+                params![session_id, serialize_turn_outcome(last_turn_outcome)?],
             )?;
         }
         tx.execute(

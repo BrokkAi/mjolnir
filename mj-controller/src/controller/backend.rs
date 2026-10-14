@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -934,23 +933,78 @@ pub fn image_refresh_plan(config: &Config) -> Vec<ImageRefresh> {
     plan
 }
 
-pub(crate) fn controller_github_token() -> Option<String> {
-    for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+/// Where the controller's GitHub credential came from, so an error about a
+/// rejected token can name the setting to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GithubTokenSource {
+    GhTokenEnv,
+    GithubTokenEnv,
+    GhCli,
+}
+
+impl std::fmt::Display for GithubTokenSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::GhTokenEnv => "GH_TOKEN",
+            Self::GithubTokenEnv => "GITHUB_TOKEN",
+            Self::GhCli => "the GitHub CLI login",
+        })
+    }
+}
+
+pub(crate) struct GithubCredential {
+    pub(crate) token: String,
+    pub(crate) source: GithubTokenSource,
+}
+
+impl std::fmt::Debug for GithubCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubCredential")
+            .field("token", &"<redacted>")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// `gh auth token` reads local state; a keychain prompt or a wedged credential
+/// helper must not hold the caller, and the bounded runner kills it on expiry.
+const GH_AUTH_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) async fn controller_github_token() -> Option<String> {
+    controller_github_credential()
+        .await
+        .map(|credential| credential.token)
+}
+
+pub(crate) async fn controller_github_credential() -> Option<GithubCredential> {
+    for (name, source) in [
+        ("GH_TOKEN", GithubTokenSource::GhTokenEnv),
+        ("GITHUB_TOKEN", GithubTokenSource::GithubTokenEnv),
+    ] {
         if let Ok(token) = std::env::var(name)
             && let Some(token) = usable_github_token(&token)
         {
-            return Some(token.to_owned());
+            return Some(GithubCredential {
+                token: token.to_owned(),
+                source,
+            });
         }
     }
-    let output = match Command::new("gh")
-        .args(["auth", "token", "--hostname", "github.com"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
+    let mut command = tokio::process::Command::new("gh");
+    command.args(["auth", "token", "--hostname", "github.com"]);
+    let output = match mj_core::subprocess::run_bounded(
+        &mut command,
+        64 * 1024,
+        GH_AUTH_TOKEN_TIMEOUT,
+    )
+    .await
     {
         Ok(output) => output,
         Err(error) => {
-            tracing::debug!(%error, "could not query the GitHub CLI for a token");
+            tracing::debug!(
+                error = format!("{error:#}"),
+                "could not query the GitHub CLI for a token"
+            );
             return None;
         }
     };
@@ -969,12 +1023,17 @@ pub(crate) fn controller_github_token() -> Option<String> {
         tracing::debug!("GitHub CLI returned an empty or invalid token");
         return None;
     };
-    Some(token.to_owned())
+    Some(GithubCredential {
+        token: token.to_owned(),
+        source: GithubTokenSource::GhCli,
+    })
 }
 
+/// A token travels in an HTTP header and a git credential line, so only
+/// visible ASCII qualifies; a stray control or non-ASCII byte is no token.
 fn usable_github_token(token: &str) -> Option<&str> {
     let token = token.trim();
-    (!token.is_empty() && !token.chars().any(char::is_whitespace)).then_some(token)
+    (!token.is_empty() && token.bytes().all(|byte| byte.is_ascii_graphic())).then_some(token)
 }
 
 pub(super) fn configure_github_token_environment(target: &mut targets::TargetTemplate) -> bool {

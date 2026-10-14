@@ -88,7 +88,7 @@ fn load_session_usage_from(
             params![session_id, after_seq, limit.clamp(1, 1000) as i64],
             |row| row.get::<_, String>(0),
         )?
-        .map(|row| Ok(serde_json::from_str::<MaterializedTurnOutcome>(&row?)?))
+        .map(|row| deserialize_turn_outcome(&row?))
         .collect::<Result<Vec<_>>>()?;
     let mut turn_selections = BTreeMap::new();
     for turn in &turns {
@@ -233,7 +233,7 @@ fn session_summary(connection: &Connection, session: &str) -> Result<UsageSummar
     })?;
     for row in rows {
         let (body, selection) = row?;
-        let turn: MaterializedTurnOutcome = serde_json::from_str(&body)?;
+        let turn = deserialize_turn_outcome(&body)?;
         summary.coverage.recorded_turns += 1;
         match turn.usage {
             Some(usage) if usage.scope == UsageScope::Turn => {
@@ -378,6 +378,80 @@ mod tests {
 
     fn configuration(model: &str, effort: &str) -> mj_core::state::SessionConfiguration {
         serde_json::from_value(serde_json::json!({"model":model,"effort":effort})).unwrap()
+    }
+
+    #[test]
+    fn semantic_turn_migration_preserves_all_billed_turns_and_exact_last_turns() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("semantic-turns.sqlite3");
+        let turns = super::super::turn_outcome::tests::legacy_turns();
+        for turn in &turns {
+            save_session_to(
+                &path,
+                &super::super::tests::session(&turn.command_id, "project"),
+            )?;
+            let mut session = MaterializedSession::empty(&turn.command_id);
+            session.last_turn_outcome = Some(turn.clone());
+            save_materialized_session_to(&path, &session)?;
+        }
+        let connection = Connection::open(&path)?;
+        for turn in &turns {
+            connection.execute(
+                "INSERT INTO session_turn_usage VALUES (?1,?1,?2,?3,?4)",
+                params![
+                    turn.command_id,
+                    turn.completed_ordinal,
+                    turn.turn_start_position,
+                    serialize_turn_outcome(turn)?
+                ],
+            )?;
+        }
+        let before = turns
+            .iter()
+            .map(|turn| session_summary(&connection, &turn.command_id))
+            .collect::<Result<Vec<_>>>()?;
+        for turn in &turns {
+            let body = serde_json::to_string(turn)?;
+            connection.execute(
+                "UPDATE session_turn_usage SET body=?2 WHERE session_id=?1",
+                params![turn.command_id, body],
+            )?;
+            connection.execute(
+                "UPDATE materialized_sessions SET last_turn_outcome_json=?2 WHERE session_id=?1",
+                params![turn.command_id, body],
+            )?;
+        }
+        connection.execute_batch("DELETE FROM schema_migrations WHERE version=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
+        drop(connection);
+        super::super::schema::forget_verified_schema(&path);
+        let connection = open(&path)?;
+        let state = super::super::schema::read_schema_state(&connection)?;
+        assert_eq!(state.revision, 82);
+        assert_eq!(state.minimum_compatible, Some(82));
+        assert!(state.ensure_supported_by(81).is_err());
+        for (turn, before) in turns.iter().zip(before) {
+            assert_eq!(session_summary(&connection, &turn.command_id)?, before);
+            let page = load_session_usage_from(&path, &turn.command_id, 0, 100)?.unwrap();
+            assert_eq!(page.turns.as_slice(), std::slice::from_ref(turn));
+            assert_eq!(page.coverage.recorded_turns, 1);
+            assert_eq!(page.totals["input_tokens"].tokens, 42);
+            assert_eq!(
+                read_materialized_turn_state(&connection, &turn.command_id)?
+                    .unwrap()
+                    .2,
+                Some(turn.clone())
+            );
+            let body: String = connection.query_row(
+                "SELECT last_turn_outcome_json FROM materialized_sessions WHERE session_id=?1",
+                [&turn.command_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                serde_json::from_str::<mj_core::event_outcome::ApiTurnOutcome>(&body)?,
+                mj_core::event_outcome::ApiTurnOutcome::from(turn)
+            );
+        }
+        Ok(())
     }
 
     #[test]

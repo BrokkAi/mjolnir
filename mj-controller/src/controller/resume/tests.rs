@@ -42,7 +42,10 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let _writer = crate::database::install_isolated_test_writer();
     let parent_id = "0123456789abcdef0123456789abcdef";
     let mut parent = checkpoint_test_session(parent_id);
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     crate::database::save_session(&parent).unwrap();
     let child_directory = tempfile::tempdir().unwrap();
     let mut child = parent.clone();
@@ -266,6 +269,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     let mut controller = Controller {
@@ -754,6 +758,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     config
@@ -1327,6 +1332,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     config.bundles.insert(
@@ -1479,6 +1485,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     let mut controller = Controller {
@@ -1688,6 +1695,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
         },
     );
     config.save().unwrap();
@@ -1969,6 +1977,7 @@ exit 0
                 context_window_bytes: None,
                 legacy_subagents: None,
                 guardian_review_model: None,
+                codex_profile: None,
             },
         );
         config
@@ -1980,7 +1989,10 @@ exit 0
     // The record as `resume_session_controlled` leaves it once the target
     // is provisioned: still provisioning, expecting the archived identity.
     let mut session = checkpoint_test_session(session_id);
-    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     session.harness_kind = harness;
     session.last_profile = profile_id.into();
     session.target_template_id = "local-bare".into();
@@ -2081,7 +2093,10 @@ exit 0
             );
             assert_eq!(
                 durable.sessions[session_id].subagents,
-                Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+                Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None
+                }),
                 "Resume retains legacy policy across differing creation defaults"
             );
             if stopped_subagents == StoppedSubagents::One {

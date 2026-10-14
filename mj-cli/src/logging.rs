@@ -1,9 +1,11 @@
 //! Durable, non-blocking diagnostics for controller-facing Mjolnir processes.
 
+use mj_core::logging::ResilientWriter;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread;
 use std::time::Duration;
@@ -77,15 +79,25 @@ struct ReliableWorkerGuard {
 impl Write for ReliableWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let length = bytes.len();
-        self.sender
-            .send(LogMessage::Line(bytes.to_vec()))
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "log worker stopped")
-            })?;
+        if self.sender.send(LogMessage::Line(bytes.to_vec())).is_err() {
+            mj_core::diagnostic_stderr!(
+                "Mjolnir log worker stopped; dropped diagnostic: {}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
         Ok(length)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        if let Err(error) = self.flush_checked() {
+            mj_core::diagnostic_stderr!("Mjolnir log writer could not flush: {error}");
+        }
+        Ok(())
+    }
+}
+
+impl ReliableWriter {
+    fn flush_checked(&mut self) -> std::io::Result<()> {
         let (flushed_tx, flushed_rx) = mpsc::sync_channel(1);
         self.sender
             .send(LogMessage::Flush(flushed_tx))
@@ -118,8 +130,8 @@ impl Drop for ReliableWorkerGuard {
             return;
         };
         let mut writer = ReliableWriter { sender };
-        if let Err(error) = writer.flush() {
-            eprintln!("Mjolnir log writer failed to drain before exit: {error}");
+        if let Err(error) = writer.flush_checked() {
+            mj_core::diagnostic_stderr!("Mjolnir log writer failed to drain before exit: {error}");
         }
         // The global tracing subscriber owns another sender for the rest of
         // the process. Keep its worker valid after this flush so detached
@@ -128,7 +140,9 @@ impl Drop for ReliableWorkerGuard {
     }
 }
 
-fn reliable_non_blocking(file: File) -> Result<(ReliableWriter, ReliableWorkerGuard)> {
+fn reliable_non_blocking<W: Write + Send + 'static>(
+    file: ResilientWriter<W>,
+) -> Result<(ReliableWriter, ReliableWorkerGuard)> {
     let (sender, receiver) = mpsc::channel();
     thread::Builder::new()
         .name("mj-log-writer".into())
@@ -137,7 +151,7 @@ fn reliable_non_blocking(file: File) -> Result<(ReliableWriter, ReliableWorkerGu
                 write_log_messages(file, receiver);
             }));
             if let Err(error) = result {
-                eprintln!("Mjolnir log writer panicked: {error:?}");
+                mj_core::diagnostic_stderr!("Mjolnir log writer panicked: {error:?}");
             }
         })
         .context("spawn Mjolnir log writer")?;
@@ -150,29 +164,74 @@ fn reliable_non_blocking(file: File) -> Result<(ReliableWriter, ReliableWorkerGu
     Ok((writer, guard))
 }
 
-fn write_log_messages(mut file: File, receiver: mpsc::Receiver<LogMessage>) {
+fn write_log_messages<W: Write>(
+    mut file: ResilientWriter<W>,
+    receiver: mpsc::Receiver<LogMessage>,
+) {
     while let Ok(message) = receiver.recv() {
         match message {
             LogMessage::Line(line) => {
-                if let Err(error) = file.write_all(&line) {
-                    eprintln!("Mjolnir log writer failed: {error}");
-                    break;
-                }
+                let _ = file.write_all(&line);
             }
             LogMessage::Flush(flushed) => {
                 let result = file.flush();
-                let failed = result.is_err();
                 if flushed.send(result).is_err() {
-                    eprintln!("Mjolnir log writer flush completion could not be reported");
-                }
-                if failed {
-                    break;
+                    mj_core::diagnostic_stderr!(
+                        "Mjolnir log writer flush completion could not be reported"
+                    );
                 }
             }
         }
     }
-    if let Err(error) = file.flush() {
-        eprintln!("Mjolnir log writer failed to flush: {error}");
+    let _ = file.flush();
+}
+
+// Panic messages bypass the queue: process exit cannot discard them while the
+// asynchronous writer has not yet run. This is diagnostic I/O, not UI work.
+static PANIC_LOG: OnceLock<ResilientWriter<DeferredLogFile>> = OnceLock::new();
+
+pub(crate) fn panic_log(reason: &str) {
+    mj_core::diagnostic_stderr!("{reason}");
+    if let Some(writer) = PANIC_LOG.get() {
+        let _ = writer
+            .clone()
+            .write_all(format!("{} {reason}\n", Utc::now().to_rfc3339()).as_bytes());
+    }
+}
+
+/// Startup can also run out of space. Keep trying to create the log on later
+/// lines instead of making a diagnostic file a prerequisite for daemon startup.
+struct DeferredLogFile {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl Write for DeferredLogFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.file.is_none() {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            self.file = Some(options.open(&self.path)?);
+        }
+        // The descriptor remains valid after ENOSPC and must not be replaced.
+        self.file
+            .as_mut()
+            .expect("opened diagnostic file")
+            .write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.file {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -180,25 +239,22 @@ impl ControllerLog {
     pub(crate) fn start(command: &'static str, kind: ProcessKind) -> Result<Self> {
         let data_dir = mj_core::config::data_dir();
         let directory = data_dir.join("logs");
-        fs::create_dir_all(&directory)
-            .with_context(|| format!("create Mjolnir log directory {}", directory.display()))?;
-        prune_logs(
-            &directory,
-            RETAINED_LOGS.saturating_sub(1),
-            current_daemon_pid(&data_dir),
-        )?;
-
-        let path = directory.join(log_filename(kind));
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        if let Err(error) = fs::create_dir_all(&directory).and_then(|()| {
+            prune_logs(
+                &directory,
+                RETAINED_LOGS.saturating_sub(1),
+                current_daemon_pid(&data_dir),
+            )
+            .map_err(std::io::Error::other)
+        }) {
+            mj_core::diagnostic_stderr!("Mjolnir could not prepare diagnostic logs: {error}");
         }
-        let file = options
-            .open(&path)
-            .with_context(|| format!("create Mjolnir log {}", path.display()))?;
+        let path = directory.join(log_filename(kind));
+        let file = ResilientWriter::new(DeferredLogFile {
+            path: path.clone(),
+            file: None,
+        });
+        let _ = PANIC_LOG.set(file.clone());
         let (writer, writer_guard) = reliable_non_blocking(file)?;
         let (filter, filter_error) = env_filter("info");
         tracing_subscriber::fmt()
@@ -397,7 +453,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("burst.log");
         let file = File::create(&path).unwrap();
-        let (mut writer, guard) = reliable_non_blocking(file).unwrap();
+        let (mut writer, guard) = reliable_non_blocking(ResilientWriter::new(file)).unwrap();
         for line in 0..10_000 {
             writer
                 .write_all(format!("error {line}\n").as_bytes())
@@ -416,7 +472,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("late.log");
         let file = File::create(&path).unwrap();
-        let (mut writer, guard) = reliable_non_blocking(file).unwrap();
+        let (mut writer, guard) = reliable_non_blocking(ResilientWriter::new(file)).unwrap();
         writer.write_all(b"before guard drop\n").unwrap();
 
         drop(guard);
@@ -425,6 +481,80 @@ mod tests {
 
         let contents = fs::read_to_string(path).unwrap();
         assert_eq!(contents, "before guard drop\nafter guard drop\n");
+    }
+
+    // Hard-won: d7ca109e4: a real disk write error must not disconnect the daemon log channel.
+    // /dev/full exists only on Linux; macOS has no equivalent full device, so the
+    // fake-writer test below covers this on the other Unix hosts.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dev_full_keeps_the_daemon_log_thread_connected() {
+        let sink = ResilientWriter::new(DeferredLogFile {
+            path: "/dev/full".into(),
+            file: Some(OpenOptions::new().write(true).open("/dev/full").unwrap()),
+        });
+        let (mut writer, guard) = reliable_non_blocking(sink.clone()).unwrap();
+        for _ in 0..1000 {
+            writer.write_all(b"daemon diagnostic\n").unwrap();
+        }
+        writer.flush_checked().unwrap();
+        assert_eq!(sink.dropped_lines().unwrap().count, 1000);
+        assert!(
+            sink.dropped_lines()
+                .unwrap()
+                .error
+                .contains("No space left on device")
+        );
+        drop(guard);
+        writer.write_all(b"still connected\n").unwrap();
+        writer.flush_checked().unwrap();
+        assert_eq!(sink.dropped_lines().unwrap().count, 1001);
+    }
+
+    // Hard-won: d7ca109e4: daemon logging stopped permanently after the first ENOSPC.
+    #[test]
+    fn log_thread_survives_full_disk_and_flush_then_reports_recovery() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        struct Disk {
+            full: Arc<AtomicBool>,
+            output: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for Disk {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.full.load(Ordering::SeqCst) {
+                    return Err(std::io::Error::from_raw_os_error(libc::ENOSPC));
+                }
+                self.output.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.full.load(Ordering::SeqCst) {
+                    Err(std::io::Error::from_raw_os_error(libc::ENOSPC))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let full = Arc::new(AtomicBool::new(true));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = ResilientWriter::new(Disk {
+            full: full.clone(),
+            output: output.clone(),
+        });
+        let (mut writer, guard) = reliable_non_blocking(sink.clone()).unwrap();
+        for _ in 0..1000 {
+            writer.write_all(b"lost line\n").unwrap();
+        }
+        writer.flush_checked().unwrap();
+        assert_eq!(sink.dropped_lines().unwrap().count, 1000);
+        full.store(false, Ordering::SeqCst);
+        writer.write_all(b"recovered line\n").unwrap();
+        writer.flush_checked().unwrap();
+        drop(guard);
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.matches("dropped 1000 log lines between").count(), 1);
+        assert!(text.ends_with("recovered line\n"));
     }
 
     /// An arbitrary PID used for logs that are never the protected daemon

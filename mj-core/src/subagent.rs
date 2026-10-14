@@ -4,13 +4,18 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// A session's delegation policy. Global task choices are owned by configuration.
+/// A session's delegation policy, optionally overriding global task choices.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SubagentPolicy {
     #[default]
     Native,
-    Mjolnir,
+    Mjolnir {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        straightforward: Option<Box<crate::config::SubagentChoice>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subtle: Option<Box<crate::config::SubagentChoice>>,
+    },
     None,
 }
 
@@ -20,13 +25,57 @@ impl<'de> Deserialize<'de> for SubagentPolicy {
         #[serde(tag = "mode", rename_all = "snake_case")]
         enum Wire {
             Native,
-            #[serde(alias = "all_models", alias = "single_model")]
-            Mjolnir,
+            Mjolnir {
+                #[serde(default)]
+                straightforward: Option<Box<crate::config::SubagentChoice>>,
+                #[serde(default)]
+                subtle: Option<Box<crate::config::SubagentChoice>>,
+                // b4374cb29 briefly stored one flattened choice for both types.
+                #[serde(default)]
+                model: Option<String>,
+                #[serde(default)]
+                effort: Option<String>,
+            },
+            #[serde(rename = "all_models", alias = "single_model")]
+            LegacyMjolnir,
             None,
         }
         Ok(match Wire::deserialize(deserializer)? {
             Wire::Native => Self::Native,
-            Wire::Mjolnir => Self::Mjolnir,
+            Wire::Mjolnir {
+                straightforward,
+                subtle,
+                model,
+                effort,
+            } => {
+                if effort.as_deref() == Some("adaptive")
+                    || straightforward
+                        .as_ref()
+                        .and_then(|choice| choice.effort.as_deref())
+                        == Some("adaptive")
+                    || subtle.as_ref().and_then(|choice| choice.effort.as_deref())
+                        == Some("adaptive")
+                {
+                    return Err(serde::de::Error::custom(
+                        "adaptive sub-agent effort is not supported",
+                    ));
+                }
+                if model.is_none() && effort.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "sub-agent effort requires a model override",
+                    ));
+                }
+                let legacy =
+                    model.map(|model| Box::new(crate::config::SubagentChoice { model, effort }));
+                Self::Mjolnir {
+                    straightforward: straightforward.or_else(|| legacy.clone()),
+                    subtle: subtle.or(legacy),
+                }
+            }
+            Wire::LegacyMjolnir => Self::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             Wire::None => Self::None,
         })
     }
@@ -54,7 +103,22 @@ impl SubagentPolicy {
         matches!(self, Self::Native)
     }
     pub fn uses_mjolnir(&self) -> bool {
-        matches!(self, Self::Mjolnir)
+        matches!(self, Self::Mjolnir { .. })
+    }
+    pub fn override_choice(
+        &self,
+        task_type: SubagentTaskType,
+    ) -> Option<&crate::config::SubagentChoice> {
+        match self {
+            Self::Mjolnir {
+                straightforward,
+                subtle,
+            } => match task_type {
+                SubagentTaskType::Straightforward => straightforward.as_deref(),
+                SubagentTaskType::Subtle => subtle.as_deref(),
+            },
+            _ => None,
+        }
     }
     pub fn suppresses_native(&self) -> bool {
         !self.is_native()
@@ -86,7 +150,10 @@ pub fn deserialize_optional_policy<'de, D: serde::Deserializer<'de>>(
     }
     Ok(
         Option::<Stored>::deserialize(deserializer)?.map(|stored| match stored {
-            Stored::Legacy(true) => SubagentPolicy::Mjolnir,
+            Stored::Legacy(true) => SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
             Stored::Legacy(false) => SubagentPolicy::Native,
             Stored::Policy(policy) => policy,
         }),
@@ -107,7 +174,7 @@ pub fn parse_stored_policy(json: &str) -> serde_json::Result<SubagentPolicy> {
     Ok(policy)
 }
 
-/// The refusal code for an unavailable global task choice. A
+/// The refusal code for an unavailable sub-agent choice. A
 /// client picks its own remedy from it: the daemon's message names no
 /// surface, and only the client knows whether the person has a Settings
 /// screen or command-line flags to change the choice with.
@@ -1359,7 +1426,10 @@ mod tests {
         for (json, expected) in [
             (
                 r#"{"mjolnir_subagents":true}"#,
-                Some(SubagentPolicy::Mjolnir),
+                Some(SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
             ),
             (
                 r#"{"mjolnir_subagents":false}"#,
@@ -1367,15 +1437,24 @@ mod tests {
             ),
             (
                 r#"{"subagents":{"mode":"all_models"}}"#,
-                Some(SubagentPolicy::Mjolnir),
+                Some(SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
             ),
             (
                 r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"adaptive"}}"#,
-                Some(SubagentPolicy::Mjolnir),
+                Some(SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
             ),
             (
                 r#"{"subagents":{"mode":"single_model","model":"chosen","effort":"high"}}"#,
-                Some(SubagentPolicy::Mjolnir),
+                Some(SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
             ),
             ("{}", None),
         ] {
@@ -1385,15 +1464,73 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<SubagentPolicy>("true").is_err());
-        let fixed = SubagentPolicy::Mjolnir;
+        let fixed = SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(crate::config::SubagentChoice {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+            })),
+            subtle: Some(Box::new(crate::config::SubagentChoice {
+                model: "gpt-6-sol".into(),
+                effort: None,
+            })),
+        };
+        assert_eq!(
+            serde_json::to_value(SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None
+            })
+            .unwrap(),
+            serde_json::json!({"mode":"mjolnir"})
+        );
+        assert_eq!(
+            serde_json::to_value(&fixed).unwrap(),
+            serde_json::json!({"mode":"mjolnir", "straightforward":{"model":"gpt-6-luna", "effort":"max"}, "subtle":{"model":"gpt-6-sol"}})
+        );
+        let default_effort = SubagentPolicy::Mjolnir {
+            straightforward: Some(Box::new(crate::config::SubagentChoice {
+                model: "gpt-6-luna".into(),
+                effort: None,
+            })),
+            subtle: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&default_effort).unwrap(),
+            serde_json::json!({"mode":"mjolnir", "straightforward":{"model":"gpt-6-luna"}})
+        );
+        for invalid in [
+            serde_json::json!({"mode":"mjolnir", "model":"chosen", "effort":"adaptive"}),
+            serde_json::json!({"mode":"mjolnir", "effort":"high"}),
+            serde_json::json!({"mode":"mjolnir", "subtle":{"model":"chosen", "effort":"adaptive"}}),
+        ] {
+            assert!(serde_json::from_value::<SubagentPolicy>(invalid).is_err());
+        }
+        let old_flat: SubagentPolicy = serde_json::from_value(serde_json::json!({
+            "mode":"mjolnir", "model":"gpt-6-luna", "effort":"max"
+        }))
+        .unwrap();
+        let duplicated = crate::config::SubagentChoice {
+            model: "gpt-6-luna".into(),
+            effort: Some("max".into()),
+        };
+        assert_eq!(
+            old_flat,
+            SubagentPolicy::Mjolnir {
+                straightforward: Some(Box::new(duplicated.clone())),
+                subtle: Some(Box::new(duplicated))
+            }
+        );
         for harness in [
             crate::config::HarnessKind::Claude,
             crate::config::HarnessKind::Codex,
         ] {
             for policy in [
                 SubagentPolicy::Native,
-                SubagentPolicy::Mjolnir,
+                SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                },
                 fixed.clone(),
+                default_effort.clone(),
                 SubagentPolicy::None,
             ] {
                 assert_eq!(policy.for_launch(harness, true), SubagentPolicy::None);

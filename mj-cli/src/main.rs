@@ -38,6 +38,7 @@ use mj_core::state::{MoveSelection, MoveSessionRequest, ResumeQueueDisposition};
 use std::io::{self, Write};
 
 use mj_controller::controller::Controller;
+use mj_controller::controller::update::StartupUpdateNotice;
 use mj_controller::setup::run_setup_command;
 #[cfg(test)]
 use mj_controller::targets::ProcessExecutor;
@@ -264,14 +265,27 @@ struct CheckpointArgs {
         .multiple(true)
 ))]
 struct MoveArgs {
-    /// Destination delegation policy. Omit to retain the session's policy,
+    /// Destination delegation policy: native, mjolnir, or none (no
+    /// delegation tools). Omit to retain the session's policy,
     /// or the recorded policy when retrying a sealed Move.
     #[arg(long)]
     subagents: Option<String>,
-    /// Removed: configure global task types in config.toml.
+    /// Override the configured model for straightforward Mjolnir sub-agents.
+    #[arg(long)]
+    subagent_straightforward: Option<String>,
+    /// Override straightforward sub-agent effort (requires --subagent-straightforward).
+    #[arg(long)]
+    subagent_straightforward_effort: Option<String>,
+    /// Override the configured model for subtle Mjolnir sub-agents.
+    #[arg(long)]
+    subagent_subtle: Option<String>,
+    /// Override subtle sub-agent effort (requires --subagent-subtle).
+    #[arg(long)]
+    subagent_subtle_effort: Option<String>,
+    /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_model: Option<String>,
-    /// Removed: configure global task types in config.toml.
+    /// Retired; use the four per-type sub-agent flags.
     #[arg(long, hide = true)]
     subagent_effort: Option<String>,
     /// Inspect the transfer and return its preparation without moving anything.
@@ -453,18 +467,23 @@ fn run(cli: Cli) -> Result<()> {
         .enable_all()
         .build()
         .context("build Tokio runtime")?;
-    if matches!(
+    let update_notice = if matches!(
         cli.command,
         None | Some(Command::Workspaces(WorkspacesArgs { command: None }))
     ) {
         // Interactive dashboard startup is the one place an update may be
         // checked, prompted for, and applied on every launch. The whole flow
         // finishes before daemon startup and the TUI takes over the terminal; a
-        // successful upgrade never returns because the process re-execs.
-        runtime.block_on(mj_controller::controller::update::check_prompt_and_apply());
-    }
+        // successful upgrade never returns because the process re-execs. A
+        // failure is reported inside the dashboard, which starts regardless.
+        runtime
+            .block_on(mj_controller::controller::update::check_prompt_and_apply())
+            .dashboard_notice()
+    } else {
+        None
+    };
     let daemon = matches!(cli.command, Some(Command::DaemonRun));
-    let result = runtime.block_on(run_command(cli.command, cli.workspace));
+    let result = runtime.block_on(run_command(cli.command, cli.workspace, update_notice));
     if daemon {
         shutdown_daemon_runtime(runtime);
     } else if matches!(
@@ -493,10 +512,13 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn install_panic_logging() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "Mjolnir panicked");
-        default_hook(info);
+    // A default hook writes to detached stderr, which may itself be full.
+    let _ = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        logging::panic_log(&format!(
+            "Mjolnir panicked: {}",
+            mj_core::logging::panic_message(info)
+        ));
     }));
 }
 
@@ -627,9 +649,13 @@ fn shutdown_dashboard_runtime(runtime: tokio::runtime::Runtime) {
 async fn run_command(
     command: Option<Command>,
     requested_workspace: Option<String>,
+    update_notice: Option<StartupUpdateNotice>,
 ) -> Result<DashboardExit> {
     match command {
-        None => run_workspace_dashboard(requested_workspace.as_deref(), false, None).await,
+        None => {
+            run_workspace_dashboard(requested_workspace.as_deref(), false, None, update_notice)
+                .await
+        }
         Some(Command::Go(args)) => {
             ensure!(
                 requested_workspace.is_none(),
@@ -639,10 +665,14 @@ async fn run_command(
             let mode = tokio::task::spawn_blocking(move || go::prepare(args))
                 .await
                 .context("prepare fast start")??;
-            run_workspace_dashboard(None, false, Some((mode, setup))).await
+            // `mj go` never runs the startup update check.
+            run_workspace_dashboard(None, false, Some((mode, setup)), None).await
         }
         Some(Command::Workspaces(args)) => match args.command {
-            None => run_workspace_dashboard(requested_workspace.as_deref(), true, None).await,
+            None => {
+                run_workspace_dashboard(requested_workspace.as_deref(), true, None, update_notice)
+                    .await
+            }
             Some(WorkspacesCommand::List(args)) => api_commands::workspaces_list(args)
                 .await
                 .map(|()| DashboardExit::Normal),
@@ -816,6 +846,10 @@ async fn run_command(
 async fn move_session(args: MoveArgs) -> Result<()> {
     let subagents = api_commands::subagent_policy(
         args.subagents.as_deref(),
+        args.subagent_straightforward.as_deref(),
+        args.subagent_straightforward_effort.as_deref(),
+        args.subagent_subtle.as_deref(),
+        args.subagent_subtle_effort.as_deref(),
         args.subagent_model.as_deref(),
         args.subagent_effort.as_deref(),
     )?;
@@ -1241,6 +1275,7 @@ async fn run_workspace_dashboard(
     requested_workspace: Option<&str>,
     open_workspace_manager: bool,
     mut go: Option<(mj_tui::GoMode, bool)>,
+    update_notice: Option<StartupUpdateNotice>,
 ) -> Result<DashboardExit> {
     let resume = dashboard::UpgradeResume::load().await?;
     if resume.is_some() {
@@ -1327,6 +1362,7 @@ async fn run_workspace_dashboard(
                         go,
                         attachment.presence,
                         resume,
+                        update_notice,
                     )
                     .await
                 }

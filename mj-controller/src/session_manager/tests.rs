@@ -452,7 +452,7 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     let restarted = directory.path().join("worker-restarted");
     let stopped_at = chrono::Utc::now() - chrono::Duration::seconds(60);
     let exit_record = format!(
-        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test"}}    "#,
+        r#"{{"reason":"relay coordinator failed: append journal: No space left on device (os error 28)","refusal":null,"at":"{}","version":"test","recent_log":["failed diagnostic\n"]}}    "#,
         stopped_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
     let plan = WorkerRecoveryPlan {
@@ -2411,7 +2411,10 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
     let mut session = crate::database::load_session_record(LEASED_RELAY_SESSION)
         .unwrap()
         .unwrap();
-    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+    session.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
     crate::database::save_session(&session).unwrap();
 
     let relay_root = tempfile::tempdir().unwrap();

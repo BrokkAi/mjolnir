@@ -255,7 +255,10 @@ mod tests {
                 bundle_id: Some("hel".into()),
                 project_directory: None,
                 create_managed_worktree: Some(false),
-                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
                 additional_mounts: Vec::new(),
                 resource_allocation: None,
             }),

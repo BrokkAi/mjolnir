@@ -12,6 +12,7 @@ fn homes(directory: &Path, kinds: &[HarnessKind]) -> Vec<DiscoveredHome> {
         .map(|kind| DiscoveredHome {
             kind: *kind,
             path: directory.join(format!("custom-{}", kind.id())),
+            codex_profile: None,
             authenticated: false,
         })
         .collect()
@@ -150,6 +151,68 @@ fn automatic_setup_leaves_existing_installations_and_comments_untouched() {
         .is_none()
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+}
+
+// Hard-won: 1c14f7b9b: discovery ran only on the first launch, so agents installed later never got profiles.
+#[test]
+fn every_launch_adds_newly_installed_agents_and_keeps_disabled_profiles_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    let installed = homes(directory.path(), &[HarnessKind::Codex]);
+    run_setup_with_discovery(
+        &path,
+        directory.path(),
+        false,
+        &|| false,
+        || {},
+        || Ok((installed.clone(), None)),
+    )
+    .unwrap()
+    .unwrap();
+    Config::update_to(&path, |config| {
+        config
+            .profiles
+            .values_mut()
+            .for_each(|profile| profile.enabled = false);
+        Ok(())
+    })
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(
+        add_profiles_for(&path, &installed, &|| false)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let mut later = homes(directory.path(), &[HarnessKind::Codex, HarnessKind::Claude]);
+    // A Codex profile overlay written into the same home later.
+    later.push(DiscoveredHome {
+        codex_profile: Some("ds".to_owned()),
+        ..later[0].clone()
+    });
+    let added = add_profiles_for(&path, &later, &|| false).unwrap();
+    let config = Config::load_from(&path).unwrap();
+    assert_eq!(added, ["claude", "codex-ds"]);
+    assert_eq!(config.profiles["claude"].kind, HarnessKind::Claude);
+    assert_eq!(
+        config.profiles["codex-ds"].codex_profile.as_deref(),
+        Some("ds")
+    );
+    assert_eq!(config.profiles["codex-ds"].home, later[0].path);
+    assert_eq!(config.profiles.len(), 3);
+    assert!(
+        config
+            .profiles
+            .iter()
+            .all(|(id, profile)| profile.enabled == added.contains(id))
+    );
+    assert!(
+        add_profiles_for(&path, &later, &|| false)
+            .unwrap()
+            .is_empty(),
+        "the overlay's profile is not added again on the next launch"
+    );
 }
 
 #[test]

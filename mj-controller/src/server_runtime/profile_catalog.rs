@@ -191,16 +191,33 @@ impl ProfileCatalog {
             let mut inner = self.lock();
             for (id, profile) in config.enabled_profiles() {
                 let identity = profile.capabilities_key(id);
+                // Muse catalogues change server-side without a managed-pin
+                // bump, so a retained entry hides models and efforts people
+                // expect. Every warm pass re-probes a Muse profile instead of
+                // keeping its entries; reads below never serve them either.
+                let live = profile.kind == HarnessKind::Muse;
                 if let Some(definition) = inner.definitions.get_mut(&identity) {
-                    if !definition.cancellation.is_cancelled() {
+                    if !live && !definition.cancellation.is_cancelled() {
                         // Keep successful entries and the in-flight attempt.
                         // A failed owner's next retry uses refreshed credentials.
                         definition.config = config.clone();
                         continue;
                     }
-                    inner.entries.retain(|(entry_identity, _), entry| {
-                        entry_identity != &identity || matches!(entry, Entry::Ready(_))
-                    });
+                    if !live {
+                        inner.entries.retain(|(entry_identity, _), entry| {
+                            entry_identity != &identity || matches!(entry, Entry::Ready(_))
+                        });
+                    }
+                }
+                if live {
+                    // End the previous owner's supervisors so only the fresh
+                    // attempt below can publish for this identity.
+                    if let Some(definition) = inner.definitions.get(&identity) {
+                        definition.cancellation.cancel();
+                    }
+                    inner
+                        .entries
+                        .retain(|(entry_identity, _), _| entry_identity != &identity);
                 }
                 let definition = Definition {
                     id: id.into(),
@@ -445,10 +462,16 @@ impl ProfileCatalog {
         model: Option<String>,
     ) -> Result<ProfileConfig> {
         let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let live = profile.kind == HarnessKind::Muse;
         self.ensure(config);
         let key = (profile.capabilities_key(id), model);
         let cancellation = self.lock().definitions[&key.0].cancellation.clone();
         let mut revisions = self.revisions.subscribe();
+        if live {
+            return self
+                .fetch_live(&key, key.1.clone(), cancellation, &mut revisions)
+                .await;
+        }
         loop {
             // Subscribe before inspecting ownership, so completion cannot be
             // missed. Readers never drive or publish the supervisor's future.
@@ -488,6 +511,64 @@ impl ProfileCatalog {
                 result = revisions.changed() => { result.context("profile capability publisher stopped")?; }
             }
         }
+    }
+
+    /// Read a Muse profile live instead of serving a retained entry. New
+    /// models and effort tiers appear server-side at any time, so a retained
+    /// answer is never served: every read probes the harness that actually
+    /// runs. An in-flight probe is still joined so concurrent readers share
+    /// it, and failures are served as-is so a broken harness keeps the
+    /// supervisor's backoff instead of being hammered on every read. The
+    /// supervisor still publishes each result, so the snapshot converges.
+    async fn fetch_live(
+        self: &Arc<Self>,
+        key: &CacheKey,
+        model: Option<String>,
+        cancellation: CancellationToken,
+        revisions: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> Result<ProfileConfig> {
+        if model.is_some() {
+            // Efforts are discovered against the default catalogue; wait for
+            // it the way a shared reader would.
+            loop {
+                match self.lock().entries.get(&(key.0.clone(), None)) {
+                    Some(Entry::Ready(_)) => break,
+                    Some(Entry::Failed { error, .. }) => {
+                        return Err(anyhow::anyhow!("{error}"));
+                    }
+                    _ => {}
+                }
+                tokio::select! {
+                    biased;
+                    _ = self.cancellation.cancelled() => bail!("profile discovery cancelled by daemon shutdown"),
+                    _ = cancellation.cancelled() => bail!("profile definition retired"),
+                    result = revisions.changed() => { result.context("profile capability publisher stopped")?; }
+                }
+            }
+        }
+        let (attempt, started) = {
+            let mut inner = self.lock();
+            match inner.entries.get(key) {
+                Some(Entry::Pending(attempt)) => (attempt.clone(), false),
+                Some(Entry::Failed { error, .. }) => {
+                    return Err(anyhow::anyhow!("{error}"));
+                }
+                _ => {
+                    let attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
+                    inner
+                        .entries
+                        .insert(key.clone(), Entry::Pending(attempt.clone()));
+                    (attempt, true)
+                }
+            }
+        };
+        if started {
+            self.spawn(key.clone(), attempt.clone());
+            self.publish();
+        }
+        attempt
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.message))
     }
 
     fn live(&self) -> Result<Config> {
@@ -630,6 +711,7 @@ pub(crate) fn test_config(profiles: &[(&str, HarnessKind)], eligible: &[&str]) -
                         context_window_bytes: None,
                         legacy_subagents: Default::default(),
                         guardian_review_model: None,
+                        codex_profile: None,
                     },
                 )
             })
@@ -814,6 +896,78 @@ mod tests {
             calls.load(Ordering::SeqCst),
             2,
             "membership changes retain unchanged efforts"
+        );
+    }
+
+    /// Muse catalogues change server-side without a managed-pin bump, so a
+    /// retained answer hides models and efforts people expect. Every Muse
+    /// read probes live; other harnesses keep serving their warm entries.
+    #[tokio::test]
+    async fn muse_reads_probe_live_while_other_harnesses_stay_warm() {
+        let calls = calls();
+        let probe: Arc<Probe> = {
+            let calls = calls.clone();
+            Arc::new(move |profile: String| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    let revision = calls.fetch_add(1, Ordering::SeqCst);
+                    let model = format!("{profile}-model-{revision}");
+                    let mut choices = test_choices(&profile);
+                    choices.model = Some(model.clone());
+                    choices.models = vec![mj_core::acp::SessionConfigChoice {
+                        value: model.clone(),
+                        name: model,
+                        description: None,
+                    }];
+                    Ok(choices)
+                })
+            })
+        };
+        let catalog = ProfileCatalog::with_probe(probe);
+        let config = test_config(
+            &[("muse", HarnessKind::Muse), ("codex", HarnessKind::Codex)],
+            &[],
+        );
+        catalog.sync_now(&config).await;
+
+        let first = catalog.capabilities(&["muse".into()]).await.unwrap();
+        let first = first[0].models[0].value.clone();
+        // Wait until the supervisor published this probe, so the next read
+        // cannot join the same in-flight attempt: it must start its own.
+        let key = config.profiles["muse"].capabilities_key("muse");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let published =
+                    catalog
+                        .snapshot()
+                        .profiles
+                        .get(&key)
+                        .and_then(|entry| match &entry.choices {
+                            CapabilityState::Ready(choices) => {
+                                choices.models.first().map(|choice| choice.value.clone())
+                            }
+                            _ => None,
+                        });
+                if published.as_deref() == Some(first.as_str()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the supervisor publishes each live Muse probe");
+
+        let second = catalog.capabilities(&["muse".into()]).await.unwrap();
+        assert_ne!(
+            second[0].models[0].value, first,
+            "a Muse read never serves the retained catalogue"
+        );
+
+        let codex_first = catalog.capabilities(&["codex".into()]).await.unwrap();
+        let codex_second = catalog.capabilities(&["codex".into()]).await.unwrap();
+        assert_eq!(
+            codex_first[0].models[0].value, codex_second[0].models[0].value,
+            "other harnesses keep serving their warm entries"
         );
     }
 

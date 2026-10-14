@@ -1357,12 +1357,39 @@ test('delegation reflects unavailable configuration and rechecks it before submi
   }
 });
 
+test('Move retains per-type session overrides without global configuration', () => {
+  const context = delegationContext('codex', false);
+  Object.assign(context, { targetLaunchable: () => true, selectedWorkspaceId: () => 'test' });
+  vm.runInContext(sourceBetween('function freshMoveDraft(', '\n/// The delegation policy a Move'), context);
+  for (const policy of [
+    { mode: 'mjolnir', subtle: { model: 'gpt-6-luna' } },
+    { mode: 'mjolnir', straightforward: { model: 'gpt-6-sol', effort: 'high' }, subtle: { model: 'gpt-6-luna', effort: 'max' } },
+  ]) {
+    const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: policy });
+    const body = makeNode();
+    context.renderSubagentFields(body, draft, 'move-session', () => {});
+    const select = body.children[0].children[1];
+    assert.equal(select.children[1].disabled, false);
+    assert.match(select.children[1].textContent, /subtle: gpt-6-luna/);
+    select.onchange();
+    assert.equal(context.moveSubagentChange(draft), null);
+    assert.deepEqual(JSON.parse(JSON.stringify(draft.subagents)), policy);
+    assert.equal(context.subagentSelectionError(draft), '');
+    select.value = 'native';
+    select.onchange();
+    assert.deepEqual(JSON.parse(JSON.stringify(context.moveSubagentChange(draft))), { mode: 'native' });
+    select.value = 'mjolnir';
+    select.onchange();
+    assert.equal(context.moveSubagentChange(draft), null);
+  }
+});
+
 test('Move keeps legacy delegation unchanged without resending obsolete selectors', () => {
   const context = delegationContext('codex', false);
   Object.assign(context, { targetLaunchable: () => true, selectedWorkspaceId: () => 'test' });
   vm.runInContext(sourceBetween('function freshMoveDraft(', '\n/// The delegation policy a Move'), context);
   for (const mode of ['single_model', 'all_models', 'mjolnir', 'none']) {
-    const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: { mode, model: 'obsolete', effort: 'adaptive' } });
+    const draft = context.freshMoveDraft({ id: 'session', profile_id: 'profile', subagents: mode === 'mjolnir' ? { mode } : { mode, model: 'obsolete', effort: 'adaptive' } });
     const body = makeNode();
     context.renderSubagentFields(body, draft, 'move-session', () => {});
     const select = body.children[0].children[1];

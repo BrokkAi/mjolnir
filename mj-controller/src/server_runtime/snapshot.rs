@@ -777,13 +777,13 @@ pub(super) fn viewer_snapshot_selected(
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
             session.capacity_retry = state.capacity_retry.clone();
-            session.retry_assessment_pending = state.retry_assessment_pending;
             session.quota_recovery = state
                 .continuation
                 .quota_recovery
                 .clone()
                 .filter(|r| !r.submitted);
             let activity = mj_client::usage_format::SessionActivity::of(state);
+            session.retry_assessment_pending = activity.checking_response;
             let activity_details =
                 activity.details(turn_started_at_ms, state.current_step_started_at_ms);
             session.activity_details = Some(viewer_activity_details(&activity_details));
@@ -943,20 +943,20 @@ pub(super) async fn load_materialized_activity(
         .cloned()
         .collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        session_ids
+        let activity_by_session = crate::database::load_materialized_activity()?;
+        Ok(session_ids
             .into_iter()
             .map(|session_id| {
-                crate::database::load_materialized_session_summary(&session_id).map(|summary| {
-                    let activity = summary
-                        .map(|summary| MaterializedActivity {
-                            last_activity_at_ms: summary.last_activity_at_ms,
-                            execution: summary.execution,
-                        })
-                        .unwrap_or_default();
-                    (session_id, activity)
-                })
+                let activity = activity_by_session
+                    .get(&session_id)
+                    .map(|(last_activity_at_ms, execution)| MaterializedActivity {
+                        last_activity_at_ms: *last_activity_at_ms,
+                        execution: *execution,
+                    })
+                    .unwrap_or_default();
+                (session_id, activity)
             })
-            .collect()
+            .collect::<std::collections::BTreeMap<_, _>>())
     })
     .await
     .context("materialized activity startup task failed")?

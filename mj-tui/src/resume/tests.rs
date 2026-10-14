@@ -313,9 +313,19 @@ fn incomplete_move_resume_row_opens_same_destination_retry_controls() {
 #[test]
 fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
     use mj_core::subagent::SubagentPolicy;
+    let policy = SubagentPolicy::Mjolnir {
+        straightforward: Some(Box::new(mj_core::config::SubagentChoice {
+            model: "gpt-6-luna".into(),
+            effort: Some("max".into()),
+        })),
+        subtle: Some(Box::new(mj_core::config::SubagentChoice {
+            model: "gpt-6-sol".into(),
+            effort: None,
+        })),
+    };
     for retained in [None, Some(SubagentPolicy::Native)] {
         let mut session = running_session();
-        session.subagents = Some(SubagentPolicy::Mjolnir);
+        session.subagents = Some(policy.clone());
         let configuration = config();
         let mut dashboard =
             DashboardState::new(configuration, state_with(vec![session]), BTreeMap::new());
@@ -328,12 +338,18 @@ fn move_recovery_uses_recorded_policy_and_retained_explicit_override() {
         };
         assert_eq!(
             wizard.subagents.policy,
-            retained.clone().unwrap_or(SubagentPolicy::Mjolnir)
+            retained.clone().unwrap_or(policy.clone())
         );
         assert_eq!(wizard.subagent_change(&dashboard), retained);
+        if retained.is_none() {
+            let mut draft = wizard.subagents.clone();
+            draft.select_policy(0);
+            assert!(draft.select_policy(1));
+            assert_eq!(draft.policy, policy);
+        }
         assert_eq!(
             dashboard.state.sessions["session-1"].subagents,
-            Some(SubagentPolicy::Mjolnir)
+            Some(policy.clone())
         );
     }
 }

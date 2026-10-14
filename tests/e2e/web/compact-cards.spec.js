@@ -66,6 +66,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     operation: options.operation || null,
     chat_phase: 'idle',
     is_idle: options.isIdle !== false,
+    retry_assessment_pending: Boolean(options.retryAssessmentPending),
     config_options: [],
     plan_mode_active: false,
     turn_review: null,
@@ -262,6 +263,7 @@ async function fixGoldenTime(page) {
   await page.clock.install({ time: new Date(SERVER_TIME_MS) });
 }
 
+// Hard-won: b72adcc6f: an idle session lost its genuine pending response check.
 test('golden_viewer_dashboard', async ({ context }) => {
   const { assertGolden } = await import('./golden.mjs');
   const output = [];
@@ -316,6 +318,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
     session('alpha-idle', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_000, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }) }),
     session('alpha-yesterday', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 86_465_000 }) }),
     session('lifecycle', 'project-lifecycle', 'Lifecycle', { activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
+    session('checking-response', 'project-checking', 'Checking', { activity: SERVER_TIME_MS - 5_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }), retryAssessmentPending: true }),
     session('unknown-idle', 'project-unknown', 'Unknown', { activity: SERVER_TIME_MS - 6_000, activityDetails: activity('idle') }),
   ]);
   await captureGoldenState(output, compactPage, 'compact cards with attention and activity clocks', await compactPage.evaluate(() => ({

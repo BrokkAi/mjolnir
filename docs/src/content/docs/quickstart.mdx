@@ -27,7 +27,10 @@ Two words come up on every screen:
 When no workspace exists, Mjolnir creates one named after the current
 directory. On first launch, it automatically discovers your installed agents,
 adds their profiles, and creates a bundle for the current GitHub repository
-when one is found. A one-time welcome dialog shows the detected agents and
+when one is found. Every later plain `mj` launch adds profiles for agents
+installed since (`mj go`, `mj workspaces`, and the relaunch after an upgrade
+do not); disable a profile in Settings to stop using an agent, because a removed
+profile for an installed agent comes back. A one-time welcome dialog shows the detected agents and
 project, plus any prerequisite errors. Continue dismisses the dialog even
 while checks are running; errors found afterward appear as dashboard notices.
 Mjolnir does not start a session automatically.

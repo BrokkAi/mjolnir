@@ -188,17 +188,24 @@ fn write_worker_exit_record_with_refusal(root: &Path, reason: &str, refusal: Opt
     if !root.is_dir() {
         return;
     }
-    if let Err(error) = mj_worker::exit_record::write(root, reason, refusal) {
-        eprintln!("Mjolnir: could not write worker exit record: {error:#}");
+    if let Err(error) = mj_worker::exit_record::write_with_recent_log(
+        root,
+        reason,
+        refusal,
+        &mj_core::logging::stderr_writer().recent_log(),
+    ) {
+        mj_core::diagnostic_stderr!("Mjolnir: could not write worker exit record: {error:#}");
     }
 }
 
 fn install_worker_last_words(root: &Path) {
     let root = root.to_path_buf();
-    let default_hook = std::panic::take_hook();
+    // Do not chain the default hook: stderr is a disk-backed worker log.
+    let _ = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        write_worker_exit_record(&root, &format!("panic: {info}"));
-        default_hook(info);
+        let reason = format!("panic: {}", mj_core::logging::panic_message(info));
+        mj_core::diagnostic_stderr!("{reason}");
+        write_worker_exit_record(&root, &reason);
     }));
 }
 
@@ -222,7 +229,7 @@ fn install_stderr_logging() -> Result<()> {
     tracing_subscriber::fmt()
         .with_ansi(false)
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(mj_core::logging::stderr_writer)
         .try_init()
         .map_err(|error| anyhow::anyhow!("install Mjolnir stderr subscriber: {error}"))?;
     if let Some(error) = filter_error {
@@ -386,12 +393,16 @@ fn main() -> Result<()> {
         // output, which carries nothing else now, because standard error also
         // carries this process's log. It goes to standard error as well for a
         // daemon that predates reading it from standard output.
-        println!("{refusal}");
+        mj_core::diagnostic_stdout!("{refusal}");
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        eprintln!("{refusal}");
+        mj_core::diagnostic_stderr!("{refusal}");
         std::process::exit(EXPORT_REFUSED_EXIT_CODE);
     }
     if let Err(error) = &result {
+        tracing::error!(
+            error = format!("{error:#}"),
+            "Mjolnir worker exited with an error"
+        );
         if let Some(root) = &exit_root {
             let refusal = mj_core::refusal::Refusal::of(error);
             write_worker_exit_record_with_refusal(
@@ -400,10 +411,11 @@ fn main() -> Result<()> {
                 refusal.as_ref().map(mj_core::refusal::Refusal::message),
             );
         }
-        tracing::error!(
-            error = format!("{error:#}"),
-            "Mjolnir worker exited with an error"
-        );
+    }
+    if result.is_ok()
+        && let Some(root) = &exit_root
+    {
+        write_worker_exit_record(root, "worker stopped");
     }
     result
 }
@@ -618,6 +630,86 @@ mod tests {
                 command: WorkerCommand::MemoryMcp { history_socket: Some(socket), .. }
             }) if socket == Path::new("/worker/control.sock")
         ));
+    }
+
+    // Hard-won: d7ca109e4: a panic hook writing to a full stderr must preserve the reserved record without aborting.
+    // /dev/full exists only on Linux; macOS has no equivalent full device, so this
+    // real-disk worker check is scoped to Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn full_stderr_keeps_worker_diagnostics_alive_and_panic_records_the_tail() {
+        const CHILD_ROOT: &str = "MJ_TEST_FULL_STDERR_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            use std::io::Write;
+            use std::os::fd::AsRawFd;
+            let full = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap();
+            // SAFETY: this isolated child owns stderr, and the descriptor is open.
+            assert!(unsafe { libc::dup2(full.as_raw_fd(), libc::STDERR_FILENO) } >= 0);
+            assert_eq!(
+                std::io::stderr()
+                    .write_all(b"ENOSPC probe\n")
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::ENOSPC)
+            );
+            install_worker_last_words(&root);
+            install_stderr_logging().unwrap();
+            mj_worker::exit_record::reserve(&root).unwrap();
+            for index in 0..1000 {
+                mj_core::diagnostic_stderr!("startup diagnostic {index}");
+                tracing::warn!(index, "still running with full stderr");
+            }
+            assert_eq!(
+                mj_core::logging::stderr_writer()
+                    .dropped_lines()
+                    .unwrap()
+                    .count,
+                2000
+            );
+            assert!(
+                mj_core::logging::stderr_writer()
+                    .recent_log()
+                    .concat()
+                    .contains("still running with full stderr")
+            );
+            std::fs::write(root.join("survived"), "alive").unwrap();
+            let result = std::panic::catch_unwind(|| panic!("intentional full-stderr panic"));
+            assert!(result.is_err());
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "tests::full_stderr_keeps_worker_diagnostics_alive_and_panic_records_the_tail",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, root.path())
+            .env("MJ_DATA_DIR", root.path().join("data"))
+            .env("RUST_BACKTRACE", "1");
+        let output = mj_core::subprocess::run_capturing_stdout(&mut command).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(root.path().join("survived").exists());
+        let bytes = std::fs::read(root.path().join(mj_core::relay::WORKER_EXIT_FILE)).unwrap();
+        assert_eq!(
+            bytes.len(),
+            mj_worker::exit_record::RESERVED_EXIT_RECORD_BYTES
+        );
+        let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            record["reason"]
+                .as_str()
+                .unwrap()
+                .contains("intentional full-stderr panic")
+        );
+        let tail = record["recent_log"].to_string();
+        let diagnostics = format!("{}{tail}", record["reason"].as_str().unwrap());
+        assert!(diagnostics.contains("mj_core::logging::panic_message"));
     }
 
     /// A precondition failure leaves its reason on the process, not a generic

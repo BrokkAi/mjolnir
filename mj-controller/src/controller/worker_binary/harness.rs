@@ -260,5 +260,55 @@ pub(in crate::controller) fn stage_profile(
         }
         Ok(())
     })?;
+    // `codex app-server` refuses `--profile`, so a Codex profile overlay
+    // reaches the session already layered into the staged `config.toml`.
+    if profile.codex_profile.is_some()
+        && let Some(config) = profile.codex_config()?
+    {
+        std::fs::write(destination.join("config.toml"), config).with_context(|| {
+            format!(
+                "stage Codex configuration {}",
+                profile.describe_codex_config()
+            )
+        })?;
+    }
+    // `muse serve` never fetches its model list: it reads the list the
+    // person's own `muse` last saved in its data directory, and without one
+    // offers only its built-in model. A staged home starts with empty data, so
+    // it gets that saved list.
+    if harness == mj_core::config::HarnessKind::Muse {
+        let catalog = muse_data_dir(source).join("model-catalog");
+        if catalog.exists() {
+            copy_profile_entry(&catalog, &destination.join(".data/muse/model-catalog"))?;
+        }
+    }
     Ok(())
+}
+
+/// Where Muse keeps its data for the configured home `home`. The person's own
+/// home (`$XDG_CONFIG_HOME/muse` or `~/.config/muse`) pairs with Muse's own
+/// data directory, `$XDG_DATA_HOME/muse` or `~/.local/share/muse`; any other
+/// home is one Mjolnir runs Muse against with its data under `<home>/.data`.
+fn muse_data_dir(home: &Path) -> PathBuf {
+    let kind = mj_core::config::HarnessKind::Muse;
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let user_home = dirs::home_dir();
+    let own_home = absolute("XDG_CONFIG_HOME")
+        .map(|config| kind.home_from_environment(config))
+        .or_else(|| {
+            user_home
+                .as_ref()
+                .map(|user| user.join(kind.default_home_leaf()))
+        });
+    if own_home.as_deref() != Some(home) {
+        return home.join(".data").join(kind.id());
+    }
+    absolute("XDG_DATA_HOME")
+        .or_else(|| user_home.map(|user| user.join(".local/share")))
+        .unwrap_or_else(|| home.join(".data"))
+        .join(kind.id())
 }

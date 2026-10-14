@@ -354,6 +354,7 @@ mod delegation_replay_tests {
                 environment: Default::default(),
                 context_window_bytes: None,
                 guardian_review_model: None,
+                codex_profile: None,
                 legacy_subagents: None,
             },
         );
@@ -364,7 +365,10 @@ mod delegation_replay_tests {
             &workspace.id,
             mj_core::state::SessionState::Running,
         );
-        legacy.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir);
+        legacy.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        });
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
         let request = mj_client::daemon::CreateSessionRequest {
@@ -372,7 +376,10 @@ mod delegation_replay_tests {
             at: None,
             branch: None,
             base: None,
-            subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+            subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            }),
             review: None,
             no_project_memory: false,
             no_mailbox: false,
@@ -392,10 +399,8 @@ mod delegation_replay_tests {
             .await
             .expect_err("a refusal");
         let refusal = mj_core::refusal::Refusal::of(&error).expect("a request refusal");
-        assert!(
-            refusal.message().contains("[subagents.straightforward]")
-                && refusal.message().contains("[subagents.subtle]")
-        );
+        assert!(refusal.message().contains("[subagents.straightforward]"));
+        assert!(refusal.message().contains("--subagent-straightforward"));
         assert_eq!(
             refusal.code(),
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)

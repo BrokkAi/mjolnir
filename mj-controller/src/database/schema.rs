@@ -6,7 +6,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
-    minimum_compatible: Option<i64>,
+    pub(super) minimum_compatible: Option<i64>,
 }
 
 impl SchemaState {
@@ -14,7 +14,7 @@ impl SchemaState {
         self.ensure_supported_by(SCHEMA_VERSION)
     }
 
-    fn ensure_supported_by(&self, supported: i64) -> Result<()> {
+    pub(super) fn ensure_supported_by(&self, supported: i64) -> Result<()> {
         let reason = if self.revision < supported {
             StoreSchemaMismatchReason::NeedsMigration
         } else if let Some(minimum_compatible) = self.minimum_compatible {
@@ -1468,6 +1468,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older readers reject semantic turn kinds, and older writers
+    // discard the exact raw outcome retained beside the semantic projection.
+    if version < 82 {
+        migrate_turn_outcome_schema(connection)?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1682,6 +1688,19 @@ fn migrate_startup_cleanup_state(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn migrate_turn_outcome_schema(connection: &Connection) -> Result<()> {
+    let tx = connection.unchecked_transaction()?;
+    super::turn_outcome::migrate_turn_outcomes(&tx)?;
+    tx.execute_batch(
+        "UPDATE schema_compatibility SET minimum_compatible_version = 82 WHERE singleton = 1;
+         INSERT INTO schema_migrations(version, applied_at)
+             VALUES (82, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+         PRAGMA user_version = 82;",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Create an empty store at the baseline revision in one immediate transaction.
 /// The revision is read again under the write lock, so a second process that
 /// raced to create the same store finds it already created.
@@ -1798,7 +1817,7 @@ mod reader_tests {
              INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at,project_directory)
                  VALUES ('kept','Keep my work','codex','codex','local','error','now',X'2F7265706F');
              INSERT INTO materialized_sessions(session_id) VALUES ('kept');
-             INSERT INTO session_turn_usage VALUES ('kept','turn',1,1,'{{\"tokens\":42}}');
+             INSERT INTO session_turn_usage VALUES ('kept','turn',1,1,'{{\"command_id\":\"turn\",\"completed_ordinal\":1,\"completed_at_ms\":100,\"outcome\":{{\"kind\":\"completed\",\"stop_reason\":\"EndTurn\"}}}}');
              INSERT INTO session_provider_cost VALUES ('kept','{{\"amount\":1}}');
              CREATE TRIGGER stop_at_revision BEFORE INSERT ON schema_migrations
                  WHEN NEW.version > {revision}
@@ -1882,7 +1901,7 @@ mod reader_tests {
         let usage: String = writer
             .query_row("SELECT body FROM session_turn_usage", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(usage, r#"{"tokens":42}"#);
+        assert_eq!(deserialize_turn_outcome(&usage).unwrap().command_id, "turn");
         let cost: String = writer
             .query_row("SELECT body FROM session_provider_cost", [], |row| {
                 row.get(0)
@@ -2276,7 +2295,7 @@ mod reader_tests {
         connection
             .execute_batch(
                 "ROLLBACK; DROP TRIGGER stop_before_accounting;
-            INSERT INTO session_turn_usage VALUES ('old-session','turn',7,1,'{}');
+            INSERT INTO session_turn_usage VALUES ('old-session','turn',7,1,'{\"command_id\":\"turn\",\"completed_ordinal\":7,\"completed_at_ms\":100,\"outcome\":{\"kind\":\"completed\",\"stop_reason\":\"EndTurn\"}}');
             INSERT INTO session_provider_cost VALUES ('old-session','{\"amount\":1}');",
             )
             .unwrap();
@@ -2294,13 +2313,10 @@ mod reader_tests {
                 1
             );
         }
-        assert_eq!(
-            writer
-                .query_row("SELECT body FROM session_turn_usage", [], |row| row
-                    .get::<_, String>(0))
-                .unwrap(),
-            "{}"
-        );
+        let body: String = writer
+            .query_row("SELECT body FROM session_turn_usage", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(deserialize_turn_outcome(&body).unwrap().command_id, "turn");
         assert!(
             !writer
                 .prepare("PRAGMA foreign_key_check")
@@ -2315,8 +2331,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 79 preserves native cache placement.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 81;
+    /// `SCHEMA_VERSION`. Migration 82 retains raw turns beside semantic outcomes.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 82;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -2396,7 +2412,10 @@ mod reader_tests {
         let state = load_state_from(&path).unwrap();
         assert_eq!(
             state.sessions["all"].subagents,
-            Some(SubagentPolicy::Mjolnir)
+            Some(SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None
+            })
         );
         assert_eq!(
             state.sessions["native"].subagents,

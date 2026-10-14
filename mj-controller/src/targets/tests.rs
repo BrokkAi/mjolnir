@@ -2871,6 +2871,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let worker_root = format!("/var/lib/hel/workers/{SESSION}");
     let local = TargetLocator::LocalBare {
@@ -2948,6 +2949,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let local = TargetLocator::LocalBare {
         worker_root: format!("/var/lib/hel/workers/{SESSION}"),

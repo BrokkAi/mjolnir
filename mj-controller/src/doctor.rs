@@ -368,8 +368,13 @@ fn harness_discovery_check_from(
             } else {
                 "not authenticated"
             };
+            let overlay = home
+                .codex_profile
+                .as_deref()
+                .map(|name| format!(" with Codex profile {name}"))
+                .unwrap_or_default();
             format!(
-                "{} at {} ({authentication})",
+                "{} at {}{overlay} ({authentication})",
                 home.kind.display_name(),
                 home.path.display()
             )

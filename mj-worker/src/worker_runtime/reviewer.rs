@@ -36,7 +36,7 @@ use crate::relay::{
     RelayRequest, RelayRequestEnvelope, RelayResponseBody, RelayResponseEnvelope,
     RelayResponsePayload, ReviewerAdmission,
 };
-use mj_core::config::HarnessKind;
+use mj_core::config::{HarnessKind, harness_authentication_marker};
 use mj_core::worker_launch::HarnessRuntimePolicy;
 
 /// How long a reviewer may take to open its native session and advertise its
@@ -1143,8 +1143,13 @@ impl ReviewerRole {
             let staging = tempfile::Builder::new()
                 .prefix(".reviewer-profile-")
                 .tempdir_in(parent)?;
-            copy_tree(&source, &harness.home_from_environment(staging.path()))
-                .with_context(|| format!("stage the reviewer profile for {}", home.display()))?;
+            let login = harness_authentication_marker(harness, &source);
+            copy_tree(
+                &source,
+                &harness.home_from_environment(staging.path()),
+                &login,
+            )
+            .with_context(|| format!("stage the reviewer profile for {}", home.display()))?;
             if root.exists() {
                 std::fs::remove_dir_all(&root)
                     .with_context(|| format!("clear the reviewer role home {}", root.display()))?;
@@ -1414,7 +1419,12 @@ fn archive_relay(root: &std::path::Path, identity: &str) -> Result<()> {
 }
 
 /// Recursively copies a staged profile into the reviewer's private home.
-fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+///
+/// `login` is the staged login file. On this machine the controller stages it
+/// as a link to the profile's own login, which the reviewer's harness has to
+/// share rather than copy (see `HarnessKind::shares_local_login`), so that one
+/// link is kept as a link.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path, login: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("create {}", to.display()))?;
     for entry in std::fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
         let entry = entry?;
@@ -1422,14 +1432,19 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
         let destination = to.join(entry.file_name());
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            copy_tree(&source, &destination)?;
+            copy_tree(&source, &destination, login)?;
+        } else if metadata.is_symlink() && source == login {
+            let target = std::fs::read_link(&source)?;
+            std::os::unix::fs::symlink(&target, &destination).with_context(|| {
+                format!("link {} to {}", destination.display(), target.display())
+            })?;
         } else if metadata.is_symlink() {
             // A staged profile's symlink is copied as its target's content:
             // the role's home must not point back at a directory another role
             // owns.
             let resolved = std::fs::canonicalize(&source)?;
             if resolved.is_dir() {
-                copy_tree(&resolved, &destination)?;
+                copy_tree(&resolved, &destination, login)?;
             } else {
                 std::fs::copy(&resolved, &destination)?;
             }

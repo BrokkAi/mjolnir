@@ -836,7 +836,10 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         launch_branch: None,
         checkout: None,
         publication: None,
-        subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir),
+        subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        }),
         create_managed_worktree: None,
         container_workspace: None,
         build_cache: None,
@@ -1782,7 +1785,7 @@ fn a_child_is_done_only_when_its_newest_prompt_is_answered_and_says_how_it_faile
         |awaited: Option<u64>, answered: Option<u64>, failed: Option<(&'static str, &str)>| {
             ChildProgress {
                 finished_span: None,
-                last_completed_ordinal: None,
+                last_completed_ordinal: answered.map(|ordinal| ordinal + 1),
                 report: ReportState::Fallback,
                 awaited_ordinal: awaited,
                 answered_ordinal: answered,
@@ -1852,7 +1855,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
     };
     let progress = ChildProgress {
         finished_span: None,
-        last_completed_ordinal: None,
+        last_completed_ordinal: Some(21),
         report: ReportState::Fallback,
         awaited_ordinal: Some(20),
         answered_ordinal: Some(20),
@@ -1912,6 +1915,7 @@ async fn spawn_refuses_a_profile_whose_login_is_known_to_be_refused() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
     let mut rejected = mj_core::credentials::RejectedLogins::default();
     rejected.observe(
@@ -4465,6 +4469,196 @@ async fn wait_blocks_until_any_child_finishes_and_hides_other_output() {
         .unwrap();
     assert_eq!(child_one["output"], serde_json::Value::Null, "{child_one}");
     assert_eq!(child_two["output"], "child two report", "{child_two}");
+}
+
+// Hard-won: 039633bb6: an in-flight wait collected a newly registered child before startup.
+#[tokio::test]
+async fn wait_keeps_a_child_spawned_during_the_wait_unfinished_until_its_first_answer() {
+    if !isolated_parked_test(
+        "wait_keeps_a_child_spawned_during_the_wait_unfinished_until_its_first_answer",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
+    conversation.execution = MaterializedExecutionState::Running { started_at_ms: 1 };
+    conversation.applied_event_ordinal = 2;
+    conversation.applied_event_digest = format!("{:064x}", 2);
+    crate::database::save_materialized_session(&conversation).unwrap();
+    let exports = ParkingExports::new(SessionState::Running, None);
+    let (backend, _delivered) = parking_backend(exports.clone(), &[], Arc::new(|| {}));
+    let mut waiting = {
+        let backend = backend.clone();
+        tokio::spawn(async move { durable_wait(&backend, "wait-before-spawn").await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "the parent is already waiting on its running child"
+    );
+
+    // Registration publishes an idle projection before the startup group or
+    // accepted prompt exists. An in-flight wait discovers this child too.
+    let mut child = parent_record("child-2", "helper");
+    child.state = SessionState::Provisioning;
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .insert(child.id.clone(), child);
+    add_child_relation("child-2");
+    crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
+        "child-2",
+    ))
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err(),
+        "registration must not complete the wait before the child's first prompt"
+    );
+    record_finished_child("child-1", "task-1", "first child report", 3, 9, 7);
+    let answer = tokio::time::timeout(Duration::from_secs(2), waiting)
+        .await
+        .expect("the genuine report wakes the wait")
+        .unwrap();
+    let child = answer["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["child_session_id"] == "child-2")
+        .unwrap();
+    assert_eq!(child["state"], "running", "{answer}");
+    assert_eq!(child["finished"], false, "{answer}");
+    assert!(
+        crate::database::load_subagent("child-2")
+            .unwrap()
+            .unwrap()
+            .reported_finish
+            .is_none()
+    );
+
+    // Launching and accepted-but-not-yet-answered must also stay unfinished.
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-2")
+        .unwrap()
+        .state = SessionState::Running;
+    let (_, children) = backend.wait_children("parent-1").await.unwrap();
+    assert!(
+        !children
+            .iter()
+            .find(|child| child.relation.child_session_id == "child-2")
+            .unwrap()
+            .finished
+    );
+    crate::database::record_subagent_prompt("child-2", 12).unwrap();
+    let (_, children) = backend.wait_children("parent-1").await.unwrap();
+    assert!(
+        !children
+            .iter()
+            .find(|child| child.relation.child_session_id == "child-2")
+            .unwrap()
+            .finished
+    );
+    // A persisted false finish from an older daemon must not suppress the
+    // child's eventual real answer. Seed exactly the old terminal identity.
+    let request = mj_core::subagent::SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "old-false-wait".into(),
+        created_at_ms: 1,
+        action: mj_core::subagent::SubagentToolAction::WaitAgents,
+    };
+    crate::database::prepare_delegation(
+        "parent-1".into(),
+        crate::database::PreparedDelegation {
+            request: request.clone(),
+            turn_target: None,
+            spawn: None,
+        },
+    )
+    .unwrap();
+    crate::database::record_delegation_result_with_reports(
+        "parent-1".into(),
+        crate::database::StoredDelegationResult {
+            result: mj_core::subagent::SubagentToolResult {
+                request_id: request.request_id,
+                completed_at_ms: 1,
+                is_error: false,
+                message: "{}".into(),
+            },
+            reported_finishes: vec![(
+                "child-2".into(),
+                mj_core::subagent::SubagentFinishIdentity::Terminal {
+                    state: "completed".into(),
+                    detail: None,
+                    last_completed_ordinal: None,
+                },
+            )],
+        },
+    )
+    .unwrap();
+    record_finished_child("child-2", "task-2", "real second report", 13, 19, 12);
+    let answer = durable_wait(&backend, "wait-after-first-answer").await;
+    let child = answer["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["child_session_id"] == "child-2")
+        .unwrap();
+    assert_eq!(child["output"], "real second report", "{answer}");
+    assert_eq!(child["finished"], true, "{answer}");
+
+    // A genuine startup failure still ends the wait without any first turn.
+    let mut failed = parent_record("child-3", "helper");
+    failed.state = SessionState::Error;
+    failed.last_error = Some("worker launch failed: no space left on device".into());
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .insert(failed.id.clone(), failed);
+    add_child_relation("child-3");
+    let answer = tokio::time::timeout(
+        Duration::from_secs(2),
+        durable_wait(&backend, "wait-startup-error"),
+    )
+    .await
+    .expect("startup failure must not hang wait");
+    let child = answer["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["child_session_id"] == "child-3")
+        .unwrap();
+    assert_eq!(child["state"], "error", "{answer}");
+    assert_eq!(child["finished"], true, "{answer}");
+    assert_eq!(
+        child["output"], "worker launch failed: no space left on device",
+        "{answer}"
+    );
+    exports
+        .records
+        .lock()
+        .unwrap()
+        .get_mut("child-3")
+        .unwrap()
+        .state = SessionState::Stopped;
+    let answer = tokio::time::timeout(
+        Duration::from_secs(2),
+        durable_wait(&backend, "wait-closed-before-first-turn"),
+    )
+    .await
+    .expect("closed children must not hang wait");
+    assert_eq!(
+        answer["status"],
+        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR,
+        "{answer}"
+    );
 }
 
 /// A wait with no child to watch answers immediately, and the reminder turn

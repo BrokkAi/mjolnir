@@ -19,6 +19,7 @@ fn an_api_key_codex_profile_is_authenticated_by_its_configuration_file() {
         context_window_bytes: None,
         legacy_subagents: Default::default(),
         guardian_review_model: None,
+        codex_profile: None,
     };
 
     assert!(
@@ -124,6 +125,9 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
     fs::create_dir_all(&grok).unwrap();
     fs::create_dir_all(&claude).unwrap();
     fs::write(codex.join("auth.json"), "{}").unwrap();
+    fs::write(codex.join("ds.config.toml"), "model = \"deepseek-v5\"\n").unwrap();
+    // `codex --profile` refuses a name with a dot, so this is not an overlay.
+    fs::write(codex.join("a.b.config.toml"), "").unwrap();
     fs::write(kimi.join("credentials/kimi-code.json"), "{}").unwrap();
     fs::write(grok.join("auth.json"), "{}").unwrap();
     fs::write(claude.join(".credentials.json"), "{}").unwrap();
@@ -135,9 +139,14 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
         &executor,
     );
 
-    assert_eq!(homes.len(), 4);
+    assert_eq!(homes.len(), 5);
     assert!(homes.iter().all(|home| home.authenticated));
-    assert!(homes.iter().any(|home| home.path == codex));
+    let codex_profiles = homes
+        .iter()
+        .filter(|home| home.path == codex)
+        .map(|home| home.codex_profile.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(codex_profiles, [None, Some("ds")]);
     assert!(homes.iter().any(|home| home.path == claude));
     assert!(homes.iter().any(|home| home.path == kimi));
     assert!(
@@ -165,6 +174,7 @@ fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {
         vec![DiscoveredHome {
             kind: HarnessKind::Claude,
             path: claude.clone(),
+            codex_profile: None,
             authenticated: true,
         }]
     );
@@ -210,6 +220,7 @@ fn claude_status_checks_a_custom_home_without_a_marker() {
         vec![DiscoveredHome {
             kind: HarnessKind::Claude,
             path: claude.clone(),
+            codex_profile: None,
             authenticated: true,
         }]
     );

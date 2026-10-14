@@ -3,8 +3,12 @@ use anyhow::{Context, Result, ensure};
 use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions};
 use std::time::Duration;
 
+/// The Unix worker is the only production caller of the classifier client;
+/// these items stay compiled on Windows alongside the shared source type.
+#[cfg_attr(not(unix), allow(dead_code))]
 const HOSTED_VERDICT_ENDPOINT: &str =
     "https://mj-jev-proxy.eng-admin-a63.workers.dev/v7/turn-verdict";
+#[cfg_attr(not(unix), allow(dead_code))]
 const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 #[derive(Clone)]
@@ -20,6 +24,7 @@ pub enum VerdictSource {
 }
 
 impl VerdictSource {
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn for_key(key: Option<String>) -> Self {
         match key {
             Some(key) => Self::Direct {
@@ -46,6 +51,7 @@ impl std::fmt::Debug for VerdictSource {
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct VerdictClient {
     source: VerdictSource,
     client: reqwest::Client,
@@ -53,6 +59,7 @@ pub(crate) struct VerdictClient {
 }
 
 /// Kept alive through application so cancellation has a terminal log event too.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct VerdictAttempt {
     pub(crate) diagnostic: Option<mj_core::jev::Attempt>,
     decision: Option<mj_core::activity::verdict::Decision>,
@@ -66,6 +73,7 @@ pub(crate) struct VerdictAttempt {
     dispatch: tracing::Dispatch,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictAttempt {
     pub(crate) fn finish(&mut self, outcome: &str, reason: &str) {
         tracing::dispatcher::with_default(&self.dispatch, || {
@@ -157,6 +165,7 @@ impl Drop for VerdictAttempt {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
     pub(crate) async fn resolve(source: Option<&VerdictSource>) -> Option<Self> {
         let source = source.cloned();

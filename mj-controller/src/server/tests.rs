@@ -94,6 +94,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 context_window_bytes: None,
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
+                codex_profile: None,
                 kind: HarnessKind::Codex,
                 home: "/highly/secret/codex".into(),
                 environment: BTreeMap::from([("GH_TOKEN".into(), "secret-token".into())]).into(),
@@ -2668,6 +2669,7 @@ async fn action_validation_accepts_cross_harness_resume_and_rejects_unknown() {
             context_window_bytes: None,
             legacy_subagents: Default::default(),
             guardian_review_model: None,
+            codex_profile: None,
             kind: HarnessKind::Claude,
             home: "/secret/claude".into(),
             environment: Default::default(),
@@ -4387,7 +4389,7 @@ assert(moveSubagentChange(draft).mode === "mjolnir", "an explicit session edit i
 draft.subagents = structuredClone(draft.storedSubagents);
 draft.profileId = "kimi";
 assert(moveSubagentChange(draft) === null, "a native destination keeps an already native policy");
-draft.storedSubagents = { mode: "mjolnir" };
+draft.storedSubagents = { mode: "mjolnir", straightforward: { model: "gpt-6-sol", effort: "high" }, subtle: { model: "gpt-6-luna" } };
 draft.subagents = structuredClone(draft.storedSubagents);
 assert(moveSubagentChange(draft) === null, "a different destination preserves untouched legacy policy");
 assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its task is counted; a parked one has handed back");

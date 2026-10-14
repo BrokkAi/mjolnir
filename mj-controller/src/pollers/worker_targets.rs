@@ -69,7 +69,9 @@ pub fn dashboard_worker_targets_excluding(
 /// local session an earlier release started from the profile home itself. Its
 /// worker still reads that home, so a push would replace the person's own
 /// skills tree; it is left out until it is next staged (see
-/// [`crate::controller::local_profile_homes`]).
+/// [`crate::controller::local_profile_homes`]). A local session whose login
+/// file links to the profile's own keeps its skills sync but skips the login
+/// file, which is already the profile's.
 pub fn credential_sync_targets(controller: &Controller) -> Vec<CredentialSyncTarget> {
     let schemes = controller
         .config
@@ -131,7 +133,11 @@ pub(crate) fn credential_sync_targets_from_sources(
                 profile_id: session.last_profile.clone(),
                 harness: profile.kind,
                 profile_home: profile.home.clone(),
-                skips_login_file_sync: *schemes.get(&session.last_profile)?,
+                skips_login_file_sync: *schemes.get(&session.last_profile)?
+                    || crate::controller::local_profile_homes::session_shares_profile_login(
+                        session,
+                        profile.kind,
+                    ),
                 sync_github_token,
                 github_app_configured: controller.config.github.app.is_some(),
                 skills_scope: session.target.as_ref()?.skills_scope(),

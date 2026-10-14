@@ -34,7 +34,7 @@ pub(super) fn defaults(path: &[String], value: &Value) -> Value {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -257,6 +257,7 @@ pub(super) fn label(key: &str) -> String {
         "environment" => "Environment variables",
         "context_window_bytes" => "Context budget (bytes)",
         "guardian_review_model" => "Guardian review model",
+        "codex_profile" => "Codex profile",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
         "tls_cert" => "TLS certificate file",
@@ -384,6 +385,7 @@ pub(super) fn null_label(path: &[String], draft: &Value) -> String {
         ["profiles", _, "guardian_review_model"] => {
             mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
         }
+        ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
         // Review needs a named reviewer profile; there is no fallback to a
         // first enabled profile (`ReviewConfig::reviewer_profile`).
         ["review", "profile"] => "Auto — choose by provider and quota".to_owned(),
@@ -845,6 +847,9 @@ pub(super) fn help(path: &[String]) -> &'static str {
         }
         "guardian_review_model" => {
             "Codex with a custom provider: newest-flash, session (the session's model), or a model name. Blank: newest-flash."
+        }
+        "codex_profile" => {
+            "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
         }
         // The first page has no parent setting to describe, so it says what
         // the whole screen does instead.

@@ -2201,7 +2201,10 @@ async fn subagent_model_selection_stays_within_eligible_profiles() {
     let selection = crate::server::api::resolve_subagent_policy_selection(
         &backend,
         "codex-1",
-        &mj_core::subagent::SubagentPolicy::Mjolnir,
+        &mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        },
         mj_core::subagent::SubagentTaskType::Straightforward,
     )
     .await
@@ -4353,7 +4356,10 @@ async fn a_spawn_waits_for_its_child_to_appear_instead_of_reporting_it_unknown()
     let (app, _actions, snapshot_tx, _bundles) =
         api_app(Arc::new(FakeBackend::default()), |snapshot| {
             snapshot.sessions[0].harness_kind = "codex".to_owned();
-            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::Mjolnir;
+            snapshot.sessions[0].subagents = mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            };
         });
     let parent = {
         let snapshot = snapshot_tx.borrow();

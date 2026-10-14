@@ -2087,6 +2087,46 @@ fn materialized_summary_loads_messages_without_deserializing_full_history() {
 }
 
 #[test]
+fn bulk_materialized_activity_matches_session_summaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    for session_id in ["running", "idle", "without-projection"] {
+        save_session_to(&database, &session(session_id, "project-1")).unwrap();
+    }
+    open(&database)
+        .unwrap()
+        .execute(
+            "DELETE FROM materialized_sessions WHERE session_id = 'without-projection'",
+            [],
+        )
+        .unwrap();
+
+    let mut running = materialized_session("running");
+    running.last_activity_at_ms = Some(2_000);
+    running.execution = MaterializedExecutionState::Running {
+        started_at_ms: 1_900,
+    };
+    save_materialized_session_to(&database, &running).unwrap();
+
+    let mut idle = materialized_session("idle");
+    idle.last_activity_at_ms = Some(3_000);
+    idle.execution = MaterializedExecutionState::Idle;
+    save_materialized_session_to(&database, &idle).unwrap();
+
+    let activity = load_materialized_activity_from(&database).unwrap();
+    for session_id in ["running", "idle"] {
+        let summary = load_materialized_session_summary_from(&database, session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            activity.get(session_id),
+            Some(&(summary.last_activity_at_ms, summary.execution))
+        );
+    }
+    assert!(!activity.contains_key("without-projection"));
+}
+
+#[test]
 fn queued_prompt_loader_does_not_deserialize_transcript_history() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -6327,7 +6367,13 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mj.sqlite3");
     let mut parent = session("fixed-parent", "project");
-    let fixed = SubagentPolicy::Mjolnir;
+    let fixed = SubagentPolicy::Mjolnir {
+        straightforward: Some(Box::new(mj_core::config::SubagentChoice {
+            model: "gpt-6-luna".into(),
+            effort: Some("max".into()),
+        })),
+        subtle: None,
+    };
     parent.subagents = Some(fixed.clone());
     save_new_session_to(&path, &parent, None).unwrap();
     let state = load_state_from(&path).unwrap();
@@ -6352,16 +6398,34 @@ fn accepted_session_policy_survives_reopen_and_only_creation_changes_the_default
     );
     let connection = open(&path).unwrap();
     for (json, expected) in [
-        (r#"{"mode":"all_models"}"#, SubagentPolicy::Mjolnir),
+        (
+            r#"{"mode":"all_models"}"#,
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
         (
             r#"{"mode":"single_model","model":"old","effort":"high"}"#,
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
         ),
         (
             r#"{"mode":"single_model","model":"old","effort":"adaptive"}"#,
-            SubagentPolicy::Mjolnir,
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
         ),
-        ("true", SubagentPolicy::Mjolnir),
+        (
+            "true",
+            SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        ),
         ("false", SubagentPolicy::Native),
     ] {
         connection
