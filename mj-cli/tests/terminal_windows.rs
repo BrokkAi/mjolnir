@@ -20,7 +20,8 @@ use pty_screen::{PTY_COLUMNS, PTY_ROWS, PtyOutput};
 
 /// Empty-session text that appears after the combined dashboard is ready.
 const READY_MARKER: &str = "No live session";
-const REATTACH_MESSAGE: &str = "Active sessions will continue working";
+const REATTACH_MESSAGE: &str =
+    "Active sessions will continue working; Mjolnir will reattach to them on your next invocation.";
 // Startup includes the daemon's first initialization of the store.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -90,10 +91,14 @@ impl Terminal {
                 .expect("answer a terminal query");
         }
     }
+}
 
-    fn visible(&self, text: &str) -> bool {
-        self.output.screen.contents().contains(text)
-    }
+/// Whether the screen shows `text`, including where it wraps. Rows are the
+/// terminal's full width, so wrapped text continues straight into the next
+/// row; padding and line breaks are compared as single spaces.
+fn shows(output: &PtyOutput, text: &str) -> bool {
+    let flatten = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    flatten(&output.screen.contents().replace('\n', "")).contains(&flatten(text))
 }
 
 #[test]
@@ -134,22 +139,15 @@ fn dashboard_starts_its_daemon_renders_and_quits_under_conpty() {
     command.env("MJ_DATA_DIR", &data_directory);
     command.env("MJ_DAEMON_EXIT_WHEN_IDLE", "1");
     command.env("MJOLNIR_NO_UPDATE_CHECK", "1");
-    // Profile discovery reads agent homes and commands, so the dashboard
-    // must see neither the host's homes nor its installed agents.
-    for home in ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
-        command.env(home, storage.path());
+    let isolation = common::AgentIsolation::under(storage.path());
+    for (name, value) in &isolation.set {
+        command.env(name, value);
     }
-    command.env("CODEX_HOME", storage.path().join(".codex"));
-    command.env("CLAUDE_CONFIG_DIR", storage.path().join(".claude"));
+    for name in isolation.remove {
+        command.env_remove(name);
+    }
     let system_root = std::env::var_os("SystemRoot").expect("SystemRoot is set on Windows");
     command.env("PATH", std::path::Path::new(&system_root).join("System32"));
-    for variable in ["MJ_BIFROST_BIN", "KIMI_CODE_HOME", "GROK_HOME", "MUSE_HOME"] {
-        command.env_remove(variable);
-    }
-    // Each fixture has a dashboard and daemon. Host-sized pools multiply
-    // into many threads on large CI machines during parallel runs.
-    command.env("TOKIO_WORKER_THREADS", "2");
-    command.env("RAYON_NUM_THREADS", "2");
     let mut child = pty
         .slave
         .spawn_command(command)
@@ -193,7 +191,7 @@ fn dashboard_starts_its_daemon_renders_and_quits_under_conpty() {
                     output.screen.contents()
                 );
             }
-            output.screen.contents().contains(READY_MARKER)
+            shows(output, READY_MARKER)
         },
     );
     assert!(
@@ -217,16 +215,14 @@ fn dashboard_starts_its_daemon_renders_and_quits_under_conpty() {
     );
     let status = status.unwrap();
     assert!(status.success(), "mj exit: {status:?}");
-    // The final message is written before exit; collect what remains, then
-    // close the console so the forwarder sees end of file.
-    while let Ok(chunk) = terminal.chunks.recv_timeout(Duration::from_millis(500)) {
-        terminal.output.extend_from_slice(&chunk);
-    }
-    assert!(
-        terminal.visible(REATTACH_MESSAGE),
-        "missing the reattachment message; screen:\n{}",
-        terminal.output.screen.contents()
+    // ConPTY may relay the final message after the exit is observed.
+    terminal.wait(
+        &mut *child,
+        Instant::now() + TIMEOUT,
+        "the reattachment message",
+        |output, _| shows(output, REATTACH_MESSAGE),
     );
+    // Close the console so the forwarder sees end of file.
     drop(terminal);
     drop(pty.master);
     forwarder

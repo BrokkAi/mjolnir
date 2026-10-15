@@ -598,12 +598,7 @@ image = "ubuntu:24.04"
         "#!/bin/sh\necho 'PTY fixture cannot launch workers' >&2\nexit 1\n",
     );
     let mut command = Command::new(env!("CARGO_BIN_EXE_mj"));
-    command
-        .env("MJ_WORKER_BINARY", worker)
-        // Each fixture has a dashboard and daemon. Host-sized pools multiply
-        // into thousands of threads on large CI machines during parallel runs.
-        .env("TOKIO_WORKER_THREADS", "2")
-        .env("RAYON_NUM_THREADS", "2");
+    command.env("MJ_WORKER_BINARY", worker);
     // Every launch detects agent profiles from HOME and PATH, so no fixture
     // may see the host's own agent homes or installed agent commands.
     let tools = if first_run {
@@ -624,17 +619,8 @@ image = "ubuntu:24.04"
         }
         tools
     };
-    command
-        .env("HOME", storage.path())
-        .env("XDG_CONFIG_HOME", storage.path().join("config"))
-        .env("XDG_DATA_HOME", storage.path().join("data"))
-        .env("PATH", tools)
-        .env("CODEX_HOME", storage.path().join(".codex"))
-        .env("CLAUDE_CONFIG_DIR", storage.path().join(".claude"))
-        .env_remove("MJ_BIFROST_BIN")
-        .env_remove("KIMI_CODE_HOME")
-        .env_remove("GROK_HOME")
-        .env_remove("MUSE_HOME");
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    command.env("PATH", tools);
     command.args(["--instance", "terminal-regression"]);
     common::own_test_daemons(&mut command);
     if let Some(workspace) = &seeded_workspace {

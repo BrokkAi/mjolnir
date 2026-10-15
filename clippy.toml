@@ -29,5 +29,6 @@ disallowed-methods = [
     # it starts could disagree about the home, and a test could not relocate
     # it away from the user's real agent credentials.
     { path = "dirs::home_dir", reason = "use mj_core::path_input::user_home, the one owner of the user's home directory" },
+    { path = "std::env::home_dir", reason = "use mj_core::path_input::user_home, the one owner of the user's home directory" },
     { path = "tokio::process::Child::wait_with_output", reason = "write-then-wait deadlocks once a pipe buffer fills; use the shared run_with_input helper (or justify with an explicit allow)", allow-invalid = true },
 ]
