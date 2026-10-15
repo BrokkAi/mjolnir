@@ -22,11 +22,7 @@ impl SubagentDraft {
     pub(crate) fn new(policy: SubagentPolicy) -> Self {
         Self {
             last_mjolnir_policy: policy.uses_mjolnir().then(|| Box::new(policy.clone())),
-            policy: if policy.uses_mjolnir() {
-                policy
-            } else {
-                SubagentPolicy::Native
-            },
+            policy,
             ..Self::default()
         }
     }
@@ -62,10 +58,17 @@ impl SubagentDraft {
         } else {
             format!("Mjolnir ({overrides})")
         };
-        vec!["Native".into(), mjolnir]
+        vec!["Native".into(), mjolnir, "None".into()]
     }
     pub(crate) fn policy_index(&self) -> usize {
-        usize::from(self.policy.uses_mjolnir())
+        match self.policy {
+            SubagentPolicy::Native => 0,
+            SubagentPolicy::Mjolnir { .. } => 1,
+            SubagentPolicy::None => 2,
+        }
+    }
+    pub(crate) fn enabled_policies(&self) -> Vec<bool> {
+        vec![true, self.unavailable_reason().is_none(), true]
     }
     pub(crate) fn unavailable_reason(&self) -> Option<&str> {
         self.discovery
@@ -94,17 +97,18 @@ impl SubagentDraft {
         if index == 1 && self.unavailable_reason().is_some() {
             return false;
         }
-        let policy = if index == 1 {
-            self.last_mjolnir_policy
-                .as_deref()
-                .cloned()
-                .unwrap_or(SubagentPolicy::Mjolnir {
-                    straightforward: None,
-                    subtle: None,
-                })
-        } else {
-            SubagentPolicy::Native
-        };
+        let policy =
+            match index {
+                0 => SubagentPolicy::Native,
+                1 => self.last_mjolnir_policy.as_deref().cloned().unwrap_or(
+                    SubagentPolicy::Mjolnir {
+                        straightforward: None,
+                        subtle: None,
+                    },
+                ),
+                2 => SubagentPolicy::None,
+                _ => return false,
+            };
         let changed = self.policy != policy;
         self.chosen_policy = Some(Box::new(policy.clone()));
         if policy.uses_mjolnir() {
@@ -140,10 +144,7 @@ impl SubagentDraft {
             },
             true,
         );
-        form.set_row_enabled(
-            WizardControl::Subagents,
-            vec![true, self.unavailable_reason().is_none()],
-        );
+        form.set_row_enabled(WizardControl::Subagents, self.enabled_policies());
     }
     pub(crate) fn refresh_create(
         &mut self,
@@ -159,10 +160,10 @@ impl SubagentDraft {
             .as_deref()
             .cloned()
             .unwrap_or_else(|| remembered.clone());
-        let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_none() {
-            desired.clone()
-        } else {
+        let policy = if desired.uses_mjolnir() && self.unavailable_reason().is_some() {
             SubagentPolicy::Native
+        } else {
+            desired.clone()
         };
         if self.policy != policy {
             self.policy = policy;
@@ -273,12 +274,7 @@ impl ResumeWizard {
             .session_record(&self.session_id)
             .and_then(|session| session.subagents.clone())
             .unwrap_or_default();
-        let displayed = if stored.uses_mjolnir() {
-            stored
-        } else {
-            SubagentPolicy::Native
-        };
-        (self.subagent_choice_applies(dashboard) && self.subagents.policy != displayed)
+        (self.subagent_choice_applies(dashboard) && self.subagents.policy != stored)
             .then(|| self.subagents.policy.clone())
     }
 }

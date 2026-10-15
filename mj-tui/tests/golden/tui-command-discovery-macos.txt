@@ -1134,34 +1134,34 @@ Ente                                                                            
 ╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages yet                   ││                                                                              │
-│  │                                   ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
-│                                      ││                  Select a session to open its conversation.                  │
-│                                                                                                                      │
-│                                                                                                                      │
-│                  ╭ × New session · 1/4 profile ──────────────────────────────────────────────────╮                   │
-│                  │                                                                               │                   │
-│                  │   PROFILE   HARNESS      WEEKLY      5H                                       │                   │
-│                  │   claude-1  Claude Code  refreshing                                           │                   │
-│                  │   codex-1   Codex        refreshing                                           │                   │
-│                  │   codex-2   Codex        refreshing                                           │                   │
-│                  │                                                                               │                   │
-│                  │   Cancel     Next                                                             │                   │
-│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
-│                                                                                                                      │
-│                                                                                                     ─────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
-│                                      ││No conversation open.                                                         │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
+│› · ACP pretty                                                                                                        │
+│  Idle  podman                                                                                                        │
+│  │ No messages  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│  │              │                                                                                  │                 │
+│                 │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
+│                 │   claude-1  Claude Code  refreshing                                              │                 │
+│                 │   codex-1   Codex        refreshing                                              │                 │
+│                 │   codex-2   Codex        refreshing                                              │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   Cancel     Next                                                                │  ──────── ▁   ▪ ╮
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
+│                                                                                                       ───────────────╯
+│                                                                                                       ──────── ▁   ▪ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │

@@ -146,11 +146,11 @@ fn render_launching(
     title: &str,
     error: Option<&str>,
 ) {
+    let popup = wizard_modal(frame, surfaces, area);
     let lines = wrap_lines(
         [Line::raw(error.unwrap_or("Checking prerequisites…"))],
-        68.min(area.width.saturating_sub(4)),
+        popup.width.saturating_sub(4),
     );
-    let popup = centered_modal(frame, surfaces, 72, (lines.len() as u16 + 6).max(8), area);
     let inner = DialogShell::padded_inner(popup);
     let title = dismissible_modal_title(form, popup, title, theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
@@ -280,7 +280,8 @@ pub(crate) fn render_new_wizard(
             dashboard.config.targets[&target_id],
             TargetTemplate::LocalBare
         );
-        let width = centered_rect(76, 1, area).width.saturating_sub(4);
+        let popup = wizard_modal(frame, surfaces, area);
+        let width = popup.width.saturating_sub(4);
         let intro = wrap_lines(
             [Line::raw(if local {
                 "Absolute project directory on this machine:"
@@ -359,7 +360,6 @@ pub(crate) fn render_new_wizard(
         let height = field_row
             + 1
             + (details.len() as u16).max(PathField::popup_rows(&wizard.project_directory));
-        let popup = centered_modal(frame, surfaces, 76, (height + 5).max(9), area);
         let inner = DialogShell::padded_inner(popup);
         let layout = DialogShell::layout(inner, 1);
         let focused_row = match focused_before_frame {
@@ -953,7 +953,8 @@ pub(crate) fn render_review_wizard(
             lines.pop();
         }
     }
-    let width = centered_rect(84, 1, area).width.saturating_sub(4);
+    let popup = wizard_modal(frame, surfaces, area);
+    let width = popup.width.saturating_sub(4);
     let mut wrapped = Vec::new();
     let mut offsets = Vec::new();
     for line in lines {
@@ -981,7 +982,6 @@ pub(crate) fn render_review_wizard(
     let total_height = summary_height
         .saturating_add(list_height)
         .saturating_add(queue_height);
-    let popup = centered_modal(frame, surfaces, 84, (total_height + 5).clamp(13, 36), area);
     let inner = DialogShell::padded_inner(popup);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);
@@ -1067,7 +1067,7 @@ pub(crate) fn render_review_wizard(
                 form,
                 id,
             );
-            form.set_row_enabled(id, vec![true, wizard.unavailable_reason().is_none()]);
+            form.set_row_enabled(id, wizard.enabled_policies());
             if wizard.combo.is_open(id) {
                 expanded_subagent_combo = Some((id, field, value, options, selected, enabled));
             }
@@ -1397,10 +1397,10 @@ pub(crate) fn render_mount_wizard(
     }
 
     lines.push(Line::raw(""));
-    let lines = wrap_lines(lines, centered_rect(84, 1, area).width.saturating_sub(4));
+    let popup = wizard_modal(frame, surfaces, area);
+    let lines = wrap_lines(lines, popup.width.saturating_sub(4));
     let info_height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let total_height = info_height.saturating_add(5);
-    let popup = centered_modal(frame, surfaces, 84, (total_height + 5).clamp(13, 32), area);
     let inner = DialogShell::padded_inner(popup);
     let title_line = dismissible_modal_title(form, popup, title.trim(), theme::title(true), true);
     frame.render_widget(theme::modal().title(title_line), popup);

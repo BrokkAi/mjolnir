@@ -511,34 +511,34 @@ mode after selecting Hel row: "Resume wizard"
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ☰ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
-│No sessions yet                       ││                                                                              │
-│Create new work or open a session.    ││                                                                              │
-│                                      ││                               ✦  M J O L N I R                               │
-│                                      ││                                                                              │
+╭ Sessions ─────                                                                                                       │
+│ Create   Open                                                                                                        │
+│No sessions yet  ╭ × Resume · 1/3 profile (cross-harness supported) ────────────────────────────────╮                 │
+│Create new work  │                                                                                  │                 │
+│                 │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
+│                 │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)           │                 │
+│                 │   codex-1   Codex        refreshing                                              │                 │
+│                 │   codex-2   Codex        refreshing                                              │                 │
+│                 │                                                                                  │                 │
+│                 │ Same agent: the conversation continues natively.                                 │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ──────── ▁   ▪ ╮
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │   Cancel     Next                                                                │  ──────── ▁   ▪ ╮
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯                 │
 │                                                                                                                      │
 │                                                                                                                      │
-│                  ╭ × Resume · 1/3 profile (cross-harness supported) ─────────────────────────────╮                   │
-│                  │                                                                               │                   │
-│                  │   PROFILE   HARNESS      WEEKLY      5H                                       │                   │
-│                  │   claude-1  Claude Code  refreshing      (lossy: text-only transcript)        │                   │
-│                  │   codex-1   Codex        refreshing                                           │                   │
-│                  │   codex-2   Codex        refreshing                                           │                   │
-│                  │                                                                               │                   │
-│                  │ Same agent: the conversation continues natively.                              │                   │
-│                  │                                                                               │  ─────────────────╯
-│                  │   Cancel     Next                                                             │  ─────────────────╮
-│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
-│                                                                                                                      │
-│                                                                                                     ─────────────────╯
-│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▪ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
-│                                      ││  claude-1  Claude Code  refreshing…                                          │
-│                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · : palette · ? keys

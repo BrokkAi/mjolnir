@@ -466,7 +466,7 @@ pub(super) fn render_project_picker(
     surfaces: &mut FrameSurfaces,
 ) {
     let picker = &wizard.project_picker;
-    let popup = centered_modal(frame, surfaces, 88, 32, area);
+    let popup = wizard_modal(frame, surfaces, area);
     let inner = DialogShell::padded_inner(popup);
     let layout = DialogShell::layout(inner, 1);
     let ready = !wizard.bundle_creation_in_flight;

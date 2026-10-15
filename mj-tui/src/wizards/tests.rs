@@ -561,8 +561,13 @@ fn a_saved_project_with_a_missing_directory_is_marked_unavailable() {
             .any(|line| line.contains("missingpath") && line.contains("(unavailable")),
         "{text}"
     );
+    let joined = lines
+        .iter()
+        .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        text.contains("Unavailable: the directory") && text.contains("does not exist."),
+        joined.contains("Unavailable: the directory") && joined.contains("does not exist."),
         "{text}"
     );
 }
@@ -4353,8 +4358,19 @@ fn the_completion_popup_keeps_off_the_project_steps_button_row() {
         "the button row is whole: {:?}",
         lines[buttons]
     );
+    let title = &lines[row_of(&lines, "New session · 2/3 local project")];
+    let modal_left = title.chars().position(|c| c == '╭').unwrap();
+    let modal_width = title
+        .chars()
+        .skip(modal_left + 1)
+        .position(|c| c == '╮')
+        .unwrap();
     assert!(
-        !lines[buttons].contains('\u{2500}'),
+        !lines[buttons]
+            .chars()
+            .skip(modal_left + 1)
+            .take(modal_width)
+            .any(|c| c == '\u{2500}'),
         "no popup border is drawn through the buttons: {:?}",
         lines[buttons]
     );
@@ -5350,12 +5366,62 @@ fn golden_profile_picker_table() {
     );
 }
 
+fn new_session_wizard_keeps_its_frame_across_steps() {
+    for (width, height) in [(140, 40), (60, 22)] {
+        let mut dashboard = dashboard_with_session(stopped_session());
+        dashboard.begin_new_wizard();
+        let mut frame_bounds = None;
+        for step in [
+            WizardStep::Profile,
+            WizardStep::Target,
+            WizardStep::Bundle,
+            WizardStep::NewBundle,
+            WizardStep::ProjectDirectory,
+            WizardStep::Review,
+            WizardStep::Mounts,
+            WizardStep::Launching,
+        ] {
+            let Mode::New(wizard) = &mut dashboard.mode else {
+                unreachable!()
+            };
+            wizard.step = step;
+            *wizard.form.borrow_mut() = Dialog::new();
+            // Hard-won: ee7ee2012: wizard steps moved and resized the frame around their content.
+            let lines = captured_drawn(&mut dashboard, width, height);
+            let title = match step {
+                WizardStep::NewBundle => "Choose a project",
+                WizardStep::Mounts => "Add attached directory",
+                WizardStep::Launching => "Creating session",
+                _ => "New session",
+            };
+            let top = row_of(&lines, title);
+            let left = lines[top].chars().position(|c| c == '╭').unwrap();
+            let right = lines[top]
+                .chars()
+                .collect::<Vec<_>>()
+                .iter()
+                .rposition(|&c| c == '╮')
+                .unwrap();
+            let bottom = (top + 1..lines.len())
+                .find(|&y| lines[y].chars().nth(left) == Some('╰'))
+                .unwrap();
+            let bounds = (left, top, right - left + 1, bottom - top + 1);
+            assert_eq!(*frame_bounds.get_or_insert(bounds), bounds, "{step:?}");
+            assert!(bounds.2 <= 84 && bounds.3 <= 24);
+        }
+    }
+}
+
 #[test]
 fn golden_wizard_target_step() {
     for (label, run) in [
         (
+            "new_session_wizard_keeps_its_frame_across_steps",
+            new_session_wizard_keeps_its_frame_across_steps as fn(),
+        ),
+        (
             "new_session_skips_the_target_step_when_only_one_target_is_offered",
-            new_session_skips_the_target_step_when_only_one_target_is_offered as fn(),
+            new_session_skips_the_target_step_when_only_one_target_is_offered,
         ),
         (
             "new_session_shows_the_target_step_when_a_second_target_may_be_chosen",
@@ -5494,12 +5560,49 @@ fn golden_create_delegation_availability_and_submission() {
                 SubagentPolicy::Native
             })
         );
+        // None is available even without configured Mjolnir models.
+        let Mode::New(wizard) = &mut dashboard.mode else {
+            unreachable!()
+        };
+        wizard.form.borrow_mut().focus(WizardControl::Subagents);
+        drawn(&mut dashboard, 140, 40);
+        dashboard.handle_key(key(KeyCode::Enter));
+        dashboard.handle_key(key(KeyCode::End));
+        let screen = drawn(&mut dashboard, 140, 40).join("\n");
+        output.push_str(&format!(
+            "=== configured={configured}, selecting None ===\n{screen}\n"
+        ));
+        dashboard.handle_key(key(KeyCode::Enter));
+        dashboard.take_subagent_discovery();
+        let Mode::New(wizard) = &dashboard.mode else {
+            unreachable!()
+        };
+        let action = dashboard.create_session_action_without_closing(wizard);
+        assert!(
+            matches!(
+                &action,
+                DashboardAction::CreateSession {
+                    subagents: Some(SubagentPolicy::None),
+                    ..
+                }
+            ),
+            "{action:?}"
+        );
+        output.push_str(&format!("action: {action:?}\n"));
+        // The remembered selection must survive opening another draft.
+        dashboard.state.last_subagent_policy = SubagentPolicy::None;
+        dashboard.begin_new_wizard();
+        dashboard.take_subagent_discovery();
+        assert_eq!(
+            new_wizard(&dashboard).subagents.policy,
+            SubagentPolicy::None
+        );
     }
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "create-delegation", &output);
 }
 
 #[test]
-fn move_unconfigured_delegation_retains_legacy_none_until_changed() {
+fn move_unconfigured_delegation_retains_none_until_changed() {
     use mj_core::subagent::SubagentPolicy;
     let mut session = running_session();
     session.project_directory = Some("/work/project".into());
@@ -5512,7 +5615,7 @@ fn move_unconfigured_delegation_retains_legacy_none_until_changed() {
     let Mode::Resume(wizard) = &mut dashboard.mode else {
         panic!("move");
     };
-    assert_eq!(wizard.subagents.policy, SubagentPolicy::Native);
+    assert_eq!(wizard.subagents.policy, SubagentPolicy::None);
     assert!(
         wizard
             .subagents

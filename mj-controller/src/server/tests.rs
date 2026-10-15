@@ -4533,7 +4533,7 @@ assert(moveStoppedChildren(sessions.parent) === 1, "only a child still at its ta
 }
 
 #[test]
-fn viewer_move_controls_use_global_availability_and_two_delegation_choices() {
+fn viewer_move_controls_use_global_availability_for_delegation() {
     let source = format!(
         "{}\n{}",
         viewer_source("function subagentChoiceApplies(", "function targetIsBare("),
@@ -4557,7 +4557,7 @@ let edits = 0;
 function render() {{ const body = el('div'); renderSubagentFields(body, draft, 'move', () => {{}}, () => edits++); return elements(body, 'select'); }}
 let fields = render();
 checkEqual(fields.length, 1, 'only delegation picker remains');
-checkEqual(fields[0].childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'native,mjolnir', 'two choices');
+checkEqual(fields[0].childNodes.filter(node => node.tagName === 'OPTION').map(node => node.value).join(','), 'native,mjolnir,none', 'delegation choices');
 check(fields[0].childNodes.find(node => node.value === 'mjolnir').disabled, 'unconfigured Mjolnir disabled');
 snapshot.subagents_configured = true;
 fields = render();
@@ -4566,6 +4566,9 @@ fields[0].value = 'mjolnir'; fields[0].onchange();
 checkEqual(moveSubagentChange(draft).mode, 'mjolnir', 'explicit policy submitted');
 checkEqual(subagentSelectionError(draft), '', 'configured choice valid');
 checkEqual(edits, 1, 'edit reported');
+fields[0].value = 'none'; fields[0].onchange();
+checkEqual(moveSubagentChange(draft).mode, 'none', 'None policy submitted');
+checkEqual(subagentSelectionError(draft), '', 'None needs no configured models');
 "#
         ),
     );

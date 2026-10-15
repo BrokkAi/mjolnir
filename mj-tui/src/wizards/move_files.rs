@@ -1,4 +1,5 @@
 use super::*;
+use crate::widgets::centered_modal;
 use mj_core::move_workspace::*;
 use std::collections::BTreeSet;
 

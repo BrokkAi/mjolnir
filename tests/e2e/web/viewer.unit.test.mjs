@@ -1316,7 +1316,7 @@ function delegationContext(kind = 'codex', configured = true) {
 }
 
 test('Create sends the selected delegation policy across the browser action wire', async () => {
-  for (const mode of ['native', 'mjolnir']) {
+  for (const mode of ['native', 'mjolnir', 'none']) {
     const posted = [];
     const context = delegationContext();
     Object.assign(context, {
@@ -1399,7 +1399,7 @@ test('Move keeps legacy delegation unchanged without resending obsolete selector
     const body = makeNode();
     context.renderSubagentFields(body, draft, 'move-session', () => {});
     const select = body.children[0].children[1];
-    assert.equal(select.value, mode === 'none' ? 'native' : 'mjolnir');
+    assert.equal(select.value, mode === 'none' ? 'none' : 'mjolnir');
     assert.equal(context.moveSubagentChange(draft), null);
     assert.equal(context.subagentSelectionError(draft), '');
     select.value = mode === 'none' ? 'mjolnir' : 'native';

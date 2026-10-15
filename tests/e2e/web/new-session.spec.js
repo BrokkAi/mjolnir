@@ -418,6 +418,8 @@ test('golden_viewer_new_session', async ({ context }) => {
     [false, 'mjolnir', 'native', 'unconfigured'],
     [true, 'native', 'mjolnir', 'configured selection'],
     [true, 'mjolnir', 'mjolnir', 'remembered Mjolnir'],
+    [false, 'native', 'none', 'None without configured models'],
+    [false, 'none', 'none', 'remembered None'],
   ]) {
     await withNewSessionPage(context, {}, output, `delegation ${label}`, async (page, state) => {
       state.snapshot.subagents_configured = configured;
@@ -433,10 +435,10 @@ test('golden_viewer_new_session', async ({ context }) => {
       const delegation = page.locator('#new-subagents');
       await expect(delegation.locator('option[value="mjolnir"]')).toHaveJSProperty('disabled', !configured);
       if (!configured) {
-        await expect(delegation).toHaveValue('native');
+        await expect(delegation).toHaveValue(remembered === 'none' ? 'none' : 'native');
         await expect(page.locator('#new-step')).toContainText("Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents");
       } else if (remembered === 'mjolnir') await expect(delegation).toHaveValue('mjolnir');
-      else await delegation.selectOption(selected);
+      await delegation.selectOption(selected);
       await captureNewSessionState(output, page, `review delegation ${label}`, state);
       const release = await startHeldLaunch(page, state);
       expect(state.actions[0].subagents).toEqual({ mode: selected });

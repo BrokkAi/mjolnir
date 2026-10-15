@@ -21,26 +21,26 @@
 Background work finished
 
 === Create opens the session wizard (80x20) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────── ◇   ⋯───╮
-│ default                            ☰ ││                                      │
-╰──────────────────────────────────────╯│                                      │
-╭ Sessions                                                                     │
-│ Create                                                                       │
-│hel ──────  ╭ × New session · 1/4 profile ───────────────────────╮            │
-│› · ACP pr  │                                                    │   conversat│
-│  Idle  po  │   PROFILE   HARNESS      WEEKLY      5H            │            │
-│  │ No mes  │   claude-1  Claude Code  refreshing                │            │
-│  │         │   codex-1   Codex        refreshing                │            │
-│            │   codex-2   Codex        refreshing                │            │
-│            │                                                    │            │
-│            │   Cancel     Next                                  │  ──────────╯
-│            ╰────────────────────────────────────────────────────╯  ──────────╮
-│                                                                              │
-│                                                                     Enter on │
-╰──────────────────────────────────────╯╰──────────────────────────────────────╯
-─ Targets ── none configured ─────────────────────────────────────────── ▁   ▪ ─
-─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────── ▁   ▪   □ ─
-Background work finished
+
+
+  ╭ × New session · 1/4 profile ─────────────────────────────────────────────╮
+  │                                                                          │
+  │   PROFILE   HARNESS      WEEKLY      5H                                  │
+  │   claude-1  Claude Code  refreshing                                      │
+  │   codex-1   Codex        refreshing                                      │
+  │   codex-2   Codex        refreshing                                      │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │                                                                          │
+  │   Cancel     Next                                                        │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+
 action: None; mode: New=true
 
 === Open launches the session picker (80x20) ===
@@ -93,30 +93,30 @@ action: OpenResumeDialog
 Background work finished
 
 === Create opens the session wizard (100x24) ===
-╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                          │
-╰──────────────────────────────────────╯│                                                          │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
-│ Create   Open   Filter: _____________││                                                          │
-│hel ─────────                                                                                     │
-│› · ACP prett                                                                                     │
-│  Idle  podma  ╭ × New session · 1/4 profile ─────────────────────────────────────╮               │
-│  │ No messag  │                                                                  │  tion.        │
-│  │            │   PROFILE   HARNESS      WEEKLY      5H                          │               │
-│               │   claude-1  Claude Code  refreshing                              │               │
-│               │   codex-1   Codex        refreshing                              │               │
-│               │   codex-2   Codex        refreshing                              │               │
-│               │                                                                  │               │
-│               │   Cancel     Next                                                │               │
-│               ╰──────────────────────────────────────────────────────────────────╯               │
-│                                                                                     ─────────────╯
-│                                                                                     ─────────────╮
-│                                      ││No conversation open.                                     │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.    │
-│                                      │╰──────────────────────────────────────────────────────────╯
-│                                      │─ Targets ── none configured ─────────────────────── ▁   ▪ ─
-╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, … ────────────── ▁   ▪ ─
-Background work finished
+╭ Work                                                                                         ⋯───╮
+│ defa                                                                                             │
+╰─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮       │
+╭ Sess  │                                                                                  │       │
+│ Crea  │   PROFILE   HARNESS      WEEKLY      5H                                          │       │
+│hel ─  │   claude-1  Claude Code  refreshing                                              │       │
+│› · A  │   codex-1   Codex        refreshing                                              │       │
+│  Idl  │   codex-2   Codex        refreshing                                              │       │
+│  │ N  │                                                                                  │       │
+│  │    │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │       │
+│       │                                                                                  │  ─────╯
+│       │                                                                                  │  ─────╮
+│       │                                                                                  │       │
+│       │                                                                                  │  .    │
+│       │   Cancel     Next                                                                │  ─────╯
+│       ╰──────────────────────────────────────────────────────────────────────────────────╯     ▪ ─
+╰─────                                                                                           ▪ ─
+Backgr
 action: None; mode: New=true
 
 === Open launches the session picker (100x24) ===
@@ -180,34 +180,34 @@ Background work finished
 
 === Create opens the session wizard (120x30) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default                            ☰ ││                                                                              │
-╰──────────────────────────────────────╯│                                                                              │
-╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                                              │
-│ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
-│› · ACP pretty name               ◇ ⋯ ││                                                                              │
-│  Idle  podman  codex-1               ││                                                                              │
-│  │ No messages                                                                                                       │
-│  │                                                                                                                   │
-│                  ╭ × New session · 1/4 profile ──────────────────────────────────────────────────╮                   │
-│                  │                                                                               │                   │
-│                  │   PROFILE   HARNESS      WEEKLY      5H                                       │                   │
-│                  │   claude-1  Claude Code  refreshing                                           │                   │
-│                  │   codex-1   Codex        refreshing                                           │                   │
-│                  │   codex-2   Codex        refreshing                                           │                   │
-│                  │                                                                               │                   │
-│                  │   Cancel     Next                                                             │                   │
-│                  ╰───────────────────────────────────────────────────────────────────────────────╯                   │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                      ││                                                                              │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
-│                                      ││No conversation open.                                                         │
-│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
-│                                      │─ Targets ── none configured ─────────────────────────────────────────── ▁   ▪ ─
-╰──────────────────────────────────────╯─ Profiles ── claude-1 unavailable, codex-1 unavailable, … ───────────── ▁   ▪ ─
+│ default                                                                                                              │
+╰───────────────                                                                                                       │
+╭ Sessions ─────  ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                 │
+│ Create   Open   │                                                                                  │                 │
+│hel ───────────  │   PROFILE   HARNESS      WEEKLY      5H                                          │                 │
+│› · ACP pretty   │   claude-1  Claude Code  refreshing                                              │                 │
+│  Idle  podman   │   codex-1   Codex        refreshing                                              │                 │
+│  │ No messages  │   codex-2   Codex        refreshing                                              │                 │
+│  │              │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │                 │
+│                 │                                                                                  │  ───────────────╯
+│                 │                                                                                  │  ───────────────╮
+│                 │                                                                                  │                 │
+│                 │   Cancel     Next                                                                │                 │
+│                 ╰──────────────────────────────────────────────────────────────────────────────────╯  ───────────────╯
+│                                                                                                       ──────── ▁   ▪ ─
+╰───────────────                                                                                        ──────── ▁   ▪ ─
 Background work finished
 action: None; mode: New=true
 
@@ -293,34 +293,34 @@ Background work finished
 ╭ Sessions ─────────────────────── ▁   ▪   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ────────────────────────────────────────││                                                                                            │
-│› · ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Idle  podman  codex-1                     ││                                                                                            │
-│  │ No messages yet                         ││                                                                                            │
-│  │                                         ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                                                                                                                          │
-│                                                                                                                                          │
-│                     ╭ × New session · 1/4 profile ────────────────────────────────────────────────────────────────╮                      │
-│                     │                                                                                             │                      │
-│                     │   PROFILE   HARNESS      WEEKLY      5H                                                     │                      │
-│                     │   claude-1  Claude Code  refreshing                                                         │                      │
-│                     │   codex-1   Codex        refreshing                                                         │                      │
-│                     │   codex-2   Codex        refreshing                                                         │                      │
-│                     │                                                                                             │                      │
-│                     │   Cancel     Next                                                                           │                      │
-│                     ╰─────────────────────────────────────────────────────────────────────────────────────────────╯                      │
-│                                                                                                                                          │
-│                                                                                                                                          │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            ││                                                                                            │
-│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
-│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│› · ACP pretty name                                                                                                                       │
+│  Idle  podman  codex-1                                                                                                                   │
+│  │ No messages yet        ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                           │
+│  │                        │                                                                                  │                           │
+│                           │   PROFILE   HARNESS      WEEKLY      5H                                          │                           │
+│                           │   claude-1  Claude Code  refreshing                                              │                           │
+│                           │   codex-1   Codex        refreshing                                              │                           │
+│                           │   codex-2   Codex        refreshing                                              │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │                                                                                  │                           │
+│                           │   Cancel     Next                                                                │                           │
+│                           ╰──────────────────────────────────────────────────────────────────────────────────╯                           │
+│                                                                                                                 ─────────────────────────╯
+│                                                                                                                 ─────────────────────────╮
 │                                            ││No conversation open.                                                                       │
 │                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
 │                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -451,34 +451,34 @@ Background work finished
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
 │                                                                                                                                                                                                      │
 │                                                                                                                                                                                                      │
-│                               ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────────────────────────────────────────────────────────╮                               │
-│                               │                                                                                                                                      │                               │
-│                               │   PROFILE   HARNESS      WEEKLY      5H                                                                                              │                               │
-│                               │   claude-1  Claude Code  refreshing                                                                                                  │                               │
-│                               │   codex-1   Codex        refreshing                                                                                                  │                               │
-│                               │   codex-2   Codex        refreshing                                                                                                  │                               │
-│                               │                                                                                                                                      │                               │
-│                               │   Cancel     Next                                                                                                                    │                               │
-│                               ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯                               │
+│                                                         ╭ × New session · 1/4 profile ─────────────────────────────────────────────────────╮                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │   PROFILE   HARNESS      WEEKLY      5H                                          │                                                         │
+│                                                         │   claude-1  Claude Code  refreshing                                              │                                                         │
+│                                                         │   codex-1   Codex        refreshing                                              │                                                         │
+│                                                         │   codex-2   Codex        refreshing                                              │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │  versation.                                             │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │                                                                                  │                                                         │
+│                                                         │   Cancel     Next                                                                │                                                         │
+│                                                         ╰──────────────────────────────────────────────────────────────────────────────────╯                                                         │
 │                                                                                                                                                                                                      │
 │                                                                                                                                                                                                      │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
-│                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
 │                                                                ││                                                                                                                                    │
