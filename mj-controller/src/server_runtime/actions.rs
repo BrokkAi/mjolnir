@@ -531,7 +531,10 @@ pub(super) async fn apply_phone_action(
             )?;
             Ok(())
         }
-        ControllerAction::Restart { session_id } => {
+        ControllerAction::Restart {
+            session_id,
+            acknowledge_container_recreation,
+        } => {
             let _record = controller
                 .state
                 .sessions
@@ -540,7 +543,11 @@ pub(super) async fn apply_phone_action(
                 .with_context(|| format!("unknown session {session_id}"))?;
             services
                 .daemon_runtime
-                .restart_session_controlled(session_id, control.create.clone())
+                .restart_session_controlled(
+                    session_id,
+                    acknowledge_container_recreation,
+                    control.create.clone(),
+                )
                 .await
                 .map(|_| ())
         }

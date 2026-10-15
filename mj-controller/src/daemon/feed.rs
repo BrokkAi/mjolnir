@@ -307,6 +307,17 @@ impl RuntimeState {
                 operations,
             )
         };
+        full.metadata.container_recreation_sessions =
+            history.full.metadata.container_recreation_sessions.clone();
+        for (id, record) in history.full.records.changes(&full.records) {
+            if record.is_some_and(mj_core::state::ContainerSettings::recreation_required) {
+                full.metadata
+                    .container_recreation_sessions
+                    .insert(id.clone());
+            } else {
+                full.metadata.container_recreation_sessions.remove(id);
+            }
+        }
         full.native_agents = history.full.native_agents.clone();
         for (owner, children) in history.native_owners.changes(&native_owners) {
             let empty = SnapshotMap::new();

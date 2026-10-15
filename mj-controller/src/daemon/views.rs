@@ -23,33 +23,17 @@ impl RuntimeState {
     }
 
     pub async fn cancel_lifecycle_with_intent(&self, session_id: &str) -> Result<()> {
-        let restart = self
-            .request_lifecycle_cancel(session_id)?
+        self.request_lifecycle_cancel(session_id)?
             .with_context(|| {
                 format!("no lifecycle operation is running for session {session_id}")
             })?;
-        if restart {
-            blocking({
-                let session_id = session_id.to_owned();
-                move || crate::database::cancel_session_restart(&session_id)
-            })
-            .await?;
-        }
+        // The lifecycle owner releases its durable intent only after all work
+        // has stopped. Until then, it still excludes container settings edits.
         Ok(())
     }
 
     pub async fn cancel_lifecycle_if_active(&self, session_id: &str) -> Result<bool> {
-        let Some(restart) = self.request_lifecycle_cancel(session_id)? else {
-            return Ok(false);
-        };
-        if restart {
-            blocking({
-                let session_id = session_id.to_owned();
-                move || crate::database::cancel_session_restart(&session_id)
-            })
-            .await?;
-        }
-        Ok(true)
+        Ok(self.request_lifecycle_cancel(session_id)?.is_some())
     }
 
     /// Let storage cleanup drain briefly, then cancel and join every lifecycle

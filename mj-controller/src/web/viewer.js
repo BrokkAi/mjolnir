@@ -5215,7 +5215,7 @@ function openContainerSettings(session) {
     memoryField,
     renderMountEditor(editor, 'container', session.target_id),
     error,
-    el('p', 'dim', 'Suspend and resume the session to apply these settings to a newly created container.'),
+    el('p', 'dim', 'Restart the session to apply changed settings to a newly created container.'),
     controls,
   );
   confirm.onclick = async () => {
@@ -7861,7 +7861,12 @@ async function runSessionAction(dataset, errorNode, extra) {
     return true;
   }
   if (dataset.action === 'restart') {
-    if (!confirm('Restart session?\n\nStop and resume with the same profile, target, and mounts. Any running turn will be interrupted.')) return false;
+    const session = sessionById(dataset.id);
+    const question = session?.restart_recreates_container
+      ? 'Recreate container on Restart?\n\nRestart will replace this container because its settings changed or are unknown. The conversation and workspace recovery copy will be restored.\n\nFiles outside the recovery copy may be lost, including temporary files and installed tools.\n\nAny running turn will be interrupted.'
+      : 'Restart session?\n\nRestart the worker in the existing environment. Any running turn will be interrupted.';
+    if (!confirm(question)) return false;
+    if (session?.restart_recreates_container) extra = { ...extra, acknowledge_container_recreation: true };
   }
   if (dataset.action === 'interrupt-all') {
     if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;

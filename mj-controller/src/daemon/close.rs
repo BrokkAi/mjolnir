@@ -340,23 +340,28 @@ impl RuntimeState {
                     )
                 })
                 .map(|operation| {
+                    let retiring_restart = match &operation.phase {
+                        LifecyclePhase::RetiringContainer { restart_intent } => {
+                            Some(restart_intent.clone())
+                        }
+                        _ => None,
+                    };
                     operation.request_cancel();
-                    (
-                        operation.kind == LifecycleKind::Restart,
-                        operation.result.clone(),
-                    )
+                    (retiring_restart, operation.result.clone())
                 })
         };
-        if let Some((cancelled_restart, pending)) = pending {
-            if cancelled_restart {
-                blocking({
-                    let session_id = session_id.to_owned();
-                    move || crate::database::cancel_session_restart(&session_id)
-                })
-                .await?;
-            }
+        if let Some((retiring_restart, pending)) = pending {
             if let Err(error) = Self::wait_lifecycle_result(pending.clone()).await {
                 tracing::debug!(%session_id, %error, "previous lifecycle ended before close");
+            }
+            if let Some(operation_id) = retiring_restart {
+                // The old owner could not be cancelled. Wait for it, then
+                // remove only its intent, never a newer Restart's admission.
+                blocking({
+                    let session_id = session_id.to_owned();
+                    move || crate::database::finish_session_restart(&session_id, &operation_id)
+                })
+                .await?;
             }
             self.remove_completed_lifecycle(&pending);
         }

@@ -122,6 +122,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
         phase: crate::database::SessionRestartPhase::Stopping,
         checkpoint_sha256: None,
         checkpoint_started: true,
+        container_recreation_acknowledged: true,
     };
 
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
@@ -2221,8 +2222,7 @@ async fn committed_creation_cannot_be_cancelled_by_another_surface() {
 async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
     let state = test_runtime_state();
     state.owner().edit_sessions(|sessions| {
-        let mut record =
-            runtime_test_session("restart-guard", "workspace", SessionState::Destroying);
+        let mut record = runtime_test_session("restart-guard", "workspace", SessionState::Closing);
         record.target = None;
         sessions.insert(record.id.clone(), record);
     });
@@ -2237,6 +2237,22 @@ async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
         })
         .unwrap();
 
+    assert!(state.active_lifecycles()[0].cancellable);
+    state
+        .begin_restart_container_teardown("restart-guard", "restart-owned")
+        .unwrap();
+    assert!(!state.active_lifecycles()[0].cancellable);
+    assert!(
+        state
+            .cancel_lifecycle_if_active("restart-guard")
+            .await
+            .is_err()
+    );
+    state.finish_restart_container_teardown("restart-guard");
+    assert!(state.active_lifecycles()[0].cancellable);
+    state.owner().edit_sessions(|sessions| {
+        sessions.get_mut("restart-guard").unwrap().state = SessionState::Destroying
+    });
     let result = state.cancel_lifecycle_if_active("restart-guard").await;
     assert!(result.is_err());
     assert!(
@@ -2253,6 +2269,70 @@ async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
     RuntimeState::wait_lifecycle_result(operation)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
+    const NAME: &str = "a_waiting_close_preserves_the_intent_of_reserved_restart_teardown";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Closing,
+    );
+    crate::database::save_session(&session).unwrap();
+    let intent = crate::database::begin_session_restart(
+        "session-1",
+        "restart-owned",
+        Arc::new(AtomicBool::new(false)),
+        true,
+    )
+    .unwrap();
+    let state = test_runtime_state();
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(session.id.clone(), session);
+    });
+    let release = Arc::new(tokio::sync::Notify::new());
+    let operation = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Restart, {
+            let release = release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    state
+        .begin_restart_container_teardown("session-1", &intent.operation_id)
+        .unwrap();
+    let mut close = tokio::spawn({
+        let state = state.clone();
+        async move { state.wait_before_close("session-1").await }
+    });
+    // Drive the waiting close while teardown is deliberately held. It must
+    // neither cancel that owner nor delete the durable recovery permission.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut close)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        crate::database::load_session_restarts().unwrap(),
+        vec![intent]
+    );
+    assert!(
+        !state.owner().lifecycle["session-1"]
+            .cancelled
+            .load(Ordering::Acquire)
+    );
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(operation)
+        .await
+        .unwrap();
+    close.await.unwrap().unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
 }
 
 // Hard-won: 7b694803: Alt-X stayed available and could cancel teardown after the checkpoint gate.
@@ -2699,6 +2779,165 @@ fn startup_prompt_test_store(name: &str) -> Option<crate::database::DatabaseWrit
     Some(crate::database::install_isolated_test_writer())
 }
 
+// Hard-won: 955f4204: Restart reused a container after its mount settings changed.
+#[tokio::test]
+async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits() {
+    const NAME: &str = "restart_compares_persisted_applied_settings_and_serializes_mount_edits";
+    let Some(_writer) = startup_prompt_test_store(NAME) else {
+        return;
+    };
+    let mut session = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: mj_core::targets::resource_name("session-1").unwrap(),
+        workspace_storage: Default::default(),
+    });
+    session.additional_mounts = vec![mj_core::targets::AdditionalMount {
+        source: "/srv/reference".into(),
+        destination: "/reference".into(),
+        access: mj_core::targets::MountAccess::Ro,
+    }];
+    let template = mj_core::config::TargetTemplate::LocalPodman {
+        container: serde_json::from_value(serde_json::json!({})).unwrap(),
+    };
+    let mut runtime = mj_core::state::TargetRuntimeSettings::from(&template);
+    let applied = mj_core::state::ContainerSettings::requested(&session);
+    runtime.container_settings = Some(applied.clone());
+    session.target_runtime = Some(runtime);
+    crate::database::save_session(&session).unwrap();
+    let load = || Controller {
+        config: Config::default(),
+        state: crate::database::load_state().unwrap(),
+    };
+    assert!(!load().container_recreation_required("session-1").unwrap());
+    for change in ["source", "destination", "access", "remove", "size"] {
+        let mut mounts = session.additional_mounts.clone();
+        match change {
+            "source" => mounts[0].source = "/srv/other".into(),
+            "destination" => mounts[0].destination = "/other".into(),
+            "access" => mounts[0].access = mj_core::targets::MountAccess::Rw,
+            "remove" => mounts.clear(),
+            "size" => {}
+            _ => unreachable!(),
+        }
+        crate::database::set_session_container_settings(
+            "session-1",
+            (change == "size").then_some("4"),
+            None,
+            &mounts,
+            "now",
+        )
+        .unwrap();
+        let controller = load();
+        assert!(
+            controller
+                .container_recreation_required("session-1")
+                .unwrap(),
+            "{change}"
+        );
+        let snapshot = crate::server::ViewerSnapshot::from_config_state(
+            &controller.config,
+            &controller.state,
+            1,
+        );
+        assert!(snapshot.sessions[0].restart_recreates_container);
+        let state = test_runtime_state();
+        state.owner().edit_sessions(|records| {
+            records.insert(
+                "session-1".into(),
+                controller.state.sessions["session-1"].clone(),
+            );
+        });
+        assert!(
+            state
+                .runtime_publication()
+                .unwrap()
+                .metadata
+                .container_recreation_sessions
+                .contains("session-1")
+        );
+        assert_eq!(
+            restart::restart_container_recovery(&controller, "session-1").unwrap(),
+            restart::RestartContainerRecovery::RecreateSource
+        );
+        assert_eq!(
+            controller.state.sessions["session-1"]
+                .target_runtime
+                .as_ref()
+                .unwrap()
+                .container_settings
+                .as_ref(),
+            Some(&applied)
+        );
+    }
+    let refused = crate::database::begin_session_restart(
+        "session-1",
+        "restart-unwarned",
+        Arc::new(AtomicBool::new(false)),
+        false,
+    )
+    .unwrap_err();
+    assert!(mj_core::refusal::Refusal::of(&refused).is_some());
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    crate::database::begin_session_restart(
+        "session-1",
+        "restart-settings",
+        Arc::new(AtomicBool::new(false)),
+        true,
+    )
+    .unwrap();
+    let refused =
+        crate::database::set_session_container_settings("session-1", None, None, &[], "later")
+            .unwrap_err();
+    assert!(mj_core::refusal::Refusal::of(&refused).is_some());
+    assert_eq!(
+        load().state.sessions["session-1"].container_cpus.as_deref(),
+        Some("4")
+    );
+    assert!(
+        crate::database::advance_session_restart(
+            "session-1",
+            "restart-settings",
+            crate::database::SessionRestartPhase::RecreatingContainer
+        )
+        .is_err()
+    );
+    assert_eq!(
+        crate::database::load_session_restarts().unwrap()[0].phase,
+        crate::database::SessionRestartPhase::Stopping
+    );
+    crate::database::cancel_session_restart("session-1").unwrap();
+    crate::database::set_session_container_settings(
+        "session-1",
+        None,
+        None,
+        &session.additional_mounts,
+        "later",
+    )
+    .unwrap();
+    assert!(!load().container_recreation_required("session-1").unwrap());
+
+    // Unknown legacy creation settings are not evidence of an empty mount list.
+    session.additional_mounts.clear();
+    session.target_runtime.as_mut().unwrap().container_settings = None;
+    crate::database::save_session(&session).unwrap();
+    assert!(load().container_recreation_required("session-1").unwrap());
+    session.target_runtime.as_mut().unwrap().container_settings =
+        Some(mj_core::state::ContainerSettings::requested(&session));
+    crate::database::save_session(&session).unwrap();
+    assert!(!load().container_recreation_required("session-1").unwrap());
+    // A replacement may own a newly dispatched turn before Running is published.
+    // Its creation snapshot therefore forbids repeating source teardown.
+    assert_eq!(
+        restart::restart_container_recovery(&load(), "session-1").unwrap(),
+        restart::RestartContainerRecovery::ReconnectReplacement
+    );
+}
+
 #[tokio::test]
 async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() {
     const NAME: &str = "restart_intent_checks_cancellation_and_records_its_sealed_checkpoint";
@@ -2719,7 +2958,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     let cancelled = Arc::new(AtomicBool::new(true));
     let result = tokio::task::spawn_blocking({
         let cancelled = cancelled.clone();
-        || crate::database::begin_session_restart("session-1", "restart-cancelled", cancelled)
+        || crate::database::begin_session_restart("session-1", "restart-cancelled", cancelled, true)
     })
     .await
     .unwrap();
@@ -2747,7 +2986,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     let cancelled = control.cancelled.clone();
     let intent = tokio::task::spawn_blocking({
         let cancelled = cancelled.clone();
-        || crate::database::begin_session_restart("session-1", "restart-accepted", cancelled)
+        || crate::database::begin_session_restart("session-1", "restart-accepted", cancelled, true)
     })
     .await
     .unwrap()
@@ -2758,30 +2997,66 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         crate::database::record_session_restart_checkpoint(
             "session-1",
             "restart-accepted",
-            "sealed-checkpoint-sha",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
     })
     .await
     .unwrap()
     .unwrap();
 
+    tokio::task::spawn_blocking(|| {
+        let mut session = crate::database::load_state()?
+            .sessions
+            .remove("session-1")
+            .unwrap();
+        session.state = SessionState::Closing;
+        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+            archive_path: "/isolated/checkpoint.hel.zip".into(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            created_at: "now".into(),
+            event_frontier: 1,
+        });
+        crate::database::save_checkpointed_session(&session)?;
+        crate::database::advance_session_restart(
+            "session-1",
+            "restart-accepted",
+            crate::database::SessionRestartPhase::RecreatingContainer,
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
     let saved = crate::database::load_session_restarts().unwrap();
     assert_eq!(saved.len(), 1);
     assert!(saved[0].checkpoint_started);
     assert_eq!(
+        saved[0].phase,
+        crate::database::SessionRestartPhase::RecreatingContainer
+    );
+    assert_eq!(
         saved[0].checkpoint_sha256.as_deref(),
-        Some("sealed-checkpoint-sha")
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
     state
         .cancel_lifecycle_with_intent("session-1")
         .await
         .unwrap();
     assert!(cancelled.load(Ordering::Acquire));
-    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert_eq!(crate::database::load_session_restarts().unwrap().len(), 1);
+    let refused = crate::database::set_session_container_settings(
+        "session-1",
+        None,
+        None,
+        &[],
+        "while cancelling",
+    )
+    .unwrap_err();
+    assert!(mj_core::refusal::Refusal::of(&refused).is_some());
     release.notify_one();
     RuntimeState::wait_lifecycle_result(operation)
         .await
         .unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
 
     let session = runtime_test_session(
         "session-2",
@@ -2812,7 +3087,7 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         .unwrap();
     tokio::task::spawn_blocking({
         let cancelled = control.cancelled.clone();
-        || crate::database::begin_session_restart("session-2", "restart-preempted", cancelled)
+        || crate::database::begin_session_restart("session-2", "restart-preempted", cancelled, true)
     })
     .await
     .unwrap()
@@ -2820,19 +3095,21 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     let closing_state = state.clone();
     let close = tokio::spawn(async move { closing_state.wait_before_close("session-2").await });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !control.cancelled.load(Ordering::Acquire)
-            || crate::database::load_session_restarts()
-                .unwrap()
-                .iter()
-                .any(|intent| intent.session_id == "session-2")
-        {
+        while !control.cancelled.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("Suspend removed the Restart intent before waiting for its lifecycle");
+    .expect("Suspend requested cancellation before waiting for Restart");
+    assert!(
+        crate::database::load_session_restarts()
+            .unwrap()
+            .iter()
+            .any(|intent| intent.session_id == "session-2")
+    );
     release.notify_one();
     close.await.unwrap().unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
 }
 
 /// The smallest archived snapshot a hand-off step can carry.

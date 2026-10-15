@@ -211,7 +211,7 @@ impl RuntimeState {
                     let mut result = match mj_core::runtime::spawn_off_async_workers(operation(
                         operation_state,
                         operation_id,
-                        cancelled,
+                        cancelled.clone(),
                     ))
                     .await
                     {
@@ -223,6 +223,31 @@ impl RuntimeState {
                             "daemon lifecycle task failed: {error}"
                         ))),
                     };
+                    if kind == LifecycleKind::Restart {
+                        // End cancellation and decide durable release under the
+                        // same owner lock, before another lifecycle can enter.
+                        let release_intent = {
+                            let mut owner = state.owner();
+                            let active = owner
+                                .lifecycle
+                                .get_mut(&operation_session_id)
+                                .expect("Restart owns its lifecycle until completion");
+                            active.phase = LifecyclePhase::CompletingRestart;
+                            active.cancelled.load(Ordering::Acquire)
+                        };
+                        if release_intent {
+                            let session_id = operation_session_id.clone();
+                            if let Err(error) = tokio::task::spawn_blocking(move || {
+                                crate::database::cancel_session_restart(&session_id)
+                            })
+                            .await
+                            .context("join cancelled Restart intent release")
+                            .and_then(std::convert::identity)
+                            {
+                                result = Err(LifecycleFailure::of(&error));
+                            }
+                        }
+                    }
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"

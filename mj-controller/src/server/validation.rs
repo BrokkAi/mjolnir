@@ -670,7 +670,7 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::Restart { session_id } => {
+        ControllerAction::Restart { session_id, .. } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
             if !session.capabilities.restart {

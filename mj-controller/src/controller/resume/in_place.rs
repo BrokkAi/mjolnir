@@ -279,6 +279,10 @@ impl Controller {
                     .target_runtime
                     .as_ref()
                     .and_then(|runtime| runtime.tool_cache.clone());
+                runtime.container_settings = record
+                    .target_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.container_settings.clone());
                 record.target_runtime = Some(runtime);
                 record.native_session_id =
                     native_continuity.then(|| archive_manifest.session.native_session_id.clone());

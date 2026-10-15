@@ -446,6 +446,8 @@ struct ActiveLifecycle {
 
 enum LifecyclePhase {
     Executing,
+    RetiringContainer { restart_intent: String },
+    CompletingRestart,
     MovingDestination,
     Cancelling,
     CancellingMoveDestination,

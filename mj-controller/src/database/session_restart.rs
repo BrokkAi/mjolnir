@@ -6,6 +6,7 @@ use super::*;
 pub(crate) enum SessionRestartPhase {
     Stopping,
     RestoringInPlace,
+    RecreatingContainer,
     Fallback,
 }
 
@@ -14,6 +15,7 @@ impl SessionRestartPhase {
         match self {
             Self::Stopping => "stopping",
             Self::RestoringInPlace => "restoring_in_place",
+            Self::RecreatingContainer => "recreating_container",
             Self::Fallback => "fallback",
         }
     }
@@ -22,6 +24,7 @@ impl SessionRestartPhase {
         match value {
             "stopping" => Ok(Self::Stopping),
             "restoring_in_place" => Ok(Self::RestoringInPlace),
+            "recreating_container" => Ok(Self::RecreatingContainer),
             "fallback" => Ok(Self::Fallback),
             _ => bail!("unknown session restart phase {value:?}"),
         }
@@ -31,8 +34,10 @@ impl SessionRestartPhase {
         self == next
             || matches!(
                 (self, next),
-                (Self::Stopping, Self::RestoringInPlace | Self::Fallback)
-                    | (Self::RestoringInPlace, Self::Fallback)
+                (
+                    Self::Stopping,
+                    Self::RestoringInPlace | Self::RecreatingContainer | Self::Fallback
+                ) | (Self::RestoringInPlace, Self::Fallback)
             )
     }
 }
@@ -44,6 +49,7 @@ pub(crate) struct SessionRestartIntent {
     pub phase: SessionRestartPhase,
     pub checkpoint_sha256: Option<String>,
     pub checkpoint_started: bool,
+    pub container_recreation_acknowledged: bool,
 }
 
 /// Create one intent, or return the unfinished intent the session already owns.
@@ -51,6 +57,7 @@ pub(crate) fn begin_session_restart(
     session_id: &str,
     operation_id: &str,
     cancelled: Arc<AtomicBool>,
+    container_recreation_acknowledged: bool,
 ) -> Result<SessionRestartIntent> {
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
@@ -65,18 +72,23 @@ pub(crate) fn begin_session_restart(
             tx.commit()?;
             return Ok(intent);
         }
-        ensure!(
-            state_io::load_session_with(&tx, &session_id)?.is_some(),
-            "unknown session {session_id}"
-        );
+        let session = state_io::load_session_with(&tx, &session_id)?
+            .with_context(|| format!("unknown session {session_id}"))?;
+        if mj_core::state::ContainerSettings::recreation_required(&session)
+            && !container_recreation_acknowledged
+        {
+            return Err(anyhow::Error::new(mj_core::refusal::Refusal::precondition(
+                "Restart must recreate this container. Files outside the recovery copy may be lost. Review the recreation warning and confirm Restart again.",
+            )));
+        }
         ensure!(
             !cancelled.load(Ordering::Acquire),
             "Restart was cancelled before its durable intent was recorded"
         );
         tx.execute(
-            "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at)
-             VALUES (?1, ?2, 'stopping', ?3)",
-            params![session_id, operation_id, Utc::now().to_rfc3339()],
+            "INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, container_recreation_acknowledged)
+             VALUES (?1, ?2, 'stopping', ?3, ?4)",
+            params![session_id, operation_id, Utc::now().to_rfc3339(), container_recreation_acknowledged],
         )?;
         tx.commit()?;
         Ok(SessionRestartIntent {
@@ -85,6 +97,7 @@ pub(crate) fn begin_session_restart(
             phase: SessionRestartPhase::Stopping,
             checkpoint_sha256: None,
             checkpoint_started: false,
+            container_recreation_acknowledged,
         })
     })
 }
@@ -92,7 +105,7 @@ pub(crate) fn begin_session_restart(
 pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started
+        "SELECT session_id, operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged
          FROM session_restart_intents ORDER BY session_id",
     )?;
     statement
@@ -103,16 +116,25 @@ pub(crate) fn load_session_restarts() -> Result<Vec<SessionRestartIntent>> {
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         })?
         .map(|row| {
-            let (session_id, operation_id, phase, checkpoint_sha256, checkpoint_started) = row?;
+            let (
+                session_id,
+                operation_id,
+                phase,
+                checkpoint_sha256,
+                checkpoint_started,
+                container_recreation_acknowledged,
+            ) = row?;
             Ok(SessionRestartIntent {
                 session_id,
                 operation_id,
                 phase: SessionRestartPhase::parse(&phase)?,
                 checkpoint_sha256,
                 checkpoint_started,
+                container_recreation_acknowledged,
             })
         })
         .collect()
@@ -176,7 +198,8 @@ pub(crate) fn advance_session_restart(
     let session_id = session_id.to_owned();
     let operation_id = operation_id.to_owned();
     submit_database_write("advance_session_restart", move |connection| {
-        let current = load_session_restart_with(connection, &session_id)?
+        let tx = connection.transaction()?;
+        let current = load_session_restart_with(&tx, &session_id)?
             .context("session restart intent disappeared")?;
         ensure!(
             current.operation_id == operation_id,
@@ -188,7 +211,33 @@ pub(crate) fn advance_session_restart(
             current.phase,
             phase
         );
-        connection.execute(
+        if phase == SessionRestartPhase::RecreatingContainer {
+            let session = state_io::load_session_with(&tx, &session_id)?
+                .context("session disappeared before Restart recreation")?;
+            ensure!(
+                current.container_recreation_acknowledged
+                    && current.checkpoint_started
+                    && current.checkpoint_sha256.is_some()
+                    && session
+                        .checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.sha256.as_str())
+                        == current.checkpoint_sha256.as_deref(),
+                "Restart recreation requires its own sealed checkpoint"
+            );
+            ensure!(
+                matches!(
+                    session.state,
+                    SessionState::Closing
+                        | SessionState::Destroying
+                        | SessionState::Error
+                        | SessionState::Stopped
+                        | SessionState::Provisioning
+                ),
+                "Restart recreation cannot remove an unsealed live session"
+            );
+        }
+        tx.execute(
             "UPDATE session_restart_intents SET phase=?3, updated_at=?4
              WHERE session_id=?1 AND operation_id=?2",
             params![
@@ -198,6 +247,7 @@ pub(crate) fn advance_session_restart(
                 Utc::now().to_rfc3339()
             ],
         )?;
+        tx.commit()?;
         Ok(())
     })
 }
@@ -231,7 +281,7 @@ fn load_session_restart_with(
 ) -> Result<Option<SessionRestartIntent>> {
     let row = connection
         .query_row(
-            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started
+            "SELECT operation_id, phase, checkpoint_sha256, checkpoint_started, container_recreation_acknowledged
          FROM session_restart_intents WHERE session_id=?1",
             [session_id],
             |row| {
@@ -240,18 +290,26 @@ fn load_session_restart_with(
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, bool>(3)?,
+                    row.get::<_, bool>(4)?,
                 ))
             },
         )
         .optional()?;
     row.map(
-        |(operation_id, phase, checkpoint_sha256, checkpoint_started)| {
+        |(
+            operation_id,
+            phase,
+            checkpoint_sha256,
+            checkpoint_started,
+            container_recreation_acknowledged,
+        )| {
             Ok(SessionRestartIntent {
                 session_id: session_id.to_owned(),
                 operation_id,
                 phase: SessionRestartPhase::parse(&phase)?,
                 checkpoint_sha256,
                 checkpoint_started,
+                container_recreation_acknowledged,
             })
         },
     )

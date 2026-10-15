@@ -1716,6 +1716,17 @@ impl DashboardState {
                 else {
                     return DashboardAction::None;
                 };
+                if self.container_recreation_sessions.contains(&session_id) {
+                    self.mode = crate::Mode::Confirm(
+                        ConfirmDialog::new(Confirmation::RestartContainer {
+                            interrupting: self.attention_level(&session_id)
+                                == crate::AttentionLevel::Working,
+                            session_id,
+                        })
+                        .naming_session(&name),
+                    );
+                    return DashboardAction::None;
+                }
                 // Mid-turn work is lost by a restart, so that case asks first;
                 // an idle session restarts at once.
                 if self.attention_level(&session_id) == crate::AttentionLevel::Working {
@@ -1728,7 +1739,10 @@ impl DashboardState {
                     );
                     return DashboardAction::None;
                 }
-                DashboardAction::RestartSession { session_id }
+                DashboardAction::RestartSession {
+                    session_id,
+                    acknowledge_container_recreation: false,
+                }
             }
             CommandId::ResumeDialog => DashboardAction::OpenResumeDialog,
             CommandId::Palette => {

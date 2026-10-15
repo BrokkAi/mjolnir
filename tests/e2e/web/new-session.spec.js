@@ -331,7 +331,7 @@ test('golden_viewer_new_session', async ({ context }) => {
       id: 'mounted', title: 'Mounted session', state: 'running', lifecycle: 'live',
       workspace_id: 'test', profile_id: 'alpha', target_id: 'container', is_idle: true,
       container_cpus: '6', container_memory: '12g', additional_mounts: mounts,
-      capabilities: { container_settings: true },
+      capabilities: { container_settings: true, restart: true },
     });
     await refresh(page, state);
     await page.evaluate(() => { location.hash = '#workspace/test'; });
@@ -347,6 +347,22 @@ test('golden_viewer_new_session', async ({ context }) => {
       action: 'set-container-settings', session_id: 'mounted', cpus: '6', memory: '12g', mounts,
     });
     await expect(dialog).toHaveCount(0);
+    state.snapshot.sessions[0].restart_recreates_container = true;
+    await refresh(page, state);
+    await page.locator('.session-menu-trigger').click();
+    const cancelled = page.waitForEvent('dialog');
+    const clickRestart = page.getByRole('menuitem', { name: 'Restart', exact: true }).click();
+    const warning = await cancelled;
+    output.push('=== Restart recreation warning ===', warning.message());
+    expect(warning.message()).toContain('Files outside the recovery copy may be lost');
+    await warning.dismiss();
+    await clickRestart;
+    expect(state.actions).toHaveLength(1);
+    await page.locator('.session-menu-trigger').click();
+    page.once('dialog', next => next.accept());
+    await page.getByRole('menuitem', { name: 'Restart', exact: true }).click();
+    await expect.poll(() => state.actions.length).toBe(2);
+    expect(state.actions[1]).toEqual({ action: 'restart', session_id: 'mounted', acknowledge_container_recreation: true });
   });
 
   const ec2Choices = [

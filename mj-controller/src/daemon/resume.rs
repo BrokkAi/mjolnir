@@ -580,7 +580,7 @@ impl RuntimeState {
     /// than [`FORCE_DESTROY_PREEMPT_TIMEOUT`] is reported instead of destroyed
     /// under.
     pub(super) async fn preempt_active_lifecycle(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        let (mut result, tearing_down, cancelled_restart) = {
+        let (mut result, tearing_down, retiring_restart) = {
             let mut lifecycle_owner = self.owner();
             let lifecycle = &mut lifecycle_owner.lifecycle;
             let Some(active) = lifecycle.get_mut(session_id) else {
@@ -589,7 +589,13 @@ impl RuntimeState {
             if !active.is_running() {
                 return Ok(());
             }
-            let tearing_down = active.kind.is_teardown();
+            let retiring_restart = match &active.phase {
+                LifecyclePhase::RetiringContainer { restart_intent } => {
+                    Some(restart_intent.clone())
+                }
+                _ => None,
+            };
+            let tearing_down = active.kind.is_teardown() || retiring_restart.is_some();
             // A teardown already under way is the fact this destroy wants, so
             // it is waited for, not cancelled half way: cancelling it is what
             // left a sub-agent's destroy "cancelled before its parent" when
@@ -598,19 +604,8 @@ impl RuntimeState {
             if !tearing_down {
                 active.request_cancel();
             }
-            (
-                active.result.clone(),
-                tearing_down,
-                active.kind == LifecycleKind::Restart && !tearing_down,
-            )
+            (active.result.clone(), tearing_down, retiring_restart)
         };
-        if cancelled_restart {
-            blocking({
-                let session_id = session_id.to_owned();
-                move || crate::database::cancel_session_restart(&session_id)
-            })
-            .await?;
-        }
         let mut finished = wait_for_lifecycle_result(&mut result).await;
         if finished.is_err() && tearing_down {
             {
@@ -624,7 +619,16 @@ impl RuntimeState {
         match finished {
             // The wait only returns once the watch holds a result or its
             // sender died; distinguish those two, and the timeout separately.
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                if let Some(operation_id) = retiring_restart {
+                    blocking({
+                        let session_id = session_id.to_owned();
+                        move || crate::database::finish_session_restart(&session_id, &operation_id)
+                    })
+                    .await?;
+                }
+                Ok(())
+            }
             Ok(Err(())) => bail!(
                 "daemon lifecycle operation stopped without a result for session {session_id}"
             ),

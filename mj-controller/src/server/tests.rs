@@ -2481,6 +2481,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     };
     let restart = || ControllerAction::Restart {
         session_id: "session-1".into(),
+        acknowledge_container_recreation: false,
     };
     let interrupt_all = || ControllerAction::InterruptAll {
         session_id: "session-1".into(),
@@ -2511,6 +2512,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     let error = validate_action(
         &ControllerAction::Restart {
             session_id: "not-managed".into(),
+            acknowledge_container_recreation: false,
         },
         &snapshot,
     )

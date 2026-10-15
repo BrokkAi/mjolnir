@@ -295,10 +295,18 @@ read-write
 
 Add mount
 
-Suspend and resume the session to apply these settings to a newly created container.
+Restart the session to apply changed settings to a newly created container.
 
 Cancel
 Save
+=== Restart recreation warning ===
+Recreate container on Restart?
+
+Restart will replace this container because its settings changed or are unknown. The conversation and workspace recovery copy will be restored.
+
+Files outside the recovery copy may be lost, including temporary files and installed tools.
+
+Any running turn will be interrupted.
 === existing container settings preserve mount access modes (390x844) ===
 Test
 Other
@@ -313,7 +321,7 @@ alpha
 Live
 controls: [{"tag":"select","id":"new-profile","label":"alphabetagamma","value":"alpha","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
-action: POST /api/actions [{"action":"set-container-settings","session_id":"mounted","cpus":"6","memory":"12g","mounts":[{"source":"/srv/reference","destination":"/reference","read_only":true},{"source":"/srv/cache","destination":"/cache","read_only":false},{"source":"/srv/work","destination":"/work","read_only":false,"access":"rw"}]}]
+action: POST /api/actions [{"action":"set-container-settings","session_id":"mounted","cpus":"6","memory":"12g","mounts":[{"source":"/srv/reference","destination":"/reference","read_only":true},{"source":"/srv/cache","destination":"/cache","read_only":false},{"source":"/srv/work","destination":"/work","read_only":false,"access":"rw"}]},{"action":"restart","session_id":"mounted","acknowledge_container_recreation":true}]
 project creation requests: 0
 === EC2 default resource option (390x844) ===
 New session

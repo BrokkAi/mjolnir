@@ -15,6 +15,7 @@ use mj_core::state::SessionState;
 fn web_restart_uses_the_lifecycle_cancellation_control() {
     let action = ControllerAction::Restart {
         session_id: "restart-web-session".into(),
+        acknowledge_container_recreation: false,
     };
     let control = PhoneActionControl::for_action(&action);
     let lifecycle_control = control

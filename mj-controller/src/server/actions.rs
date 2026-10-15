@@ -115,6 +115,8 @@ pub enum ControllerAction {
     /// target and mounts it last ran with.
     Restart {
         session_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        acknowledge_container_recreation: bool,
     },
     /// Stop the turn this session is working on and the turns of every
     /// sub-agent under it, leaving the sessions alive.

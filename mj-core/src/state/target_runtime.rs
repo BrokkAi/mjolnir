@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::{SessionRecord, SessionResourceAllocation, TargetLocator};
 use crate::config::{ExecutionPolicy, SshConnection, TargetTemplate};
+use crate::targets::AdditionalMount;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetRuntimeSettings {
@@ -17,6 +19,61 @@ pub struct TargetRuntimeSettings {
     /// Container mounts cannot follow subsequent machine configuration edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_cache: Option<ToolCachePlacement>,
+    /// Immutable per-session selection used to create this container.
+    /// Missing on legacy containers: their applied configuration is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_settings: Option<ContainerSettings>,
+}
+
+/// Desired settings and the applied creation snapshot share one representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerSettings {
+    pub additional_mounts: Vec<AdditionalMount>,
+    pub resource_allocation: Option<SessionResourceAllocation>,
+    pub cpus: Option<String>,
+    pub memory: Option<String>,
+}
+
+impl ContainerSettings {
+    /// One policy for Restart and the daemon's confirmation projections.
+    pub fn recreation_required(session: &SessionRecord) -> bool {
+        let owns_container = matches!(
+            session.target,
+            Some(
+                TargetLocator::LocalPodman {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::LocalDocker {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::AppleContainer {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::SshPodman {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::SshDocker {
+                    borrowed_from: None,
+                    ..
+                }
+            )
+        );
+        owns_container
+            && session
+                .target_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.container_settings.as_ref())
+                != Some(&Self::requested(session))
+    }
+
+    pub fn requested(session: &SessionRecord) -> Self {
+        Self {
+            additional_mounts: session.additional_mounts.clone(),
+            resource_allocation: session.resource_allocation.clone(),
+            cpus: session.container_cpus.clone(),
+            memory: session.container_memory.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +178,7 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             execution_policy: template.execution_policy(),
             environment,
             tool_cache: None,
+            container_settings: None,
         }
     }
 }
