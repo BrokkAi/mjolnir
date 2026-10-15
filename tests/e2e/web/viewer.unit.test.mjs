@@ -330,6 +330,7 @@ test('project preflight prevents duplicate checks and ignores a cancelled wizard
       return new Promise(resolve => { complete = resolve; });
     },
   });
+  vm.runInContext(sourceBetween('function mountEditorWire(', '\nfunction renderMountEditor('), context);
   vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
   const pending = vm.runInContext('preflightNew()', context);
   assert.equal(context.pendingNewPreflight, draft);
@@ -349,7 +350,7 @@ test('project preflight prevents duplicate checks and ignores a cancelled wizard
 
 test('an aborted preflight cannot clear a replacement check for the same draft', async () => {
   const completions = [];
-  const draft = { targetId: 'podman' };
+  const draft = { targetId: 'podman', mountEditors: {} };
   const context = vm.createContext({
     newDraft: draft, pendingNewPreflight: null, pendingNewPreflightController: null,
     AbortController, targetIsBare: () => false, selectedWorkspaceId: () => 'test',
@@ -357,6 +358,7 @@ test('an aborted preflight cannot clear a replacement check for the same draft',
     request: () => new Promise(resolve => completions.push(resolve)),
   });
   vm.runInContext(sourceBetween('function abortPendingNewPreflight()', '\nfunction freshDraft()'), context);
+  vm.runInContext(sourceBetween('function mountEditorWire(', '\nfunction renderMountEditor('), context);
   vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
   const old = vm.runInContext('preflightNew()', context);
   vm.runInContext('abortPendingNewPreflight()', context);
@@ -1258,7 +1260,7 @@ test('remote tracking is repaired only after confirmation and preflight then con
   for (const approve of [false, true]) {
     const requests = [];
     const context = vm.createContext({
-      newDraft: { profileId: 'codex', bundleId: 'project', targetId: 'docker' },
+      newDraft: { profileId: 'codex', bundleId: 'project', targetId: 'docker', mountEditors: {} },
       pendingNewPreflight: null, pendingNewPreflightController: null, AbortController,
       targetIsBare: () => false, selectedWorkspaceId: () => 'workspace', renderNewForm() {},
       request: async (_url, options) => {
@@ -1274,6 +1276,7 @@ test('remote tracking is repaired only after confirmation and preflight then con
         return approve;
       },
     });
+    vm.runInContext(sourceBetween('function mountEditorWire(', '\nfunction renderMountEditor('), context);
     vm.runInContext(sourceBetween('async function preflightNew()', '\nasync function advanceNew()'), context);
     assert.equal(await vm.runInContext('preflightNew()', context), approve);
     assert.deepEqual(requests[0].remote_repairs, []);
@@ -1295,6 +1298,7 @@ test('commit refuses unready, pending, or failed preflight even when called dire
       pendingNewPreflight: state === 'pending' ? draft : null,
       request: () => assert.fail('unready draft cannot launch'),
     });
+    vm.runInContext(sourceBetween('function mountEditorWire(', '\nfunction renderMountEditor('), context);
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
   }
@@ -1318,13 +1322,14 @@ test('Create sends the selected delegation policy across the browser action wire
     Object.assign(context, {
       newDraft: {
         workspaceId: 'test', preflighted: true, profileId: 'profile', bundleId: 'bundle',
-        targetId: 'container', projectDirectory: '', title: '',
+        targetId: 'container', projectDirectory: '', title: '', mountEditors: {},
         worktreeOptions: { available: false }, createManagedWorktree: false, subagents: { mode },
       },
       pendingNewPreflight: null, targetResourceKind: () => 'fixed', targetIsBare: () => false,
       renderNewForm() {}, refresh: async () => {}, navigate() {}, newError: makeNode(),
       request: async (_path, options) => { posted.push(JSON.parse(options.body)); },
     });
+    vm.runInContext(sourceBetween('function mountEditorWire(', '\nfunction renderMountEditor('), context);
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
     assert.deepEqual(posted[0].subagents, { mode });
@@ -1350,6 +1355,7 @@ test('delegation reflects unavailable configuration and rechecks it before submi
       newError: makeNode(), request: () => assert.fail('unavailable configuration cannot launch'),
     });
     if (unavailable) {
+      vm.runInContext(sourceBetween('function mountEditorWire(', '\nfunction renderMountEditor('), context);
       vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
       await vm.runInContext('commitNew()', context);
       assert.match(context.newError.textContent, /TUI Settings -> Sub-agents/);

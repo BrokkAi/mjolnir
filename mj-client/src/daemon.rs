@@ -698,6 +698,8 @@ pub enum DaemonAction {
     },
     RestartSession {
         session_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        acknowledge_container_recreation: bool,
     },
     StartCreateSession(CreateSessionRequest),
     WaitCreateSession {
@@ -2221,6 +2223,14 @@ impl DaemonClient {
     }
 
     pub async fn restart_session(&mut self, session_id: String) -> Result<()> {
+        self.restart_session_with_ack(session_id, false).await
+    }
+
+    pub async fn restart_session_with_ack(
+        &mut self,
+        session_id: String,
+        acknowledge_container_recreation: bool,
+    ) -> Result<()> {
         ensure!(
             self.metadata.protocol_version == PROTOCOL_VERSION,
             "cannot Restart a session: daemon protocol {} does not match client protocol {}; restart the daemon, then try again",
@@ -2228,7 +2238,10 @@ impl DaemonClient {
             PROTOCOL_VERSION
         );
         match self
-            .request(DaemonAction::RestartSession { session_id })
+            .request(DaemonAction::RestartSession {
+                session_id,
+                acknowledge_container_recreation,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),

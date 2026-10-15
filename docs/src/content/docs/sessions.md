@@ -320,7 +320,15 @@ operation is `POST /api/v1/sessions/{id}/resume` in the
 To test native recovery for one selected session, use **Restart session** in
 the terminal command palette, or suspend and resume that session with the
 commands above. This stops its worker and starts a new one, which attempts to
-reload the recorded native session. Restarting only the Mjolnir daemon leaves
+reload the recorded native session. For container sessions, Restart keeps an
+unchanged container, preserving its workspace and caches. Changed attachments or
+per-session resource settings require a new container; Restart creates one only
+after its fresh recovery copy has been verified and sealed. Containers created
+before applied settings were recorded are recreated once on their next Restart.
+Both interfaces warn before recreation: the conversation and workspace recovery
+copy are restored, but files outside that copy, including temporary files and
+installed tools, may be lost.
+Restarting only the Mjolnir daemon leaves
 detached workers running and does not exercise native reload. If Codex or
 Claude reports that a never-prompted native session is missing, Mjolnir warns
 and opens a new empty native session under the same Mjolnir session ID. A

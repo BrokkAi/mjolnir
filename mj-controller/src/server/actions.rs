@@ -49,6 +49,9 @@ pub enum ControllerAction {
         profile_id: String,
         bundle_id: String,
         target_id: String,
+        /// Host directories attached when the session is first provisioned.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_mounts: Vec<AdditionalMount>,
         /// Explicit container or EC2 sizing selected in the create wizard.
         /// Omitted preserves the historical target defaults for older clients.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +115,8 @@ pub enum ControllerAction {
     /// target and mounts it last ran with.
     Restart {
         session_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        acknowledge_container_recreation: bool,
     },
     /// Stop the turn this session is working on and the turns of every
     /// sub-agent under it, leaving the sessions alive.
@@ -408,6 +413,7 @@ pub struct PathCompletionRequest {
 
 #[derive(Debug)]
 pub struct NewPreflightRequest {
+    pub additional_mounts: Vec<AdditionalMount>,
     pub bundle_id: String,
     pub target_id: String,
     pub project_directory: Option<PathBuf>,
@@ -462,6 +468,7 @@ pub struct MovePreparationRequest {
 /// distinct without carrying filesystem, Git, or SSH details to the phone.
 #[derive(Debug)]
 pub enum PreflightFailure {
+    InvalidMount,
     Validation,
     /// A configured isolated-session repository cannot be used as a network
     /// source. The detail is safe for the phone and tells the person how to

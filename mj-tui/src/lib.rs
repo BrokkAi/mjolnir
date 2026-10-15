@@ -264,6 +264,7 @@ pub enum DashboardAction {
     },
     RestartSession {
         session_id: String,
+        acknowledge_container_recreation: bool,
     },
     /// Start shared background hydration for unsaved profile definitions.
     WarmProfileCapabilities {
@@ -885,6 +886,8 @@ pub struct DashboardState {
     /// What new-session defaults are chosen from. The feed carries only live
     /// sessions, so this summary of every session arrives beside them.
     pub(crate) launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
+    /// The daemon's verdict, delivered with its records in the same runtime frame.
+    pub(crate) container_recreation_sessions: BTreeSet<String>,
     pub(crate) session_operations: Tracked<BTreeMap<String, SessionOperationDisplay>>,
     /// The real composers parked in front of sessions that are not attached
     /// yet: a Starting/Resuming transition or an in-flight attach. Keyed per
@@ -1195,6 +1198,7 @@ impl DashboardState {
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
             launch_recency,
+            container_recreation_sessions: BTreeSet::new(),
             go: None,
             launch_project_directory: None,
             go_workspaces: BTreeMap::new(),

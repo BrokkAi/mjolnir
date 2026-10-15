@@ -37,7 +37,7 @@ static DELEGATION_ONLY_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
 static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{} If these tools are not visible, find mj-agents in the tool catalog; code mode exposes it as ALL_TOOLS. In code mode a wait runs inside an exec script that yields to you while the wait is still blocking; when that happens, poll that script with the longest yield your exec tool allows, never one second, and do other work between polls only when you have some: every poll re-sends your whole context, and in one measured run second-by-second polls were a quarter of the parent's cost.",
+        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog. A direct wait suspends inference until a report arrives or this harness's wait window ends; if it returns still_running, call wait again to renew the wait.",
         SERVER_INSTRUCTIONS.as_str()
     )
 });
@@ -823,7 +823,7 @@ mod tests {
                             )
                         );
                         assert_eq!(
-                            instructions.contains("ALL_TOOLS"),
+                            instructions.contains("Call mj-agents tools directly"),
                             harness == HarnessKind::Codex
                         );
                         let spawn = tools.iter().find(|t| t["name"] == "spawn").unwrap();
@@ -1105,10 +1105,6 @@ mod tests {
         assert!(spawn.contains("finished children are parked"), "{spawn}");
         assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
         assert!(SERVER_INSTRUCTIONS.contains("send_message resumes one"));
-        // Codex code mode runs a wait inside an exec script that yields while
-        // the wait blocks; the S30 parents then polled that script every second.
-        assert!(CODEX_SERVER_INSTRUCTIONS.contains("longest yield"));
-        assert!(!SERVER_INSTRUCTIONS.contains("longest yield"));
     }
 
     #[test]

@@ -104,6 +104,7 @@ impl RuntimeState {
             move_operation_id,
         } = start;
         let mut work = Some(work);
+        let mut superseded_restart_intent = None;
         let result = {
             let mut lifecycle_owner = self.owner();
             lifecycle_owner.ensure_available()?;
@@ -132,7 +133,9 @@ impl RuntimeState {
                 .get(&session_id)
                 .is_some_and(|active| active.kind != kind && !active.is_running());
             if completed_other_kind {
-                lifecycle.remove(&session_id);
+                superseded_restart_intent = lifecycle
+                    .remove(&session_id)
+                    .and_then(|active| active.restart_intent);
             }
             if let Some(active) = lifecycle.get(&session_id) {
                 ensure!(
@@ -174,6 +177,7 @@ impl RuntimeState {
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
+                        restart_intent: None,
                         upgrade_work: upgrade_work.clone(),
                         phase,
                         operation_id: operation_reference.clone(),
@@ -208,11 +212,15 @@ impl RuntimeState {
                     // task keeps the admission and publishes the result; the
                     // daemon's `blocking` helper is not used because it would
                     // add an admission hold of its own.
-                    let mut result = match mj_core::runtime::spawn_off_async_workers(operation(
-                        operation_state,
-                        operation_id,
-                        cancelled,
-                    ))
+                    let cleanup_state = state.clone();
+                    let mut result = match mj_core::runtime::spawn_off_async_workers(async move {
+                        if let Some(intent_id) = superseded_restart_intent {
+                            cleanup_state
+                                .release_restart_intent(&operation_id, &intent_id)
+                                .await?;
+                        }
+                        operation(operation_state, operation_id, cancelled).await
+                    })
                     .await
                     {
                         Ok(Ok(result)) => result.map_err(|error| LifecycleFailure::of(&error)),
@@ -223,6 +231,30 @@ impl RuntimeState {
                             "daemon lifecycle task failed: {error}"
                         ))),
                     };
+                    if kind == LifecycleKind::Restart {
+                        // End cancellation and decide durable release under the
+                        // same owner lock, before another lifecycle can enter.
+                        let release_intent = {
+                            let mut owner = state.owner();
+                            let active = owner
+                                .lifecycle
+                                .get_mut(&operation_session_id)
+                                .expect("Restart owns its lifecycle until completion");
+                            let user_cancelled =
+                                matches!(active.phase, LifecyclePhase::CancellingRestart);
+                            active.phase = LifecyclePhase::CompletingRestart;
+                            user_cancelled
+                                .then(|| active.restart_intent.clone())
+                                .flatten()
+                        };
+                        if let Some(intent_id) = release_intent
+                            && let Err(error) = state
+                                .release_restart_intent(&operation_session_id, &intent_id)
+                                .await
+                        {
+                            result = Err(LifecycleFailure::of(&error));
+                        }
+                    }
                     if let Err(error) = state.reload_controller().await {
                         let reload_error = format!(
                             "reload daemon state after lifecycle operation for {operation_session_id}: {error:#}"
@@ -358,9 +390,12 @@ impl RuntimeState {
     }
 
     pub(super) fn remove_completed_lifecycle(&self, channel: &LifecycleWatch) {
-        self.owner()
-            .lifecycle
-            .retain(|_, active| !active.result.same_channel(channel) || active.is_visible());
+        self.owner().lifecycle.retain(|_, active| {
+            !active.result.same_channel(channel)
+                || active.is_visible()
+                || (active.restart_intent.is_some()
+                    && matches!(active.phase, LifecyclePhase::Completed(Err(_))))
+        });
     }
 }
 

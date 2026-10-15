@@ -2068,6 +2068,7 @@ async fn start_returns_the_created_session_and_hands_its_prompt_to_the_followup(
             })),
             title: None,
             project_directory: None,
+            additional_mounts: Vec::new(),
             dirty_ack: Vec::new(),
         }
     );

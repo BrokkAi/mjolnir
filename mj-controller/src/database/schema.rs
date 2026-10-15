@@ -1474,6 +1474,33 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         migrate_turn_outcome_schema(connection)?;
     }
 
+    // Breaking: older daemons reject the recreation phase and discard applied
+    // container settings from target_runtime_json when saving a session.
+    if version < 83 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE session_restart_intents RENAME TO session_restart_intents_v82;
+             CREATE TABLE session_restart_intents (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 operation_id TEXT NOT NULL,
+                 phase TEXT NOT NULL CHECK(phase IN ('stopping', 'restoring_in_place', 'recreating_container', 'cancel_requested', 'fallback')),
+                 updated_at TEXT NOT NULL,
+                 checkpoint_sha256 TEXT,
+                 checkpoint_started INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_started IN (0, 1)),
+                 container_recreation_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(container_recreation_acknowledged IN (0, 1))
+             ) STRICT;
+             INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, checkpoint_sha256, checkpoint_started)
+                 SELECT session_id, operation_id, phase, updated_at, checkpoint_sha256, checkpoint_started
+                 FROM session_restart_intents_v82;
+             DROP TABLE session_restart_intents_v82;
+             UPDATE schema_compatibility SET minimum_compatible_version = 83 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (83, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 83;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -1775,7 +1802,7 @@ mod reader_tests {
         upgraded
             .execute_batch(
                 "CREATE TRIGGER stop_before_restart_migration BEFORE INSERT ON schema_migrations
-                 WHEN NEW.version > 72
+                 WHEN NEW.version > 82
                  BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
             )
             .unwrap();
@@ -1783,11 +1810,37 @@ mod reader_tests {
         if !upgraded.is_autocommit() {
             upgraded.execute_batch("ROLLBACK").unwrap();
         }
+        upgraded.execute_batch(
+            "INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+             INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                 VALUES ('kept','Keep my work','codex','codex','podman','closing','now');
+             INSERT INTO session_restart_intents(session_id,operation_id,phase,updated_at,checkpoint_sha256,checkpoint_started)
+                 VALUES ('kept','restart-kept','stopping','now','sealed-sha',1);"
+        ).unwrap();
+        assert!(migrate_schema(&upgraded).is_err());
+        if !upgraded.is_autocommit() {
+            upgraded.execute_batch("ROLLBACK").unwrap();
+        }
+        let retained: (String, String) = upgraded.query_row(
+            "SELECT operation_id,checkpoint_sha256 FROM session_restart_intents WHERE session_id='kept'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, ("restart-kept".into(), "sealed-sha".into()));
         upgraded
             .execute_batch("DROP TRIGGER stop_before_restart_migration")
             .unwrap();
-        assert_eq!(read_schema_state(&upgraded).unwrap().revision, 72);
+        assert_eq!(read_schema_state(&upgraded).unwrap().revision, 82);
         assert!(migrate_schema(&upgraded).is_ok());
+
+        let upgraded_schema = read_schema_state(&upgraded).unwrap();
+        assert_eq!(upgraded_schema.minimum_compatible, Some(SCHEMA_VERSION));
+        assert!(upgraded_schema.ensure_supported_by(82).is_err());
+        upgraded.execute("UPDATE session_restart_intents SET phase='recreating_container' WHERE session_id='kept'", []).unwrap();
+        let retained: (String, String, bool) = upgraded.query_row(
+            "SELECT operation_id,checkpoint_sha256,checkpoint_started FROM session_restart_intents WHERE session_id='kept'",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(retained, ("restart-kept".into(), "sealed-sha".into(), true));
 
         let table_sql = |connection: &Connection| {
             connection
@@ -2331,8 +2384,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 82 retains raw turns beside semantic outcomes.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 82;
+    /// `SCHEMA_VERSION`. Migration 83 adds acknowledged container recreation.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 83;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.

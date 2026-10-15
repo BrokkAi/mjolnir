@@ -123,3 +123,37 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-2   Codex        refreshing…                      │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys
+
+=== restart warns before recreating an idle container (100x32) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
+│ default                            ☰ ││                                                          │
+╰──────────────────────────────────────╯│                                                          │
+╭ Sessions ───────────────── ▁   ▪   □ ╮│                                                          │
+│ Create   Open   Filter: _____________││                                                          │
+│hel ───────                                                                                       │
+│› · ACP pre                                                                                       │
+│  Idle  pod  ╭ × Recreate container on Restart? ────────────────────────────────────╮             │
+│  │ No mess  │Session: ACP pretty name                                              │  on.        │
+│  │          │                                                                      │             │
+│             │Restart will replace this container because its settings changed or   │             │
+│             │are unknown.                                                          │             │
+│             │The conversation and workspace recovery copy will be restored.        │             │
+│             │Files outside the recovery copy may be lost, including temporary files│             │
+│             │and installed tools.                                                  │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │c Cancel  ·  r Recreate and restart                                   │  ───────────╯
+│             │                                                                      │  ───────────╮
+│             │                                                                      │             │
+│             │                                                                      │  o open.    │
+│             │                                                                      │  ───────────╯
+│             │  Cancel     Recreate and restart                                     │  ──── ▁   ▪ ╮
+│             ╰──────────────────────────────────────────────────────────────────────╯             │
+│                                                                                       ───────────╯
+│                                                                                       ──── ▁   ▪ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets    │
+│                                      ││  claude-1  Claude Code  refreshing…                      │
+│                                      ││  codex-1   Codex        refreshing…                      │
+│                                      ││  codex-2   Codex        refreshing…                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then : palette · ? keys

@@ -104,7 +104,8 @@ impl CacheHost {
     /// successful answer is cached; a host that was unreachable is retried.
     pub(super) fn home(&self, executor: &impl CommandExecutor) -> Result<PathBuf> {
         let Self::Ssh(_) = self else {
-            return dirs::home_dir().context("Cannot expand ~: the home directory is unavailable.");
+            return mj_core::path_input::user_home()
+                .context("Cannot expand ~: the home directory is unavailable.");
         };
         let key = self.key();
         if let Some((recorded, home)) = HOMES.lock().expect("resolved homes").get(&key)

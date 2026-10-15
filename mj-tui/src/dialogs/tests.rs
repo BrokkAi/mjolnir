@@ -1280,6 +1280,48 @@ fn golden_tui_container_editor_details() {
         &drawn(&mut mounted, 100, 40),
     );
 
+    mounted.cancel_modal();
+    mounted.focus_sessions();
+    mounted.set_container_recreation_sessions(["session-1".into()].into());
+    assert_eq!(
+        mounted.dispatch_command(crate::actions::CommandId::RestartSession),
+        DashboardAction::None
+    );
+    append_dialog_render(
+        &mut output,
+        "restart warns before recreating an idle container",
+        100,
+        32,
+        &drawn(&mut mounted, 100, 32),
+    );
+    // Cancel is initially selected; Enter must not authorize replacement.
+    assert_eq!(
+        mounted.handle_key(key(KeyCode::Enter)),
+        DashboardAction::None
+    );
+    assert!(matches!(mounted.mode, Mode::Dashboard));
+    assert_eq!(
+        mounted.dispatch_command(crate::actions::CommandId::RestartSession),
+        DashboardAction::None
+    );
+    drawn(&mut mounted, 100, 32);
+    mounted.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        mounted.handle_key(key(KeyCode::Enter)),
+        DashboardAction::RestartSession {
+            session_id: "session-1".into(),
+            acknowledge_container_recreation: true,
+        }
+    );
+    mounted.set_container_recreation_sessions(Default::default());
+    assert_eq!(
+        mounted.dispatch_command(crate::actions::CommandId::RestartSession),
+        DashboardAction::RestartSession {
+            session_id: "session-1".into(),
+            acknowledge_container_recreation: false,
+        }
+    );
+
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "tui-container-editor-details",

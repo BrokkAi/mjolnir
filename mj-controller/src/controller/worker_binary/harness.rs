@@ -296,7 +296,7 @@ fn muse_data_dir(home: &Path) -> PathBuf {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    let user_home = dirs::home_dir();
+    let user_home = mj_core::path_input::user_home();
     let own_home = absolute("XDG_CONFIG_HOME")
         .map(|config| kind.home_from_environment(config))
         .or_else(|| {

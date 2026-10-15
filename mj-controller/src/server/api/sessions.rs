@@ -220,6 +220,7 @@ pub(super) async fn start_session(
         resource_allocation: resource_allocation.map(Box::new),
         title: request.title.clone(),
         project_directory: request.project_directory.clone(),
+        additional_mounts: Vec::new(),
         dirty_ack: Vec::new(),
     };
     crate::server::validate_action_live(&state, &action).await?;

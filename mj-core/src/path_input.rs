@@ -2,6 +2,25 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::path::{Component, Path, PathBuf};
 
+/// This user's home directory: the one owner of that answer in mj.
+///
+/// On Windows, `dirs` asks the shell's known-folder API, which ignores
+/// `USERPROFILE`. Node's `os.homedir()`, and so Claude Code, reads
+/// `USERPROFILE` first. Honouring it keeps mj on the same home as the agents
+/// it starts, and lets an isolated test instance relocate the home as `HOME`
+/// does on Unix, where `dirs` already honours it.
+#[allow(clippy::disallowed_methods)] // The one sanctioned home lookup.
+pub fn user_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .filter(|profile| profile.is_absolute())
+    {
+        return Some(profile);
+    }
+    dirs::home_dir()
+}
+
 /// Whether an input requests home expansion. Named users are not supported.
 pub fn needs_home(path: &Path) -> Result<bool> {
     let first = path.components().next();
@@ -33,7 +52,7 @@ pub fn expand_home(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub fn expand_local(path: &Path) -> Result<PathBuf> {
-    expand_home(path, dirs::home_dir().as_deref())
+    expand_home(path, user_home().as_deref())
 }
 
 /// Keep target-specific validation after resolution, but reject unsafe drafts early.

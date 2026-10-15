@@ -577,6 +577,8 @@ pub(super) async fn stop_background_task(
 #[serde(deny_unknown_fields)]
 pub(super) struct PreflightNewRequest {
     #[serde(default)]
+    pub(super) additional_mounts: Vec<AdditionalMount>,
+    #[serde(default)]
     pub(super) remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
     #[serde(default)]
     pub(super) workspace_id: String,
@@ -613,6 +615,7 @@ pub(super) async fn preflight_new(
         resource_allocation: None,
         title: None,
         project_directory: request.project_directory.clone(),
+        additional_mounts: request.additional_mounts.clone(),
         dirty_ack: Vec::new(),
     };
     validate_action(&action, &state.snapshot_rx.borrow())?;
@@ -620,6 +623,7 @@ pub(super) async fn preflight_new(
     state
         .preflight_tx
         .send(PreflightRequest::New(NewPreflightRequest {
+            additional_mounts: request.additional_mounts,
             bundle_id: request.bundle_id,
             target_id: request.target_id,
             project_directory: request.project_directory,
@@ -633,6 +637,9 @@ pub(super) async fn preflight_new(
         .map_err(|_| ApiError::controller_unavailable())?
         .map(Json)
         .map_err(|failure| match failure {
+            PreflightFailure::InvalidMount => ApiError::bad_request(
+                "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host",
+            ),
             PreflightFailure::Validation if project_validation => ApiError::bad_request(
                 "project validation failed; check that the directory exists, is accessible, and contains a Git repository with a valid HEAD",
             ),
@@ -769,7 +776,9 @@ pub(super) async fn preflight_resume(
         .map_err(|_| ApiError::controller_unavailable())?
         .map(Json)
         .map_err(|failure| match failure {
-            PreflightFailure::Validation | PreflightFailure::InvalidRepository(_) => {
+            PreflightFailure::InvalidMount
+            | PreflightFailure::Validation
+            | PreflightFailure::InvalidRepository(_) => {
                 ApiError::bad_request("this session cannot resume on that target")
             }
             PreflightFailure::Controller(_) => ApiError::new(

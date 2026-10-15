@@ -321,7 +321,7 @@ fn harness_discovery_check(
     config: ConfigStatus<'_>,
     executor: &impl CommandExecutor,
 ) -> DoctorCheck {
-    let home = dirs::home_dir();
+    let home = mj_core::path_input::user_home();
     let overrides = HarnessKind::ALL.into_iter().filter_map(|kind| {
         std::env::var_os(kind.home_env()).map(|path| (kind, kind.home_from_environment(path)))
     });

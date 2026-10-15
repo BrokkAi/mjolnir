@@ -201,6 +201,8 @@ impl ViewerSnapshot {
                     at: start.at,
                     branch: start.branch,
                     base: start.base,
+                    restart_recreates_container:
+                        mj_core::state::ContainerSettings::recreation_required(session),
                     targeted_turn_control_supported: false,
                     native_subagents: Vec::new(),
                     steering: None,
@@ -433,6 +435,9 @@ pub(super) fn project_key(identity: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    /// The daemon's creation-settings comparison, also used by Restart itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restart_recreates_container: bool,
     /// In-process identity used by `mj sessions`; deliberately not part of the
     /// viewer or API JSON contract.
     #[serde(skip, default)]

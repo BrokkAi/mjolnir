@@ -21,7 +21,9 @@ use crate::targets::{AdditionalMount, validate_additional_mounts};
 pub const STATE_VERSION: u32 = 1;
 
 mod target_runtime;
-pub use target_runtime::{TargetConnection, TargetRuntimeSettings, ToolCachePlacement};
+pub use target_runtime::{
+    ContainerSettings, TargetConnection, TargetRuntimeSettings, ToolCachePlacement,
+};
 
 mod session_configuration;
 pub use session_configuration::SessionConfiguration;
