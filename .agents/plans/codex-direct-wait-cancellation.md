@@ -33,9 +33,15 @@ the child's actual handback through a subsequent wait.
 - [x] (2026-10-15) Serialize successive parent waits through delivery receipt and
   report-marker restoration; retain failed delivery across empty worker snapshots.
 - [x] (2026-10-15) Pass all seven final dispatcher regressions and workspace Clippy.
-- [ ] Finish the complete controller suite; one checkpoint subprocess exceeded
-  its 60-second bound so far and needs an isolated rerun after its diagnostic is available.
-- [ ] Live-test actual post-cancellation `reported`/`handback` payload delivery.
+- [x] (2026-10-15) Finish the controller suite: 2,004 passes, 12 ignored and one
+  60-second checkpoint subprocess timeout; that case passed alone in 0.76 seconds.
+- [x] (2026-10-15) Commit `8acaaaf3f`, merge upstream as `171a2a4ac`, and pass
+  workspace Clippy again on the integrated revision.
+- [x] (2026-10-15) Live-test actual post-cancellation `reported`/`handback` payload
+  delivery in `fix1287-c6ad0d9c`: cancellation took 0.89 seconds, false receipt
+  observed, child continued, and the fresh native MCP wait received its handback.
+- [x] (2026-10-15) Remove the isolated runtime after scoped process teardown and
+  rootless-layer cleanup; source profile project listings remained unchanged.
 - [ ] Complete final checks, commit and push, then install without changing HEAD
   while the installer builds. Verify the installed version and daemon handoff.
 
@@ -76,10 +82,10 @@ cannot clear someone else's cancellation target.
 
 ## Outcomes & Retrospective
 
-Direct routing and executor exclusion are verified. Post-cancellation report
-delivery is still incomplete; the original source-only fix is published, but
-local installation was intentionally stopped. No default instance was used for
-tests and no installed binaries were replaced by that stopped installer.
+Direct routing, executor exclusion, actual deadline renewal and post-cancellation
+report delivery are verified. Tests passed after one isolated timeout rerun, and
+merged workspace Clippy passed. No default instance was used for tests. Publishing
+the ownership follow-up and the requested local installation remain to do.
 
 ## Context and Orientation
 
@@ -95,7 +101,7 @@ tool-boundary correction needs to run.
 for every cancel form. No journal, wire or database field is added.
 
 The daemon consumes completion receipts in
-`mj-controller/src/server_runtime/api.rs`; delivery false restores report
+`mj-controller/src/daemon/delegation.rs`; delivery false restores report
 markers. Keep accepted child mutations and handbacks durable. Only completion
 waits should end with their parent turn.
 
@@ -172,3 +178,9 @@ through receipt processing, so a successor cannot read report markers before a
 cancelled predecessor restores them. Delivery retries survive worker snapshots
 that already removed the request. Other parents and child mutations stay concurrent.
 Final logs now live in `/home/jonathan/.cache/mjolnir/build/issue1287/`.
+
+Validation completed on the merged revision: final cancellation evidence is in
+`target/issue1287-cancel-live-3/`. The driver required manual rootless-layer
+cleanup after passing all acceptance assertions. Its test processes were stopped
+before that cleanup, the namespace helper was stopped before runtime removal,
+and the trace records the final clean state. No build configuration was changed.

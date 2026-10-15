@@ -34,6 +34,7 @@ call; no parent called `functions.exec` or `functions.wait`.
 | Slow report | `b4f323cef9a6bcb698dc2d1bd167ed1f` | 110.95 seconds without additional model activity, then successful child-report delivery. Parent tools: spawn, wait. |
 | Deadline renewal | `3ae560935362867610242807d9967df8` | First wait returned `still_running` with `waited_seconds: 240`. Parent renewed with another direct wait and collected the report. No activity while either call remained pending. |
 | Initial cancellation | `178c451b40dc4f5d22c4ad32187c6717` | Interrupt returned parent to idle in 2.89 seconds and the child kept running. Actual tool output later revealed that the cancelled wait consumed the report; this was not a successful report-delivery check. |
+| Corrected cancellation | `2996084eb1718b6d927253cd18b8d148` | Parent returned to idle in 0.89 seconds, its retired wait had a false delivery receipt, and the child continued. A fresh direct wait received the actual `reported`/`handback` payload for child `e56cc7c82c83bae915d168759c61618b`. |
 
 The local evidence directory is `target/issue1287-live-2/`. It contains the
 driver, native records, API history, staged Codex configuration, trace and
@@ -59,9 +60,22 @@ report-marker restoration, including failed delivery and task recovery. Other
 parents, spawns and messages remain concurrent. No database, journal or wire
 field is added.
 
-The stronger live follow-up must observe a false receipt for the retired wait
-and an actual `reported` payload containing the child's `handback` in a fresh
-parent turn. This follow-up is still pending while its test binaries build.
+The stronger follow-up passed on merged commit `171a2a4ac` in named instance
+`fix1287-c6ad0d9c`. The retired wait had `delivered_to_waiter: false` and status
+`interrupted`. Its child stayed running. The fresh wait's actual native MCP
+response had status `reported`, `report_source: handback`, the expected child
+ID and output `REPORT1287_0f11d473e208`. Parent tools were spawn, wait, wait;
+no outer exec calls or polls appeared. No parent inference occurred during
+the observed 5.01-second pending interval.
+
+Evidence is in `target/issue1287-cancel-live-3/`, including native payloads,
+API history, staged configuration, driver, trace and summary. The driver
+passed its acceptance assertions but returned nonzero during cleanup because
+an isolated rootless Podman layer had foreign directory ownership. After
+confirming every test process was stopped, its overlay was removed in its own
+user namespace; the helper was then stopped before removing the runtime.
+The trace and summary record completed cleanup. Source profile project
+listings remained unchanged.
 
 ## Initial automated validation
 
@@ -79,8 +93,13 @@ also passed in the dev profile.
 
 Those checks precede the cancellation ownership correction. Its final core and
 worker suites passed 1,205 tests with 12 ignored. All seven final dispatcher
-regressions and workspace Clippy passed. The full controller suite is running;
-one checkpoint subprocess needs an isolated rerun after the suite completes. Logs are under
+regressions passed. The complete controller run reported 2,004 passes,
+12 ignored and one checkpoint subprocess timeout at its fixed 60-second bound.
+That test, `workspace_lease_blocks_prompts_and_releases_without_advancing_recovery`,
+passed alone from the same test binary in 0.76 seconds. Total validation is
+3,210 passing tests after that isolated rerun, with 24 ignored. No unrelated
+timeout or build setting was changed. Workspace Clippy passed again after
+merging upstream, on `171a2a4ac`, in the dev profile. Logs are under
 `/home/jonathan/.cache/mjolnir/build/issue1287/`.
 
 An earlier overloaded run timed out in the unchanged
