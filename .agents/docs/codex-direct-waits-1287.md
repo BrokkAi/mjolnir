@@ -11,6 +11,11 @@ Codex profile, preserving existing namespaces and the code-mode enablement
 setting. `omit_tools_from = ["deferred"]` still exposes MJ tools initially.
 The setting is documented in the [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
+A separate real ACP turn inspected the code-mode executor itself. It returned
+`mj_wait_type: "undefined"`, no MJ entries in `ALL_TOOLS`, and 106 other
+available tools. This confirms enforced executor exclusion while retaining
+independent code-mode tools. Evidence is in `target/issue1287-routing/`.
+
 ## Live acceptance
 
 The test used named instance `fix1287-32285f23`, a separate daemon, copied
@@ -34,6 +39,8 @@ The local evidence directory is `target/issue1287-live-2/`. It contains the
 driver, native records, API history, staged Codex configuration, trace and
 summary. The driver reuses `SteerLab` from `tests/e2e/steer_live.py` and
 destroys its fixture sessions before stopping its isolated daemon.
+The test-local Podman pause process and the isolated runtime were also removed;
+source profile project listings were unchanged.
 
 ## Automated validation
 
@@ -43,9 +50,13 @@ startup, legacy boolean code-mode settings and failure without partial writes.
 The MCP initialization contract test passed after replacing its old
 `ALL_TOOLS` expectation with direct-call guidance.
 
-The worker library suite had 676 passes and 11 ignores in its final run,
-with one timeout in the unchanged
-`saturated_wait_lane_keeps_send_message_available` test. It also timed out
-serially at its existing two-second admission bound under host load above
-300. That same test passed in the earlier suite run. All 23 binary and
-integration tests passed; the documentation target contained no tests.
+After merging upstream release 2.46.0, the complete worker suite passed:
+`cargo test -p brokk-mj-worker -- --test-threads=4` reported 677 library
+passes, 11 ignores, and 23 binary/integration passes. The documentation target
+contained no tests. Workspace `cargo clippy --all-targets -- -D warnings`
+also passed in the dev profile.
+
+An earlier overloaded run timed out in the unchanged
+`saturated_wait_lane_keeps_send_message_available` test at its two-second
+admission bound. It passed in the final complete suite with reduced test
+concurrency. All Cargo tests ran outside the restricted sandbox.
