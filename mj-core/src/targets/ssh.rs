@@ -70,7 +70,7 @@ pub fn scp_upload(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool)
     if recursive {
         args.push("-r".into());
     }
-    args.push(source.to_string_lossy().into_owned());
+    args.push(scp_local_path(source));
     args.push(format!("{}:{remote}", ssh.destination));
     scp_command(ssh, args)
 }
@@ -79,8 +79,26 @@ pub fn scp_upload(ssh: &SshTarget, source: &Path, remote: &str, recursive: bool)
 pub fn scp_download(ssh: &SshTarget, remote: &str, local: &str) -> CommandSpec {
     let mut args = scp_args(ssh);
     args.push(format!("{}:{remote}", ssh.destination));
-    args.push(local.into());
+    args.push(scp_local_path(Path::new(local)));
     scp_command(ssh, args)
+}
+
+/// A controller path as `scp` must see it. `scp` reads an argument with a
+/// colon before any separator as `host:path`, and Windows OpenSSH exempts only
+/// a plain drive letter, so a verbatim path from `canonicalize`
+/// (`\\?\C:\...`) would name the host `\\?\C`. Spell it without the
+/// verbatim prefix; nothing else about the path changes.
+fn scp_local_path(path: &Path) -> String {
+    use std::path::{Component, Prefix};
+    let text = path.to_string_lossy();
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::VerbatimDisk(_) => text[r"\\?\".len()..].to_owned(),
+            Prefix::VerbatimUNC(..) => format!(r"\\{}", &text[r"\\?\UNC\".len()..]),
+            _ => text.into_owned(),
+        },
+        _ => text.into_owned(),
+    }
 }
 
 /// The connection's `ssh` arguments rewritten for `scp`, which spells the port
@@ -2929,5 +2947,70 @@ mod tests {
         let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
         assert!(ledger.lease(&ssh, dir.path(), &executor).is_err());
         assert_eq!(ledger.connections()[&connection_key(&ssh)][0].leased, 1);
+    }
+
+    /// Fails the test if a lease runs any command, such as opening a master.
+    struct NoMaster;
+
+    impl CommandExecutor for NoMaster {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            panic!(
+                "an unshared lease ran {} {:?}",
+                command.program, command.args
+            )
+        }
+    }
+
+    /// Every `ssh` and `scp` on a native Windows controller, and on Unix with
+    /// `MJ_SSH_CONTROL_MASTER=off`, takes an unshared lease: it opens no master
+    /// and the command spawns exactly as built, on its own connection.
+    #[test]
+    fn unshared_leases_open_no_master_and_spawn_the_built_command() {
+        #[cfg(unix)]
+        let _guard = SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(unix)]
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let ssh = SshTarget {
+            destination: "dev@203.0.113.7".to_owned(),
+            ssh_args: vec!["-p".to_owned(), "2238".to_owned()],
+        };
+        let commands = [
+            ssh_command(&ssh, ["git", "status"]),
+            ssh_validation_command(&ssh, vec!["true".to_owned()], "validate"),
+            ssh_connectivity_probe(&ssh),
+            scp_upload(&ssh, Path::new("archive.zip"), "remote/archive.zip", false),
+            scp_download(&ssh, "remote/archive.zip", "archive.zip"),
+        ];
+        for command in &commands {
+            let session = command.open_ssh_session(&NoMaster).unwrap();
+            let lease = session.lease().expect("an SSH command takes a lease");
+            assert_eq!(lease.control_path(), None);
+            lease.invalidate();
+            assert_eq!(session.command().args, command.args, "{}", command.purpose);
+        }
+        #[cfg(unix)]
+        set_ssh_connection_sharing_for_test(None);
+    }
+
+    // Hard-won: #1238: a canonicalized `\\?\C:` checkpoint path reached Windows scp as a host name.
+    #[cfg(windows)]
+    #[test]
+    fn scp_names_verbatim_controller_paths_without_their_prefix() {
+        let ssh = plain_target("dev@203.0.113.7");
+        for (local, expected) in [
+            (r"\\?\C:\mj\a.hel.zip", r"C:\mj\a.hel.zip"),
+            (
+                r"\\?\UNC\server\share\a.hel.zip",
+                r"\\server\share\a.hel.zip",
+            ),
+            (r"C:\mj\a.hel.zip", r"C:\mj\a.hel.zip"),
+        ] {
+            let upload = scp_upload(&ssh, Path::new(local), "a.zip", false);
+            assert_eq!(upload.args, [expected, "dev@203.0.113.7:a.zip"]);
+            let download = scp_download(&ssh, "a.zip", local);
+            assert_eq!(download.args, ["dev@203.0.113.7:a.zip", expected]);
+        }
     }
 }

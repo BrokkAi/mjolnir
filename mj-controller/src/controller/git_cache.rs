@@ -227,7 +227,10 @@ fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathB
     let output = checked(executor.execute(&command)?, &command)?;
     let home = String::from_utf8(output.stdout).context("decode container host home directory")?;
     let home = PathBuf::from(home);
-    ensure!(home.is_absolute(), "container host HOME is not absolute");
+    ensure!(
+        mj_core::target_path::is_absolute_on_host_or_target(&home),
+        "container host HOME is not absolute"
+    );
     Ok(home)
 }
 

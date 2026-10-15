@@ -268,6 +268,11 @@ pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
         crate::target_path::is_absolute_on_host_or_target(&common),
         "Git path must be absolute"
     );
+    // `push` separates components with `\` on Windows; a path on a session
+    // target keeps POSIX separators.
+    if crate::target_path::is_absolute(directory) {
+        return Ok(PathBuf::from(crate::target_path::text(&common)));
+    }
     Ok(common)
 }
 

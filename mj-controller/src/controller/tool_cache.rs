@@ -1,5 +1,7 @@
 //! Machine storage shared by native build tools, independently of mbx.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, ensure};
 use mj_core::config::{Config, TargetTemplate, stored_target};
 use mj_core::state::ToolCachePlacement;
@@ -67,22 +69,24 @@ fn prepare_checked(
     let home = host.home(executor)?;
     let directory = match settings.and_then(|settings| settings.tools_directory.clone()) {
         Some(directory) => directory,
-        None => home.join(".cache/mjolnir/build"),
+        None => mj_core::target_path::join(&home, Path::new(".cache/mjolnir/build")),
     };
-    let nx_home = home.join(".nx");
+    let nx_home = mj_core::target_path::join(&home, Path::new(".nx"));
     let container = !matches!(
         template,
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. }
     );
     let nx_destination = if container {
-        std::path::Path::new(
-            template
-                .container()
-                .and_then(|container| container.environment.resolved().get("HOME"))
-                .map(String::as_str)
-                .unwrap_or("/home/hel"),
+        mj_core::target_path::join(
+            Path::new(
+                template
+                    .container()
+                    .and_then(|container| container.environment.resolved().get("HOME"))
+                    .map(String::as_str)
+                    .unwrap_or("/home/hel"),
+            ),
+            Path::new(".nx"),
         )
-        .join(".nx")
     } else {
         nx_home.clone()
     };

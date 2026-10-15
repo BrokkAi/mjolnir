@@ -122,10 +122,14 @@ impl CheckpointTransfer<'_> {
         validate_checkpoint_path(self.locator, self.remote_archive)?;
         let parent = self.destination.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
+        // Keep only the reserved name, not an open handle: the copy commands
+        // write this file from another process, and Windows OpenSSH `scp`
+        // cannot open a file this process still holds open.
         let temporary = tempfile::Builder::new()
             .prefix(".hel-checkpoint-")
-            .tempfile_in(parent)?;
-        let path = temporary.path().to_path_buf();
+            .tempfile_in(parent)?
+            .into_temp_path();
+        let path = temporary.to_path_buf();
         let staging = remote_staging_path(self.session_id, self.operation_id)?;
         let transfer_result = transfer_plan(
             self.locator,

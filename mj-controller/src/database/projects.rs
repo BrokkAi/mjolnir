@@ -62,9 +62,13 @@ pub(super) fn read_project_catalog_from(connection: &Connection) -> Result<Proje
 pub(crate) fn store_project_location(location: &ProjectLocation) -> Result<()> {
     ensure!(
         !location.host.trim().is_empty()
-            && location.directory.is_absolute()
-            && location.checkout_root.is_absolute()
-            && location.repository_root.is_absolute(),
+            && [
+                &location.directory,
+                &location.checkout_root,
+                &location.repository_root,
+            ]
+            .iter()
+            .all(|path| mj_core::target_path::is_absolute_on_host_or_target(path)),
         "project location on {:?} must contain absolute directory, checkout, and repository paths",
         location.host
     );

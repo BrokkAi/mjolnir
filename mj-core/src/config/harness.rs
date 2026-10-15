@@ -221,7 +221,7 @@ impl HarnessKind {
         let config_root = if self.nested_home() {
             environment.insert(
                 "XDG_DATA_HOME".into(),
-                home.join(".data").to_string_lossy().into_owned(),
+                crate::target_path::text(&crate::target_path::join(home, Path::new(".data"))),
             );
             home.parent().unwrap_or(home)
         } else {
@@ -229,7 +229,7 @@ impl HarnessKind {
         };
         environment.insert(
             self.home_env().into(),
-            config_root.to_string_lossy().into_owned(),
+            crate::target_path::text(config_root),
         );
     }
 

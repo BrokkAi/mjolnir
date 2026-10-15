@@ -41,7 +41,10 @@ impl Controller {
         }
         let root = workspace_root(backend, session.container_workspace.as_deref());
         for repository in &bundle.repositories {
-            let directory = std::path::Path::new(&root).join(&repository.destination);
+            let directory = mj_core::target_path::join(
+                std::path::Path::new(&root),
+                std::path::Path::new(&repository.destination),
+            );
             // With an exact checkout, the base belongs to the checked-out
             // repository alone; the others start at their default branch.
             let checkout = session

@@ -2136,7 +2136,10 @@ pub fn podman_workspace_locator_named(
                 "Podman workspace storage helper must contain non-empty arguments"
             );
             Ok(PodmanWorkspaceLocator::HostPath {
-                path: root.join(&resource).to_string_lossy().into_owned(),
+                path: crate::target_path::text(&crate::target_path::join(
+                    root,
+                    Path::new(&resource),
+                )),
                 helper: helper.clone(),
                 resource,
             })
@@ -2153,16 +2156,16 @@ pub fn podman_workspace_locator_named(
 /// `/workspace/<session id>`, so a build cache shared by every container on a
 /// host never sees two checkouts of one project at the same absolute path.
 pub fn container_workspace_root(recorded: Option<&Path>) -> String {
-    recorded.map_or_else(
-        || CONTAINER_WORKSPACE.to_owned(),
-        |path| path.to_string_lossy().into_owned(),
-    )
+    recorded.map_or_else(|| CONTAINER_WORKSPACE.to_owned(), crate::target_path::text)
 }
 
 /// The per-session container workspace recorded for a session created now.
 pub fn new_container_workspace(session_id: &str) -> Result<PathBuf> {
     validate_session_id(session_id)?;
-    Ok(Path::new(CONTAINER_WORKSPACE).join(session_id))
+    Ok(crate::target_path::join(
+        Path::new(CONTAINER_WORKSPACE),
+        Path::new(session_id),
+    ))
 }
 
 /// The workspace directory an EC2 session owns in its login home.

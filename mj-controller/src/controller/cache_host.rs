@@ -127,7 +127,10 @@ impl CacheHost {
         let home = String::from_utf8(output.stdout).context("Remote home is not valid UTF-8")?;
         ensure!(!home.is_empty(), "Remote home is empty");
         let home = PathBuf::from(home);
-        ensure!(home.is_absolute(), "Remote home is not absolute");
+        ensure!(
+            mj_core::target_path::is_absolute(&home),
+            "Remote home is not absolute"
+        );
         HOMES
             .lock()
             .expect("resolved homes")

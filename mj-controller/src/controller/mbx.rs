@@ -576,7 +576,7 @@ fn inspect_host(
     let native_version = Some(native.version.clone());
     let directory = native_cache_directory(host, &native, executor)?;
     ensure!(
-        directory.is_absolute(),
+        mj_core::target_path::is_absolute_on_host_or_target(&directory),
         "build cache directory {} is not absolute",
         directory.display()
     );
@@ -905,7 +905,7 @@ pub(super) fn sync_mbx_binary_from_native(
         status => bail!("{}", cache_unavailable_reason(&status)),
     };
     ensure!(
-        directory.is_absolute(),
+        mj_core::target_path::is_absolute_on_host_or_target(directory),
         "build cache directory is not absolute: {}",
         directory.display()
     );

@@ -35,11 +35,13 @@ pub(super) fn project_memory_launch(
     };
     let project_key = identity.key()?;
     let replica_slug = project_memory_replica_slug(&project_key, &session.id);
-    let project_root = PathBuf::from(target_profile_home)
-        .join("projects")
-        .join(replica_slug);
-    let root = project_root.join("memory");
-    let baseline_root = project_root.join(".hel-memory-baseline");
+    let project_root = mj_core::target_path::join(
+        Path::new(target_profile_home),
+        &Path::new("projects").join(replica_slug),
+    );
+    let root = mj_core::target_path::join(&project_root, Path::new("memory"));
+    let baseline_root =
+        mj_core::target_path::join(&project_root, Path::new(".hel-memory-baseline"));
     let mut repository_roots = std::collections::BTreeMap::new();
     if let Some(bundle) = bundle {
         let target_roots =
