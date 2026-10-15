@@ -364,6 +364,12 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 RelayCommand::CancelTurnFor { active_prompt_id } => {
                     snapshot.cancelling_prompt_id = Some(active_prompt_id.clone())
                 }
+                RelayCommand::Cancel | RelayCommand::CancelTurn => {
+                    snapshot.cancelling_prompt_id = snapshot
+                        .active_prompt
+                        .as_ref()
+                        .map(|prompt| prompt.command_id.clone());
+                }
                 _ => {}
             }
             match command {
@@ -802,6 +808,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 (RelayCommand::GoalControl { .. }, RelayCommandOutcome::GoalControlled) => {}
                 (RelayCommand::Cancel, RelayCommandOutcome::Cancelled)
                 | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
+                // A cancel acknowledgement does not end its originating
+                // prompt, and must never retarget cancellation to a later one.
                 | (RelayCommand::CancelTurnFor { .. }, RelayCommandOutcome::Cancelled) => {}
                 (
                     RelayCommand::ResolveSteering { steering_id },
@@ -815,7 +823,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     }
                 }
                 (
-                    RelayCommand::Cancel | RelayCommand::Steer { .. },
+                    control @ (RelayCommand::Cancel | RelayCommand::Steer { .. }),
                     RelayCommandOutcome::Steered { queued_command_id },
                 ) => {
                     if let Some(steering) = snapshot.steering.as_mut()
@@ -860,11 +868,17 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.pending_user_shell_contexts.retain(|context| {
                         context.attached_command_id.as_deref() != Some(queued_command_id.as_str())
                     });
+                    if matches!(control, RelayCommand::Cancel) {
+                        snapshot.cancelling_prompt_id = None;
+                    }
                 }
                 (
-                    RelayCommand::Cancel | RelayCommand::Steer { .. },
+                    control @ (RelayCommand::Cancel | RelayCommand::Steer { .. }),
                     RelayCommandOutcome::SteeringReturned { .. },
                 ) => {
+                    if matches!(control, RelayCommand::Cancel) {
+                        snapshot.cancelling_prompt_id = None;
+                    }
                     // The turn it targeted had already ended, so nothing was
                     // delivered and there is nothing for the user to decide:
                     // the prompt runs next from the queue.
@@ -1088,6 +1102,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if let RelayCommand::CancelTurnFor { active_prompt_id } = &command
                 && snapshot.cancelling_prompt_id.as_ref() == Some(active_prompt_id)
             {
+                snapshot.cancelling_prompt_id = None;
+            }
+            if matches!(command, RelayCommand::Cancel | RelayCommand::CancelTurn) {
                 snapshot.cancelling_prompt_id = None;
             }
             snapshot

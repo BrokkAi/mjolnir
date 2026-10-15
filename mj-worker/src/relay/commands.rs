@@ -122,9 +122,14 @@ impl DurableRelay {
                 {
                     return Err("The requested turn is no longer running".into());
                 }
-                if self.snapshot.cancelling_prompt_id.is_some() {
+                if self.turn_cancellation_pending() {
                     return Err("Cancellation is already pending".into());
                 }
+            }
+            RelayCommand::Cancel | RelayCommand::CancelTurn
+                if self.turn_cancellation_pending() =>
+            {
+                return Err("Cancellation is already pending".into());
             }
             RelayCommand::ResolveSteering { steering_id } => {
                 let Some(steering) = self
@@ -1831,6 +1836,9 @@ impl DurableRelay {
         // configuration changes while its prompt loop is running.
         if self.checkpoint_only
             || self.turn_in_progress()
+            // A cancel can outlive its prompt result. Drain it before a
+            // replacement turn starts, so it cannot reach the newer turn.
+            || self.turn_cancellation_pending()
             || self
                 .snapshot
                 .steering
@@ -1884,8 +1892,12 @@ impl DurableRelay {
             .iter()
             .any(|event| event.wake)
             && self.activity_is_idle()
-            && self.snapshot.cancelling_prompt_id.is_none()
-            && !self.snapshot.dispatches.values().any(|dispatch| {
+            && !self.turn_cancellation_pending()
+    }
+
+    fn turn_cancellation_pending(&self) -> bool {
+        self.snapshot.cancelling_prompt_id.is_some()
+            || self.snapshot.dispatches.values().any(|dispatch| {
                 matches!(
                     dispatch.command,
                     RelayCommand::Cancel
@@ -1898,6 +1910,17 @@ impl DurableRelay {
                         | RelayDispatchState::InFlight
                 )
             })
+    }
+
+    /// Socket liveness does not mean a cancelled tool call can receive output.
+    /// The turn owner decides this under the same lock as cancellation admission.
+    #[cfg(unix)]
+    pub(crate) fn subagent_wait_turn_is_live(&self, command_id: &str) -> bool {
+        self.snapshot
+            .active_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.command_id == command_id)
+            && self.snapshot.cancelling_prompt_id.as_deref() != Some(command_id)
     }
 
     fn enqueue_mailbox_wake(&mut self) -> Result<()> {

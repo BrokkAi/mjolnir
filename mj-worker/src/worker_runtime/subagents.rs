@@ -693,7 +693,7 @@ impl SubagentEndpoint {
                 waiter.finish();
                 return Ok(Some(result));
             }
-            if let Some(result) = self.yield_wait_for_steering(request_id, waiter)? {
+            if let Some(result) = self.interrupt_wait_at_turn_boundary(request_id, waiter)? {
                 return Ok(Some(result));
             }
             tokio::select! {
@@ -709,7 +709,7 @@ impl SubagentEndpoint {
         }
     }
 
-    fn yield_wait_for_steering(
+    fn interrupt_wait_at_turn_boundary(
         &self,
         request_id: &str,
         waiter: &mut LiveWaiter,
@@ -719,38 +719,14 @@ impl SubagentEndpoint {
         };
         let relay = relay.lock().expect("relay lock poisoned");
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
-        // This lock also owns daemon completion. Exactly one result wins;
-        // neither an arriving report nor a steering wake can overwrite it.
+        // Completion takes these locks in the same order. A turn boundary
+        // cannot race a report's delivery receipt, even before this task wakes.
         if let Some(result) = state.results.get(request_id).cloned() {
             LiveWaiter::remove_from(&mut waiter.active, request_id, &mut state);
             return Ok(Some(result));
         }
-        let Some(request) = state.requests.get(request_id) else {
+        let Some(result) = Self::interrupted_wait_result(&relay, &state, request_id) else {
             return Ok(None);
-        };
-        if !matches!(
-            request.action,
-            mj_core::subagent::SubagentToolAction::WaitAgents
-        ) || !request
-            .originating_command_id
-            .as_deref()
-            .is_some_and(|turn| relay.boundary_steer_needs_turn(turn))
-        {
-            return Ok(None);
-        }
-        let now = mj_core::clock::epoch_millis();
-        let waited_seconds = now.saturating_sub(request.created_at_ms).max(0) as u64 / 1_000;
-        let payload = serde_json::json!({
-            "status": "interrupted",
-            "waited_seconds": waited_seconds,
-            "agents": [],
-            "next_action": "A user correction is waiting at this tool boundary. Read it before calling wait again. Your children continue working; their reports have not been collected by this reply.",
-        });
-        let result = SubagentToolResult {
-            request_id: request_id.to_owned(),
-            completed_at_ms: now,
-            is_error: false,
-            message: payload.to_string(),
         };
         // Publish the worker's answer durably so the daemon retires its wait
         // too. A later daemon report was NOT delivered by this answer: its
@@ -760,6 +736,44 @@ impl SubagentEndpoint {
         drop(state);
         self.completed.notify_waiters();
         Ok(Some(result))
+    }
+
+    fn interrupted_wait_result(
+        relay: &crate::relay::DurableRelay,
+        state: &QueueState,
+        request_id: &str,
+    ) -> Option<SubagentToolResult> {
+        let request = state.requests.get(request_id)?;
+        if !matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::WaitAgents
+        ) {
+            return None;
+        }
+        // Legacy/untracked calls have no turn identity; keep their existing
+        // socket-based delivery semantics rather than guessing an origin.
+        let turn = request.originating_command_id.as_deref()?;
+        let next_action = if !relay.subagent_wait_turn_is_live(turn) {
+            "The originating parent turn ended or was cancelled. Your children continue working; their reports have not been collected by this reply. Call wait from the next turn to collect them."
+        } else if relay.boundary_steer_needs_turn(turn) {
+            "A user correction is waiting at this tool boundary. Read it before calling wait again. Your children continue working; their reports have not been collected by this reply."
+        } else {
+            return None;
+        };
+        let now = mj_core::clock::epoch_millis();
+        let waited_seconds = now.saturating_sub(request.created_at_ms).max(0) as u64 / 1_000;
+        let payload = serde_json::json!({
+            "status": "interrupted",
+            "waited_seconds": waited_seconds,
+            "agents": [],
+            "next_action": next_action,
+        });
+        Some(SubagentToolResult {
+            request_id: request_id.to_owned(),
+            completed_at_ms: now,
+            is_error: false,
+            message: payload.to_string(),
+        })
     }
 
     #[cfg(test)]
@@ -862,6 +876,10 @@ impl SubagentEndpoint {
 
     pub fn complete(&self, result: SubagentToolResult) -> Result<bool> {
         let request_id = result.request_id.clone();
+        let relay = self
+            .relay
+            .as_ref()
+            .map(|relay| relay.lock().expect("relay lock poisoned"));
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         if let Some(delivered) = state.delivered_to_waiter.get(&request_id).copied() {
             return Ok(delivered);
@@ -871,6 +889,14 @@ impl SubagentEndpoint {
         // its caller rather than reopening a report that may already be read.
         if state.results.contains_key(&request_id) {
             return Ok(true);
+        }
+        if let Some(relay) = relay.as_deref()
+            && let Some(interrupted) = Self::interrupted_wait_result(relay, &state, &request_id)
+        {
+            self.store_result(&mut state, interrupted, false)?;
+            drop(state);
+            self.completed.notify_waiters();
+            return Ok(false);
         }
         let delivered = state.live_waiters.get(&request_id).copied().unwrap_or(0) > 0;
         self.store_result(&mut state, result, delivered)?;
@@ -1877,7 +1903,7 @@ enabled = false
     }
 
     #[tokio::test]
-    async fn steering_yield_preserves_a_report_that_completed_first_and_ignores_other_requests() {
+    async fn turn_boundary_preserves_completed_reports_and_child_mutations() {
         use crate::relay::test_support::{prompt, submit_relay};
         use mj_core::config::HarnessKind;
 
@@ -1940,13 +1966,163 @@ enabled = false
                 .unwrap()
                 .originating_command_id = Some(origin.into());
             let mut waiter = endpoint.register_waiter(id);
+            let interrupted = endpoint
+                .interrupt_wait_at_turn_boundary(id, &mut waiter)
+                .unwrap();
+            assert_eq!(interrupted.is_some(), id == "stale");
+            assert_eq!(endpoint.complete(done(id)).unwrap(), id != "stale");
+        }
+    }
+
+    // Hard-won: #1287: a cancelled direct MCP wait consumed a later child report through its live socket.
+    #[test]
+    fn cancelled_wait_completion_is_serialized_with_its_turn_owner() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use mj_core::config::HarnessKind;
+        use mj_core::relay::{RelayCommand, RelayCommandOutcome};
+
+        for cancel in [
+            RelayCommand::CancelTurnFor {
+                active_prompt_id: "original-turn".into(),
+            },
+            RelayCommand::CancelTurn,
+            RelayCommand::Cancel,
+        ] {
+            for completion_first in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut owner = crate::relay::DurableRelay::open_for_harness(
+                    root.path(),
+                    "session-123",
+                    "test",
+                    HarnessKind::Codex,
+                )
+                .unwrap();
+                submit_relay(&mut owner, "original-turn", prompt("work"));
+                owner.claim_pending_commands(true).unwrap();
+                let relay = Arc::new(Mutex::new(owner));
+                let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+                endpoint.relay = Some(relay.clone());
+                let mut request = request("waiting");
+                request.action = SubagentToolAction::WaitAgents;
+                endpoint.enqueue(request).unwrap();
+                let _waiter = endpoint.register_waiter("waiting");
+                if completion_first {
+                    assert!(endpoint.complete(done("waiting")).unwrap());
+                }
+                submit_relay(
+                    &mut relay.lock().unwrap(),
+                    "cancel-original-turn",
+                    cancel.clone(),
+                );
+                {
+                    let mut owner = relay.lock().unwrap();
+                    owner.claim_pending_commands(true).unwrap();
+                    owner
+                        .record_command_completed(
+                            "cancel-original-turn",
+                            RelayCommandOutcome::Cancelled,
+                        )
+                        .unwrap();
+                }
+                // The waiter has not polled the relay change. Completion itself
+                // must use the turn owner even after the cancel RPC was acknowledged.
+                assert_eq!(
+                    endpoint.complete(done("waiting")).unwrap(),
+                    completion_first
+                );
+                let payload = endpoint.cached_result("waiting").unwrap();
+                if completion_first {
+                    assert_eq!(payload, done("waiting"));
+                } else {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&payload.message).unwrap();
+                    assert_eq!(payload["status"], "interrupted");
+                }
+                let restored = SubagentEndpoint::open(root.path()).unwrap();
+                assert_eq!(
+                    restored.complete(done("waiting")).unwrap(),
+                    completion_first
+                );
+            }
+        }
+    }
+
+    // Hard-won: #1287: cancelled or superseded turns left their MCP waiter registered until its deadline.
+    #[tokio::test]
+    async fn turn_end_retires_pending_wait_without_collecting_child_reports() {
+        use crate::relay::test_support::{prompt, submit_relay};
+        use mj_core::config::HarnessKind;
+        use mj_core::relay::{RelayCommand, RelayCommandOutcome};
+
+        for replacement_turn in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut owner = crate::relay::DurableRelay::open_for_harness(
+                root.path(),
+                "session-123",
+                "test",
+                HarnessKind::Codex,
+            )
+            .unwrap();
+            submit_relay(&mut owner, "original-turn", prompt("work"));
+            owner.claim_pending_commands(true).unwrap();
+            let relay = Arc::new(Mutex::new(owner));
+            let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+            endpoint.relay = Some(relay.clone());
+            let mut request = request("waiting");
+            request.action = SubagentToolAction::WaitAgents;
+            endpoint.enqueue(request).unwrap();
+            let mut waiter = endpoint.register_waiter("waiting");
+            let mut pending = Box::pin(endpoint.await_result_registered(
+                "waiting",
+                Instant::now() + Duration::from_secs(240),
+                &mut waiter,
+            ));
             assert!(
-                endpoint
-                    .yield_wait_for_steering(id, &mut waiter)
-                    .unwrap()
-                    .is_none()
+                std::future::poll_fn(|context| {
+                    std::task::Poll::Ready(std::future::Future::poll(pending.as_mut(), context))
+                })
+                .await
+                .is_pending()
             );
-            assert!(endpoint.complete(done(id)).unwrap());
+            {
+                let mut owner = relay.lock().unwrap();
+                if replacement_turn {
+                    submit_relay(&mut owner, "cancel-original-turn", RelayCommand::CancelTurn);
+                    owner.claim_pending_commands(true).unwrap();
+                    owner
+                        .record_command_completed(
+                            "original-turn",
+                            RelayCommandOutcome::Prompt {
+                                stop_reason: "cancelled".into(),
+                                usage: None,
+                                diagnostic: None,
+                            },
+                        )
+                        .unwrap();
+                    submit_relay(&mut owner, "next-turn", prompt("collect reports"));
+                    owner.claim_pending_commands(true).unwrap();
+                    assert!(owner.originating_command_id().is_none());
+                    owner
+                        .record_command_completed(
+                            "cancel-original-turn",
+                            RelayCommandOutcome::Cancelled,
+                        )
+                        .unwrap();
+                    assert!(owner.subagent_wait_turn_is_live("next-turn"));
+                } else {
+                    submit_relay(&mut owner, "cancel-original-turn", RelayCommand::CancelTurn);
+                }
+            }
+            let result = tokio::time::timeout(Duration::from_secs(2), pending)
+                .await
+                .expect("turn changes must wake the wait before its deadline")
+                .unwrap()
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&result.message).unwrap();
+            assert_eq!(payload["status"], "interrupted");
+            assert!(!endpoint.complete(done("waiting")).unwrap());
+            assert!(endpoint.state.lock().unwrap().live_waiters.is_empty());
+            assert!(endpoint.snapshot().0.is_empty());
         }
     }
 
