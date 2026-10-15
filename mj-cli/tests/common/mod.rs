@@ -15,7 +15,55 @@ use anyhow::{Context, Result, bail};
 /// unwinding, so every test daemon also watches this process and exits with
 /// it. The environment is inherited by the daemon a client spawns.
 pub fn own_test_daemons(command: &mut Command) -> &mut Command {
-    command.env("MJ_DAEMON_OWNER_PID", std::process::id().to_string())
+    command.env(DAEMON_OWNER_ENV, std::process::id().to_string())
+}
+
+/// The variable [`own_test_daemons`] sets, for launchers other than
+/// [`Command`] such as a pseudo console.
+pub const DAEMON_OWNER_ENV: &str = "MJ_DAEMON_OWNER_PID";
+
+/// The environment that keeps an `mj` launched under `root` away from the
+/// host's agent homes, commands and credentials. Profile discovery reads
+/// these on every launch, so every terminal fixture applies all of it; a
+/// variable missing from one copy is how a fixture leaks host credentials.
+/// Callers still restrict PATH to the commands their platform needs.
+// Only the terminal fixtures launch a dashboard.
+#[allow(dead_code)]
+pub struct AgentIsolation {
+    pub set: Vec<(&'static str, PathBuf)>,
+    pub remove: [&'static str; 4],
+}
+
+#[allow(dead_code)]
+impl AgentIsolation {
+    pub fn under(root: &Path) -> Self {
+        Self {
+            set: vec![
+                ("HOME", root.to_path_buf()),
+                // `mj_core::path_input::user_home` reads it on Windows.
+                ("USERPROFILE", root.to_path_buf()),
+                ("XDG_CONFIG_HOME", root.join("config")),
+                ("XDG_DATA_HOME", root.join("data")),
+                ("CODEX_HOME", root.join(".codex")),
+                ("CLAUDE_CONFIG_DIR", root.join(".claude")),
+                // Each fixture has a dashboard and daemon. Host-sized pools
+                // multiply into thousands of threads on large CI machines
+                // during parallel runs.
+                ("TOKIO_WORKER_THREADS", "2".into()),
+                ("RAYON_NUM_THREADS", "2".into()),
+            ],
+            remove: ["MJ_BIFROST_BIN", "KIMI_CODE_HOME", "GROK_HOME", "MUSE_HOME"],
+        }
+    }
+
+    pub fn apply(&self, command: &mut Command) {
+        for (name, value) in &self.set {
+            command.env(name, value);
+        }
+        for name in self.remove {
+            command.env_remove(name);
+        }
+    }
 }
 
 /// Own an implicitly started daemon until its temporary store can be removed.

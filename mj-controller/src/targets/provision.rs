@@ -430,7 +430,8 @@ pub(super) const DOCKER_READ_ONLY_SMOKE_PROBE: &str = "test \"$(cat /mnt/hel-ove
 // home directory is shared by Colima's default configuration.
 pub(super) fn docker_overlay_smoke_directory() -> Result<tempfile::TempDir> {
     let parent = if cfg!(target_os = "macos") {
-        dirs::home_dir().context("locate shared home directory for Docker smoke test")?
+        mj_core::path_input::user_home()
+            .context("locate shared home directory for Docker smoke test")?
     } else {
         std::env::temp_dir()
     };

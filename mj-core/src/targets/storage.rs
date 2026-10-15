@@ -199,7 +199,7 @@ pub fn session_storage_paths(
 
 /// A home-relative path made absolute against this machine's home.
 pub fn local_home_path(relative: &str) -> String {
-    match dirs::home_dir() {
+    match crate::path_input::user_home() {
         Some(home) => home.join(relative).to_string_lossy().into_owned(),
         None => relative.to_owned(),
     }
@@ -608,13 +608,16 @@ pub fn views_for<'a>(
 /// as an argument at its nearest existing ancestor:
 /// `storage=<avail-kib>\t<total-kib>\t<used-kib>\t<mount>\t<path>`. `df -Pk`
 /// is POSIX, so it reads the same on Linux and macOS; its "Available" column
-/// is what a non-root user can write.
+/// is what a non-root user can write. The ancestor walk ends whenever a step
+/// fails or makes no progress, so a host without `dirname` cannot spin it.
 pub const STORAGE_PROBE_SCRIPT: &str = r#"
 printf 'home=%s\n' "$HOME"
 for hel_path in "$@"; do
     hel_probe=$hel_path
-    while [ ! -e "$hel_probe" ] && [ "$hel_probe" != / ] && [ "$hel_probe" != . ]; do
-        hel_probe=$(dirname -- "$hel_probe")
+    while [ ! -e "$hel_probe" ]; do
+        hel_parent=$(dirname -- "$hel_probe") || break
+        [ "$hel_parent" != "$hel_probe" ] || break
+        hel_probe=$hel_parent
     done
     df -Pk -- "$hel_probe" 2>/dev/null | awk -v hel_path="$hel_path" 'NR == 2 { mount = $6; for (i = 7; i <= NF; i++) mount = mount " " $i; printf "storage=%s\t%s\t%s\t%s\t%s\n", $4, $2, $3, mount, hel_path }'
 done
@@ -884,6 +887,41 @@ garbage\n";
         assert_eq!(filesystems.len(), 1, "{output:?}");
         assert!(filesystems[0].total_bytes > 0);
         assert_eq!(filesystems[0].paths.len(), 2);
+    }
+
+    // Hard-won: a6ecbe614: without `dirname` on PATH, the probe of a missing path spun forever and outlived its daemon.
+    #[cfg(unix)]
+    #[test]
+    fn storage_probe_script_ends_when_the_host_lacks_dirname() {
+        let directory = tempfile::tempdir().unwrap();
+        let shell = ["/bin/sh", "/usr/bin/sh"]
+            .into_iter()
+            .map(std::path::Path::new)
+            .find(|path| path.is_file())
+            .expect("find a POSIX sh");
+        let tools = directory.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        std::os::unix::fs::symlink(shell, tools.join("sh")).unwrap();
+        let mut child = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(STORAGE_PROBE_SCRIPT)
+            .arg("mj-storage")
+            .arg(directory.path().join("not/yet/created"))
+            .env("PATH", &tools)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("the storage probe kept walking a path it could not shorten");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[cfg(windows)]

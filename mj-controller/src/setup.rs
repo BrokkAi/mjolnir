@@ -82,7 +82,7 @@ impl RuntimeProbe {
 /// The installed agent homes alone. Callers that only add profiles use this
 /// without probing unrelated runtimes or remote targets.
 pub fn discover_profiles(executor: &impl CommandExecutor) -> Vec<DiscoveredHome> {
-    let home = dirs::home_dir();
+    let home = mj_core::path_input::user_home();
     let overrides = HarnessKind::ALL
         .into_iter()
         .filter_map(|kind| {
@@ -258,7 +258,7 @@ pub(crate) fn harness_is_authenticated_with_executor(
     profile: &HarnessProfile,
     executor: &impl CommandExecutor,
 ) -> bool {
-    let is_default_home = dirs::home_dir()
+    let is_default_home = mj_core::path_input::user_home()
         .is_some_and(|user_home| profile.home == user_home.join(profile.kind.default_home_leaf()));
     harness_is_authenticated_with(profile, is_default_home, executor)
 }
