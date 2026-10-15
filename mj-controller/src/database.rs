@@ -48,6 +48,8 @@ mod turn_outcome;
 use turn_outcome::{deserialize_turn_outcome, serialize_turn_outcome};
 mod usage;
 pub use usage::*;
+mod usage_report;
+pub use usage_report::load_session_usage_report;
 mod events;
 pub use events::*;
 

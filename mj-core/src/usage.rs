@@ -1,6 +1,9 @@
 //! Provider-reported consumption. Context occupancy is deliberately excluded.
 use serde::{Deserialize, Serialize};
 
+mod report;
+pub use report::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageScope {

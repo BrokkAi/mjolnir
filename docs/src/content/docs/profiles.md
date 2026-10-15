@@ -22,6 +22,27 @@ requires a Claude or Codex profile and both task types to be configured.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 
+## Usage by session
+
+Open the dashboard's **Profiles** title menu and choose **Usage by session**,
+or find it in the command palette. Each parent session shows its recorded
+usage by model and estimated API cost, including its Mjolnir sub-agents. Rows
+are sorted by total cost, highest first. Accounting retained for destroyed
+sub-agents still contributes to their parent.
+
+The profile dropdown starts on **All**. Choosing a profile selects parents
+whose last profile matches; their complete sub-agent trees remain included,
+even when children used other profiles. **Hourly** is the default period;
+**Weekly** and **Monthly** cover the trailing seven and thirty days. Check
+**Include suspended sessions** to include inactive parents. The report refreshes
+every thirty seconds, and **Refresh** reloads it immediately.
+
+Costs assume standard base API token rates, including cache reads and default
+cache writes, even for subscription profiles. They exclude tools and speed,
+region, or long-context premiums. Only completed turns with complete usage
+reports enter the estimates. A **+** marks partial accounting, and **unpriced**
+marks models or counters that cannot be priced from the recorded information.
+
 ## Supported harnesses
 
 | Harness | `kind` | Home variable | Conventional home | Authentication marker | Guardian approvals on a raw target |

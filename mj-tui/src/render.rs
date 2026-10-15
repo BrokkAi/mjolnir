@@ -93,6 +93,9 @@ pub(crate) fn render_modal(frame: &mut Frame, area: Rect, dashboard: &mut Dashbo
         Mode::SessionCpuReport(dialog) => {
             render_session_cpu_report(frame, area, dashboard, dialog, &mut surfaces)
         }
+        Mode::SessionUsageReport(dialog) => {
+            crate::session_usage_report::render(frame, area, dashboard, dialog, &mut surfaces)
+        }
         Mode::NoticeLog(dialog) => render_notice_log(frame, area, dashboard, dialog, &mut surfaces),
         Mode::EditContainer(editor) => render_container_editor(frame, area, editor, &mut surfaces),
         Mode::Importing(progress) => render_import_progress(frame, area, progress, &mut surfaces),

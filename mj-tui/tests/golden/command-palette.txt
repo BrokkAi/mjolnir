@@ -11,7 +11,7 @@
 │  │                                   ││                                                                              │
 │                                                                                                                      │
 │                                                                                                                      │
-│                ╭ × ✦ Commands ───────────────────────────────────────────────────────── 65 commands ╮                │
+│                ╭ × ✦ Commands ───────────────────────────────────────────────────────── 66 commands ╮                │
 │                │Search commands…                                                                    │                │
 │                │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
 │                │› Pin session…                                                                      │                │
@@ -78,17 +78,17 @@
 │                │  Restart the Mjolnir daemon                                                        │                │
 │                │  Refresh targets and quotas                                        ctrl+b shift+r  │                │
 │                │  CPU by session                                                                    │                │
+│                │  Usage by session                                                                  │                │
 │                │  Recent messages                                                                   │                │
 │                │  Detach from this terminal                                               ctrl+b q  │                │
 │                │  Toggle transcript rendering                                             ctrl+b t  │                │
 │                │  Dictation                                                               ctrl+b m  │                │
 │                │  Help                                                                ? / ctrl+b ?  │                │
-│                │Keep a session visible while browsing others.                                       │                │
-│                │  Run                                                                               │  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╮
+│                │Keep a session visible while browsing others.                                       │  ──────────────╯
+│                │  Run                                                                               │  ──────────────╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                                      │
-│                                                                                                                      │
-│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                                                                                        ──────────────╯
 │                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▪ ╮
 │                                      ││  Host / fleet  Targets  CPU  RAM                                             │
 │                                      │╰──────────────────────────────────────────────────────────────────────────────╯
@@ -107,7 +107,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 65 commands ╮                │
+│  Idle  podman  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 66 commands ╮                │
 │  │ No message  │Search commands…                                                                    │                │
 │  │             │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
 │                │› Pin session…                                                                      │                │
@@ -174,17 +174,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Restart the Mjolnir daemon                                                        │                │
 │                │  Refresh targets and quotas                                        ctrl+b shift+r  │                │
 │                │  CPU by session                                                                    │                │
-│                │  Recent messages                                                                   │                │
-│                │  Detach from this terminal                                               ctrl+b q  │  ──────────────╯
-│                │  Toggle transcript rendering                                             ctrl+b t  │  ──────────────╮
+│                │  Usage by session                                                                  │                │
+│                │  Recent messages                                                                   │  ──────────────╯
+│                │  Detach from this terminal                                               ctrl+b q  │  ──────────────╮
+│                │  Toggle transcript rendering                                             ctrl+b t  │                │
 │                │  Dictation                                                               ctrl+b m  │                │
-│                │  Help                                                                ? / ctrl+b ?  │                │
-│                │Keep a session visible while browsing others.                                       │  ──────────────╯
-│                │  Run                                                                               │  ─────── ▁   ▪ ╮
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │  Help                                                                ? / ctrl+b ?  │  ──────────────╯
+│                │Keep a session visible while browsing others.                                       │  ─────── ▁   ▪ ╮
+│                │  Run                                                                               │                │
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▪ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                                                                                                      │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
@@ -347,7 +347,7 @@ Enter open                                                                      
 === non-container session commands (120x44) ===
 ╭ Workspaces ──                                                                                          ───── ◇   ⋯───╮
 │ default                                                                                                              │
-╰──────────────  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 62 commands ╮                │
+╰──────────────  ╭ × ✦ Commands ───────────────────────────────────────────────────────── 63 commands ╮                │
 ╭ Sessions ────  │Search commands…                                                                    │                │
 │ Create   Open  │  ACP pretty name  ───────────────────────────────────────────────────────────────  │                │
 │hel ──────────  │› Pin session…                                                                     ▐│                │
@@ -366,7 +366,7 @@ Enter open                                                                      
 │                │  Open session                                                               Enter ▐│                │
 │                │  Create session                                                  n / N / ctrl+b c ▐│                │
 │                │  Mark all read                                                           ctrl+b a ▐│                │
-│                │  Search sessions                                                                / ▐│                │
+│                │  Search sessions                                                                / ││                │
 │                │  Fold project                                                               Space ││                │
 │                │  Panes  ───────────────────────────────────────────────────────────────────────── ││                │
 │                │  Split right                                                             ctrl+b v ││                │

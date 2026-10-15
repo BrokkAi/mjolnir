@@ -113,6 +113,9 @@ impl DashboardState {
             Mode::Rename(dialog) => self.handle_rename_event(event, dialog),
             Mode::ChangedFiles(dialog) => self.handle_changed_files_event(event, dialog),
             Mode::SessionCpuReport(dialog) => self.handle_session_cpu_report_event(event, dialog),
+            Mode::SessionUsageReport(dialog) => {
+                self.handle_session_usage_report_event(event, dialog)
+            }
             Mode::NoticeLog(dialog) => self.handle_notice_log_event(event, dialog),
             Mode::ConfigId(dialog) => self.handle_config_id_event(event, dialog),
             Mode::RepositoryOrigin(dialog) => self.handle_repository_origin_event(event, dialog),

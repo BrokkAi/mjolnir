@@ -804,6 +804,7 @@ pub(crate) enum Mode {
     /// The last notices the footer showed, newest first.
     NoticeLog(NoticeLogDialog),
     SessionCpuReport(dialogs::SessionCpuReportDialog),
+    SessionUsageReport(session_usage_report::SessionUsageDialog),
     EditContainer(ContainerEditor),
     Importing(ImportProgress),
     ConfirmImportBundle(ImportBundleConfirmation),
@@ -1025,6 +1026,7 @@ pub struct DashboardState {
     last_row_click: Option<(Focus, usize, Instant)>,
     pub(crate) mode: Mode,
     pub(crate) help_request_generation: u64,
+    pub(crate) usage_request_generation: u64,
     pub(crate) go: Option<go::GoMode>,
     /// The Git repository `mj` was started in, found before the dashboard
     /// opened. The new-session wizard offers it as the local project.
@@ -1156,6 +1158,7 @@ mod dashboard_workspaces;
 pub use dashboard_workspaces::StoppedBySuspend;
 mod native_agents;
 mod session_cpu_report;
+mod session_usage_report;
 mod stopped_subagents;
 
 impl DashboardState {
@@ -1267,6 +1270,7 @@ impl DashboardState {
             mode: Mode::Dashboard,
             pending_welcome: None,
             help_request_generation: 0,
+            usage_request_generation: 0,
             modal_click_transition: None,
             suppress_modal_release: false,
             review_settings_generation: 0,

@@ -86,6 +86,7 @@ pub enum CommandId {
     RestartDaemon,
     NoticeLog,
     SessionCpuReport,
+    SessionUsageReport,
     QuitDetach,
     Palette,
     CycleSpinner,
@@ -1343,6 +1344,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: always_ready,
     },
     CommandSpec {
+        id: CommandId::SessionUsageReport,
+        label: "Usage by session",
+        description: "Compare each parent session and its sub-agents by model and estimated API cost, highest total first; filter by parent profile and trailing hour, week or month.",
+        scope: Scope::Global,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Chord,
+        footer_rank: 0,
+        available: always_ready,
+    },
+    CommandSpec {
         id: CommandId::NoticeLog,
         label: "Recent messages",
         description: "Show the last notices the footer reported, newest first, including failures that replaced each other.",
@@ -1981,6 +1994,10 @@ impl DashboardState {
             CommandId::SessionCpuReport => {
                 self.mode =
                     crate::Mode::SessionCpuReport(crate::dialogs::SessionCpuReportDialog::new());
+                DashboardAction::None
+            }
+            CommandId::SessionUsageReport => {
+                self.begin_session_usage_report();
                 DashboardAction::None
             }
             CommandId::NoticeLog => {

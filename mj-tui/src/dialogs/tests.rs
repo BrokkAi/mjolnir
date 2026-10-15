@@ -1024,6 +1024,142 @@ fn golden_dashboard_dialogs() {
     let action = cpu.handle_key(key(KeyCode::Esc));
     writeln!(output, "action: {action:?}").unwrap();
 
+    // Extend the full dialog golden through the Profiles menu and real controls.
+    use mj_core::usage::{
+        ModelUsageEstimate, SessionUsageEstimate, SessionUsageReport, UsagePeriod,
+    };
+    let mut usage = dashboard_with_session(running_session());
+    usage.begin_support_pane_menu(crate::SupportPane::Quota);
+    append_dialog_render(
+        &mut output,
+        "Profiles menu with usage report",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Char('3')));
+    append_dialog_render(
+        &mut output,
+        "Usage by session loading",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    let (first, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query, mj_core::usage::SessionUsageQuery::default());
+    let report = SessionUsageReport {
+        profiles: vec!["claude".into(), "codex".into()],
+        cost_usd_ticks: 72_050_000_000,
+        sessions: vec![SessionUsageEstimate {
+            session_id: "session-1".into(),
+            title: "Investigate recovery".into(),
+            profile: "codex".into(),
+            subagent_count: 2,
+            cost_usd_ticks: 72_050_000_000,
+            models: vec![
+                ModelUsageEstimate {
+                    model: Some("claude-opus-5-5".into()),
+                    cost_usd_ticks: Some(71_000_000_000),
+                    ..Default::default()
+                },
+                ModelUsageEstimate {
+                    model: Some("gpt-6-luna".into()),
+                    cost_usd_ticks: Some(1_050_000_000),
+                    ..Default::default()
+                },
+                ModelUsageEstimate {
+                    model: Some("custom-model".into()),
+                    ..Default::default()
+                },
+            ],
+            coverage: mj_core::storage::UsageCoverage {
+                recorded_turns: 5,
+                full_turn_reports: 3,
+                missing_reports: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    append_dialog_render(
+        &mut output,
+        "Usage by session All with model costs",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    append_dialog_render(
+        &mut output,
+        "Usage profile dropdown",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Down));
+    usage.handle_key(key(KeyCode::Enter));
+    let (profile_request, query) = usage.session_usage_request().unwrap();
+    assert_eq!(query.profile.as_deref(), Some("claude"));
+    // The old All result cannot replace the filtered loading state.
+    usage.apply_session_usage_result(first, Ok(report.clone()));
+    assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.apply_session_usage_result(
+        profile_request,
+        Ok(SessionUsageReport {
+            profiles: report.profiles.clone(),
+            ..Default::default()
+        }),
+    );
+    drawn(&mut usage, 120, 36);
+    usage.handle_key(key(KeyCode::Tab));
+    usage.handle_key(key(KeyCode::Enter));
+    append_dialog_render(
+        &mut output,
+        "Usage period dropdown",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Down));
+    usage.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.period,
+        UsagePeriod::Weekly
+    );
+    drawn(&mut usage, 120, 36);
+    usage.handle_key(key(KeyCode::Tab));
+    usage.handle_key(key(KeyCode::Char(' ')));
+    let (weekly_request, query) = usage.session_usage_request().unwrap();
+    assert!(query.include_suspended);
+    let mut suspended = report.clone();
+    suspended.sessions[0].suspended = true;
+    usage.apply_session_usage_result(weekly_request, Ok(suspended));
+    append_dialog_render(
+        &mut output,
+        "Usage weekly including suspended",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.apply_session_usage_result(weekly_request, Err("test store unavailable".into()));
+    append_dialog_render(
+        &mut output,
+        "Usage report failure",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Esc));
+    assert!(usage.session_usage_request().is_none());
+    usage.dispatch_command(crate::CommandId::SessionUsageReport);
+    let (reopened, _) = usage.session_usage_request().unwrap();
+    assert_ne!(weekly_request, reopened);
+    usage.apply_session_usage_result(weekly_request, Ok(report));
+    assert!(matches!(&usage.mode,Mode::SessionUsageReport(dialog) if dialog.report.is_none()));
+    usage.handle_key(key(KeyCode::Esc));
+
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "dashboard-dialogs",

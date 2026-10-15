@@ -142,7 +142,14 @@ impl DashboardState {
                     ("CPU by session…", CommandId::SessionCpuReport),
                 ],
             ),
-            SupportPane::Quota => (2, "Profiles", &[("Settings…", CommandId::ManageProfiles)]),
+            SupportPane::Quota => (
+                2,
+                "Profiles",
+                &[
+                    ("Settings…", CommandId::ManageProfiles),
+                    ("Usage by session…", CommandId::SessionUsageReport),
+                ],
+            ),
             SupportPane::Sessions => return,
         };
         let entries = std::iter::once(("Refresh", CommandId::Refresh))

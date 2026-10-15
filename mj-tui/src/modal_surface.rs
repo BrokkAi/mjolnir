@@ -156,6 +156,16 @@ impl DialogModal for SessionCpuReportDialog {
     }
 }
 
+impl DialogModal for crate::session_usage_report::SessionUsageDialog {
+    dialog_form!(crate::session_usage_report::UsageControl);
+
+    fn prepare(&mut self) {
+        let form = self.form.get_mut();
+        form.set_dismiss_actions(&[crate::session_usage_report::UsageControl::Close]);
+        form.set_default_action(crate::session_usage_report::UsageControl::Close);
+    }
+}
+
 impl DialogModal for ChangedFilesDialog {
     dialog_form!(DialogControl);
 
@@ -426,6 +436,7 @@ mode_surfaces!(
     ChangedFiles,
     NoticeLog,
     SessionCpuReport,
+    SessionUsageReport,
     EditContainer,
     Importing,
     ConfirmImportBundle,

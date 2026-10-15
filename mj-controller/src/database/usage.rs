@@ -159,7 +159,7 @@ fn add_counters(
 
 /// Attribute each counter once. Partial or inconsistent breakdowns retain an
 /// unknown remainder instead of assigning it to the configured model.
-fn attribute(
+pub(super) fn attribute(
     usage: &TokenUsage,
     selected: UsageSelection,
     groups: &mut BTreeMap<UsageSelection, BTreeMap<String, UsageCounterTotal>>,
@@ -321,7 +321,7 @@ fn load_usage_tree_from(path: &Path, parent: &str) -> Result<Option<UsageTree>> 
     }))
 }
 
-fn merge_totals(
+pub(super) fn merge_totals(
     target: &mut BTreeMap<String, UsageCounterTotal>,
     source: &BTreeMap<String, UsageCounterTotal>,
 ) -> Result<()> {
