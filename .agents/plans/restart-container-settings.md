@@ -17,7 +17,7 @@ Saving container mounts followed by Restart must result in a container with thos
 - [x] (2026-10-15) Add daemon-owned recreation projections and explicit warnings with Cancel selected in TUI and web confirmation.
 - [x] (2026-10-15) Focused regressions, full touched-crate suites, all 30 browser checks, 56 web unit checks, formatting, and workspace Clippy passed.
 - [x] (2026-10-15) Committed the main correction as b0bc92951; final recovery fixes are validated.
-- [ ] Commit final fixes, merge the upstream version-only release, and push to origin/master.
+- [x] (2026-10-15) Committed final fixes as 96fea4dd3 and merged the upstream version-only 2.46.0 release; publish the validated commits to origin/master.
 
 ## Surprises & Discoveries
 
@@ -39,7 +39,7 @@ Saving container mounts followed by Restart must result in a container with thos
 
 ## Outcomes & Retrospective
 
-The live session is repaired. Creation Review supports directory attachments. Restart reuses containers with known unchanged settings, checkpoints and recreates changed or unknown containers, and requires acknowledgment of the recovery limits before recreation. Both confirmation surfaces and recovery regressions are complete. Final controller validation passed: 2004 tests, 12 ignored. All other touched Rust suites, 30 browser tests, 56 web unit tests, formatting, and workspace Clippy passed. Publication is the remaining step.
+The live session is repaired. Creation Review supports directory attachments. Restart reuses containers with known unchanged settings, checkpoints and recreates changed or unknown containers, and requires acknowledgment of the recovery limits before recreation. Both confirmation surfaces and recovery regressions are complete. Final controller validation passed: 2004 tests, 12 ignored. All other touched Rust suites, 30 browser tests, 56 web unit tests, formatting, and workspace Clippy passed. Implementation and validation are complete; the final publication command is git push to origin/master.
 
 ## Context and Orientation
 
@@ -98,3 +98,5 @@ Revision note (2026-10-15): Full validation caught migration-replay fixtures sel
 Revision note (2026-10-15): Bind each admitted Restart's exact durable operation id to the existing lifecycle owner. Preserve a failed completion while it still owns an intent, and have a superseding lifecycle release that exact intent before starting its work. A failed Restart followed by Suspend and a completed Restart superseded directly by Resume both have regression coverage. Explicit user cancellation is a durable cancel_requested phase, retaining the settings lock until the task stops. Startup settles a cancelled Closing session as Error with its environment retained, rather than resuming it or interpreting it as an ordinary suspension. Keep internal shutdown cancellation distinct so accepted Restart work can still recover after daemon replacement.
 
 Validation completion (2026-10-15): The final controller suite passed all 2004 tests, with 12 ignored, using the already-built test binary and disposable fixture data under runtime TMPDIR=/tmp. Inherited /mnt/optane/tmp fixture fsync stalled on the busy build pool; no Cargo output, target directory, mbx configuration, or host mount was changed. Final focused cancellation/recovery and migration checks also passed, and workspace Clippy passed with warnings denied. The user requested that any separately identified unrelated Restart bugs be filed as tickets instead of expanding this change. No additional unresolved Restart defect was identified for a ticket at completion.
+
+Publication checkpoint (2026-10-15): Final ownership fixes are committed as 96fea4dd3. Merged origin/master release 09b776ecc, whose only changes are workspace and lockfile versions. Locked offline workspace metadata confirms 2.46.0; no semantic source changed after final validation. Publish directly to the configured upstream as requested.

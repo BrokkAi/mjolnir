@@ -14,7 +14,7 @@ The web new-session wizard will offer attached directories on its final Review s
 - [x] (2026-10-15) Extend browser goldens and HTTP boundary coverage, verify both goldens, pass all web unit checks and the focused HTTP tests.
 - [x] (2026-10-15) Full controller suite: 2000 passed, 12 ignored; workspace clippy with warnings denied passed.
 - [x] (2026-10-15) Committed on master as a0102eac2.
-- [ ] Push upstream together with the validated Restart correction as requested.
+- [x] (2026-10-15) Included in the final validated publication to origin/master together with the Restart correction.
 
 ## Surprises & Discoveries
 
