@@ -99,6 +99,14 @@ impl RuntimeState {
         let mut owned = BTreeSet::new();
         for intent in intents {
             let session_id = intent.session_id.clone();
+            if intent.phase == crate::database::SessionRestartPhase::CancelRequested {
+                crate::database::recover_cancelled_session_restart(
+                    &session_id,
+                    &intent.operation_id,
+                )?;
+                tracing::info!(%session_id, "retired a Restart cancelled before daemon replacement");
+                continue;
+            }
             let current_state = self
                 .owner()
                 .controller()
@@ -223,6 +231,7 @@ impl RuntimeState {
             intent.session_id == session_id,
             "Restart intent belongs to another session"
         );
+        self.bind_restart_intent(session_id, &intent.operation_id)?;
         // Admission and settings edits serialize in the database writer. Read
         // only after admission, so no accepted edit can be missed or race this plan.
         let mut controller = tokio::task::spawn_blocking(Controller::load)
@@ -245,7 +254,8 @@ impl RuntimeState {
                 .get(session_id)
                 .is_some_and(|record| record.state == SessionState::Running)
         {
-            finish_restart_intent(session_id, &intent.operation_id).await?;
+            self.release_restart_intent(session_id, &intent.operation_id)
+                .await?;
             tracing::info!(%session_id, "completed recovered Restart intent for an already running session");
             return Ok(DaemonLifecycleResult::Done);
         }
@@ -265,7 +275,8 @@ impl RuntimeState {
                 &cancelled,
             )
             .await?;
-            finish_restart_intent(session_id, &intent.operation_id).await?;
+            self.release_restart_intent(session_id, &intent.operation_id)
+                .await?;
             return Ok(DaemonLifecycleResult::Done);
         }
 
@@ -274,7 +285,8 @@ impl RuntimeState {
             tracing::info!(%session_id, "Restart selected suspend-and-resume fallback");
             self.restart_fallback(session_id, &mut controller, &executor, &cancelled)
                 .await?;
-            finish_restart_intent(session_id, &intent.operation_id).await?;
+            self.release_restart_intent(session_id, &intent.operation_id)
+                .await?;
             return Ok(DaemonLifecycleResult::Done);
         }
 
@@ -305,7 +317,8 @@ impl RuntimeState {
                 );
                 self.restart_fallback(session_id, &mut controller, &executor, &cancelled)
                     .await?;
-                finish_restart_intent(session_id, &intent.operation_id).await?;
+                self.release_restart_intent(session_id, &intent.operation_id)
+                    .await?;
                 return Ok(DaemonLifecycleResult::Done);
             }
 
@@ -384,7 +397,8 @@ impl RuntimeState {
                 &cancelled,
             )
             .await?;
-            finish_restart_intent(session_id, &intent.operation_id).await?;
+            self.release_restart_intent(session_id, &intent.operation_id)
+                .await?;
             return Ok(DaemonLifecycleResult::Done);
         }
         advance_restart_phase(
@@ -404,7 +418,8 @@ impl RuntimeState {
         {
             Ok(Ok(_)) => {
                 tracing::info!(%session_id, "Restart restored the worker in the retained target");
-                finish_restart_intent(session_id, &intent.operation_id).await?;
+                self.release_restart_intent(session_id, &intent.operation_id)
+                    .await?;
                 Ok(DaemonLifecycleResult::Done)
             }
             Ok(Err(crate::controller::InPlaceRestartError::Preflight(error))) => {
@@ -414,6 +429,42 @@ impl RuntimeState {
             | Ok(Err(crate::controller::InPlaceRestartError::Cancelled(error))) => Err(error),
             Err(error) => Err(error.context("restore Restart in the retained target")),
         }
+    }
+
+    pub(super) async fn release_restart_intent(
+        &self,
+        session_id: &str,
+        intent_id: &str,
+    ) -> Result<()> {
+        finish_restart_intent(session_id, intent_id).await?;
+        let mut owner = self.owner();
+        if let Some(active) = owner.lifecycle.get_mut(session_id)
+            && active.restart_intent.as_deref() == Some(intent_id)
+        {
+            active.restart_intent = None;
+        }
+        Ok(())
+    }
+
+    pub(super) fn bind_restart_intent(&self, session_id: &str, intent_id: &str) -> Result<()> {
+        let mut owner = self.owner();
+        let active = owner
+            .lifecycle
+            .get_mut(session_id)
+            .context("Restart lifecycle is missing")?;
+        ensure!(
+            active.kind == LifecycleKind::Restart && active.is_running(),
+            "Restart no longer owns admission"
+        );
+        ensure!(
+            active
+                .restart_intent
+                .as_deref()
+                .is_none_or(|held| held == intent_id),
+            "Restart intent ownership changed"
+        );
+        active.restart_intent = Some(intent_id.to_owned());
+        Ok(())
     }
 
     pub(super) fn begin_restart_container_teardown(
@@ -430,9 +481,15 @@ impl RuntimeState {
             active.kind == LifecycleKind::Restart && active.is_cancellable(),
             "Restart cancelled before container teardown"
         );
-        active.phase = LifecyclePhase::RetiringContainer {
-            restart_intent: restart_intent.to_owned(),
-        };
+        ensure!(
+            active
+                .restart_intent
+                .as_deref()
+                .is_none_or(|held| held == restart_intent),
+            "Restart intent ownership changed before teardown"
+        );
+        active.restart_intent = Some(restart_intent.to_owned());
+        active.phase = LifecyclePhase::RetiringContainer;
         drop(owner);
         self.publish_revision();
         Ok(())
@@ -441,7 +498,7 @@ impl RuntimeState {
     pub(super) fn finish_restart_container_teardown(&self, session_id: &str) {
         let mut owner = self.owner();
         if let Some(active) = owner.lifecycle.get_mut(session_id)
-            && matches!(active.phase, LifecyclePhase::RetiringContainer { .. })
+            && matches!(active.phase, LifecyclePhase::RetiringContainer)
         {
             active.phase = LifecyclePhase::Executing;
         }

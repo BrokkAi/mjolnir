@@ -421,13 +421,13 @@ mod tests {
                 params![turn.command_id, body],
             )?;
         }
-        connection.execute_batch("DELETE FROM schema_migrations WHERE version=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
+        connection.execute_batch("DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         drop(connection);
         super::super::schema::forget_verified_schema(&path);
         let connection = open(&path)?;
         let state = super::super::schema::read_schema_state(&connection)?;
-        assert_eq!(state.revision, 82);
-        assert_eq!(state.minimum_compatible, Some(82));
+        assert_eq!(state.revision, super::super::SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(super::super::SCHEMA_VERSION));
         assert!(state.ensure_supported_by(81).is_err());
         for (turn, before) in turns.iter().zip(before) {
             assert_eq!(session_summary(&connection, &turn.command_id)?, before);

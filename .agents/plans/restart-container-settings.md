@@ -15,8 +15,9 @@ Saving container mounts followed by Restart must result in a container with thos
 - [x] (2026-10-15) Add a checkpoint-bound recreation phase, breaking forward migration 83, and serialized settings admission.
 - [x] (2026-10-15) Add isolated migration, applied-settings, checkpoint and cancellation regressions; update UI and documentation guidance.
 - [x] (2026-10-15) Add daemon-owned recreation projections and explicit warnings with Cancel selected in TUI and web confirmation.
-- [ ] Run focused checks during iteration, then full touched-crate suites and workspace Clippy once after the last round.
-- [ ] Commit the restart correction and push both commits to origin/master.
+- [x] (2026-10-15) Focused regressions, full touched-crate suites, all 30 browser checks, 56 web unit checks, formatting, and workspace Clippy passed.
+- [x] (2026-10-15) Committed the main correction as b0bc92951; final recovery fixes are validated.
+- [ ] Commit final fixes, merge the upstream version-only release, and push to origin/master.
 
 ## Surprises & Discoveries
 
@@ -38,7 +39,7 @@ Saving container mounts followed by Restart must result in a container with thos
 
 ## Outcomes & Retrospective
 
-The live session is repaired and the web creation feature is committed. The Restart correction and both confirmation surfaces are implemented. Final validation and publication remain. Do not push until the newly requested correction is complete and validated.
+The live session is repaired. Creation Review supports directory attachments. Restart reuses containers with known unchanged settings, checkpoints and recreates changed or unknown containers, and requires acknowledgment of the recovery limits before recreation. Both confirmation surfaces and recovery regressions are complete. Final controller validation passed: 2004 tests, 12 ignored. All other touched Rust suites, 30 browser tests, 56 web unit tests, formatting, and workspace Clippy passed. Publication is the remaining step.
 
 ## Context and Orientation
 
@@ -91,3 +92,9 @@ Revision note (2026-10-15): A stale screen must not bypass the new warning. Rest
 Revision note (2026-10-15): Keep the durable Restart intent while cancellation unwinds. The lifecycle owner enters a noncancellable completion phase, then releases a cancelled intent only after its task has stopped. This prevents a settings edit from racing an older controller's final persistence. Existing cancellation coverage now checks that edits remain excluded until completion.
 
 Validation checkpoint (2026-10-15): Recreation/settings and migration regressions passed; the final corrected sealed-checkpoint/cancellation regression passed. The terminal container-details golden and browser creation/settings/recreation golden passed, with Cancel preventing dispatch and acknowledgment reaching the request. Web unit tests passed (56). Formatting and diff checks passed. Commit this coherent checkpoint, merge upstream, then run all touched-crate suites and workspace Clippy before pushing.
+
+Revision note (2026-10-15): Full validation caught migration-replay fixtures selecting seven columns into six. Migration 83 now copies the six legacy columns explicitly. Two revision-81 turn fixtures now rewind all later ledger rows and assert the current revision after a full upgrade. Sixteen affected tests, including the unrelated process-deadline test, passed on focused retry; the two ledger fixtures are included in the final recovery checks. Core (503), TUI (525 plus two ignored), CLI (212 unit tests plus integration suites, including all 14 isolated startup/upgrade tests), client (40), 30 browser tests, and 56 web unit tests passed.
+
+Revision note (2026-10-15): Bind each admitted Restart's exact durable operation id to the existing lifecycle owner. Preserve a failed completion while it still owns an intent, and have a superseding lifecycle release that exact intent before starting its work. A failed Restart followed by Suspend and a completed Restart superseded directly by Resume both have regression coverage. Explicit user cancellation is a durable cancel_requested phase, retaining the settings lock until the task stops. Startup settles a cancelled Closing session as Error with its environment retained, rather than resuming it or interpreting it as an ordinary suspension. Keep internal shutdown cancellation distinct so accepted Restart work can still recover after daemon replacement.
+
+Validation completion (2026-10-15): The final controller suite passed all 2004 tests, with 12 ignored, using the already-built test binary and disposable fixture data under runtime TMPDIR=/tmp. Inherited /mnt/optane/tmp fixture fsync stalled on the busy build pool; no Cargo output, target directory, mbx configuration, or host mount was changed. Final focused cancellation/recovery and migration checks also passed, and workspace Clippy passed with warnings denied. The user requested that any separately identified unrelated Restart bugs be filed as tickets instead of expanding this change. No additional unresolved Restart defect was identified for a ticket at completion.

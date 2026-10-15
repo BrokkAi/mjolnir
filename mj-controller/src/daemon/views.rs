@@ -1,7 +1,10 @@
 use super::*;
 
 impl RuntimeState {
-    fn request_lifecycle_cancel(&self, session_id: &str) -> Result<Option<bool>> {
+    fn request_lifecycle_cancel(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(bool, Option<String>, LifecycleWatch)>> {
         let mut controller_owner = self.owner();
         let durable = durable_session_state(controller_owner.controller(), session_id);
         let Some(active) = controller_owner.lifecycle.get_mut(session_id) else {
@@ -16,24 +19,64 @@ impl RuntimeState {
             active.request_cancel(),
             "lifecycle operation is no longer cancellable"
         );
-        let restart = active.kind == LifecycleKind::Restart;
+        if active.kind == LifecycleKind::Restart {
+            active.phase = LifecyclePhase::CancellingRestart;
+        }
+        let accepted = (
+            active.kind == LifecycleKind::Restart,
+            active.restart_intent.clone(),
+            active.result.clone(),
+        );
         drop(controller_owner);
         self.publish_revision();
-        Ok(Some(restart))
+        Ok(Some(accepted))
+    }
+
+    async fn persist_restart_cancellation(
+        &self,
+        session_id: &str,
+        intent_id: Option<String>,
+        pending: LifecycleWatch,
+    ) -> Result<()> {
+        if let Some(intent_id) = intent_id {
+            blocking({
+                let session_id = session_id.to_owned();
+                move || crate::database::request_session_restart_cancel(&session_id, &intent_id)
+            })
+            .await?;
+        } else {
+            // Cancellation may precede durable admission. Wait for that owner
+            // to reject admission or release its intent before acknowledging.
+            if let Err(error) = Self::wait_lifecycle_result(pending.clone()).await {
+                tracing::debug!(%session_id, %error, "Restart stopped before cancellation acknowledgment");
+            }
+            self.remove_completed_lifecycle(&pending);
+        }
+        Ok(())
     }
 
     pub async fn cancel_lifecycle_with_intent(&self, session_id: &str) -> Result<()> {
-        self.request_lifecycle_cancel(session_id)?
+        let (restart, intent_id, pending) = self
+            .request_lifecycle_cancel(session_id)?
             .with_context(|| {
                 format!("no lifecycle operation is running for session {session_id}")
             })?;
-        // The lifecycle owner releases its durable intent only after all work
-        // has stopped. Until then, it still excludes container settings edits.
+        if restart {
+            self.persist_restart_cancellation(session_id, intent_id, pending)
+                .await?;
+        }
         Ok(())
     }
 
     pub async fn cancel_lifecycle_if_active(&self, session_id: &str) -> Result<bool> {
-        Ok(self.request_lifecycle_cancel(session_id)?.is_some())
+        let Some((restart, intent_id, pending)) = self.request_lifecycle_cancel(session_id)? else {
+            return Ok(false);
+        };
+        if restart {
+            self.persist_restart_cancellation(session_id, intent_id, pending)
+                .await?;
+        }
+        Ok(true)
     }
 
     /// Let storage cleanup drain briefly, then cancel and join every lifecycle

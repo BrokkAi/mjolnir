@@ -7,6 +7,7 @@ pub(crate) enum SessionRestartPhase {
     Stopping,
     RestoringInPlace,
     RecreatingContainer,
+    CancelRequested,
     Fallback,
 }
 
@@ -16,6 +17,7 @@ impl SessionRestartPhase {
             Self::Stopping => "stopping",
             Self::RestoringInPlace => "restoring_in_place",
             Self::RecreatingContainer => "recreating_container",
+            Self::CancelRequested => "cancel_requested",
             Self::Fallback => "fallback",
         }
     }
@@ -25,6 +27,7 @@ impl SessionRestartPhase {
             "stopping" => Ok(Self::Stopping),
             "restoring_in_place" => Ok(Self::RestoringInPlace),
             "recreating_container" => Ok(Self::RecreatingContainer),
+            "cancel_requested" => Ok(Self::CancelRequested),
             "fallback" => Ok(Self::Fallback),
             _ => bail!("unknown session restart phase {value:?}"),
         }
@@ -32,6 +35,7 @@ impl SessionRestartPhase {
 
     fn can_follow(self, next: Self) -> bool {
         self == next
+            || next == Self::CancelRequested
             || matches!(
                 (self, next),
                 (
@@ -247,6 +251,51 @@ pub(crate) fn advance_session_restart(
                 Utc::now().to_rfc3339()
             ],
         )?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// Retain the settings lock while cancellation unwinds, but never recover
+/// accepted cancellation as another Restart after a daemon crash.
+pub(crate) fn request_session_restart_cancel(session_id: &str, operation_id: &str) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    submit_database_write("request_session_restart_cancel", move |connection| {
+        connection.execute("UPDATE session_restart_intents SET phase='cancel_requested', updated_at=?3 WHERE session_id=?1 AND operation_id=?2",
+            params![session_id, operation_id, Utc::now().to_rfc3339()])?;
+        Ok(())
+    })
+}
+
+/// A cancelled Restart must not become an ordinary pending suspension on
+/// startup: retain its environment and settle the recovery row atomically.
+pub(crate) fn recover_cancelled_session_restart(
+    session_id: &str,
+    operation_id: &str,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    submit_database_write("recover_cancelled_session_restart", move |connection| {
+        let tx = connection.transaction()?;
+        let current = load_session_restart_with(&tx, &session_id)?;
+        if current.as_ref().is_some_and(|intent| {
+            intent.operation_id == operation_id
+                && intent.phase == SessionRestartPhase::CancelRequested
+        }) {
+            if let Some(mut session) = state_io::load_session_with(&tx, &session_id)?
+                && session.state == SessionState::Closing
+            {
+                session.state = SessionState::Error;
+                session.last_error = Some("Restart was cancelled; the environment was retained. Restart or suspend to continue.".into());
+                session.updated_at = Utc::now().to_rfc3339();
+                state_io::update_lifecycle_fields(&tx, &session)?;
+            }
+            tx.execute(
+                "DELETE FROM session_restart_intents WHERE session_id=?1 AND operation_id=?2",
+                params![session_id, operation_id],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     })

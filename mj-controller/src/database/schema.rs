@@ -1483,14 +1483,15 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
              CREATE TABLE session_restart_intents (
                  session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
                  operation_id TEXT NOT NULL,
-                 phase TEXT NOT NULL CHECK(phase IN ('stopping', 'restoring_in_place', 'recreating_container', 'fallback')),
+                 phase TEXT NOT NULL CHECK(phase IN ('stopping', 'restoring_in_place', 'recreating_container', 'cancel_requested', 'fallback')),
                  updated_at TEXT NOT NULL,
                  checkpoint_sha256 TEXT,
                  checkpoint_started INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_started IN (0, 1)),
                  container_recreation_acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(container_recreation_acknowledged IN (0, 1))
              ) STRICT;
              INSERT INTO session_restart_intents(session_id, operation_id, phase, updated_at, checkpoint_sha256, checkpoint_started)
-                 SELECT * FROM session_restart_intents_v82;
+                 SELECT session_id, operation_id, phase, updated_at, checkpoint_sha256, checkpoint_started
+                 FROM session_restart_intents_v82;
              DROP TABLE session_restart_intents_v82;
              UPDATE schema_compatibility SET minimum_compatible_version = 83 WHERE singleton = 1;
              INSERT INTO schema_migrations(version, applied_at)
@@ -2383,7 +2384,7 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 82 retains raw turns beside semantic outcomes.
+    /// `SCHEMA_VERSION`. Migration 83 adds acknowledged container recreation.
     const MINIMUM_COMPATIBLE_VERSION: i64 = 83;
 
     /// Rewrites a store's recorded schema version the way another build's

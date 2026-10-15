@@ -539,6 +539,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
@@ -566,6 +567,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "resume-operation".into(),
@@ -2010,6 +2012,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "closing-operation".into(),
@@ -2271,6 +2274,7 @@ async fn phone_cancel_uses_the_restart_lifecycle_cancellability_guard() {
         .unwrap();
 }
 
+// Hard-won: b0bc92951: a failed Restart kept its settings lock through a later Suspend.
 #[tokio::test]
 async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
     const NAME: &str = "a_waiting_close_preserves_the_intent_of_reserved_restart_teardown";
@@ -2333,6 +2337,70 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
         .unwrap();
     close.await.unwrap().unwrap();
     assert!(crate::database::load_session_restarts().unwrap().is_empty());
+
+    // A failed Restart retains its recovery intent. A later Suspend must
+    // release that exact intent even though the old task is already complete.
+    let intent = crate::database::begin_session_restart(
+        "session-1",
+        "restart-failed",
+        Arc::new(AtomicBool::new(false)),
+        true,
+    )
+    .unwrap();
+    let failed = state
+        .start_or_join_lifecycle(
+            "session-1".into(),
+            LifecycleKind::Restart,
+            |_, _, _| async { Err(anyhow!("retained restart failed")) },
+        )
+        .unwrap();
+    state
+        .bind_restart_intent("session-1", &intent.operation_id)
+        .unwrap();
+    assert!(
+        RuntimeState::wait_lifecycle_result(failed.clone())
+            .await
+            .is_err()
+    );
+    state.remove_completed_lifecycle(&failed);
+    assert!(state.owner().lifecycle.contains_key("session-1"));
+    assert_eq!(
+        crate::database::load_session_restarts().unwrap(),
+        vec![intent]
+    );
+    state.wait_before_close("session-1").await.unwrap();
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+
+    let intent = crate::database::begin_session_restart(
+        "session-1",
+        "restart-superseded",
+        Arc::new(AtomicBool::new(false)),
+        true,
+    )
+    .unwrap();
+    let failed = state
+        .start_or_join_lifecycle(
+            "session-1".into(),
+            LifecycleKind::Restart,
+            |_, _, _| async { Err(anyhow!("retained restart failed")) },
+        )
+        .unwrap();
+    state
+        .bind_restart_intent("session-1", &intent.operation_id)
+        .unwrap();
+    assert!(
+        RuntimeState::wait_lifecycle_result(failed.clone())
+            .await
+            .is_err()
+    );
+    state.remove_completed_lifecycle(&failed);
+    let resumed = state
+        .start_or_join_lifecycle("session-1".into(), LifecycleKind::Resume, |_, _, _| async {
+            assert!(crate::database::load_session_restarts()?.is_empty());
+            Ok(DaemonLifecycleResult::Done)
+        })
+        .unwrap();
+    RuntimeState::wait_lifecycle_result(resumed).await.unwrap();
 }
 
 // Hard-won: 7b694803: Alt-X stayed available and could cancel teardown after the checkpoint gate.
@@ -2991,6 +3059,9 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     .await
     .unwrap()
     .unwrap();
+    state
+        .bind_restart_intent("session-1", &intent.operation_id)
+        .unwrap();
     assert!(!intent.checkpoint_started);
     tokio::task::spawn_blocking(|| {
         crate::database::mark_session_restart_checkpoint_started("session-1", "restart-accepted")?;
@@ -3042,7 +3113,10 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         .await
         .unwrap();
     assert!(cancelled.load(Ordering::Acquire));
-    assert_eq!(crate::database::load_session_restarts().unwrap().len(), 1);
+    assert_eq!(
+        crate::database::load_session_restarts().unwrap()[0].phase,
+        crate::database::SessionRestartPhase::CancelRequested
+    );
     let refused = crate::database::set_session_container_settings(
         "session-1",
         None,
@@ -3092,6 +3166,9 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     .await
     .unwrap()
     .unwrap();
+    state
+        .bind_restart_intent("session-2", "restart-preempted")
+        .unwrap();
     let closing_state = state.clone();
     let close = tokio::spawn(async move { closing_state.wait_before_close("session-2").await });
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -3110,6 +3187,41 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
     release.notify_one();
     close.await.unwrap().unwrap();
     assert!(crate::database::load_session_restarts().unwrap().is_empty());
+
+    let mut session = runtime_test_session(
+        "cancelled-recovery",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Closing,
+    );
+    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        borrowed_from: None,
+        container_id: mj_core::targets::resource_name(&session.id).unwrap(),
+        workspace_storage: Default::default(),
+    });
+    crate::database::save_session(&session).unwrap();
+    let intent = crate::database::begin_session_restart(
+        &session.id,
+        "cancel-survives-crash",
+        Arc::new(AtomicBool::new(false)),
+        true,
+    )
+    .unwrap();
+    crate::database::request_session_restart_cancel(&session.id, &intent.operation_id).unwrap();
+    assert!(
+        state
+            .recover_restarts(crate::database::load_session_restarts().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(crate::database::load_session_restarts().unwrap().is_empty());
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[&session.id].state,
+        SessionState::Error
+    );
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[&session.id].target,
+        session.target
+    );
 }
 
 /// The smallest archived snapshot a hand-off step can carry.
@@ -6141,6 +6253,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
             phase: LifecyclePhase::Executing,
             operation_id: "current".into(),
