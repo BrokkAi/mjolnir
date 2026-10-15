@@ -183,6 +183,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn failed_cache_preparation_cannot_publish_a_partial_mount_set() {
         let mut config = Config::default().with_local_targets();
         let settings = mj_core::config::TargetBuildCache {

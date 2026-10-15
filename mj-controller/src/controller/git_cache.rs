@@ -692,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_evicts_the_oldest_mirror_to_meet_its_soft_cap() {
         let temporary = tempfile::tempdir().unwrap();
         let cache_root = temporary.path().join("cache");
@@ -723,6 +724,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_removes_only_old_orphan_session_snapshots() {
         let temporary = tempfile::tempdir().unwrap();
         let cache_root = temporary.path().join("cache");

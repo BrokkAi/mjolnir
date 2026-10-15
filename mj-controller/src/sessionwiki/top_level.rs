@@ -272,6 +272,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
+    )]
     fn native_discovery_indexes_parents_and_never_hands_children_to_the_parser() {
         let _held = testing::lock();
         let (_index, mut connection) = testing::isolated_index();

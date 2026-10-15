@@ -1444,6 +1444,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn darwin_hosts_skip_cache_inspection_provisioning_and_reconciliation() {
         let _isolated = isolated();
         for remote in [false, true] {
@@ -1505,6 +1509,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn linux_ssh_cache_remains_available_on_any_controller_platform() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
@@ -1526,6 +1534,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn reconciliation_refreshes_active_mounts_when_cache_policy_is_disabled() {
         let _isolated = isolated();
         let machine = mj_core::config::Machine::Local {
@@ -1546,6 +1558,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn recorded_darwin_cache_fails_explicitly_without_writing() {
         let executor = ProbeExecutor::new(&[("uname -sm", 0, "Darwin x86_64")]);
         let recorded = SessionBuildCache {
@@ -1567,6 +1583,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn failed_platform_probe_does_not_attempt_cache_operations() {
         let executor = ProbeExecutor::new(&[("uname -sm", 1, "")]);
         assert!(inspect_host(&CacheHost::Local, &TargetBuildCache::default(), &executor).is_err());
@@ -1574,6 +1594,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn installed_worker_reads_cache_configuration_from_its_recorded_host() {
         let executor = ProbeExecutor::new(&[
             ("XDG_CONFIG_HOME", 0, "/home/builder/.config/mbx"),
@@ -1604,6 +1628,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_native_mbx_supplies_the_cache_directory_and_its_own_limits() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
@@ -1648,6 +1676,10 @@ mod tests {
     }
     // Hard-won: 24f3d72c: settings refresh left sessions using a stale failed host inspection
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn looking_at_the_settings_page_lets_the_next_session_see_a_repaired_host() {
         let _isolated = isolated();
         let broken = ProbeExecutor::new(
@@ -1679,6 +1711,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_target_root_that_cannot_be_cloned_into_still_gets_the_cache() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
@@ -1777,6 +1813,10 @@ mod tests {
 
     // Hard-won: ecab42fb: non-login SSH PATH hid cargo-installed mbx and selected the wrong cache store
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_cargo_installed_mbx_off_the_path_is_queried_where_it_was_found() {
         let _isolated = isolated();
         let found = format!("/home/dev/.cargo/bin/mbx\nmbx {MBX_VERSION}");
@@ -1798,6 +1838,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn an_older_native_mbx_must_not_share_the_store() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
@@ -1820,6 +1864,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_host_without_mbx_has_no_shared_cache_and_preview_shows_setup_guidance() {
         let _isolated = isolated();
         let mut answers = absent_host();
@@ -1842,6 +1890,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_native_installation_owns_the_budget_despite_saved_mj_overrides() {
         let _isolated = isolated();
         let native = current_native_mbx();
@@ -1917,6 +1969,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn local_podman_and_local_docker_inspect_one_machine_once() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
@@ -1944,6 +2000,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn the_preview_reports_what_the_cache_has_already_done() {
         let _isolated = isolated();
         // Ahead of the configuration read, which tests the same `[ -f ]`.
@@ -1985,6 +2045,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_container_session_mounts_the_native_cache_and_records_its_synchronized_binary() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
@@ -2024,6 +2088,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_resumed_session_uses_current_machine_policy_instead_of_its_saved_budget() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
@@ -2048,6 +2116,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn a_session_moved_to_another_host_resolves_its_build_cache_again() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());
@@ -2288,6 +2360,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn cache_sync_reprobes_and_retries_after_another_process_changes_the_host_binary() {
         struct ReprobeExecutor {
             syncs: std::sync::atomic::AtomicUsize,
@@ -2620,6 +2696,10 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn absent_or_too_old_native_mbx_leaves_the_existing_cache_copy() {
         struct ProbeAnswer {
             status: i32,
@@ -2659,6 +2739,10 @@ while [ ! -e "$3" ]; do sleep 0.01; done"#;
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn the_preview_reports_native_cache_values_without_creating_directories() {
         let _isolated = isolated();
         let executor = ProbeExecutor::new(&native_host());

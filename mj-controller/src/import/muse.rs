@@ -781,6 +781,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1294: the transcript fixture records a POSIX working directory"
+    )]
     fn summary_rejects_relative_workspace_and_mixed_session_streams() {
         let mut records = read_records(&session_bytes(false)).unwrap();
         records[0].value["payload"]["record"]["workspace_root"] = json!("relative");

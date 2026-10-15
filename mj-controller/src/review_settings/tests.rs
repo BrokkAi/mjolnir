@@ -352,6 +352,7 @@ async fn discover_for_test(
 }
 
 #[tokio::test]
+#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
 async fn unsupported_model_keeps_models_without_claiming_efforts() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let mut manager = FakeManager::new(&[SESSION]).await;
@@ -385,6 +386,7 @@ async fn unsupported_model_keeps_models_without_claiming_efforts() {
 }
 
 #[tokio::test]
+#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
 async fn cleanup_failure_keeps_choices_as_a_warning() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let mut manager = FakeManager::new(&[SESSION]).await;
@@ -421,6 +423,7 @@ async fn cleanup_failure_keeps_choices_as_a_warning() {
 }
 
 #[tokio::test]
+#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
 async fn cancellation_and_start_error_still_pause_without_progress() {
     let directory = tempfile::tempdir().expect("fixture directory");
     let mut manager = FakeManager::new(&[SESSION]).await;

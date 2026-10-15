@@ -165,10 +165,12 @@ jobs:
     # The controller-side crates whose suites pass on Windows, including the
     # daemon startup tests that run `mj` against isolated instances. The
     # worker and checkpoint crates run only on Linux and macOS hosts.
-    # mj-controller joins once #1261 is fixed.
+    # mj-controller tests that still fail on Windows are ignored there with
+    # `cfg_attr(windows, ignore = "#<issue>: ...")`; the sub-issues of #1261
+    # remove those attributes as they are fixed.
     - name: Run tests on Windows
       if: runner.os == 'Windows'
-      run: cargo test -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir
+      run: cargo test -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui -p brokk-mjolnir -p brokk-mj-controller
 
     - name: Test the Windows installer
       if: runner.os == 'Windows'

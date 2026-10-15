@@ -834,6 +834,10 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     let short = "move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint";
     if !isolated_test_child(&test_name(short), PREPARATION_SNAPSHOT_CHILD) {
@@ -1631,6 +1635,10 @@ impl CommandExecutor for GitWithPodmanPreflightExecutor {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     let short = "preparing_a_local_session_for_a_container_previews_the_conversion";
     if !isolated_test_child(&test_name(short), "MJ_MOVE_CONVERSION_PREVIEW_CHILD") {
@@ -1746,6 +1754,10 @@ impl CommandExecutor for RsyncWithoutProtectArgs {
 
 // Hard-won: 6fc2ed80: unsupported rsync protection flags were discovered only after copying began
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args() {
     let short = "a_move_is_blocked_before_copying_when_an_rsync_rejects_protect_args";
     if !isolated_test_child(&test_name(short), "MJ_MOVE_RSYNC_PROBE_CHILD") {

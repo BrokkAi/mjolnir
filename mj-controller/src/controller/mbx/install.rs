@@ -840,6 +840,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn destination_installs_absent_mbx_and_replaces_only_managed_paths() {
         let home = Path::new("/home/build");
         assert_eq!(
@@ -874,6 +878,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn local_install_copies_atomically_runs_setup_and_verifies_the_version() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home with ' quotes");
@@ -916,6 +924,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn ssh_install_uses_scp_to_a_home_relative_sibling_then_renames_atomically() {
         let temp = tempfile::tempdir().unwrap();
         let binary = temp.path().join("downloaded-mbx");
@@ -963,6 +975,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn setup_failure_surfaces_stderr_and_stops_before_profile_changes() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -985,6 +1001,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn mise_install_refusal_happens_before_download_or_host_mutation() {
         let home = Path::new("/home/build");
         let executor = FakeExecutor::with_probes([output(
@@ -1293,6 +1313,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+    )]
     fn posix_profile_moves_shim_and_binary_directories_ahead_of_existing_path_entries() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");

@@ -562,6 +562,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn exact_checkout_starts_at_a_on_a_new_private_branch_while_origin_is_at_b() {
         let fixture = ExactFixture::new();
         let source_refs = test_git(fixture._host.path(), &["show-ref"]);
@@ -588,6 +592,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn exact_checkout_fetches_a_new_exact_object_and_can_leave_head_detached() {
         let mut fixture = ExactFixture::new();
         test_git(
@@ -665,6 +673,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1296: process cancellation and relay recovery assume Unix"
+    )]
     fn exact_checkout_retries_interruption_but_refuses_subsequent_branch_movement_or_dirty_work() {
         for change in ["none", "commit", "dirty", "selection"] {
             let mut fixture = ExactFixture::new();
@@ -708,6 +720,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn completed_exact_checkout_does_not_reset_a_moved_private_branch() {
         let fixture = ExactFixture::new();
         fixture.prepare(&ProcessExecutor).unwrap();
@@ -730,6 +746,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn exact_checkout_and_its_base_apply_only_to_the_checked_out_repository() {
         let fixture = ExactFixture::new();
         let other = committed_repository();
@@ -787,6 +807,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn a_launch_base_sets_diff_base_without_moving_selected_branch() {
         let host = committed_repository();
         let initial = test_git(host.path(), &["rev-parse", "HEAD"]);
@@ -869,6 +893,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn isolated_sessions_start_at_remote_default_and_publish_without_changing_the_host() {
         let host = committed_repository();
         let root = tempfile::tempdir().unwrap();

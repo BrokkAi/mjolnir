@@ -636,6 +636,10 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+    )]
     fn pushed_unmerged_clone_is_publishable_but_local_commits_and_files_are_not() {
         let source = committed_repository();
         let remote = tempfile::tempdir().unwrap();

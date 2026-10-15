@@ -157,6 +157,10 @@ fn session_targets_keep_a_cwd_repository_under_a_temporary_directory() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn codex_extracts_only_completed_file_changes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rollout.jsonl");
@@ -179,6 +183,10 @@ fn codex_extracts_only_completed_file_changes() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn claude_prefers_file_history_and_accepts_successful_edit_fallback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
@@ -516,6 +524,10 @@ fn import_safety_reports_dirty_roots_and_non_git_omissions() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn projects_jsonl_projects_user_and_assistant_text_in_source_order() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
@@ -729,6 +741,10 @@ fn isolated_local_source_import_resolves_the_checkout_network_remote() {
 /// is Mjolnir's, not a prompt the user typed.
 // Hard-won: b5ae15db: Codex titled a new session from hidden project memory instead of the user prompt.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
     let uri = mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI;
     let context = format!(
@@ -1045,6 +1061,10 @@ fn stop_sequence_claude_import_produces_idle_raw_project_session() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn codex_paginated_import_ignores_compaction_artifacts() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rollout.jsonl");
@@ -1608,6 +1628,10 @@ fn claude_listing_uses_native_all_projects_limit() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn kimi_wire_projects_user_prompt_and_text_without_thought() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir_all(directory.path().join("agents/main")).unwrap();
@@ -1672,6 +1696,10 @@ fn kimi_wire_projects_user_prompt_and_text_without_thought() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn grok_chat_history_projects_prompts_thoughts_and_replies() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1740,6 +1768,10 @@ fn grok_chat_history_projects_prompts_thoughts_and_replies() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn grok_reasoning_and_message_chunks_keep_their_own_update_kinds() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1771,6 +1803,10 @@ fn grok_reasoning_and_message_chunks_keep_their_own_update_kinds() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn grok_compaction_before_recoverable_history_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1790,6 +1826,10 @@ fn grok_compaction_before_recoverable_history_is_refused() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn grok_edited_paths_need_a_completed_search_replace_call() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1899,6 +1939,10 @@ fn kimi_locator_retains_its_native_session_directory_prefix() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn kimi_listing_matches_native_index_visibility_and_title() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("sessions/project");
@@ -2212,6 +2256,10 @@ fn codex_lookup_by_id_reports_a_directory_it_cannot_read() {
 
 // Hard-won: c72b6322: a named Kimi session omitted by its index was wrongly reported as missing.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1294: the transcript fixture records a POSIX working directory"
+)]
 fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
     let directory = tempfile::tempdir().unwrap();
     let session = directory

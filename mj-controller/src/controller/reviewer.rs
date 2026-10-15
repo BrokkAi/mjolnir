@@ -550,6 +550,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn staging_copies_the_chosen_profile_into_the_worker_root() {
         let directory = tempfile::tempdir().unwrap();
         let worker_root = directory.path().join(SESSION_ID);
@@ -667,6 +671,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1290: a session target path is joined or judged with Windows rules"
+    )]
 
     fn local_container_targets_stage_the_reviewer_through_their_engine() {
         let directory = tempfile::tempdir().unwrap();
@@ -761,6 +769,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn a_muse_reviewer_is_staged_with_the_permission_profile_its_policy_enforces() {
         let directory = tempfile::tempdir().unwrap();
         let worker_root = directory.path().join(SESSION_ID);
@@ -805,6 +817,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn a_new_generation_travels_to_the_worker_so_it_starts_a_fresh_reviewer() {
         let directory = tempfile::tempdir().unwrap();
         let (controller, session_id) = fixture(

@@ -25,6 +25,10 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec, ProcessExecuto
 use super::*;
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     const CHILD: &str = "MJ_IN_PLACE_ROSTER_FRESHNESS_TEST_CHILD";
     let test_name = crate::controller::test_support::test_name(
@@ -221,6 +225,10 @@ const WORKER_PREFLIGHT_TEST_CHILD: &str = "MJ_WORKER_PREFLIGHT_TEST_CHILD";
 /// cannot produce a worker must say so before it compacts anything.
 // Hard-won: 721bea6b94f2: a missing worker binary was discovered only after minutes of paid transcript compaction.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_resume_preflights_the_worker_binary_before_compacting() {
     // MJ_WORKER_BINARY, MJ_DATA_DIR, and MJ_CONFIG_DIR are process-global,
     // so run the half that sets them in an exact child test.
@@ -1423,6 +1431,10 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     );
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn failed_resume_retires_a_checkout_it_recreated() {
     if std::env::var_os(RETIRED_WORKTREE_RESUME_TEST_CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
@@ -1611,6 +1623,10 @@ fn native_state(archive: &mj_checkpoint::archive::VerifiedArchive) -> Vec<(PathB
 }
 const RAW_CONVERSION_TEST_CHILD: &str = "MJ_RAW_CONVERSION_TEST_CHILD";
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     // MJ_DATA_DIR and MJ_CONFIG_DIR are process-global, so run the half
     // that writes them in an exact child test.
