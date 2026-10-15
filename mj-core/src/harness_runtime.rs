@@ -98,8 +98,8 @@ pub fn managed_harness_manifest_matches(
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
 pub const CODEX_ACP_VERSION: &str = "1.13.7";
 pub const CODEX_CLI_VERSION: &str = "0.160.1";
-pub const CLAUDE_ACP_VERSION: &str = "0.87.0";
-pub const CLAUDE_CLI_VERSION: &str = "2.1.293";
+pub const CLAUDE_ACP_VERSION: &str = "0.90.0";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.300";
 pub const KIMI_VERSION: &str = "2.1.1";
 pub const GROK_VERSION: &str = "1.0.40";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
@@ -208,8 +208,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             entrypoint: "node_modules/.bin/codex-acp",
         },
         HarnessKind::Claude => HarnessPin {
-            install_id: "claude-agent-acp-0.87.0_claude-2.1.293",
-            display_version: "claude-agent-acp 0.87.0 + Claude Code 2.1.293",
+            install_id: "claude-agent-acp-0.90.0_claude-2.1.300",
+            display_version: "claude-agent-acp 0.90.0 + Claude Code 2.1.300",
             entrypoint: "node_modules/.bin/claude-agent-acp",
         },
         HarnessKind::Kimi => HarnessPin {
