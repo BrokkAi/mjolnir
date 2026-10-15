@@ -54,25 +54,27 @@ pub(super) fn configure_kimi_history_mcp(
                 )
             })?;
 
-        let worker = Path::new(worker_root).join("hel");
-        let socket_is_absolute = history_socket.is_none_or(|socket| socket.is_absolute());
-        let server = if worker.is_absolute() && socket_is_absolute {
+        // The worker root and the socket are paths on the target, which is
+        // POSIX even when the controller runs on Windows.
+        let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+        let socket_is_absolute = history_socket.is_none_or(mj_core::target_path::is_absolute);
+        let server = if mj_core::target_path::is_absolute(&worker) && socket_is_absolute {
             let mut args = vec!["worker".to_owned(), "memory-mcp".into()];
             if let Some(socket) = history_socket {
                 args.extend([
                     "--history-socket".into(),
-                    socket.to_string_lossy().into_owned(),
+                    mj_core::target_path::text(socket),
                 ]);
             }
             serde_json::json!({
                 "transport": "stdio",
-                "command": worker,
+                "command": mj_core::target_path::text(&worker),
                 "args": args,
                 "runtime_id": "local"
             })
         } else {
-            let worker = worker.to_string_lossy();
-            let worker_expression = if Path::new(worker.as_ref()).is_absolute() {
+            let worker = mj_core::target_path::text(&worker);
+            let worker_expression = if mj_core::target_path::is_absolute(Path::new(&worker)) {
                 "\"$1\""
             } else {
                 "\"$HOME/$1\""
@@ -81,15 +83,15 @@ pub(super) fn configure_kimi_history_mcp(
                 "-c".to_owned(),
                 format!("exec {worker_expression} worker memory-mcp"),
                 "mj-memory".into(),
-                worker.into_owned(),
+                worker,
             ];
             if let Some(socket) = history_socket {
-                args[1].push_str(if socket.is_absolute() {
+                args[1].push_str(if mj_core::target_path::is_absolute(socket) {
                     " --history-socket \"$2\""
                 } else {
                     " --history-socket \"$HOME/$2\""
                 });
-                args.push(socket.to_string_lossy().into_owned());
+                args.push(mj_core::target_path::text(socket));
             }
             serde_json::json!({
                 "transport": "stdio",
@@ -143,12 +145,18 @@ pub(super) fn configure_claude_subagent_mcp(
                 "alwaysLoad":true,
                 // Remote roots are home-relative; worker startup resolves
                 // both paths on the target before launching Claude.
-                "command":Path::new(worker_root).join("hel"),
+                "command":mj_core::target_path::text(&mj_core::target_path::join(
+                    Path::new(worker_root),
+                    Path::new("hel"),
+                )),
                 "args":[
                     "worker",
                     "subagent-mcp",
                     "--socket",
-                    Path::new(worker_root).join(mj_worker_socket_name()),
+                    mj_core::target_path::text(&mj_core::target_path::join(
+                        Path::new(worker_root),
+                        Path::new(mj_worker_socket_name()),
+                    )),
                     // Claude's own limit is on silence, which the server's
                     // progress notifications break, so this keeps the full
                     // advertised wait. Naming the harness anyway keeps both
@@ -213,12 +221,12 @@ pub(super) fn configure_claude_mailbox_hook(
         return Ok(());
     }
     let path = profile_stage.join("settings.json");
-    let worker = Path::new(worker_root).join("hel");
-    let socket = Path::new(worker_root).join("control.sock");
+    let worker = mj_core::target_path::join(Path::new(worker_root), Path::new("hel"));
+    let socket = mj_core::target_path::join(Path::new(worker_root), Path::new("control.sock"));
     let command = format!(
         "MJOLNIR_MAILBOX_HOOK=1 {} worker mailbox-hook --socket {} --event PostToolBatch",
-        mj_core::targets::posix_quote(&worker.to_string_lossy()),
-        mj_core::targets::posix_quote(&socket.to_string_lossy())
+        mj_core::targets::posix_quote(&mj_core::target_path::text(&worker)),
+        mj_core::targets::posix_quote(&mj_core::target_path::text(&socket))
     );
     edit_staged_json_object(&path, "staged Claude settings", |root| {
         let groups = root

@@ -341,6 +341,10 @@ mod tests {
     /// one that is not was reported as gone while it was still running.
     // Hard-won: 915d5c30: a live worker with an unexpected command line was reported gone.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1296: process cancellation and relay recovery assume Unix"
+    )]
     fn a_worker_is_found_by_the_pid_it_recorded_even_when_its_command_line_differs() {
         let root = tempfile::tempdir().unwrap();
         // This test process is certainly alive, and its command line is a test
@@ -369,6 +373,7 @@ mod tests {
     /// A startup record left by a worker that has since gone must not be read
     /// as a live worker.
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn a_startup_record_for_a_dead_pid_reports_no_worker() {
         let root = tempfile::tempdir().unwrap();
         // A pid that cannot exist: the kernel rejects it outright.
@@ -389,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn a_recycled_startup_pid_never_identifies_or_stops_an_unrelated_process() {
         let root = tempfile::tempdir().unwrap();
         for birth in [
@@ -504,6 +510,7 @@ mod tests {
     /// multi-line `-v` assignment.
     // Hard-won: 3002b626: macOS destroy failed when awk -v received a newline.
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn stop_script_is_posix_sh_and_passes_no_multiline_value_to_awk() {
         let script = stop_worker_daemon_script("/tmp/mj-worker-root");
         let mut assignments = 0;

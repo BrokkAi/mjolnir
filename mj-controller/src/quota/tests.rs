@@ -1081,6 +1081,7 @@ fn age_kimi_lock(path: &Path, age: Duration) {
 }
 
 #[tokio::test]
+#[cfg_attr(windows, ignore = "#1299: Windows file locking and directory times")]
 async fn a_kimi_refresh_lock_left_by_a_crashed_holder_is_broken_and_reacquired() {
     let home = tempfile::tempdir().unwrap();
     let lock = home.path().join("oauth/kimi-code.lock");
@@ -1123,6 +1124,7 @@ async fn a_heartbeating_kimi_refresh_lock_is_not_broken_by_a_waiter() {
 /// five seconds old, so Mjolnir's beats have to be frequent enough that a
 /// stalled heartbeat task still cannot cost it a live lock.
 #[tokio::test]
+#[cfg_attr(windows, ignore = "#1299: Windows file locking and directory times")]
 async fn a_held_kimi_lock_republishes_its_mtime_several_times_per_cli_break_window() {
     let home = tempfile::tempdir().unwrap();
     let held = KimiRefreshLock::acquire(home.path(), KIMI_LOCK_WAIT)

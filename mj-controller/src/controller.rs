@@ -929,13 +929,8 @@ impl Controller {
         if project_directory.is_some() != is_bare_project_target(template) {
             bail!("raw project directories require a bare target, and bare targets require one");
         }
-        if let Some(path) = &project_directory
-            && (!path.is_absolute()
-                || path
-                    .components()
-                    .any(|part| part == std::path::Component::ParentDir))
-        {
-            bail!("bare project directory must be an absolute safe path");
+        if let Some(path) = &project_directory {
+            targets::validate_bare_project_path(path)?;
         }
         let bundle = project_directory
             .is_none()
@@ -1489,10 +1484,10 @@ fn target_profile_home(
 ) -> String {
     let root = removable_profile_root(locator, session_id, profile);
     if profile.kind.nested_home() {
-        PathBuf::from(root)
-            .join(profile.kind.id())
-            .to_string_lossy()
-            .into_owned()
+        mj_core::target_path::text(&mj_core::target_path::join(
+            Path::new(&root),
+            Path::new(profile.kind.id()),
+        ))
     } else {
         root
     }
@@ -1516,10 +1511,9 @@ pub(super) fn removable_profile_root(
                 .to_string_lossy()
                 .into_owned()
         }
-        targets::TargetLocator::LocalBare { worker_root } => Path::new(worker_root)
-            .join("profile")
-            .to_string_lossy()
-            .into_owned(),
+        targets::TargetLocator::LocalBare { worker_root } => mj_core::target_path::text(
+            &mj_core::target_path::join(Path::new(worker_root), Path::new("profile")),
+        ),
         targets::TargetLocator::LocalPodman { .. }
         | targets::TargetLocator::LocalDocker { .. }
         | targets::TargetLocator::AppleContainer { .. }

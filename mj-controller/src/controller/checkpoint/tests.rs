@@ -97,6 +97,10 @@ fn managed_worktree_export_capture(
 
 // Hard-won: 074faa0c0155: managed worktree checkpoints omitted every commit after using the live HEAD as base
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_managed_worktree_checkpoint_bundles_from_the_recorded_base() {
     let (capture, creation_commit, worktree_head) = managed_worktree_export_capture(false);
     let CheckpointRepositoryCapture::DeltaFrom { base_commit } = capture else {
@@ -108,6 +112,10 @@ fn a_managed_worktree_checkpoint_bundles_from_the_recorded_base() {
 
 // Hard-won: 074faa0c0155: legacy managed worktree checkpoints omitted commits by using the live HEAD as base
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_managed_worktree_without_a_recorded_base_uses_its_branch_creation_commit() {
     let (capture, creation_commit, worktree_head) = managed_worktree_export_capture(true);
     let CheckpointRepositoryCapture::DeltaFrom { base_commit } = capture else {

@@ -552,6 +552,10 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
 
 /// A child that fails to stop owns its live slot across reopening the store.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching() {
     const MARKER: &str = "MJ_TEST_PENDING_STARTUP_CLEANUP";
     let name = "failed_startup_cleanup_retains_capacity_and_resumes_without_relaunching";
@@ -635,6 +639,10 @@ impl CommandExecutor for CancelledLaunch {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn a_cancelled_child_launch_still_stops_with_an_independent_executor() {
     const MARKER: &str = "MJ_TEST_CANCELLED_CHILD_CLEANUP";
     let name = "a_cancelled_child_launch_still_stops_with_an_independent_executor";

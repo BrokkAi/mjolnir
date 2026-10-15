@@ -2852,6 +2852,7 @@ mod reader_tests {
     /// An idle connection must not outlive the store it was opened on, and
     /// must not hide a migration another build made while it sat idle.
     #[test]
+    #[cfg_attr(windows, ignore = "#1299: Windows file locking and directory times")]
     fn idle_readers_follow_store_replacement_and_schema_changes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");

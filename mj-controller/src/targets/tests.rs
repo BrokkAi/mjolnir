@@ -38,11 +38,13 @@ fn assert_streams_to_eof(executor: &dyn CommandExecutor) {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn process_executor_completes_a_stream_against_a_child_that_reads_to_eof() {
     assert_streams_to_eof(&ProcessExecutor);
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn cancellable_executor_completes_a_stream_against_a_child_that_reads_to_eof() {
     assert_streams_to_eof(&CancellableProcessExecutor::new(Arc::new(AtomicBool::new(
         false,
@@ -1094,6 +1096,7 @@ fn podman_host_helper_creates_the_exact_workspace_before_launch() {
 
 // Hard-won: 15867df0: GitHub tokens were exposed in container argv.
 #[test]
+#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn container_secret_is_streamed_without_entering_local_command_arguments() {
     let secret = "github-token-that-must-not-reach-argv";
     let target = TargetTemplate::LocalPodman(ContainerTemplate {
@@ -4070,6 +4073,10 @@ fn failure_before_a_batch_prevents_the_batch_from_starting() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 fn cancellable_executor_terminates_a_running_process() {
     let cancelled = Arc::new(AtomicBool::new(false));
     let executor = CancellableProcessExecutor::new(cancelled.clone());
@@ -4087,6 +4094,10 @@ fn cancellable_executor_terminates_a_running_process() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 fn cancellable_executor_enforces_its_inline_deadline() {
     let executor = CancellableProcessExecutor::with_timeout(Duration::from_millis(50));
     let started = std::time::Instant::now();
@@ -4102,6 +4113,7 @@ fn cancellable_executor_enforces_its_inline_deadline() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
 fn bounded_executor_times_out_naming_the_probe_and_still_runs_the_next_one() {
     let executor = BoundedProcessExecutor::new(Duration::from_secs(1));
     let started = std::time::Instant::now();
@@ -4132,6 +4144,10 @@ fn bounded_executor_times_out_naming_the_probe_and_still_runs_the_next_one() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 fn cancellable_executor_interrupts_a_blocked_stdin_pipe() {
     let cancelled = Arc::new(AtomicBool::new(false));
     let executor = CancellableProcessExecutor::new(cancelled.clone());

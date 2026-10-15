@@ -422,7 +422,7 @@ pub(super) fn install_mbx_shims(
     config_roots: &[PathBuf],
 ) -> Result<()> {
     ensure!(
-        mbx_binary.is_absolute(),
+        mj_core::target_path::is_absolute_on_host_or_target(mbx_binary),
         "shared cache mbx path is not absolute: {}",
         mbx_binary.display()
     );
@@ -518,7 +518,7 @@ pub(super) fn verify_mbx_binary(
     expected_version: &str,
 ) -> Result<()> {
     ensure!(
-        mbx_binary.is_absolute(),
+        mj_core::target_path::is_absolute_on_host_or_target(mbx_binary),
         "shared cache mbx path is not absolute: {}",
         mbx_binary.display()
     );

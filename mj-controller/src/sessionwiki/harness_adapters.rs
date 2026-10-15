@@ -277,6 +277,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
+    )]
     fn kimi_sessions_are_indexed_from_their_profile_home() {
         let directory = tempfile::tempdir().unwrap();
         let home = profile_home(&directory, "kimi");
@@ -299,6 +303,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
+    )]
     fn grok_sessions_are_indexed_from_their_profile_home() {
         let directory = tempfile::tempdir().unwrap();
         let home = profile_home(&directory, "grok");

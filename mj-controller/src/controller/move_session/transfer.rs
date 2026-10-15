@@ -2,7 +2,7 @@
 use super::*;
 use crate::targets::{self, CommandSpec};
 use mj_core::move_workspace::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 fn repositories(
     layout: &super::super::checkpoint::SessionExportLayout,
@@ -12,7 +12,10 @@ fn repositories(
         .iter()
         .map(|repo| WorkspaceRepository {
             id: repo.id.clone(),
-            root: Path::new(&layout.workspace_root).join(&repo.relative_destination),
+            root: mj_core::target_path::join(
+                Path::new(&layout.workspace_root),
+                &repo.relative_destination,
+            ),
         })
         .collect()
 }
@@ -700,7 +703,10 @@ impl Controller {
         Ok(WorkspaceTransfer {
             assessment,
             source: Box::new(self.state.sessions[id].clone()),
-            source_stage: Path::new(&root).join(format!("move-{operation_id}")),
+            source_stage: mj_core::target_path::join(
+                Path::new(&root),
+                Path::new(&format!("move-{operation_id}")),
+            ),
             controller_stage: mj_core::config::data_dir()
                 .join("moves")
                 .join(operation_id)
@@ -830,8 +836,10 @@ impl Controller {
             self.state.sessions[id].target != transfer.source.target,
             "Move destination reuses the source environment; refusing to overwrite it"
         );
-        let stage = PathBuf::from(targets::worker_root(&layout.backend, id)?)
-            .join(format!("move-{}", operation.operation_id));
+        let stage = mj_core::target_path::join(
+            Path::new(&targets::worker_root(&layout.backend, id)?),
+            Path::new(&format!("move-{}", operation.operation_id)),
+        );
         super::super::execute_checked(
             executor,
             targets::command_on_locator(

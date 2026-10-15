@@ -201,6 +201,10 @@ fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     if !in_isolated_store("target_cleanup_persists_destroying_and_rechecks_the_installed_archive") {
         return;
@@ -535,6 +539,10 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     assert!(controller.state.sessions[session_id].target.is_none());
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
     if !in_isolated_store("verified_close_retires_managed_checkout_but_keeps_archive_and_branch") {
         return;
@@ -591,6 +599,10 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
     );
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
     if !in_isolated_store("force_stop_reuses_verified_archive_and_leaves_session_resumable") {
         return;
@@ -647,6 +659,10 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
 /// of waiting forever (#1059).
 // Hard-won: 7aea6c5c: wedged provisioning close left its target and lifecycle unsettled
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     if !in_isolated_store("closing_a_wedged_provisioning_session_tears_down_its_target_and_settles")
     {
@@ -774,6 +790,10 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
 /// the target down and settles.
 // Hard-won: ba6c3427: failed startup child stayed live and could not close without a checkpoint
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn closing_a_failed_subagent_tears_down_its_target_without_a_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -906,6 +926,10 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     assert!(controller.state.sessions[session_id].target.is_some());
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     struct RecordingExecutor {
         calls: RefCell<usize>,
@@ -1128,6 +1152,10 @@ fn in_isolated_store(test: &str) -> bool {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     if !in_isolated_store("force_destroy_from_running_removes_target_worktree_branch_and_archive") {
         return;
@@ -1184,6 +1212,10 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
 
 // Hard-won: 472aff0b: default force destroy removed the generated branch with its checkout
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
     if !in_isolated_store("force_destroy_keeps_the_branch_and_removes_the_checkout_by_default") {
         return;
@@ -1231,6 +1263,10 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn force_destroy_aborts_and_keeps_the_record_when_the_target_survives() {
     if !in_isolated_store("force_destroy_aborts_and_keeps_the_record_when_the_target_survives") {
         return;
@@ -1654,6 +1690,10 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1290: a session target path is joined or judged with Windows rules"
+)]
 fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
     if !in_isolated_store("destroying_an_ssh_bare_session_releases_each_repository_on_its_host") {
         return;
@@ -1735,6 +1775,10 @@ fn stopped_cached_podman_controller(session_id: &str, cached: bool) -> Controlle
 
 // Hard-won: 741163fe: container workspace state remained cached after the container was removed
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+)]
 fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
     if !in_isolated_store(
         "removing_a_cached_container_releases_its_workspaces_from_the_shared_cache",
@@ -1881,6 +1925,10 @@ fn force_destroy_without_a_target_or_archive_still_removes_the_record() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn force_destroy_removes_a_failed_subagent() {
     if !in_isolated_store("force_destroy_removes_a_failed_subagent") {
         return;

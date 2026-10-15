@@ -1653,6 +1653,10 @@ fn new_preflight(request: PreflightRequest) -> NewPreflightRequest {
 /// The browser's mount JSON must survive both HTTP boundaries unchanged,
 /// including the legacy read_only representation for copy-on-write.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1290: a session target path is joined or judged with Windows rules"
+)]
 async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
     let mounts = serde_json::json!([
         {"source": "/srv/reference", "destination": "/reference", "read_only": true},

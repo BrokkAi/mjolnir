@@ -24,6 +24,10 @@ use crate::targets::{
 use super::*;
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn independent_clones_share_a_starting_branch_and_push_normally() {
     let source = committed_repository();
     let remote = tempfile::tempdir().unwrap();
@@ -95,6 +99,10 @@ fn independent_clones_share_a_starting_branch_and_push_normally() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn worktree_choice_survives_reload_and_controls_creation() {
     const CHILD: &str = "MJ_TEST_WORKTREE_CHOICE_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -276,6 +284,10 @@ fn explicit_worktree_creation_rejects_plain_directories() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_launch_base_starts_the_worktree_at_that_commit() {
     const CHILD: &str = "MJ_TEST_WORKTREE_LAUNCH_BASE_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -858,6 +870,10 @@ fn a_checkout_without_a_network_remote_cannot_be_planned_for_a_target() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1298: a local repository path has no single canonical form"
+)]
 fn planning_a_conversion_records_the_checkouts_network_remote() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
     let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
@@ -871,6 +887,7 @@ fn planning_a_conversion_records_the_checkouts_network_remote() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "#1300: fails on a Windows controller")]
 fn a_raw_checkout_snapshot_restores_into_a_fresh_clone_of_its_remote() {
     let (checkout, _remote_parent, remote) = checkout_with_network_remote();
     let pushed = test_git(checkout.path(), &["rev-parse", "HEAD"]);
@@ -993,6 +1010,10 @@ fn a_conversion_preview_counts_unpushed_commits_and_dirty_files() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_conversion_preview_reports_a_managed_worktree_as_not_retained() {
     let (checkout, _remote_parent, remote) = checkout_with_network_remote();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1169,6 +1190,10 @@ fn resume_compatibility_names_a_target_that_is_gone() {
     assert!(reason.contains("retired"), "{reason}");
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1298: a local repository path has no single canonical form"
+)]
 fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
     let repository = committed_repository();
     let remote_parent = tempfile::tempdir().unwrap();
@@ -1249,6 +1274,10 @@ fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
     assert!(!output.status.success());
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn retired_worktree_can_be_recreated_from_its_retained_branch() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1342,6 +1371,10 @@ fn retiring_a_remote_worktree_prunes_registration_after_target_removed_checkout(
     );
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() {
     let repository = committed_repository();
     add_network_remote(repository.path());
@@ -1436,6 +1469,10 @@ fn raw_to_workspace_uses_the_configured_github_source() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn an_unmanaged_conversion_serves_the_main_repository_behind_a_linked_worktree() {
     let repository = committed_repository();
     add_network_remote(repository.path());
@@ -1513,6 +1550,10 @@ fn a_primary_checkout_is_recognized_through_a_symlinked_directory() {
     }
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_session_leaving_its_target_claims_a_worktree_of_its_own_repository() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1760,6 +1801,10 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
     assert_eq!(stranded.project, previous.project);
 }
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1938,6 +1983,10 @@ fn commit_on_session_branch(worktree: &ManagedWorktree) {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn archiving_deletes_a_branch_another_branch_contains() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1963,6 +2012,10 @@ fn archiving_deletes_a_branch_another_branch_contains() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn archiving_keeps_a_branch_holding_unmerged_commits() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";
@@ -1984,6 +2037,10 @@ fn archiving_keeps_a_branch_holding_unmerged_commits() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn archiving_keeps_a_branch_only_another_session_branch_contains() {
     let repository = committed_repository();
     let session_id = "0123456789abcdef0123456789abcdef";

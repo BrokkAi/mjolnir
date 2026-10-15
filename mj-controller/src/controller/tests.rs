@@ -120,6 +120,10 @@ impl CommandExecutor for UnusedExecutor {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1290: a session target path is joined or judged with Windows rules"
+)]
 fn remote_completion_preserves_home_shorthand_and_trailing_separator() {
     let controller = completion_controller(
         "remote",
@@ -171,6 +175,10 @@ fn bare_ssh_target_completes_over_ssh() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1290: a session target path is joined or judged with Windows rules"
+)]
 fn golden_path_completion() {
     let mut output = String::new();
     let directory = tempfile::tempdir().unwrap();
@@ -434,6 +442,10 @@ fn bundle_creation_combines_sources_with_first_primary_and_stable_collisions() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1298: a local repository path has no single canonical form"
+)]
 fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("app");
@@ -470,6 +482,10 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1298: a local repository path has no single canonical form"
+)]
 fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     let checkout = super::test_support::committed_repository();
     let worktree_parent = tempfile::tempdir().unwrap();
@@ -1517,6 +1533,10 @@ fn a_relaunch_config_keeps_the_sessions_subagent_tools() {
 /// store.
 // Hard-won: 1023368e708e: isolated-session children received an empty project-memory index.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
 fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     const MARKER: &str = "MJ_TEST_SUBAGENT_PROJECT_MEMORY_CHILD";
     if std::env::var_os(MARKER).is_none() {
@@ -1656,6 +1676,10 @@ fn a_sessions_mailbox_opt_out_only_turns_its_mailbox_off() {
 /// its sub-agents launch without project memory or a mailbox, no memory is
 /// synchronized for them, and a session started without the flags keeps both.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
     const MARKER: &str = "MJ_TEST_SUBAGENT_OPT_OUT_CHILD";
     if std::env::var_os(MARKER).is_none() {
