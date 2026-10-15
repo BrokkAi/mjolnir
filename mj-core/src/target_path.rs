@@ -46,11 +46,13 @@ pub fn join(base: &Path, relative: &Path) -> PathBuf {
 }
 
 /// The POSIX text of a target path, for an argv element or a remote command.
+/// A path with a Windows drive or UNC prefix is this controller's own, as in
+/// [`join`], and keeps its spelling.
 pub fn text(path: &Path) -> String {
     let text = path.to_string_lossy();
     // Only Windows joins components with `\`; on POSIX a backslash is an
     // ordinary file name character and must survive.
-    if cfg!(windows) {
+    if cfg!(windows) && !path.is_absolute() {
         text.replace('\\', "/")
     } else {
         text.into_owned()
