@@ -578,7 +578,7 @@ fn format_byte_size(bytes: u64) -> String {
 }
 
 fn display_home_relative(path: &std::path::Path) -> String {
-    dirs::home_dir()
+    mj_core::path_input::user_home()
         .and_then(|home| path.strip_prefix(home).ok().map(PathBuf::from))
         .map(|relative| format!("~/{}", relative.display()))
         .unwrap_or_else(|| path.display().to_string())

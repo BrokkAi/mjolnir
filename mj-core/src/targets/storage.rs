@@ -199,7 +199,7 @@ pub fn session_storage_paths(
 
 /// A home-relative path made absolute against this machine's home.
 pub fn local_home_path(relative: &str) -> String {
-    match dirs::home_dir() {
+    match crate::path_input::user_home() {
         Some(home) => home.join(relative).to_string_lossy().into_owned(),
         None => relative.to_owned(),
     }

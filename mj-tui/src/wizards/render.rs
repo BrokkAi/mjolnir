@@ -588,7 +588,7 @@ fn repository_source(repository: &mj_core::config::ProjectRepository) -> String 
     let Some(path) = &repository.local else {
         return repository.id.clone();
     };
-    if let Some(home) = std::env::home_dir()
+    if let Some(home) = mj_core::path_input::user_home()
         && let Ok(rest) = path.strip_prefix(&home)
     {
         return if rest.as_os_str().is_empty() {

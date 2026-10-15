@@ -103,7 +103,9 @@ pub fn harness_config_home(kind: HarnessKind) -> Result<PathBuf> {
     let name = kind.display_name();
     let home = std::env::var_os(kind.home_env())
         .map(|path| kind.home_from_environment(path))
-        .or_else(|| dirs::home_dir().map(|home| home.join(kind.default_home_leaf())))
+        .or_else(|| {
+            mj_core::path_input::user_home().map(|home| home.join(kind.default_home_leaf()))
+        })
         .with_context(|| format!("cannot determine {name} home; set {}", kind.home_env()))?;
     ensure!(
         home.is_dir(),

@@ -287,7 +287,7 @@ pub fn stale_finished(evidence: &TurnEvidence, verdict: &TurnVerdict) -> bool {
 pub fn api_key() -> Option<String> {
     resolve_key(
         std::env::var("TYPESAFE_API_KEY").ok().as_deref(),
-        std::env::var_os("HOME").as_deref().map(Path::new),
+        crate::path_input::user_home().as_deref(),
     )
 }
 
