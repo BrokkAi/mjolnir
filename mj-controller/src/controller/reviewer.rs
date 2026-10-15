@@ -675,7 +675,6 @@ mod tests {
         windows,
         ignore = "#1290: a session target path is joined or judged with Windows rules"
     )]
-
     fn local_container_targets_stage_the_reviewer_through_their_engine() {
         let directory = tempfile::tempdir().unwrap();
         let container_id = crate::targets::resource_name(SESSION_ID).unwrap();

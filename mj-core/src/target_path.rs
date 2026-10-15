@@ -57,12 +57,12 @@ pub fn text(path: &Path) -> String {
     }
 }
 
-#[cfg(test)]
+// The POSIX behavior only differs from the standard library on Windows.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
     // Hard-won: #1238: home-relative SSH worker roots and remote clones were joined with `\` on Windows.
-    #[cfg(windows)]
     #[test]
     fn target_paths_keep_posix_separators_on_a_windows_controller() {
         // The raw spelling, not `text`, which would hide a `\`.
