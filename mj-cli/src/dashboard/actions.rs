@@ -1184,7 +1184,10 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         action @ DashboardAction::CreateSession { .. } => start_session_launch(context, action),
-        DashboardAction::RestartSession { session_id } => {
+        DashboardAction::RestartSession {
+            session_id,
+            acknowledge_container_recreation,
+        } => {
             let Some(session) = context.controller.state.sessions.get(&session_id).cloned() else {
                 return Ok(());
             };
@@ -1197,7 +1200,8 @@ pub(crate) async fn apply_dashboard_action(
                 move |_controller, _cancelled| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
-                        dispatch_restart(&mut daemon, session_id).await
+                        dispatch_restart(&mut daemon, session_id, acknowledge_container_recreation)
+                            .await
                     })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id: session.last_profile,
@@ -2066,8 +2070,14 @@ async fn interrupt_all(targets: &mj_tui::InterruptAllTargets) -> Vec<(String, St
     failures
 }
 
-async fn dispatch_restart(daemon: &mut daemon::DaemonClient, session_id: String) -> Result<()> {
-    daemon.restart_session(session_id).await
+async fn dispatch_restart(
+    daemon: &mut daemon::DaemonClient,
+    session_id: String,
+    acknowledge_container_recreation: bool,
+) -> Result<()> {
+    daemon
+        .restart_session_with_ack(session_id, acknowledge_container_recreation)
+        .await
 }
 
 #[cfg(test)]
@@ -2128,7 +2138,7 @@ mod tests {
             let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
             assert!(matches!(
                 request.action,
-                daemon::DaemonAction::RestartSession { session_id } if session_id == "session-1"
+                daemon::DaemonAction::RestartSession { session_id, acknowledge_container_recreation: true } if session_id == "session-1"
             ));
             daemon::write_frame(
                 &mut stream,
@@ -2143,7 +2153,7 @@ mod tests {
         });
         let mut client = daemon::DaemonClient::connect(metadata).await.unwrap();
 
-        dispatch_restart(&mut client, "session-1".into())
+        dispatch_restart(&mut client, "session-1".into(), true)
             .await
             .unwrap();
         server.await.unwrap();

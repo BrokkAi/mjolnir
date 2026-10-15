@@ -340,23 +340,20 @@ impl RuntimeState {
                     )
                 })
                 .map(|operation| {
+                    let restart_intent = operation.restart_intent.clone();
                     operation.request_cancel();
-                    (
-                        operation.kind == LifecycleKind::Restart,
-                        operation.result.clone(),
-                    )
+                    (restart_intent, operation.result.clone())
                 })
         };
-        if let Some((cancelled_restart, pending)) = pending {
-            if cancelled_restart {
-                blocking({
-                    let session_id = session_id.to_owned();
-                    move || crate::database::cancel_session_restart(&session_id)
-                })
-                .await?;
-            }
+        if let Some((restart_intent, pending)) = pending {
             if let Err(error) = Self::wait_lifecycle_result(pending.clone()).await {
                 tracing::debug!(%session_id, %error, "previous lifecycle ended before close");
+            }
+            if let Some(operation_id) = restart_intent {
+                // The old task has stopped. Release its exact intent,
+                // including one retained by an already failed Restart.
+                self.release_restart_intent(session_id, &operation_id)
+                    .await?;
             }
             self.remove_completed_lifecycle(&pending);
         }

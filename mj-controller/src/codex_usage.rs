@@ -470,12 +470,14 @@ pub(crate) async fn refresh_login_with_cache_root(
 
 fn process_managed_cache_root() -> Result<PathBuf, QueryError> {
     let xdg_cache_home = std::env::var_os("XDG_CACHE_HOME");
-    let home = std::env::var_os("HOME");
-    managed_harness_cache_root(xdg_cache_home.as_deref(), home.as_deref()).map_err(|error| {
-        QueryError::NotInstalled {
-            expected: None,
-            detail: Some(error.to_string()),
-        }
+    let home = mj_core::path_input::user_home();
+    managed_harness_cache_root(
+        xdg_cache_home.as_deref(),
+        home.as_deref().map(std::path::Path::as_os_str),
+    )
+    .map_err(|error| QueryError::NotInstalled {
+        expected: None,
+        detail: Some(error.to_string()),
     })
 }
 

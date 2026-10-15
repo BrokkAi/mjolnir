@@ -1715,6 +1715,7 @@ function freshDraft() {
     projectPicker: freshProjectPicker(),
     projectPickers: {},
     projectDirectories: {},
+    mountEditors: {},
     catalogStep: false,
     catalogController: null,
     catalogStatus: null,
@@ -1876,7 +1877,7 @@ function renderNewForm() {
         ? snapshot.targets.find(t => t.id === newDraft.targetId)?.recent_project_directories
         : newDraft.projectPicker.mode === 'home' ? [snapshot.bundles, [...recentProjectIds()].sort()] : null,
     ] : null,
-    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, snapshot.subagents_configured, subagentChoiceApplies(newDraft)] : null,
+    remote: step.key === 'review' ? [newDraft.preflighted, newDraft.remoteRepositories, newDraft.localChangesExcluded, newDraft.preflightError, newDraft.worktreeOptions, newDraft.createManagedWorktree, newDraft.subagents, newDraft.mountEditors[newDraft.targetId]?.mounts, snapshot.subagents_configured, subagentChoiceApplies(newDraft)] : null,
     checking: pendingNewPreflight === newDraft,
     committing: Boolean(newDraft.committing),
     creating: newDraft.creatingBundle,
@@ -2035,6 +2036,14 @@ function renderNewForm() {
       });
       title.querySelector('input').placeholder = derivedTitle();
       body.append(review, title);
+      if (!targetIsBare(newDraft.targetId)) {
+        const draft = newDraft;
+        draft.mountEditors[draft.targetId] ||= freshMountEditor();
+        body.append(renderMountEditor(draft.mountEditors[draft.targetId], 'new', draft.targetId, () => {
+          abortPendingNewPreflight();
+          void preflightNew();
+        }));
+      }
       renderSubagentFields(body, newDraft, 'new', renderNewForm);
       const worktree = el('label', 'field-inline');
       const checkbox = el('input');
@@ -2715,6 +2724,7 @@ async function preflightNew() {
           target_id: draft.targetId,
           project_directory: bare ? draft.projectDirectory : null,
           remote_repairs: remoteRepairs,
+          ...(!bare ? { additional_mounts: mountEditorWire(draft.mountEditors[draft.targetId]) } : {}),
         }),
       });
       if (controller.signal.aborted || newDraft !== draft || pendingNewPreflightController !== controller) return false;
@@ -2823,6 +2833,7 @@ async function commitNew() {
     create_managed_worktree: bare && draft.worktreeOptions?.available === true && draft.createManagedWorktree,
     subagents: draft.subagents,
   };
+  if (!bare) body.additional_mounts = mountEditorWire(draft.mountEditors[draft.targetId]);
   const kind = targetResourceKind(draft.targetId);
   const target = snapshot?.targets.find(item => item.id === draft.targetId);
   const resourceAllocation = kind === 'container'
@@ -5053,6 +5064,129 @@ function defaultMountDestination(source, mounts) {
   }
 }
 
+// Keep unfinished edits in the owning draft so snapshot renders preserve them.
+function freshMountEditor(mounts = []) {
+  return {
+    mounts: mounts.map(mount => ({
+      source: mount.source,
+      destination: mount.destination,
+      access: mount.access || (mount.read_only ? 'ro' : 'cow'),
+    })),
+    source: '', destination: '', access: 'ro', editing: null, error: '',
+  };
+}
+
+function mountEditorWire(editor) {
+  // The archive-compatible wire uses read_only for ro/cow; only rw adds access.
+  return (editor?.mounts || []).map(mount => ({
+    source: mount.source,
+    destination: mount.destination,
+    read_only: mount.access === 'ro',
+    ...(mount.access === 'rw' ? { access: 'rw' } : {}),
+  }));
+}
+
+function renderMountEditor(editor, prefix, targetId, onChange = () => {}) {
+  const section = el('section', 'mount-editor');
+  section.setAttribute('aria-label', 'Attached directories');
+  const reset = () => {
+    editor.source = '';
+    editor.destination = '';
+    editor.access = 'ro';
+    editor.editing = null;
+    editor.error = '';
+  };
+  const render = () => {
+    const list = el('div', 'mount-list');
+    editor.mounts.forEach((mount, index) => {
+      const row = el('div', 'mount-row');
+      row.append(el('span', 'mount-path', `${mount.source} → ${mount.destination} (${mount.access})`));
+      const controls = el('div', 'row');
+      const edit = button('Edit', 'secondary');
+      edit.type = 'button';
+      edit.onclick = () => {
+        Object.assign(editor, mount, { editing: index, error: '' });
+        render();
+        document.getElementById(`${prefix}-mount-source`)?.focus();
+      };
+      const remove = button('Remove', 'danger');
+      remove.type = 'button';
+      remove.onclick = () => {
+        editor.mounts.splice(index, 1);
+        if (editor.editing === index) reset();
+        else if (editor.editing !== null && editor.editing > index) editor.editing -= 1;
+        render();
+        onChange();
+      };
+      controls.append(edit, remove);
+      row.append(controls);
+      list.append(row);
+    });
+    const fields = el('div', 'mount-fields');
+    const source = pathField('Host directory', `${prefix}-mount-source`, editor.source,
+      value => { editor.source = value; },
+      { host: () => targetId, kind: 'directories', applies: () => true });
+    const sourceInput = source.querySelector('input');
+    sourceInput.placeholder = '/srv/data';
+    sourceInput.setAttribute('aria-label', 'Mount source');
+    sourceInput.setAttribute('aria-description', 'Use an absolute directory path on the selected target’s host.');
+    const destination = textField('Container path (optional)', `${prefix}-mount-destination`, editor.destination,
+      value => { editor.destination = value; });
+    destination.querySelector('input').setAttribute('aria-label', 'Mount destination');
+    destination.querySelector('input').placeholder = '/mnt/data';
+    const accessField = el('label', 'field');
+    accessField.append(el('span', '', 'Access'));
+    const access = el('select');
+    access.id = `${prefix}-mount-access`;
+    access.setAttribute('aria-label', 'Mount access');
+    for (const [value, label] of [['ro', 'read-only'], ['cow', 'copy-on-write'], ['rw', 'read-write']]) {
+      const option = el('option', '', label);
+      option.value = value;
+      access.append(option);
+    }
+    access.value = editor.access;
+    access.onchange = () => { editor.access = access.value; };
+    accessField.append(access);
+    fields.append(source, destination, accessField);
+    const error = el('p', 'error', editor.error);
+    error.setAttribute('role', 'alert');
+    const controls = el('div', 'row');
+    const add = button(editor.editing === null ? 'Add mount' : 'Save mount', 'secondary');
+    add.type = 'button';
+    add.dataset.mountSubmit = 'true';
+    add.onclick = () => {
+      const source = editor.source.trim();
+      if (!source) {
+        editor.error = 'Enter a host directory to attach.';
+        error.textContent = editor.error;
+        return;
+      }
+      const others = editor.mounts.filter((_, index) => index !== editor.editing);
+      const mount = {
+        source,
+        destination: editor.destination.trim() || defaultMountDestination(source, others),
+        access: editor.access,
+      };
+      if (editor.editing === null) editor.mounts.push(mount);
+      else editor.mounts[editor.editing] = mount;
+      reset();
+      render();
+      onChange();
+    };
+    controls.append(add);
+    if (editor.editing !== null) {
+      const cancel = button('Cancel edit', 'secondary');
+      cancel.type = 'button';
+      cancel.onclick = () => { reset(); render(); };
+      controls.append(cancel);
+    }
+    section.replaceChildren(el('h3', '', 'Attached directories'),
+      el('p', 'dim', 'Source directories must exist on the selected target’s host.'), list, fields, error, controls);
+  };
+  render();
+  return section;
+}
+
 function openContainerSettings(session) {
   if (!session) return;
   const dialog = openSessionDialog('container-settings-dialog', 'Container settings');
@@ -5070,78 +5204,18 @@ function openContainerSettings(session) {
   memoryInput.placeholder = '8g';
   memoryField.append(memoryInput);
 
-  // The wire keeps the archive-compatible repr: ro is `read_only: true`, cow
-  // is `read_only: false`, and only rw adds `access`.
-  const mounts = (session.additional_mounts || []).map(mount => ({
-    source: mount.source,
-    destination: mount.destination,
-    access: mount.access || (mount.read_only ? 'ro' : 'cow'),
-  }));
-  const mountList = el('div', 'mount-list');
-  const renderMounts = () => {
-    mountList.replaceChildren(...mounts.map((mount, index) => {
-      const row = el('div', 'mount-row');
-      row.append(el('span', 'mount-path', `${mount.source} → ${mount.destination} (${mount.access})`));
-      const remove = button('Remove', 'danger');
-      remove.type = 'button';
-      remove.onclick = () => {
-        mounts.splice(index, 1);
-        renderMounts();
-      };
-      row.append(remove);
-      return row;
-    }));
-  };
-  renderMounts();
-
-  const addRow = el('div', 'mount-add row');
-  const sourceInput = el('input');
-  sourceInput.placeholder = 'Host directory';
-  sourceInput.setAttribute('aria-label', 'Mount source');
-  const destinationInput = el('input');
-  destinationInput.placeholder = 'Container path (optional)';
-  destinationInput.setAttribute('aria-label', 'Mount destination');
-  const access = el('select');
-  access.setAttribute('aria-label', 'Mount access');
-  for (const [value, label] of [['ro', 'read-only'], ['cow', 'copy-on-write'], ['rw', 'read-write']]) {
-    const option = el('option', '', label);
-    option.value = value;
-    access.append(option);
-  }
-  const add = button('Add mount', 'secondary');
-  add.type = 'button';
-  addRow.append(sourceInput, destinationInput, access, add);
-
+  const editor = freshMountEditor(session.additional_mounts);
   const error = el('p', 'error');
   error.setAttribute('role', 'alert');
-  add.onclick = () => {
-    const source = sourceInput.value.trim();
-    if (!source) {
-      error.textContent = 'Enter a host directory to attach.';
-      return;
-    }
-    mounts.push({
-      source,
-      destination: destinationInput.value.trim() || defaultMountDestination(source, mounts),
-      access: access.value,
-    });
-    sourceInput.value = '';
-    destinationInput.value = '';
-    access.value = 'ro';
-    error.textContent = '';
-    renderMounts();
-  };
 
   const { controls, cancel, confirm } = dialogControls('Save');
   cancel.onclick = () => dialog.close();
   dialog.append(
     cpusField,
     memoryField,
-    el('h3', '', 'Additional mounts'),
-    mountList,
-    addRow,
+    renderMountEditor(editor, 'container', session.target_id),
     error,
-    el('p', 'dim', 'These settings apply when the container is next created.'),
+    el('p', 'dim', 'Restart the session to apply changed settings to a newly created container.'),
     controls,
   );
   confirm.onclick = async () => {
@@ -5155,12 +5229,7 @@ function openContainerSettings(session) {
           session_id: session.id,
           cpus: cpusInput.value.trim(),
           memory: memoryInput.value.trim(),
-          mounts: mounts.map(mount => ({
-            source: mount.source,
-            destination: mount.destination,
-            read_only: mount.access === 'ro',
-            ...(mount.access === 'rw' ? { access: 'rw' } : {}),
-          })),
+          mounts: mountEditorWire(editor),
         }),
       });
       dialog.close();
@@ -7703,6 +7772,11 @@ newBackButton.onclick = () => {
 newForm.onsubmit = async event => {
   event.preventDefault();
   try {
+    const mountEditor = document.activeElement?.closest('.mount-editor');
+    if (mountEditor) {
+      mountEditor.querySelector('[data-mount-submit]')?.click();
+      return;
+    }
     if (document.activeElement?.id === 'new-project-source') {
       await selectProjectRepository();
       return;
@@ -7787,7 +7861,12 @@ async function runSessionAction(dataset, errorNode, extra) {
     return true;
   }
   if (dataset.action === 'restart') {
-    if (!confirm('Restart session?\n\nStop and resume with the same profile, target, and mounts. Any running turn will be interrupted.')) return false;
+    const session = sessionById(dataset.id);
+    const question = session?.restart_recreates_container
+      ? 'Recreate container on Restart?\n\nRestart will replace this container because its settings changed or are unknown. The conversation and workspace recovery copy will be restored.\n\nFiles outside the recovery copy may be lost, including temporary files and installed tools.\n\nAny running turn will be interrupted.'
+      : 'Restart session?\n\nRestart the worker in the existing environment. Any running turn will be interrupted.';
+    if (!confirm(question)) return false;
+    if (session?.restart_recreates_container) extra = { ...extra, acknowledge_container_recreation: true };
   }
   if (dataset.action === 'interrupt-all') {
     if (!confirm('Interrupt all turns?\n\nInterrupt the running turns of this session and its sub-agents.')) return false;

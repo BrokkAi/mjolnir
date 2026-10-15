@@ -534,6 +534,7 @@ impl Controller {
             let mut runtime = mj_core::state::TargetRuntimeSettings::from(selected);
             if let Some(recorded) = &session.target_runtime {
                 runtime.tool_cache = recorded.tool_cache.clone();
+                runtime.container_settings = recorded.container_settings.clone();
                 ensure!(
                     recorded == &runtime,
                     "target access settings changed before provisioning; retry with the selected target"
@@ -641,10 +642,11 @@ impl Controller {
             );
             // Record placement before creating fixed container mounts. A crash
             // after creation must not leave a mount whose location was lost.
-            self.state.sessions.get_mut(session_id)
+            let runtime = self.state.sessions.get_mut(session_id)
                 .expect("session retained during provisioning")
-                .target_runtime.as_mut().context("selected runtime disappeared")?
-                .tool_cache = tool_cache;
+                .target_runtime.as_mut().context("selected runtime disappeared")?;
+            runtime.tool_cache = tool_cache;
+
             self.persist_session_state(session_id)?;
             let prepared_cache = bundle
                 .as_mut()
@@ -775,7 +777,13 @@ impl Controller {
                 };
             }
             Ok((locator, remainder, bundle, build_cache)) => {
+                let container_settings = backend_locator(&locator, &self.state.sessions[session_id], &self.config)?
+                    .container_engine().map(|_| mj_core::state::ContainerSettings::requested(&session));
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
+                self.state.sessions.get_mut(session_id)
+                    .expect("session retained after target creation")
+                    .target_runtime.as_mut().context("selected runtime disappeared")?
+                    .container_settings = container_settings;
                 self.state
                     .sessions
                     .get_mut(session_id)

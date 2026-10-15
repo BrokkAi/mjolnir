@@ -259,13 +259,42 @@ fn configure_codex_mcp_with_mailboxes(
             "args": ["worker", "subagent-mcp", "--socket", root.join(SUBAGENT_SOCKET),
                      "--harness", "codex", "--role", role.id(),
                      "--agent-mailboxes-enabled", mailboxes_enabled.to_string()],
-            // Keep direct and code-mode access; other servers retain their policy.
+            // Expose the tools up front, including when code mode is enabled.
             "omit_tools_from": ["deferred"]
         });
         if policy == mj_core::config::ExecutionPolicy::ConfiguredApprovals {
             server["default_tools_approval_mode"] = serde_json::json!("approve");
         }
         servers.insert(name.into(), toml::Value::try_from(server)?);
+
+        // A nested blocking wait yields its exec cell and makes the model poll
+        // that cell. Keep this namespace outside the code-mode executor so
+        // Codex suspends inference until the actual MCP call returns.
+        let features = config
+            .entry("features")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .context("features in staged Codex configuration must be a table")?;
+        let code_mode = features
+            .entry("code_mode")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let toml::Value::Boolean(enabled) = code_mode {
+            *code_mode = toml::Value::Table(toml::Table::from_iter([(
+                "enabled".into(),
+                toml::Value::Boolean(*enabled),
+            )]));
+        }
+        let namespaces = code_mode
+            .as_table_mut()
+            .context("features.code_mode in staged Codex configuration must be a table or boolean")?
+            .entry("direct_only_tool_namespaces")
+            .or_insert_with(|| toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("features.code_mode.direct_only_tool_namespaces must be an array")?;
+        let namespace = toml::Value::String("mcp__mj_agents".into());
+        if !namespaces.contains(&namespace) {
+            namespaces.push(namespace);
+        }
     } else if servers.remove(name).is_none() {
         return Ok(true);
     }
@@ -1247,6 +1276,7 @@ print(sys.argv[sys.argv.index('--role') + 1])
         }
     }
 
+    // Hard-won: #1287: direct exposure still allowed blocking waits inside code-mode exec cells.
     #[test]
     fn codex_delegation_profile_preserves_other_servers_and_handles_upgrades_and_disable() {
         use mj_core::config::ExecutionPolicy;
@@ -1267,6 +1297,12 @@ print(sys.argv[sys.argv.index('--role') + 1])
                 let path = home.join("config.toml");
                 let original = r#"
 model = "parent-model"
+[features]
+hooks = true
+[features.code_mode]
+enabled = false
+excluded_tool_namespaces = ["mcp__user_hidden"]
+direct_only_tool_namespaces = ["mcp__user_direct"]
 [mcp_servers.user-server]
 command = "user-tool"
 omit_tools_from = ["direct"]
@@ -1284,6 +1320,20 @@ enabled = false
                 let config: toml::Value = toml::from_str(&first).unwrap();
                 let original: toml::Value = toml::from_str(original).unwrap();
                 assert_eq!(config["model"], original["model"]);
+                assert_eq!(config["features"]["hooks"], original["features"]["hooks"]);
+                let code_mode = &config["features"]["code_mode"];
+                assert_eq!(code_mode["enabled"].as_bool(), Some(false));
+                assert_eq!(
+                    code_mode["excluded_tool_namespaces"],
+                    original["features"]["code_mode"]["excluded_tool_namespaces"]
+                );
+                assert_eq!(
+                    code_mode["direct_only_tool_namespaces"].as_array().unwrap(),
+                    &vec![
+                        toml::Value::String("mcp__user_direct".into()),
+                        toml::Value::String("mcp__mj_agents".into())
+                    ]
+                );
                 assert_eq!(
                     config["mcp_servers"]["user-server"],
                     original["mcp_servers"]["user-server"]
@@ -1353,7 +1403,31 @@ enabled = false
             config["mcp_servers"]["mj-agents"]["omit_tools_from"][0].as_str(),
             Some("deferred")
         );
-        for broken in ["[", "mcp_servers = 3"] {
+        assert_eq!(
+            config["features"]["code_mode"]["direct_only_tool_namespaces"][0].as_str(),
+            Some("mcp__mj_agents")
+        );
+        for enabled in [false, true] {
+            std::fs::write(&path, format!("[features]\ncode_mode = {enabled}\n")).unwrap();
+            configure(Some(SubagentMcpRole::Parent)).unwrap();
+            let config: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                config["features"]["code_mode"]["enabled"].as_bool(),
+                Some(enabled)
+            );
+            assert_eq!(
+                config["features"]["code_mode"]["direct_only_tool_namespaces"][0].as_str(),
+                Some("mcp__mj_agents")
+            );
+        }
+        for broken in [
+            "[",
+            "mcp_servers = 3",
+            "features = 3",
+            "[features]\ncode_mode = 3",
+            "[features.code_mode]\ndirect_only_tool_namespaces = 3",
+        ] {
             std::fs::write(&path, broken).unwrap();
             assert!(configure(Some(SubagentMcpRole::Parent)).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);

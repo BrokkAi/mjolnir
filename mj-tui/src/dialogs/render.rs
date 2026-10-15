@@ -48,6 +48,7 @@ pub(crate) fn confirmation_buttons(confirmation: &Confirmation) -> &'static [&'s
         Confirmation::SuspendSession { .. } => &["Cancel", "Suspend session"],
         Confirmation::InterruptWork { restart: false, .. } => &["Cancel", "Suspend now"],
         Confirmation::InterruptWork { restart: true, .. } => &["Cancel", "Restart now"],
+        Confirmation::RestartContainer { .. } => &["Cancel", "Recreate and restart"],
         Confirmation::InterruptAll { .. } => &["Cancel", "Interrupt all"],
         Confirmation::RecoverFailed {
             recoverable: true, ..
@@ -138,6 +139,7 @@ pub(crate) fn initial_confirmation_button(confirmation: &Confirmation, labels: &
             | Confirmation::DiscardSinceCheckpoint { .. }
             | Confirmation::SuspendSession { .. }
             | Confirmation::InterruptWork { .. }
+            | Confirmation::RestartContainer { .. }
             | Confirmation::InterruptAll { .. }
             | Confirmation::RepairRepositoryRemotes { .. }
             | Confirmation::InstallMbx { .. }
@@ -1427,6 +1429,30 @@ pub(crate) fn confirmation_body(
                 ),
             ],
         ),
+        Confirmation::RestartContainer {
+            session_id,
+            interrupting,
+        } => (
+            " Recreate container on Restart? ",
+            vec![
+                session_line(session_id, session_name, width),
+                Line::raw(""),
+                Line::styled(
+                    "Restart will replace this container because its settings changed or are unknown.",
+                    Style::default().fg(theme::palette().warning),
+                ),
+                Line::raw("The conversation and workspace recovery copy will be restored."),
+                Line::styled(
+                    "Files outside the recovery copy may be lost, including temporary files and installed tools.",
+                    Style::default().fg(theme::palette().warning),
+                ),
+                Line::raw(if *interrupting {
+                    "The current turn will also be interrupted."
+                } else {
+                    ""
+                }),
+            ],
+        ),
         Confirmation::InterruptWork {
             session_id,
             restart,
@@ -1641,6 +1667,7 @@ pub(crate) fn render_confirmation(
         Confirmation::DiscardSinceCheckpoint { .. } => 12,
         Confirmation::SuspendSession { .. } => 10,
         Confirmation::InterruptWork { .. } => 10,
+        Confirmation::RestartContainer { .. } => 14,
         Confirmation::InterruptAll { .. } => 10,
         Confirmation::DestroyStopped { .. } => 10,
         Confirmation::RecoverFailed { .. } => 12,

@@ -20,6 +20,18 @@ use crate::targets::{
 use super::{Controller, execute_checked};
 
 impl Controller {
+    /// The desired record never proves what a retained container was created with.
+    pub(crate) fn container_recreation_required(&self, session_id: &str) -> Result<bool> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session is missing")?;
+        Ok(mj_core::state::ContainerSettings::recreation_required(
+            session,
+        ))
+    }
+
     /// Inspect the actual execution checkout in a background worker.
     pub fn session_working_context(
         &self,

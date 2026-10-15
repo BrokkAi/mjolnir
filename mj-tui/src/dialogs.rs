@@ -362,6 +362,10 @@ pub(crate) enum Confirmation {
     /// stops without asking; this exists for the one case a mis-click costs
     /// work in progress.
     InterruptWork { session_id: String, restart: bool },
+    RestartContainer {
+        session_id: String,
+        interrupting: bool,
+    },
     /// Interrupt all, with what was running when it opened. The targets are
     /// found again on confirm, since turns end while the dialog is open.
     InterruptAll {
@@ -568,6 +572,7 @@ impl Confirmation {
             | Self::SuspendSession { session_id, .. }
             | Self::DiscardSinceCheckpoint { session_id, .. }
             | Self::InterruptWork { session_id, .. }
+            | Self::RestartContainer { session_id, .. }
             | Self::InterruptAll { session_id, .. }
             | Self::ForceDestroy { session_id, .. }
             | Self::DestroyStopped { session_id, .. }
@@ -1855,6 +1860,13 @@ impl DashboardState {
                     acknowledge_unpublished_work: true,
                 }
             }
+            (Confirmation::RestartContainer { session_id, .. }, 1) => {
+                self.cancel_modal();
+                DashboardAction::RestartSession {
+                    session_id,
+                    acknowledge_container_recreation: true,
+                }
+            }
             (
                 Confirmation::InterruptWork {
                     session_id,
@@ -1864,7 +1876,10 @@ impl DashboardState {
             ) => {
                 self.cancel_modal();
                 if restart {
-                    DashboardAction::RestartSession { session_id }
+                    DashboardAction::RestartSession {
+                        session_id,
+                        acknowledge_container_recreation: false,
+                    }
                 } else {
                     DashboardAction::Suspend {
                         session_id,
