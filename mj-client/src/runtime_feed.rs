@@ -76,6 +76,9 @@ pub struct RuntimeMetadata {
     /// sessions, but the defaults follow every session, stopped ones too.
     #[serde(default)]
     pub launch_recency: Vec<LaunchRecency>,
+    /// The daemon's Restart verdict; surfaces warn before replacing these containers.
+    #[serde(default)]
+    pub container_recreation_sessions: std::collections::BTreeSet<String>,
 }
 
 impl RuntimeMetadata {

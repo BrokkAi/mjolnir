@@ -426,6 +426,8 @@ struct StartupQueue {
 }
 
 struct ActiveLifecycle {
+    /// Durable intent bound by Restart admission; cleanup names this exact owner.
+    restart_intent: Option<String>,
     upgrade_work: Arc<Mutex<Option<crate::upgrade::Work>>>,
     phase: LifecyclePhase,
     operation_id: String,
@@ -446,6 +448,9 @@ struct ActiveLifecycle {
 
 enum LifecyclePhase {
     Executing,
+    RetiringContainer,
+    CompletingRestart,
+    CancellingRestart,
     MovingDestination,
     Cancelling,
     CancellingMoveDestination,

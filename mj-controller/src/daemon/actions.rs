@@ -632,8 +632,13 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::RestartSession { session_id } => {
-            state.restart_session(session_id).await?;
+        DaemonAction::RestartSession {
+            session_id,
+            acknowledge_container_recreation,
+        } => {
+            state
+                .restart_session(session_id, acknowledge_container_recreation)
+                .await?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::StartCreateSession(request) => Ok(DaemonReply::RegisteredSession(Box::new(

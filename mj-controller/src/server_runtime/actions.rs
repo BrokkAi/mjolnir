@@ -134,6 +134,7 @@ pub(super) async fn apply_phone_action(
             bundle_id,
             target_id,
             resource_allocation,
+            additional_mounts,
             title,
             project_directory,
             create_managed_worktree,
@@ -196,7 +197,7 @@ pub(super) async fn apply_phone_action(
                         bundle_id,
                         project_directory,
                         target_template_id: target_id,
-                        additional_mounts: Vec::new(),
+                        additional_mounts,
                         resource_allocation: resource_allocation.map(|allocation| *allocation),
                         title,
                         session_title_override,
@@ -530,7 +531,10 @@ pub(super) async fn apply_phone_action(
             )?;
             Ok(())
         }
-        ControllerAction::Restart { session_id } => {
+        ControllerAction::Restart {
+            session_id,
+            acknowledge_container_recreation,
+        } => {
             let _record = controller
                 .state
                 .sessions
@@ -539,7 +543,11 @@ pub(super) async fn apply_phone_action(
                 .with_context(|| format!("unknown session {session_id}"))?;
             services
                 .daemon_runtime
-                .restart_session_controlled(session_id, control.create.clone())
+                .restart_session_controlled(
+                    session_id,
+                    acknowledge_container_recreation,
+                    control.create.clone(),
+                )
                 .await
                 .map(|_| ())
         }

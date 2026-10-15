@@ -201,7 +201,9 @@ pub(super) fn validate_move_selection(
 
 pub(super) fn validate_move_mounts(mounts: &[AdditionalMount]) -> Result<(), ApiError> {
     if mounts.len() > MAX_MOVE_MOUNTS {
-        return Err(ApiError::bad_request("a move may carry at most 32 mounts"));
+        return Err(ApiError::bad_request(
+            "at most 32 attached directories are allowed",
+        ));
     }
     for mount in mounts {
         for path in [&mount.source, &mount.destination] {
@@ -211,7 +213,7 @@ pub(super) fn validate_move_mounts(mounts: &[AdditionalMount]) -> Result<(), Api
                     .any(|component| component == Component::ParentDir)
             {
                 return Err(ApiError::bad_request(
-                    "move mount paths must be absolute and must not contain '..'",
+                    "mount paths must be absolute and must not contain '..'",
                 ));
             }
         }
@@ -407,6 +409,7 @@ fn validate_action_against(
             bundle_id,
             target_id,
             resource_allocation,
+            additional_mounts,
             title,
             project_directory,
             dirty_ack,
@@ -452,6 +455,14 @@ fn validate_action_against(
             }
             require_profile(snapshot, profile_id)?;
             let target = require_launchable_target(snapshot, target_id)?;
+            validate_move_mounts(additional_mounts)?;
+            mj_core::targets::validate_additional_mounts(additional_mounts)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+            if target.requires_project_directory && !additional_mounts.is_empty() {
+                return Err(ApiError::bad_request(
+                    "attached directories are unsupported for bare targets",
+                ));
+            }
             crate::controller::validate_resource_allocation(
                 target.resource_allocation_kind,
                 resource_allocation.as_deref(),
@@ -659,7 +670,7 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::Restart { session_id } => {
+        ControllerAction::Restart { session_id, .. } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;
             if !session.capabilities.restart {

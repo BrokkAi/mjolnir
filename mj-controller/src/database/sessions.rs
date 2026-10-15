@@ -895,6 +895,16 @@ pub(super) fn set_session_container_settings_to(
     crate::targets::validate_additional_mounts(mounts)?;
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let restarting: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_restart_intents WHERE session_id = ?1)",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if restarting {
+        return Err(anyhow::Error::new(mj_core::refusal::Refusal::precondition(
+            "finish Restart or suspend the session before changing container settings",
+        )));
+    }
     let changed = tx.execute(
         "UPDATE sessions
          SET container_cpus = ?2, container_memory = ?3, updated_at = ?4

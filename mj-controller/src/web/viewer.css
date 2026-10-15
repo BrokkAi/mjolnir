@@ -1961,12 +1961,20 @@ body[data-connection='reconnecting'] .connection {
 
 .mount-path { overflow-wrap: anywhere; }
 
-.mount-add input {
-  flex: 1 1 10rem;
-  min-width: 0;
+.mount-row > .row { flex-shrink: 0; }
+
+.mount-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 8px;
 }
 
-.mount-add select { flex: 0 1 auto; }
+.mount-fields .field { min-width: 0; }
+.mount-fields input, .mount-fields select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
 
 
 /* A question page preserves authored line breaks and wraps on phone widths. */
