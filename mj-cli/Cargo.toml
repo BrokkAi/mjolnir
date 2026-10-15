@@ -70,3 +70,7 @@ tempfile.workspace = true
 vte = { version = "0.14", default-features = false }
 # `start_paused` drives the force-destroy preemption timeout instantly.
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# The Windows terminal smoke runs `mj` under a real ConPTY pseudo console.
+portable-pty = "0.9"

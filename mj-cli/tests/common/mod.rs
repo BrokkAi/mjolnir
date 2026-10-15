@@ -15,8 +15,12 @@ use anyhow::{Context, Result, bail};
 /// unwinding, so every test daemon also watches this process and exits with
 /// it. The environment is inherited by the daemon a client spawns.
 pub fn own_test_daemons(command: &mut Command) -> &mut Command {
-    command.env("MJ_DAEMON_OWNER_PID", std::process::id().to_string())
+    command.env(DAEMON_OWNER_ENV, std::process::id().to_string())
 }
+
+/// The variable [`own_test_daemons`] sets, for launchers other than
+/// [`Command`] such as a pseudo console.
+pub const DAEMON_OWNER_ENV: &str = "MJ_DAEMON_OWNER_PID";
 
 /// Own an implicitly started daemon until its temporary store can be removed.
 pub struct DaemonStorage {
