@@ -1288,6 +1288,10 @@ mod tests {
 
     // Hard-won: 91163d55: failed orphan adoption became non-retryable instead of preserving ownership
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     async fn a_failed_adoption_records_the_failure_and_stays_retryable() {
         // MJ_DATA_DIR is process-global, so the database-backed half runs in
         // an exact child test with its own data directory.
@@ -1392,6 +1396,10 @@ mod tests {
     const RECOVERY_WORKSPACE_CHILD: &str = "MJ_TEST_RECOVERY_WORKSPACE_CHILD";
 
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     async fn orphan_workspace_ids_are_reconciled_before_adoption_persistence() {
         if std::env::var_os(RECOVERY_WORKSPACE_CHILD).is_none() {
             let directory = tempfile::tempdir().unwrap();

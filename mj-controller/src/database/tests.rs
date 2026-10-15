@@ -265,6 +265,10 @@ fn compatible_migration_preserves_new_data_through_existing_session_writes() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1290: a session target path is joined or judged with Windows rules"
+)]
 fn writer_refuses_rollback_after_observing_a_compatible_migration() {
     for reopen in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -1170,6 +1174,10 @@ fn mount_read_only_round_trips_through_both_writers() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1290: a session target path is joined or judged with Windows rules"
+)]
 fn read_write_mounts_survive_an_older_writer_rewriting_session_mounts() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");

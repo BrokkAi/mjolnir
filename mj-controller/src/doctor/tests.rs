@@ -501,6 +501,10 @@ fn config_with(targets: impl IntoIterator<Item = (&'static str, TargetTemplate)>
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+)]
 fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
     let config = config_with([
         (
@@ -560,6 +564,10 @@ fn doctor_warns_once_when_shared_container_host_mbx_is_too_old() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
+)]
 fn doctor_distinguishes_compatible_absent_and_uncheckable_host_mbx() {
     let config = config_with([(
         "podman",

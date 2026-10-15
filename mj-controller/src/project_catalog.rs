@@ -548,6 +548,10 @@ mod tests {
     use mj_core::targets::{CommandSpec, ProcessExecutor};
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn unavailable_history_is_retired_and_renamed_repositories_keep_memory() {
         const CHILD: &str = "MJ_DISCOVERY_RECOVERY_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {

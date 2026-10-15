@@ -623,6 +623,7 @@ mod tests {
     /// lists it in the repository's `info/exclude` exactly once and the
     /// project's `git status` stays clean.
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn the_report_directory_script_creates_the_directory_and_keeps_git_status_clean() {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");

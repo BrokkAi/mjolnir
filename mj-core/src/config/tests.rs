@@ -572,13 +572,13 @@ fn nested_home_mapping_keeps_config_credentials_and_session_data_together() {
         (HarnessKind::Muse, "auth.json"),
         (HarnessKind::OpenCode, ".data/opencode/auth.json"),
     ] {
-        let home = Path::new("/private/session").join(kind.id());
+        let home = crate::target_path::join(Path::new("/private/session"), Path::new(kind.id()));
         let mut environment = BTreeMap::from([("XDG_DATA_HOME".into(), "/unrelated".into())]);
         kind.configure_home_environment(&home, &mut environment);
         assert_eq!(environment["XDG_CONFIG_HOME"], "/private/session");
         assert_eq!(
             environment["XDG_DATA_HOME"],
-            home.join(".data").to_string_lossy()
+            format!("/private/session/{}/.data", kind.id())
         );
         assert_eq!(
             kind.home_from_environment(&environment["XDG_CONFIG_HOME"]),

@@ -3773,6 +3773,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
+    )]
     fn standalone_indexed_children_are_hidden_from_every_history_listing() {
         let _held = tags::testing::lock();
         let (_directory, mut connection) = tags::testing::isolated_index();

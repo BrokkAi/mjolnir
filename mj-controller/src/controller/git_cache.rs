@@ -227,7 +227,10 @@ fn cache_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathB
     let output = checked(executor.execute(&command)?, &command)?;
     let home = String::from_utf8(output.stdout).context("decode container host home directory")?;
     let home = PathBuf::from(home);
-    ensure!(home.is_absolute(), "container host HOME is not absolute");
+    ensure!(
+        mj_core::target_path::is_absolute_on_host_or_target(&home),
+        "container host HOME is not absolute"
+    );
     Ok(home)
 }
 
@@ -689,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_evicts_the_oldest_mirror_to_meet_its_soft_cap() {
         let temporary = tempfile::tempdir().unwrap();
         let cache_root = temporary.path().join("cache");
@@ -720,6 +724,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "#1297: runs sh, du or touch on the controller")]
     fn cache_gc_removes_only_old_orphan_session_snapshots() {
         let temporary = tempfile::tempdir().unwrap();
         let cache_root = temporary.path().join("cache");

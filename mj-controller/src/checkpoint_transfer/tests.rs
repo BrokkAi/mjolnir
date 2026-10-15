@@ -276,6 +276,10 @@ fn export_and_transfer_only_gate_after_local_verification() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn local_checkpoint_transfer_and_cleanup_accept_native_paths() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join(

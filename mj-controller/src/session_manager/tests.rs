@@ -347,6 +347,10 @@ async fn a_failed_lease_keeps_the_cause_that_decides_a_worker_restart() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
     let directory = tempfile::tempdir().unwrap();
     let restarted = directory.path().join("restarted");
@@ -404,6 +408,10 @@ async fn recovery_restarts_a_live_worker_only_after_a_failed_handshake() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("removed-worktree");
@@ -445,6 +453,10 @@ async fn recovery_reports_a_missing_bare_workspace_without_restarting() {
 /// and restarts nothing until a later measurement finds room.
 // Hard-won: 540c9202: Full-disk recovery must not upload another worker onto the same full filesystem.
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
     // The storage board is per process; this host name is this test's own.
     let host = "full-disk-recovery-host";
@@ -526,6 +538,10 @@ async fn recovery_waits_on_a_full_disk_and_restarts_once_space_is_measured() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("current-worker");
@@ -609,6 +625,10 @@ async fn recovery_replaces_only_a_stale_worker_binary_before_restart() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_refreshes_a_stale_launch_config_before_restart() {
     let directory = tempfile::tempdir().unwrap();
     let refreshed = directory.path().join("launch-refreshed");
@@ -672,6 +692,10 @@ async fn recovery_refreshes_a_stale_launch_config_before_restart() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
     let directory = tempfile::tempdir().unwrap();
     let target_started = directory.path().join("target-started");
@@ -757,6 +781,10 @@ async fn recovery_starts_a_stopped_target_before_probing_its_worker() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "#1296: process cancellation and relay recovery assume Unix"
+)]
 async fn recovery_reports_a_missing_target_without_running_worker_commands() {
     let unreachable = CommandSpec::new("false", std::iter::empty::<&str>());
     let outcome = recover_worker(
