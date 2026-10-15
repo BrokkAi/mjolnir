@@ -7,16 +7,18 @@ use std::collections::BTreeMap;
 pub enum UsagePeriod {
     #[default]
     Hourly,
+    Daily,
     Weekly,
     Monthly,
 }
 
 impl UsagePeriod {
-    pub const ALL: [Self; 3] = [Self::Hourly, Self::Weekly, Self::Monthly];
+    pub const ALL: [Self; 4] = [Self::Hourly, Self::Daily, Self::Weekly, Self::Monthly];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Hourly => "Hourly",
+            Self::Daily => "Daily",
             Self::Weekly => "Weekly",
             Self::Monthly => "Monthly",
         }
@@ -25,6 +27,7 @@ impl UsagePeriod {
     pub const fn duration_ms(self) -> i64 {
         match self {
             Self::Hourly => 3_600_000,
+            Self::Daily => 86_400_000,
             Self::Weekly => 7 * 86_400_000,
             Self::Monthly => 30 * 86_400_000,
         }

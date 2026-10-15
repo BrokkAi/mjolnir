@@ -658,14 +658,52 @@ Ent                                                                             
 ╭ S  │Profile claude ▾                                                                      Period Hourly ▾       │    │
 │ C  │                                                                                             ╭Period───╮    │    │
 │he  │☐ Include suspended sessions                                                                 │Hourly   │    │    │
-│›   │                                                                                             │Weekly   │    │    │
-│    │Total $0.000 · last hour · estimated API USD                                                 │Monthly  │    │    │
-│    │                                                                                             ╰─────────╯    │    │
-│    │No sessions match these filters.                                                                            │    │
+│›   │                                                                                             │Daily    │    │    │
+│    │Total $0.000 · last hour · estimated API USD                                                 │Weekly   │    │    │
+│    │                                                                                             │Monthly  │    │    │
+│    │No sessions match these filters.                                                             ╰─────────╯    │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ──╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │                                                                                                            │  ──╯
+│    │                                                                                                            │  ▪ ╮
+│    │                                                                                                            │    │
+│    │Parent profile · full sub-agent tree · + partial · standard base rates                                      │    │
+│    │  Refresh     Close                                                                                         │    │
+│    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯    │
+╰──                                                                                                                  ──╯
+Ent                                                                                                                  eys
+
+=== Usage daily (120x36) ===
+╭ W                                                                                                                  ──╮
+│ d                                                                                                                    │
+╰──  ╭ × Usage by session ────────────────────────────────────────────────────────────────────────────────────────╮    │
+╭ S  │Profile claude ▾                                                                      Period Daily ▾        │    │
+│ C  │                                                                                                            │    │
+│he  │☐ Include suspended sessions                                                                                │    │
+│›   │                                                                                                            │    │
+│    │Total $7.205+ · last 24 hours · estimated API USD                                                           │    │
+│    │                                                                                                            │    │
+│    │Investigate recovery [codex]  $7.205+                                                                       │    │
+│    │    claude-opus-5-5  $7.100  tokens unknown                                                                 │    │
+│    │    gpt-6-luna  $0.105  tokens unknown                                                                      │    │
+│    │    custom-model  unpriced  tokens unknown                                                                  │    │
+│    │    2 sub-agents · 3/5 turns reported                                                                       │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │
 │    │                                                                                                            │    │

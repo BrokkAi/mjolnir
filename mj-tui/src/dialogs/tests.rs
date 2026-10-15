@@ -1126,6 +1126,23 @@ fn golden_dashboard_dialogs() {
     usage.handle_key(key(KeyCode::Enter));
     assert_eq!(
         usage.session_usage_request().unwrap().1.period,
+        UsagePeriod::Daily
+    );
+    let (daily_request, _) = usage.session_usage_request().unwrap();
+    usage.apply_session_usage_result(daily_request, Ok(report.clone()));
+    append_dialog_render(
+        &mut output,
+        "Usage daily",
+        120,
+        36,
+        &drawn(&mut usage, 120, 36),
+    );
+    usage.handle_key(key(KeyCode::Enter));
+    drawn(&mut usage, 120, 36);
+    usage.handle_key(key(KeyCode::Down));
+    usage.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        usage.session_usage_request().unwrap().1.period,
         UsagePeriod::Weekly
     );
     drawn(&mut usage, 120, 36);

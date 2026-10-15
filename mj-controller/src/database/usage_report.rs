@@ -288,6 +288,22 @@ mod tests {
         assert_eq!(hourly.profiles, ["claude", "codex"]);
         assert_eq!(hourly.cost_usd_ticks, root.cost_usd_ticks);
 
+        let daily = load_from(
+            &path,
+            &SessionUsageQuery {
+                period: UsagePeriod::Daily,
+                include_suspended: true,
+                ..Default::default()
+            },
+            now,
+        )?;
+        assert_eq!(daily.since_ms, now - 86_400_000);
+        assert_eq!(daily.sessions.len(), 2);
+        assert_eq!(daily.sessions[0].session_id, "root");
+        assert_eq!(daily.cost_usd_ticks, 93_050_000_000);
+        assert_eq!(daily.sessions[1].session_id, "suspended");
+        assert_eq!(daily.sessions[1].coverage.recorded_turns, 0);
+
         let weekly_query = SessionUsageQuery {
             period: UsagePeriod::Weekly,
             include_suspended: true,

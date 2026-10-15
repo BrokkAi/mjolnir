@@ -242,6 +242,7 @@ pub(crate) fn render(
     );
     let window = match dialog.query.period {
         UsagePeriod::Hourly => "last hour",
+        UsagePeriod::Daily => "last 24 hours",
         UsagePeriod::Weekly => "last 7 days",
         UsagePeriod::Monthly => "last 30 days",
     };

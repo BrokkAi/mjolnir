@@ -33,7 +33,8 @@ sub-agents still contributes to their parent.
 The profile dropdown starts on **All**. Choosing a profile selects parents
 whose last profile matches; their complete sub-agent trees remain included,
 even when children used other profiles. **Hourly** is the default period;
-**Weekly** and **Monthly** cover the trailing seven and thirty days. Check
+**Daily** covers the trailing 24 hours; **Weekly** and **Monthly** cover the
+trailing seven and thirty days. Check
 **Include suspended sessions** to include inactive parents. The report refreshes
 every thirty seconds, and **Refresh** reloads it immediately.
 
