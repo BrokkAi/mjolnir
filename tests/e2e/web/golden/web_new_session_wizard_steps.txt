@@ -367,6 +367,18 @@ Excluded (unpublished commits and dirty files)
 existing network source
 fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
 Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
 Delegation
 Native
 Mjolnir
@@ -380,9 +392,9 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
-request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[]}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"a","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review after skipped steps supplies all required values (390x844) ===
 New session

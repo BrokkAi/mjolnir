@@ -914,6 +914,7 @@ pub(crate) async fn run_server(
                     // same disk, so it runs on the same supervised task set
                     // and under the same cap as a new-session preflight.
                     let crate::server::NewPreflightRequest {
+                        additional_mounts,
                         bundle_id,
                         target_id,
                         project_directory,
@@ -965,6 +966,17 @@ pub(crate) async fn run_server(
                         let cancelled = Arc::new(AtomicBool::new(false));
                         let cancellation_guard = ProcessCancellationGuard(cancelled.clone());
                         let mut blocking = tokio::task::spawn_blocking(move || {
+                            let executor = CancellableProcessExecutor::new(cancelled.clone())
+                                .with_deadline(Duration::from_secs(30));
+                            let mount_controller = config_only_controller(config.clone());
+                            for mount in &additional_mounts {
+                                if let Err(error) = mount_controller.validate_mount_source(
+                                    &target_id, &mount.source, &executor,
+                                ) {
+                                    tracing::debug!(%error, "phone attached directory check failed");
+                                    return Err(PreflightFailure::InvalidMount);
+                                }
+                            }
                             run_new_preflight_with_cancellation(
                                 config,
                                 bundle_id,
@@ -972,7 +984,14 @@ pub(crate) async fn run_server(
                                 project_directory,
                                 cancelled,
                                 remote_repairs,
-                            )
+                            ).map_err(|error| {
+                                tracing::debug!(%error, project_validation, "phone preflight check failed");
+                                if project_validation {
+                                    PreflightFailure::Validation
+                                } else {
+                                    PreflightFailure::InvalidRepository(format!("{error:#}"))
+                                }
+                            })
                         });
                         let answer = tokio::select! {
                             biased;
@@ -984,25 +1003,14 @@ pub(crate) async fn run_server(
                             drop(cancellation_guard);
                             match blocking.await {
                                 Err(error) => tracing::warn!(%error, "cancelled phone preflight task failed"),
-                                Ok(Err(error)) => tracing::debug!(%error, "phone preflight cancelled"),
+                                Ok(Err(error)) => tracing::debug!(?error, "phone preflight cancelled"),
                                 Ok(Ok(_)) => {}
                             }
                             return;
                         };
                         let answer = match answer {
                             Ok(Ok(answer)) => Ok(answer),
-                            Ok(Err(error)) => {
-                                tracing::debug!(
-                                    error = %error,
-                                    project_validation,
-                                    "phone preflight check failed"
-                                );
-                                Err(if project_validation {
-                                    PreflightFailure::Validation
-                                } else {
-                                    PreflightFailure::InvalidRepository(format!("{error:#}"))
-                                })
-                            }
+                            Ok(Err(failure)) => Err(failure),
                             Err(error) => {
                                 tracing::warn!(%error, "phone preflight task failed");
                                 Err(PreflightFailure::Controller(format!(

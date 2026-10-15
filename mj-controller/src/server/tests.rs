@@ -1650,6 +1650,130 @@ fn new_preflight(request: PreflightRequest) -> NewPreflightRequest {
     }
 }
 
+/// The browser's mount JSON must survive both HTTP boundaries unchanged,
+/// including the legacy read_only representation for copy-on-write.
+#[tokio::test]
+async fn new_session_mounts_cross_preflight_and_creation_boundaries() {
+    let mounts = serde_json::json!([
+        {"source": "/srv/reference", "destination": "/reference", "read_only": true},
+        {"source": "/srv/cache", "destination": "/cache", "read_only": false},
+        {"source": "/srv/work", "destination": "/work", "read_only": false, "access": "rw"}
+    ]);
+    let expected: Vec<AdditionalMount> = serde_json::from_value(mounts.clone()).unwrap();
+    let body = serde_json::json!({
+        "profile_id": "codex-1", "bundle_id": "hel", "target_id": "podman",
+        "additional_mounts": mounts,
+    });
+    let (app, _, _, mut preflights, _) = app();
+    let response = tokio::spawn(
+        app.oneshot(
+            Request::post("/api/preflight/new")
+                .header(COOKIE, cookie())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        ),
+    );
+    let request = new_preflight(preflights.recv().await.unwrap());
+    assert_eq!(request.additional_mounts, expected);
+    request
+        .reply
+        .send(Err(PreflightFailure::InvalidMount))
+        .unwrap();
+    let response = response.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body_bytes).unwrap(),
+        serde_json::json!({"error": "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host"})
+    );
+
+    let (app, mut actions, _, _, _) = self::app();
+    let mut body = body;
+    body["action"] = "new".into();
+    let response = tokio::spawn(post_action(app, cookie(), body.to_string()));
+    let request = actions.recv().await.unwrap();
+    let ControllerAction::New {
+        additional_mounts, ..
+    } = &request.action
+    else {
+        panic!("expected New");
+    };
+    assert_eq!(additional_mounts, &expected);
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("created".into()),
+        })
+        .unwrap();
+    assert_eq!(response.await.unwrap().status(), StatusCode::ACCEPTED);
+}
+
+/// Refuse unsafe or unsupported mounts before either endpoint asks the daemon
+/// to inspect a host or launch a session.
+#[tokio::test]
+async fn new_session_mount_boundaries_refuse_unsafe_and_unsupported_paths() {
+    for endpoint in ["/api/preflight/new", "/api/actions"] {
+        for (target, directory, mounts) in [
+            (
+                "raw",
+                Some("/project"),
+                serde_json::json!([
+                    {"source": "/srv/data", "destination": "/data", "read_only": true}
+                ]),
+            ),
+            (
+                "podman",
+                None,
+                serde_json::json!([
+                    {"source": "relative", "destination": "/data", "read_only": true}
+                ]),
+            ),
+            (
+                "podman",
+                None,
+                serde_json::json!([
+                    {"source": "/srv/data", "destination": "/data/../private", "read_only": true}
+                ]),
+            ),
+            (
+                "podman",
+                None,
+                serde_json::json!([
+                    {"source": "/srv/one", "destination": "/data", "read_only": true},
+                    {"source": "/srv/two", "destination": "/data", "read_only": false}
+                ]),
+            ),
+        ] {
+            let (app, mut actions, _, mut preflights, _) = app();
+            let mut body = serde_json::json!({
+                "profile_id": "codex-1", "bundle_id": "hel", "target_id": target,
+                "project_directory": directory, "additional_mounts": mounts,
+            });
+            if endpoint == "/api/actions" {
+                body["action"] = "new".into();
+            }
+            let response = app
+                .oneshot(
+                    Request::post(endpoint)
+                        .header(COOKIE, cookie())
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{endpoint}: {body}"
+            );
+            assert!(actions.try_recv().is_err());
+            assert!(preflights.try_recv().is_err());
+        }
+    }
+}
+
 // A bare target opens a directory the person named. The controller still
 // validates that directory before answering, because the server's state
 // projection cannot inspect the filesystem or an SSH host.
@@ -2557,6 +2681,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
         resource_allocation: None,
         title: Some("New work".into()),
         project_directory,
+        additional_mounts: Vec::new(),
         dirty_ack: Vec::new(),
     };
 
@@ -2620,6 +2745,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
                 resource_allocation: resource_allocation.map(Box::new),
                 title: Some("Sized work".into()),
                 project_directory: None,
+                additional_mounts: Vec::new(),
                 dirty_ack: Vec::new(),
             }
         };

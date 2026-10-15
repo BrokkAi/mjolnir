@@ -244,7 +244,109 @@ test('golden_viewer_new_session', async ({ context }) => {
     await page.locator('#new-next').click();
     await page.getByRole('button', { name: 'existing', exact: true }).click();
     await expect(page.locator('#new-step')).not.toContainText('Checking project');
-    return startHeldLaunch(page, state);
+    const editor = page.getByRole('region', { name: 'Attached directories' });
+    state.complete = () => ({ candidates: [], insert: '', truncated: false });
+    const addMount = async (source, access = 'ro', enter = false) => {
+      const completions = state.completions.length;
+      await editor.getByRole('textbox', { name: 'Mount source', exact: true }).fill(source);
+      await expect.poll(() => state.completions.length).toBe(completions + 1);
+      await editor.getByRole('combobox', { name: 'Mount access' }).selectOption(access);
+      if (enter) await editor.getByRole('textbox', { name: 'Mount source', exact: true }).press('Enter');
+      else await editor.getByRole('button', { name: 'Add mount', exact: true }).click();
+      await expect(page.locator('#new-next')).toBeEnabled();
+    };
+    await addMount('/srv/data', 'ro', true);
+    await addMount('/opt/data', 'cow');
+    await expect(editor.locator('.mount-row').nth(1)).toContainText('/mnt/data-2 (cow)');
+    await editor.locator('.mount-row').first().getByRole('button', { name: 'Edit' }).click();
+    await editor.getByRole('textbox', { name: 'Mount destination', exact: true }).fill('/repos');
+    await editor.getByRole('combobox', { name: 'Mount access' }).selectOption('rw');
+    await refresh(page, state);
+    await expect(editor.getByRole('textbox', { name: 'Mount destination', exact: true })).toHaveValue('/repos');
+    await editor.getByRole('button', { name: 'Save mount', exact: true }).click();
+    await expect(page.locator('#new-next')).toBeEnabled();
+    await editor.locator('.mount-row').nth(1).getByRole('button', { name: 'Remove' }).click();
+    await expect(page.locator('#new-next')).toBeEnabled();
+    await addMount('/srv/cache', 'cow');
+    await addMount('/srv/reference');
+    const overflow = await page.locator('#new-page').evaluate(root => [...root.querySelectorAll('*')]
+      .filter(node => node.getBoundingClientRect().right > window.innerWidth + 1)
+      .map(node => ({ tag: node.tagName, className: node.className, text: node.textContent.slice(0, 90), width: node.getBoundingClientRect().width })));
+    expect(overflow).toEqual([]);
+    await captureNewSessionState(output, page, 'attachments edited on Review before launch', state);
+    const release = await startHeldLaunch(page, state);
+    expect(state.actions[0].additional_mounts).toEqual([
+      { source: '/srv/data', destination: '/repos', read_only: false, access: 'rw' },
+      { source: '/srv/cache', destination: '/mnt/cache', read_only: false },
+      { source: '/srv/reference', destination: '/mnt/reference', read_only: true },
+    ]);
+    return release;
+  });
+
+  await withNewSessionPage(context, {}, output, 'mount preflight cancellation, failure, and target changes', async (page, state) => {
+    await projectStep(page);
+    await page.getByRole('button', { name: 'existing', exact: true }).click();
+    await expect(page.locator('#new-next')).toBeEnabled();
+    let release;
+    state.holdPreflight = new Promise(resolve => { release = resolve; });
+    const checks = state.preflights.length;
+    const source = page.getByRole('textbox', { name: 'Mount source', exact: true });
+    await source.fill('/srv/missing');
+    await expect.poll(() => state.completions.length).toBe(1);
+    await page.getByRole('button', { name: 'Add mount', exact: true }).click();
+    await expect.poll(() => state.preflights.length).toBe(checks + 1);
+    await expect(page.locator('#new-next')).toBeDisabled();
+    await captureNewSessionState(output, page, 'checking attached directory keeps Start disabled', state);
+    state.holdPreflight = null;
+    state.preflightError = "attached directory validation failed; check that each host directory exists and is accessible on the selected target's host";
+    await page.locator('.mount-row').getByRole('button', { name: 'Edit' }).click();
+    await page.getByRole('textbox', { name: 'Mount destination', exact: true }).fill('/data');
+    await page.getByRole('button', { name: 'Save mount', exact: true }).click();
+    await expect(page.locator('#new-step')).toContainText('attached directory validation failed');
+    release();
+    await captureNewSessionState(output, page, 'directory validation error is actionable', state);
+    state.preflightError = null;
+    await page.locator('.mount-row').getByRole('button', { name: 'Remove' }).click();
+    await expect(page.locator('#new-next')).toBeEnabled();
+    await expect(page.locator('.mount-row')).toHaveCount(0);
+    await page.locator('#new-back').click();
+    await page.locator('#new-back').click();
+    await page.locator('#new-target').getByRole('radio', { name: /^local/ }).check();
+    await page.locator('#new-next').click();
+    await page.locator('#new-next').click();
+    await expect(page.locator('#new-next')).toBeEnabled();
+    await expect(page.getByRole('region', { name: 'Attached directories' })).toHaveCount(0);
+    const finish = await startHeldLaunch(page, state);
+    expect(state.actions[0].additional_mounts).toBeUndefined();
+    return finish;
+  });
+
+  await withNewSessionPage(context, {}, output, 'existing container settings preserve mount access modes', async (page, state) => {
+    const mounts = [
+      { source: '/srv/reference', destination: '/reference', read_only: true },
+      { source: '/srv/cache', destination: '/cache', read_only: false },
+      { source: '/srv/work', destination: '/work', read_only: false, access: 'rw' },
+    ];
+    state.snapshot.sessions.push({
+      id: 'mounted', title: 'Mounted session', state: 'running', lifecycle: 'live',
+      workspace_id: 'test', profile_id: 'alpha', target_id: 'container', is_idle: true,
+      container_cpus: '6', container_memory: '12g', additional_mounts: mounts,
+      capabilities: { container_settings: true },
+    });
+    await refresh(page, state);
+    await page.evaluate(() => { location.hash = '#workspace/test'; });
+    await page.locator('.session-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Container settings…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Container settings', exact: true });
+    await expect(dialog.locator('.mount-row')).toHaveCount(3);
+    output.push('=== existing Container settings uses the shared editor ===');
+    output.push((await dialog.innerText()).trim());
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect.poll(() => state.actions.length).toBe(1);
+    expect(state.actions[0]).toEqual({
+      action: 'set-container-settings', session_id: 'mounted', cpus: '6', memory: '12g', mounts,
+    });
+    await expect(dialog).toHaveCount(0);
   });
 
   const ec2Choices = [

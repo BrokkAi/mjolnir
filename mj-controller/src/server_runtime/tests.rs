@@ -1556,6 +1556,7 @@ fn new_action() -> ControllerAction {
         resource_allocation: None,
         title: Some("Phone launch".into()),
         project_directory: None,
+        additional_mounts: Vec::new(),
         dirty_ack: Vec::new(),
     }
 }

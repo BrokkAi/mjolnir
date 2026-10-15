@@ -54,9 +54,16 @@ Use **Earlier messages** above the conversation to read stored history, then
 page. **Close** or **Escape** returns to the live conversation with your draft
 preserved, including while a history request is still loading.
 
-The terminal owns the richer launch workflow. Use it when you need per-session
-CPU or memory sizing, attached-directory setup, or quick bundle creation. The
-viewer also omits native-session import, **Discard changes since checkpoint**,
+During creation, **Where to run** includes resource sizing. On the final
+**Review** screen, **Attached directories** lets you add, edit, or remove host
+directories and choose their container paths and read-only, copy-on-write, or
+read-write access. Source directories must exist on the selected target's host.
+
+For an existing container session, use **⋯ → Container settings…** to edit its
+attachments, then **Suspend session…** and **Resume** to recreate the container
+with those settings. **Restart** can retain the existing container and its mounts.
+
+Use the terminal for native-session import, **Discard changes since checkpoint**,
 and configuration or secret editing. Explicit **Destroy session** is available
 with confirmation.
 
