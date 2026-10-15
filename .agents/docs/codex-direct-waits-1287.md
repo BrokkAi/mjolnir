@@ -106,3 +106,24 @@ An earlier overloaded run timed out in the unchanged
 `saturated_wait_lane_keeps_send_message_available` test at its two-second
 admission bound. It passed in the final complete suite with reduced test
 concurrency. All Cargo tests ran outside the restricted sandbox.
+
+
+## Publication and local installation
+
+The ownership correction is committed as `8acaaaf3f`. Concurrent upstream work
+was merged on the current branch, and the integrated fix was pushed to master
+at `38940834d`. Issue #1287 is closed and its coordination label is cleared.
+Formatting and workspace Clippy passed again on that final installation
+revision. Its Linux Rust CI, portable-worker CI, reliability smoke, web tests,
+licenses and dependency checks passed; Windows CI was still running at this
+verification. See [the pushed revision's CI run](https://github.com/BrokkAi/mjolnir/actions/runs/38726288902).
+
+Normal `scripts/install.sh` completed with HEAD fixed at `38940834d` throughout.
+SHA-256 comparisons confirmed that installed `mj`, `mj-voice-worker`, native
+`mj-worker` and musl `mj-worker-x86_64-unknown-linux-musl` match their built
+artifacts. Ordinary installed startup automatically replaced daemon PID 3595708
+(version 2.45.1) with PID 1495740 running
+`2.46.0+38940834d4f7a513761428beaff92e21f9c452b2`, protocol 56. Management status
+confirmed the daemon runs the installed executable. No manual restart was needed.
+Selected daemon metadata and artifact comparisons are saved beside the install
+log under `/home/jonathan/.cache/mjolnir/build/issue1287/`.

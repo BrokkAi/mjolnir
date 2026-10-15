@@ -42,8 +42,15 @@ the child's actual handback through a subsequent wait.
   observed, child continued, and the fresh native MCP wait received its handback.
 - [x] (2026-10-15) Remove the isolated runtime after scoped process teardown and
   rootless-layer cleanup; source profile project listings remained unchanged.
-- [ ] Complete final checks, commit and push, then install without changing HEAD
-  while the installer builds. Verify the installed version and daemon handoff.
+- [x] (2026-10-15) Complete final checks, merge concurrent upstream changes, and
+  push the fix to master at `38940834d`; #1287 closed and its coordination label cleared.
+- [x] (2026-10-15) Pass final workspace Clippy and formatting on `38940834d`.
+  Linux CI, portable-worker CI, reliability smoke and web checks also passed.
+- [x] (2026-10-15) Complete normal `scripts/install.sh` with HEAD fixed at
+  `38940834d` throughout. Verify SHA-256 equality for all four installed artifacts.
+- [x] (2026-10-15) Verify ordinary installed startup automatically replaced daemon
+  PID 3595708 with PID 1495740 running `2.46.0+38940834d`, protocol 56. Status
+  confirms that daemon runs this installed executable.
 
 ## Surprises & Discoveries
 
@@ -84,8 +91,11 @@ cannot clear someone else's cancellation target.
 
 Direct routing, executor exclusion, actual deadline renewal and post-cancellation
 report delivery are verified. Tests passed after one isolated timeout rerun, and
-merged workspace Clippy passed. No default instance was used for tests. Publishing
-the ownership follow-up and the requested local installation remain to do.
+merged workspace Clippy passed. No default instance was used for tests. The
+ownership follow-up is pushed and #1287 is closed. The requested local installation
+completed from `38940834d`; all installed artifacts match and automatic daemon
+handoff is verified. This plan completion is documentation only and was recorded
+after the installer exited, preserving its immutable build snapshot.
 
 ## Context and Orientation
 
@@ -184,3 +194,10 @@ Validation completed on the merged revision: final cancellation evidence is in
 cleanup after passing all acceptance assertions. Its test processes were stopped
 before that cleanup, the namespace helper was stopped before runtime removal,
 and the trace records the final clean state. No build configuration was changed.
+
+Installation completed successfully on 2026-10-15. Final verification artifacts
+are `/home/jonathan/.cache/mjolnir/build/issue1287/installed-artifacts.json` and
+`installed-daemon.json` beside the install and Clippy logs. The installed code
+revision is `38940834d4f7a513761428beaff92e21f9c452b2`; later plan bookkeeping
+does not change that installed code. Windows CI was still running when Linux
+CI and local installation were verified.
