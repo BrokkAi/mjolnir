@@ -1649,7 +1649,8 @@ pub(super) fn view_is_unchanged(current: &ManagedSessionView, next: &ManagedSess
                 // tool-call ordinal is already applied) is never republished to the
                 // drain and its `serve_one` waits to the socket ceiling.
                 && current.subagent_requests == next.subagent_requests
-                && current.subagent_results == next.subagent_results
+                && current.subagent_completions == next.subagent_completions
+                && current.subagent_queue_error == next.subagent_queue_error
                 && current_session.session_id == next_session.session_id
                 && current_session.applied_event_ordinal == next_session.applied_event_ordinal
                 && current_session.applied_event_digest == next_session.applied_event_digest

@@ -1,9 +1,11 @@
 # Issue #1302 parent-wait validation
 
-The final real Codex acceptance run passed on 2026-10-16 using `tests/e2e/codex_parent_wait.py`, development CLI/worker binaries, and named instance `issue-1302-waits`. Configuration, data, project and copied login files lived under `/home/jonathan/.cache/mjolnir/build/issue-1302-live-4`. The default instance and real profile homes were not modified.
+The final real Codex run passed on 2026-10-16 after merging upstream's incremental delegation exchange. The combined build retains feed protocol 38 and uses protocol 39 for explicit child waits; its store revision is 84.
 
-Parent: `c77b95c94e4d31e669f43a397423e430` (`gpt-6.1-sol`, medium).
-Children (`gpt-6-luna`, high): `e4b94117714547a9ed8a7187450bdfd4` (delayed-a), `8b9542abde4b33fd535e55c9ff8198e4` (delayed-b).
+The opt-in driver is `tests/e2e/codex_parent_wait.py`. It used named instance `issue-1302-waits`, development CLI/worker binaries, and separate configuration, data, project and copied login files under `/home/jonathan/.cache/mjolnir/build/issue-1302-live-5`. The default instance and real profile homes were not modified.
+
+Parent: `e1b538b263d64cc2fb59fe1266c30d2e` (`gpt-6.1-sol`, medium).
+Children (`gpt-6-luna`, high): `95ea37960ca45fea0abd75b9d5951e8e` (delayed-a), `ae8d330e20746fc5adac41f5478d1f79` (delayed-b).
 
 The parent spawned two children waiting on externally released gate files. It called `await_children` and ended its turn. For 30 seconds, worker status stayed between turns with the same completed command, no active prompt or harness turn, durable child-wait intent, and `expecting` activity. Restarting the isolated daemon preserved that state and left both children working.
 
@@ -13,6 +15,6 @@ Exactly four parent turns were persisted: the initial request, steering, and two
 
 Cleanup waited for suspension to persist before stopping the daemon. The final store contains the stopped parent; its children were released. The driver exited successfully.
 
-Rust validation: full controller suite (2,006 passed, 12 existing ignores), core suite (502 passed), worker suite (680 passed, 11 existing ignores, one fixture failure corrected and rerun successfully), remaining binary/doc tests, workspace Clippy with warnings denied, formatting, whitespace checking, and Python syntax checking. The sole final-suite failure was the new mailbox fixture leaving ACP readiness false; recording SessionConfigured made it represent an actual waiting parent. Production behavior did not change. The final collector-admission/steering regression and all 24 migration reader regressions also passed.
+Final merged validation passed: controller 2,007, core 502, worker 685, chat 412 and CLI 212 active library/binary unit tests, plus the full integration and doc-test targets. Existing ignored cases remain ignored. The command was `cargo test -p brokk-mj-core -p brokk-mj-worker -p brokk-mj-controller -p brokk-mj-chat -p brokk-mjolnir --no-fail-fast -- --test-threads=2`. Workspace `cargo clippy --all-targets -- -D warnings`, formatting, whitespace and Python syntax checks passed. The isolated automatic daemon upgrade regression passed with the historical fixture corrected for migration 84.
 
 An earlier real run exposed a parent making a second bounded wait after collecting A. The collection contract now explicitly says one wait returns every ready report and an otherwise idle parent should await_children again with unfinished children. The shared Claude instructions remain within its 2,048-character limit at 2,037 characters. Bounded blocking waits retain their existing timeout behavior.

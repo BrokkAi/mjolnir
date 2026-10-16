@@ -115,7 +115,8 @@ fn snapshot(session: MaterializedSession, window: ProjectionWindow) -> ManagedSe
         window,
         worker_build: None,
         subagent_requests: Vec::new(),
-        subagent_results: Vec::new(),
+        subagent_completions: Vec::new(),
+        subagent_queue_error: None,
         operational: serde_json::from_value(serde_json::json!({
             "session_id": "session-1",
             "execution": "idle",

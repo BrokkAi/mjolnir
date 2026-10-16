@@ -158,6 +158,10 @@ pub enum RelayRequest {
     /// Fetch controller work queued by the parent session's private MCP
     /// socket. Connection-only: request payloads do not enter chat history.
     SubagentRequests,
+    /// Acknowledge the previous page and fetch bounded changes on this connection.
+    PollSubagentQueue {
+        acknowledged: Option<u64>,
+    },
     /// Open or close worker-owned admission for requests that change child
     /// state. Closing is serialized with the private MCP queue's enqueue lock.
     SetSubagentAdmission {
@@ -337,6 +341,7 @@ impl RelayRequest {
             Self::RespondElicitation { .. } => "respond_elicitation",
             Self::StopBackgroundTask { .. } => "stop_background_task",
             Self::SubagentRequests => "subagent_requests",
+            Self::PollSubagentQueue { .. } => "poll_subagent_queue",
             Self::SetSubagentAdmission { .. } => "set_subagent_admission",
             Self::HistoryQuery { .. } => "history_query",
             Self::HistoryRequests => "history_requests",
@@ -364,6 +369,7 @@ impl RelayRequest {
             | Self::ReadAttachment { .. } => 8,
             Self::StopBackgroundTask { .. } => 9,
             Self::SubagentRequests | Self::CompleteSubagentRequest { .. } => 12,
+            Self::PollSubagentQueue { .. } => super::RELAY_SUBAGENT_FEED_PROTOCOL,
             Self::SetSubagentAdmission { .. } => 32,
             Self::RespondElicitation { .. } => 2,
             Self::InstallPromptContext { .. } => 3,
@@ -586,6 +592,9 @@ pub enum RelayResponsePayload {
     SubagentRequests {
         requests: Vec<crate::subagent::SubagentToolRequest>,
         results: Vec<crate::subagent::SubagentToolResult>,
+    },
+    SubagentQueue {
+        page: crate::subagent::SubagentQueuePage,
     },
     SubagentAdmissionChanged {
         open: bool,

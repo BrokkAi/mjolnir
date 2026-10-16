@@ -8,7 +8,9 @@ pub struct StandaloneSession {
     pub(super) latest_credential_sync_signal: Option<CredentialSyncSignal>,
     pub(super) project_memory: Option<ProjectMemorySyncTarget>,
     pub(super) subagent_requests: Vec<mj_core::subagent::SubagentToolRequest>,
-    pub(super) subagent_results: Vec<mj_core::subagent::SubagentToolResult>,
+    pub(super) subagent_completions: Vec<mj_core::subagent::SubagentCompletion>,
+    subagent_queue: super::subagent_queue::SubagentQueueObserver,
+    subagent_queue_error: Option<String>,
     history_jobs: tokio::task::JoinSet<mj_core::history::HistoryResult>,
     history_active: std::collections::BTreeSet<String>,
 }
@@ -39,7 +41,9 @@ impl StandaloneSession {
             latest_credential_sync_signal: None,
             project_memory: target.project_memory.clone(),
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue: super::subagent_queue::SubagentQueueObserver::spawn(target),
+            subagent_queue_error: None,
             history_jobs: tokio::task::JoinSet::new(),
             history_active: Default::default(),
         };
@@ -153,14 +157,20 @@ impl StandaloneSession {
             }
         }
         let previous_requests = self.subagent_requests.clone();
-        let previous_results = self.subagent_results.clone();
-        (self.subagent_requests, self.subagent_results) = self.client.subagent_requests().await?;
+        let previous_results = self.subagent_completions.clone();
+        let previous_error = self.subagent_queue_error.clone();
+        (
+            self.subagent_requests,
+            self.subagent_completions,
+            self.subagent_queue_error,
+        ) = self.subagent_queue.observe(self.follows_closely());
         let changed = repaired
             || self.materialized.applied_event_ordinal != original_ordinal
             || self.materialized.applied_event_digest != original_digest
             || self.operational != original_operational
             || self.subagent_requests != previous_requests
-            || self.subagent_results != previous_results;
+            || self.subagent_completions != previous_results;
+        let changed = changed || self.subagent_queue_error != previous_error;
         Ok(changed)
     }
 
@@ -333,7 +343,8 @@ impl StandaloneSession {
             latest_credential_sync_signal: self.latest_credential_sync_signal.clone(),
             worker_build: self.client.worker_build().map(str::to_owned),
             subagent_requests: self.subagent_requests.clone(),
-            subagent_results: self.subagent_results.clone(),
+            subagent_completions: self.subagent_completions.clone(),
+            subagent_queue_error: self.subagent_queue_error.clone(),
         }
     }
 
@@ -341,9 +352,7 @@ impl StandaloneSession {
         &mut self,
         result: mj_core::subagent::SubagentToolResult,
     ) -> Result<bool> {
-        let delivered = self.client.complete_subagent_request(result).await?;
-        (self.subagent_requests, self.subagent_results) = self.client.subagent_requests().await?;
-        Ok(delivered)
+        self.client.complete_subagent_request(result).await
     }
 
     pub async fn set_subagent_admission(&mut self, open: bool) -> Result<()> {

@@ -847,7 +847,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
     ManagedSessionView {
         snapshot: Some(ManagedSessionSnapshot {
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
@@ -1260,29 +1261,23 @@ fn leased_relay_child_serves_stdio() {
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
     println!();
-    let mut relay = mj_worker::relay::DurableRelay::open(
-        std::path::Path::new(&root),
-        LEASED_RELAY_SESSION,
-        "1.0.0",
-    )
-    .expect("open the test relay journal");
-    if std::env::var_os(RELAY_SESSION_CONFIGURED).is_some() {
-        // What a worker records once its harness session is open, so the
-        // relay reports no work in flight.
-        relay
-            .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
-                config_options: vec![],
-            })
-            .expect("record the configured harness session");
-    }
+    let mut relay = None;
     {
         let marker = std::env::var_os("MJ_TEST_BLOCKED_REVIEWER");
         let mut input = std::io::stdin().lock();
         let mut output = std::io::stdout().lock();
+        let mut subagent_known_ids = std::collections::BTreeSet::new();
         while let Some(request) = mj_core::relay::read_relay_frame(&mut input).unwrap() {
             use mj_core::relay::{
                 RelayRequest, RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload,
             };
+            if matches!(request.request, RelayRequest::PollSubagentQueue { .. })
+                && PathBuf::from(&root)
+                    .join("disconnect-subagent-queue")
+                    .exists()
+            {
+                return;
+            }
             // One line per request, so a parent test can count round trips.
             {
                 use std::io::Write as _;
@@ -1319,6 +1314,12 @@ fn leased_relay_child_serves_stdio() {
                 continue;
             }
             let history = match &request.request {
+                RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
+                    negotiated: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    relay_version: "1.0.0".into(),
+                    session_id: LEASED_RELAY_SESSION.into(),
+                    worker_build: None,
+                }),
                 RelayRequest::CpuUsage => {
                     let path = PathBuf::from(&root).join("cpu-usage.json");
                     let usage = if path.exists() {
@@ -1328,7 +1329,7 @@ fn leased_relay_child_serves_stdio() {
                     };
                     Some(RelayResponsePayload::CpuUsage { usage })
                 }
-                RelayRequest::SubagentRequests => {
+                RelayRequest::SubagentRequests | RelayRequest::PollSubagentQueue { .. } => {
                     let path = PathBuf::from(&root).join("subagent-request.json");
                     let requests = if path.exists() {
                         vec![serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()]
@@ -1341,7 +1342,37 @@ fn leased_relay_child_serves_stdio() {
                     } else {
                         Vec::new()
                     };
-                    Some(RelayResponsePayload::SubagentRequests { requests, results })
+                    if let RelayRequest::PollSubagentQueue { acknowledged } = &request.request {
+                        use mj_core::subagent::{
+                            SubagentCompletion, SubagentQueueChange, SubagentQueuePage,
+                        };
+                        let mut changes = requests
+                            .into_iter()
+                            .map(SubagentQueueChange::Request)
+                            .chain(results.iter().map(|r| {
+                                SubagentQueueChange::Completed(SubagentCompletion::from(r))
+                            }))
+                            .collect::<Vec<_>>();
+                        let ids = changes
+                            .iter()
+                            .map(|c| c.request_id().to_owned())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        changes.extend(subagent_known_ids.difference(&ids).map(|id| {
+                            SubagentQueueChange::Retired {
+                                request_id: id.clone(),
+                            }
+                        }));
+                        subagent_known_ids = ids;
+                        Some(RelayResponsePayload::SubagentQueue {
+                            page: SubagentQueuePage {
+                                sequence: acknowledged.unwrap_or(0) + 1,
+                                changes,
+                                has_more: false,
+                            },
+                        })
+                    } else {
+                        Some(RelayResponsePayload::SubagentRequests { requests, results })
+                    }
                 }
                 RelayRequest::CompleteSubagentRequest { result } => {
                     std::fs::write(
@@ -1413,6 +1444,30 @@ fn leased_relay_child_serves_stdio() {
                 .unwrap();
                 continue;
             }
+            let relay = relay.get_or_insert_with(|| {
+                let mut relay = mj_worker::relay::DurableRelay::open(
+                    std::path::Path::new(&root),
+                    LEASED_RELAY_SESSION,
+                    "1.0.0",
+                )
+                .expect("open the test relay journal");
+                if PathBuf::from(&root)
+                    .join("disconnect-subagent-queue")
+                    .exists()
+                {
+                    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
+                }
+                if std::env::var_os(RELAY_SESSION_CONFIGURED).is_some() {
+                    // What a worker records once its harness session is open, so the
+                    // relay reports no work in flight.
+                    relay
+                        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+                            config_options: vec![],
+                        })
+                        .expect("record the configured harness session");
+                }
+                relay
+            });
             let mut response =
                 if let mj_core::relay::RelayRequest::Reviewer { role, .. } = &request.request {
                     if let Some(marker) = &marker
@@ -2208,6 +2263,61 @@ fn leased_relay_target(relay_root: &std::path::Path) -> RelaySessionTarget {
 }
 
 const DROP_ADMISSION_OPEN_REPLY: &str = "MJ_TEST_DROP_ADMISSION_OPEN_REPLY";
+
+// Hard-won: 82e4c8a44: an oversized delegation reply also prevented idle worker replacement.
+#[cfg(unix)]
+#[tokio::test]
+async fn broken_delegation_transport_preserves_worker_control_and_idle_reservation() {
+    const CHILD: &str = "MJ_TEST_DELEGATION_CONTROL_ISOLATION";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_isolated_child(
+            CHILD,
+            "broken_delegation_transport_preserves_worker_control_and_idle_reservation",
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    register_leased_relay_session();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("disconnect-subagent-queue"),
+        b"disconnect every queue poll",
+    )
+    .unwrap();
+    let mut target = leased_relay_target(root.path());
+    target
+        .spec
+        .env
+        .insert(RELAY_SESSION_CONFIGURED.into(), "1".into());
+    let mut connection = StandaloneSession::connect(&target).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = connection.sync().await.unwrap();
+            if snapshot
+                .subagent_queue_error
+                .as_deref()
+                .is_some_and(|e| e.contains("synchronization failed"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("queue failure was not reported");
+    assert!(
+        connection
+            .reserve_idle("idle-despite-delegation-failure".into())
+            .await
+            .unwrap(),
+        "delegation failures must not block the worker's atomic idle reservation"
+    );
+    connection
+        .sync()
+        .await
+        .expect("control sync must remain usable");
+    connection.detach().await.unwrap();
+}
 
 // Hard-won: c2107d5c: admission repair hid failed startup and prevented automatic worker replacement.
 #[cfg(unix)]

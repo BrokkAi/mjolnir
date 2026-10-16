@@ -19,7 +19,7 @@ impl DelegationObservation {
         Some(Self {
             requests: snapshot.subagent_requests.clone(),
             completed: snapshot
-                .subagent_results
+                .subagent_completions
                 .iter()
                 .map(|r| r.request_id.clone())
                 .collect(),

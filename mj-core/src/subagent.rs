@@ -622,6 +622,112 @@ pub struct SubagentToolResult {
     pub message: String,
 }
 
+/// Control-plane projection of a completed tool. Report bodies stay on the worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentCompletion {
+    pub request_id: String,
+    pub completed_at_ms: i64,
+    pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_delivery: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_wait: Option<SubagentWaitInterruption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentWaitInterruption {
+    pub waited_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action: Option<String>,
+}
+
+impl From<&SubagentToolResult> for SubagentCompletion {
+    fn from(result: &SubagentToolResult) -> Self {
+        let value = serde_json::from_str::<serde_json::Value>(&result.message).ok();
+        let input_delivery = value
+            .as_ref()
+            .filter(|v| {
+                v.get("child_session_id")
+                    .is_some_and(serde_json::Value::is_string)
+                    && v.get("created_at_ms").is_some()
+                    && v.get("status").is_some()
+            })
+            .map(|v| {
+                let mut delivery = serde_json::Map::new();
+                for key in [
+                    "child_session_id",
+                    "created_at_ms",
+                    "status",
+                    "via",
+                    "kind",
+                    "turn_id",
+                    "command_id",
+                    "accepted_ordinal",
+                    "error",
+                ] {
+                    if let Some(value) = v.get(key) {
+                        delivery.insert(key.to_owned(), value.clone());
+                    }
+                }
+                serde_json::Value::Object(delivery)
+            });
+        Self {
+            request_id: result.request_id.clone(),
+            completed_at_ms: result.completed_at_ms,
+            is_error: result.is_error,
+            input_delivery,
+            interrupted_wait: value
+                .as_ref()
+                .filter(|v| v["status"] == "interrupted")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        }
+    }
+}
+
+impl SubagentCompletion {
+    pub fn interrupted_wait_result(&self) -> Option<SubagentToolResult> {
+        let interruption = self.interrupted_wait.as_ref()?;
+        let mut payload = serde_json::json!({
+            "status": "interrupted", "waited_seconds": interruption.waited_seconds, "agents": [],
+        });
+        if let Some(next_action) = &interruption.next_action {
+            payload["next_action"] = next_action.clone().into();
+        }
+        Some(SubagentToolResult {
+            request_id: self.request_id.clone(),
+            completed_at_ms: self.completed_at_ms,
+            is_error: self.is_error,
+            message: payload.to_string(),
+        })
+    }
+}
+
+/// A connection exchanges only changed queue entries. Completion replaces a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum SubagentQueueChange {
+    Request(SubagentToolRequest),
+    Completed(SubagentCompletion),
+    Retired { request_id: String },
+}
+
+impl SubagentQueueChange {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Request(request) => &request.request_id,
+            Self::Completed(completion) => &completion.request_id,
+            Self::Retired { request_id } => request_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentQueuePage {
+    pub sequence: u64,
+    pub changes: Vec<SubagentQueueChange>,
+    pub has_more: bool,
+}
+
 /// Durable ownership and launch intent for one child session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

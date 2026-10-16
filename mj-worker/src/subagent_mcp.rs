@@ -597,12 +597,30 @@ fn send(
         let socket = socket.to_path_buf();
         let request = request.clone();
         std::thread::spawn(move || {
-            let _ = sender.send(crate::mcp_stdio::socket_request(
-                &socket,
-                &request,
-                "sub-agent",
-                timeout,
-            ));
+            let reply: Result<Option<Value>> =
+                crate::mcp_stdio::socket_request(&socket, &request, "sub-agent", timeout);
+            if reply
+                .as_ref()
+                .ok()
+                .and_then(|reply| reply.as_ref())
+                .is_some_and(|reply| reply["acknowledgment_required"] == true)
+            {
+                match crate::mcp_stdio::socket_request::<_, Value>(
+                    &socket,
+                    &serde_json::json!({"acknowledge_result": request.request_id}),
+                    "sub-agent reply acknowledgment",
+                    Duration::from_secs(2),
+                ) {
+                    Ok(Some(reply)) if reply["accepted"] == true => {}
+                    Ok(_) => tracing::warn!(
+                        "sub-agent reply acknowledgment was not confirmed; its body remains durable"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not acknowledge sub-agent reply; its body remains durable")
+                    }
+                }
+            }
+            let _ = sender.send(reply);
         })
     };
     let total = match &request.action {
@@ -720,6 +738,54 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[cfg(unix)]
+    #[test]
+    fn worker_reply_acknowledgment_follows_the_complete_large_reply() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let report = "large report λ".repeat(10_000);
+        let expected = report.clone();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let body = json!({"accepted":true,"acknowledgment_required":true,"result":{
+                "request_id":request["request_id"],"completed_at_ms":2,"is_error":false,
+                "message":json!({"report":report}).to_string()
+            }})
+            .to_string()
+                + "\n";
+            reader.get_mut().write_all(body.as_bytes()).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let acknowledgment: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(acknowledgment["acknowledge_result"], request["request_id"]);
+            reader
+                .get_mut()
+                .write_all(b"{\"accepted\":true}\n")
+                .unwrap();
+        });
+        let (reply, error) = call_with_budget(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name":"list_agents"})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+            |_| Duration::from_secs(5),
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert!(!error);
+        assert_eq!(reply["report"], expected);
+    }
 
     struct ContractWriter(Arc<Mutex<Vec<u8>>>);
 

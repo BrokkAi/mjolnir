@@ -104,7 +104,7 @@ effort = "medium"
             if not found:
                 return None
             sockets[session] = found[0]
-        request = {"request_id": uuid.uuid4().hex, "protocol_version": 38,
+        request = {"request_id": uuid.uuid4().hex, "protocol_version": 39,
                    "request": {"method": "status"}}
         try:
             with socket.socket(socket.AF_UNIX) as connection:

@@ -191,6 +191,57 @@ def main():
             assert not result["is_error"], result
             return json.loads(result["message"])
 
+        def worker_status(session):
+            # Ask the worker that owns the turn, independently of projection lag.
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(15)
+                connection.connect(str(endpoint(session).with_name("control.sock")))
+                with connection.makefile("rb") as reader:
+                    hello = {
+                        "request_id": uuid.uuid4().hex, "protocol_version": 1,
+                        "request": {"method": "hello", "params": {
+                            "controller_version": "delegation-e2e",
+                            "supported": {"min": 1, "max": 4294967295},
+                        }},
+                    }
+                    connection.sendall(json.dumps(hello).encode() + b"\n")
+                    response = json.loads(reader.readline())
+                    assert response["result"] == "ok", response
+                    request = {
+                        "request_id": uuid.uuid4().hex,
+                        "protocol_version": response["protocol_version"],
+                        "request": {"method": "status"},
+                    }
+                    connection.sendall(json.dumps(request).encode() + b"\n")
+                    response = json.loads(reader.readline())
+                    assert response["result"] == "ok", response
+                    assert response["payload"]["type"] == "status", response
+                    return response["payload"]["data"]
+
+        def wait_recorded_parent_turn():
+            # The fake agent has already observed the user message. A missing
+            # selection row is still unknown, rather than an empty work queue.
+            deadline = time.monotonic() + 30
+            command = None
+            while time.monotonic() < deadline:
+                if command is None:
+                    state = worker_status(parent)
+                    turn = state.get("active_prompt") or state.get("turn_completion")
+                    if turn:
+                        command = turn["command_id"]
+                if command is not None:
+                    with sqlite3.connect(
+                        f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True
+                    ) as database:
+                        recorded = database.execute(
+                            "SELECT 1 FROM session_turn_usage "
+                            "WHERE session_id=? AND command_id=?", (parent, command),
+                        ).fetchone()
+                    if recorded:
+                        return
+                time.sleep(0.1)
+            raise RuntimeError(f"parent turn usage was not recorded: {command}")
+
         def run_mailbox_hook(session):
             # Exercise the same worker boundary that the staged Codex
             # PostToolUse handler calls, and verify the message is in its
@@ -278,16 +329,20 @@ def main():
         assert first["agents"][0]["output"] == "first report without a dashboard", first
 
         def wait_parked(session):
-            deadline = time.monotonic() + 20
+            # Match the park lifecycle's existing 120-second deadline. Cleanup
+            # kills the worker, so a shorter wait aborts a still-valid park.
+            deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 with sqlite3.connect(
                     f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True
                 ) as database:
                     row = database.execute(
-                        "SELECT state FROM sessions WHERE session_id = ?", (session,)
+                        "SELECT state, last_error FROM sessions WHERE session_id = ?", (session,)
                     ).fetchone()
                 if row and row[0].lower() == "parked":
                     return
+                if row and row[0].lower() == "error":
+                    raise RuntimeError(f"child parking failed for {session}: {row}")
                 time.sleep(0.1)
             raise RuntimeError(f"child completion did not park {session}: {row}")
 
@@ -447,22 +502,6 @@ def main():
             and agent["output"] == "fixture startup failure"
             for agent in startup_failure["agents"]
         ), startup_failure
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
-                unfinished = database.execute(
-                    "SELECT COUNT(*) FROM session_turn_selections s "
-                    "WHERE session_id=? AND NOT EXISTS("
-                    "SELECT 1 FROM session_turn_usage u "
-                    "WHERE u.session_id=s.session_id AND u.command_id=s.command_id)",
-                    (parent,),
-                ).fetchone()[0]
-            if unfinished == 0:
-                break
-            time.sleep(0.1)
-        else:
-            raise RuntimeError("parent wait prompt did not finish before accounting checks")
-
         message_text = "check the last change from the user"
         message = json.loads(
             cli("message", "--session", parent, "--json", message_text)
@@ -471,21 +510,7 @@ def main():
         assert message["via"] in ("mailbox", "turn"), message
         wait_prompt(parent, "Message from the user:")
         wait_prompt(parent, message_text)
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
-                unfinished = database.execute(
-                    "SELECT COUNT(*) FROM session_turn_selections s "
-                    "WHERE session_id=? AND NOT EXISTS("
-                    "SELECT 1 FROM session_turn_usage u "
-                    "WHERE u.session_id=s.session_id AND u.command_id=s.command_id)",
-                    (parent,),
-                ).fetchone()[0]
-            if unfinished == 0:
-                break
-            time.sleep(0.1)
-        else:
-            raise RuntimeError("mj message prompt did not finish before teardown")
+        wait_recorded_parent_turn()
 
         retained = json.loads(cli("usage", "--parent", parent, "--json"))
         for session in [child, legacy, subtle, parent]:

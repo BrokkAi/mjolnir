@@ -160,6 +160,8 @@ pub struct RelayClient {
     worker_build: Option<String>,
     latest_ordinal: u64,
     latest_digest: String,
+    subagent_acknowledged: Option<u64>,
+    subagent_queue: BTreeMap<String, mj_core::subagent::SubagentQueueChange>,
     /// The shared-connection session the proxy runs on. Unlike the admission
     /// permit, which is released once hello completes, the session is in use
     /// for as long as the proxy runs, so the lease lives as long as `child`.

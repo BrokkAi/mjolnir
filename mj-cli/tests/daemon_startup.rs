@@ -74,9 +74,11 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // 2.15.0's actual shape, not only a changed PRAGMA: migration 44 must
     // create the missing cache and advance the compatibility floor.
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
+    // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
     connection
         .execute_batch(
-            "ALTER TABLE mailbox_outbox DROP COLUMN failure;
+            "ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
+         ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
          DROP TABLE subagent_accounting;
          DROP TABLE session_turn_selections;

@@ -1,6 +1,6 @@
 //! Parent-worker queue behind the Mjolnir sub-agent MCP server.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,7 +15,12 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::{Instant, sleep_until};
 
+use mj_core::subagent::{SubagentCompletion, SubagentQueueChange, SubagentQueuePage};
 use mj_core::subagent::{SubagentToolRequest, SubagentToolResult};
+
+mod feed;
+pub(super) use feed::SubagentFeed;
+mod replies;
 
 use crate::subagent_mcp::DaemonContact;
 
@@ -561,6 +566,12 @@ struct QueueState {
     requests: BTreeMap<String, SubagentToolRequest>,
     #[serde(default)]
     results: BTreeMap<String, SubagentToolResult>,
+    #[serde(default)]
+    completions: BTreeMap<String, SubagentCompletion>,
+    #[serde(default)]
+    caller_acknowledged: BTreeSet<String>,
+    #[serde(default)]
+    daemon_acknowledged: BTreeSet<String>,
     /// Whether each persisted result reached a live waiter when it arrived.
     /// Older queue files lack this fact and are treated as already delivered.
     #[serde(default)]
@@ -573,6 +584,8 @@ struct QueueState {
     /// under the queue's lock so a request is either in a read or after it.
     #[serde(skip)]
     collections: Collections,
+    #[serde(skip)]
+    generation: u64,
     /// Waiters currently registered in this worker process. Registration and
     /// completion share the queue lock to decide the fallback race once.
     #[serde(skip)]
@@ -584,9 +597,13 @@ impl Default for QueueState {
         Self {
             requests: BTreeMap::new(),
             results: BTreeMap::new(),
+            completions: BTreeMap::new(),
+            caller_acknowledged: BTreeSet::new(),
+            daemon_acknowledged: BTreeSet::new(),
             delivered_to_waiter: BTreeMap::new(),
             mutating_admission_open: true,
             collections: Collections::default(),
+            generation: 0,
             live_waiters: BTreeMap::new(),
         }
     }
@@ -618,7 +635,7 @@ pub struct SubagentEndpoint {
 impl SubagentEndpoint {
     pub fn open(root: &Path) -> Result<Self> {
         let path = root.join(SUBAGENT_QUEUE);
-        let state = match std::fs::read(&path) {
+        let state: QueueState = match std::fs::read(&path) {
             Ok(body) => serde_json::from_slice(&body)
                 .with_context(|| format!("parse sub-agent queue {}", path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => QueueState::default(),
@@ -627,23 +644,21 @@ impl SubagentEndpoint {
                     .with_context(|| format!("read sub-agent queue {}", path.display()));
             }
         };
-        Ok(Self {
+        let endpoint = Self {
             path,
             admission: Arc::default(),
             relay: None,
             harness: None,
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(Notify::new()),
-        })
+        };
+        endpoint.import_legacy_results()?;
+        Ok(endpoint)
     }
 
-    fn cached_result(&self, request_id: &str) -> Option<SubagentToolResult> {
-        self.state
-            .lock()
-            .expect("sub-agent queue lock poisoned")
-            .results
-            .get(request_id)
-            .cloned()
+    fn cached_result(&self, request_id: &str) -> Result<Option<SubagentToolResult>> {
+        let state = self.state.lock().expect("sub-agent queue lock poisoned");
+        self.read_result(&state, request_id)
     }
 
     /// Wait for the daemon to complete `request_id`, up to `deadline`. Returns
@@ -689,7 +704,7 @@ impl SubagentEndpoint {
             let notified = self.completed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(result) = self.cached_result(request_id) {
+            if let Some(result) = self.cached_result(request_id)? {
                 waiter.finish();
                 return Ok(Some(result));
             }
@@ -698,7 +713,7 @@ impl SubagentEndpoint {
             }
             tokio::select! {
                 _ = &mut notified => {}
-                _ = sleep_until(deadline) => return Ok(waiter.finish_and_take_result()),
+                _ = sleep_until(deadline) => return waiter.finish_and_take_result(self),
                 _ = async {
                     match relay_changes.as_mut() {
                         Some(changes) => { let _ = changes.changed().await; }
@@ -721,13 +736,14 @@ impl SubagentEndpoint {
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         // Completion takes these locks in the same order. A turn boundary
         // cannot race a report's delivery receipt, even before this task wakes.
-        if let Some(result) = state.results.get(request_id).cloned() {
+        if let Some(result) = self.read_result(&state, request_id)? {
             LiveWaiter::remove_from(&mut waiter.active, request_id, &mut state);
             return Ok(Some(result));
         }
         let Some(result) = Self::interrupted_wait_result(&relay, &state, request_id) else {
             return Ok(None);
         };
+
         // Publish the worker's answer durably so the daemon retires its wait
         // too. A later daemon report was NOT delivered by this answer: its
         // receipt must restore any child report markers it tentatively set.
@@ -783,21 +799,19 @@ impl SubagentEndpoint {
         let state = self.state.lock().expect("sub-agent queue lock poisoned");
         (
             state.requests.values().cloned().collect(),
-            state.results.values().cloned().collect(),
+            state
+                .completions
+                .keys()
+                .filter_map(|id| self.read_result(&state, id).unwrap())
+                .collect(),
         )
     }
 
-    /// The daemon's read of the queue: every queued request and recorded result. It
-    /// also records the read, so a caller still waiting can learn whether the
-    /// daemon has seen its request.
-    pub fn collect_for_daemon(&self) -> (Vec<SubagentToolRequest>, Vec<SubagentToolResult>) {
+    #[cfg(test)]
+    fn record_collection(&self) {
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         state.collections.count += 1;
         state.collections.last = Some(Instant::now());
-        (
-            state.requests.values().cloned().collect(),
-            state.results.values().cloned().collect(),
-        )
     }
 
     /// Serialize an admission change with every enqueue and persist it before
@@ -810,7 +824,7 @@ impl SubagentEndpoint {
         }
         let mut next = state.clone();
         next.mutating_admission_open = open;
-        self.persist(&next)?;
+        self.persist(&mut next)?;
         *state = next;
         Ok(())
     }
@@ -851,14 +865,38 @@ impl SubagentEndpoint {
         }
         let mut state = self.state.lock().expect("sub-agent queue lock poisoned");
         let mark = state.collections.count;
-        if let Some(result) = state.results.get(&request.request_id) {
-            return Ok((true, Some(result.clone()), mark));
+        if let Some(result) = self.read_result(&state, &request.request_id)? {
+            return Ok((true, Some(result), mark));
         }
         // A retry of a request already accepted before the gate closed is not
         // a new admission. Keep it attached to the original queued operation.
         if state.requests.contains_key(&request.request_id) {
             return Ok((true, None, mark));
         }
+        if state.requests.len()
+            + state.completions.len().saturating_sub(
+                state
+                    .caller_acknowledged
+                    .intersection(&state.daemon_acknowledged)
+                    .count(),
+            )
+            >= mj_core::relay::RELAY_RETRY_ID_RETENTION
+        {
+            return Ok((false, Some(SubagentToolResult {
+                request_id: request.request_id,
+                completed_at_ms: mj_core::clock::epoch_millis(), is_error: true,
+                message: "Sub-agent request was not accepted: outstanding replies must be acknowledged before more work can be queued.".into(),
+            }), mark));
+        }
+        if request.action.mutates_child_state() && !state.mutating_admission_open {
+            return Ok((false, Some(SubagentToolResult {
+                request_id: request.request_id,
+                completed_at_ms: mj_core::clock::epoch_millis(),
+                is_error: true,
+                message: "Sub-agent request was not accepted: this session is replacing its harness (Move). Retry after the Move finishes.".into(),
+            }), mark));
+        }
+        // Reject admission before changing the relay's intentional wait.
         if matches!(
             request.action,
             mj_core::subagent::SubagentToolAction::WaitAgents
@@ -887,19 +925,11 @@ impl SubagentEndpoint {
             }
             self.completed.notify_waiters();
         }
-        if request.action.mutates_child_state() && !state.mutating_admission_open {
-            return Ok((false, Some(SubagentToolResult {
-                request_id: request.request_id,
-                completed_at_ms: mj_core::clock::epoch_millis(),
-                is_error: true,
-                message: "Sub-agent request was not accepted: this session is replacing its harness (Move). Retry after the Move finishes.".into(),
-            }), mark));
-        }
         let mut next = state.clone();
         next.requests
             .entry(request.request_id.clone())
             .or_insert(request);
-        self.persist(&next)?;
+        self.persist(&mut next)?;
         *state = next;
         Ok((true, None, mark))
     }
@@ -917,7 +947,7 @@ impl SubagentEndpoint {
         // A result retained by an older worker has no delivery bit. Preserve
         // legacy behavior: a duplicate completion is assumed to have reached
         // its caller rather than reopening a report that may already be read.
-        if state.results.contains_key(&request_id) {
+        if state.completions.contains_key(&request_id) {
             return Ok(true);
         }
         if let Some(relay) = relay.as_deref()
@@ -944,32 +974,23 @@ impl SubagentEndpoint {
         let request_id = result.request_id.clone();
         let mut next = state.clone();
         next.requests.remove(&request_id);
-        next.results.insert(request_id.clone(), result);
+        self.write_result(&result)?;
+        next.completions
+            .insert(request_id.clone(), SubagentCompletion::from(&result));
         next.delivered_to_waiter
             .insert(request_id.clone(), delivered);
-        // Results are small but bound retained history so a long-lived parent does not
-        // grow this control file forever.
-        while next.results.len() > 256 {
-            let Some(oldest) = next
-                .results
-                .values()
-                .min_by_key(|result| result.completed_at_ms)
-                .map(|result| result.request_id.clone())
-            else {
-                break;
-            };
-            next.results.remove(&oldest);
-            next.delivered_to_waiter.remove(&oldest);
-        }
-        self.persist(&next)?;
+        self.retire_receipts(&mut next)?;
+        self.persist(&mut next)?;
         *state = next;
         Ok(())
     }
 
-    fn persist(&self, state: &QueueState) -> Result<()> {
+    fn persist(&self, state: &mut QueueState) -> Result<()> {
         let body = serde_json::to_vec_pretty(state)?;
         mj_core::config::atomic_write(&self.path, &body)
-            .with_context(|| format!("write sub-agent queue {}", self.path.display()))
+            .with_context(|| format!("write sub-agent queue {}", self.path.display()))?;
+        state.generation = state.generation.wrapping_add(1);
+        Ok(())
     }
 }
 
@@ -982,12 +1003,15 @@ struct LiveWaiter {
 impl LiveWaiter {
     /// End the waiter and inspect its result under the same lock used by
     /// `complete`, so timeout and completion have one serialized winner.
-    fn finish_and_take_result(&mut self) -> Option<SubagentToolResult> {
+    fn finish_and_take_result(
+        &mut self,
+        endpoint: &SubagentEndpoint,
+    ) -> Result<Option<SubagentToolResult>> {
         let state_ref = self.state.clone();
         let request_id = self.request_id.clone();
         let mut state = state_ref.lock().expect("sub-agent queue lock poisoned");
         Self::remove_from(&mut self.active, &request_id, &mut state);
-        state.results.get(&request_id).cloned()
+        endpoint.read_result(&state, &request_id)
     }
 
     fn finish(&mut self) {
@@ -2065,7 +2089,7 @@ enabled = false
                     endpoint.complete(done("waiting")).unwrap(),
                     completion_first
                 );
-                let payload = endpoint.cached_result("waiting").unwrap();
+                let payload = endpoint.cached_result("waiting").unwrap().unwrap();
                 if completion_first {
                     assert_eq!(payload, done("waiting"));
                 } else {
@@ -2299,6 +2323,7 @@ enabled = false
         .unwrap();
         served.await.unwrap().unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["acknowledgment_required"], false);
         let payload: serde_json::Value =
             serde_json::from_str(reply["result"]["message"].as_str().unwrap()).unwrap();
         assert_eq!(payload["status"], "queued");
@@ -2461,7 +2486,7 @@ enabled = false
         for daemon_reads_it in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let endpoint = SubagentEndpoint::open(directory.path()).unwrap();
-            endpoint.collect_for_daemon();
+            endpoint.record_collection();
             let socket = directory.path().join("test.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             let served = tokio::spawn({
@@ -2482,7 +2507,7 @@ enabled = false
                 tokio::task::yield_now().await;
             }
             if daemon_reads_it {
-                endpoint.collect_for_daemon();
+                endpoint.record_collection();
             }
 
             let mut line = String::new();
@@ -2510,6 +2535,8 @@ enabled = false
 #[serde(deny_unknown_fields)]
 struct SocketReply {
     accepted: bool,
+    #[serde(default)]
+    acknowledgment_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     result: Option<SubagentToolResult>,
     /// Set only when `result` is absent.
@@ -2641,8 +2668,28 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
     .await
     .context("sub-agent request read timed out")??
     .context("sub-agent request ended before a frame")?;
-    let request: SubagentToolRequest =
-        serde_json::from_str(&line).context("parse sub-agent request")?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SocketRequest {
+        Acknowledge { acknowledge_result: String },
+        Tool(SubagentToolRequest),
+    }
+    let request = match serde_json::from_str(&line).context("parse sub-agent request")? {
+        SocketRequest::Tool(request) => request,
+        SocketRequest::Acknowledge { acknowledge_result } => {
+            endpoint.acknowledge_replies(&[acknowledge_result], true)?;
+            return write_reply(
+                &mut write,
+                SocketReply {
+                    accepted: true,
+                    acknowledgment_required: false,
+                    result: None,
+                    daemon: None,
+                },
+            )
+            .await;
+        }
+    };
     let lane = if matches!(
         request.action,
         mj_core::subagent::SubagentToolAction::WaitAgents
@@ -2653,7 +2700,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         &endpoint.admission.control
     };
     let Ok(_admission) = lane.clone().try_acquire_owned() else {
-        let body = SocketReply { accepted: false, result: Some(SubagentToolResult {
+        let body = SocketReply { accepted: false, acknowledgment_required: false, result: Some(SubagentToolResult {
             request_id: request.request_id, completed_at_ms: mj_core::clock::epoch_millis(),
             is_error: true, message: "Sub-agent request was not accepted: this operation's queue is full; retry later.".into(),
         }), daemon: None };
@@ -2707,23 +2754,26 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
             &mut write,
             SocketReply {
                 accepted: false,
+                acknowledgment_required: false,
                 result: queued,
                 daemon: None,
             },
         )
         .await;
     }
-    let result = match queued {
-        Some(cached) => Some(cached),
-        None if queued_input.is_some() => queued_input,
+    let (result, acknowledgment_required) = match queued {
+        Some(cached) => (Some(cached), true),
+        None if queued_input.is_some() => (queued_input, false),
         None => {
-            endpoint
+            let result = endpoint
                 .await_result_registered(
                     &request_id,
                     started + deadline_budget,
                     waiter.as_mut().expect("a waiting request has a waiter"),
                 )
-                .await?
+                .await?;
+            let acknowledgment_required = result.is_some();
+            (result, acknowledgment_required)
         }
     };
     let result = result.or_else(|| {
@@ -2745,6 +2795,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         &mut write,
         SocketReply {
             accepted: true,
+            acknowledgment_required,
             result,
             daemon,
         },

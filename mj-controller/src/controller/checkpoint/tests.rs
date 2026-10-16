@@ -188,7 +188,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
     materialized.applied_event_digest = cursor.digest.clone();
     ManagedSessionSnapshot {
         subagent_requests: Vec::new(),
-        subagent_results: Vec::new(),
+        subagent_completions: Vec::new(),
+        subagent_queue_error: None,
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized,
         latest_credential_sync_signal: None,
@@ -933,69 +934,9 @@ fn latch_relay_child_serves_stdio() {
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
     println!();
-    // Record this start so a parent test can tell a reconnect from a reused
-    // connection.
-    if let Some(starts) = std::env::var_os(LATCH_RELAY_STARTS) {
-        use std::io::Write;
-        let mut log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(starts)
-            .expect("open the relay start log");
-        writeln!(log, "{}", std::process::id()).expect("record this relay start");
-    }
     let checkpoint_only = std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some();
-    let mut relay = if checkpoint_only {
-        mj_worker::relay::DurableRelay::open_for_checkpoint(
-            Path::new(&root),
-            LATCH_RELAY_SESSION,
-            "1.0.0",
-        )
-    } else {
-        mj_worker::relay::DurableRelay::open(Path::new(&root), LATCH_RELAY_SESSION, "1.0.0")
-    }
-    .expect("open the test relay journal");
-    relay.set_turn_verdict_harness(HarnessKind::Codex);
-    if relay.operational_state().native_session_id.is_none() {
-        if let Ok(fresh) = std::env::var(LATCH_RELAY_FRESH_NATIVE) {
-            let replaced = std::env::var(LATCH_RELAY_REPLACED_UNUSED).ok();
-            // What a worker restored from a checkpoint journals when the
-            // harness cannot reload the archived native session and this
-            // session never used it.
-            relay
-                .record_observation(mj_core::relay::RelayObservation::SessionRestarted)
-                .unwrap();
-            relay
-                .record_observation(mj_core::relay::RelayObservation::Warning {
-                    message: "Claude Code has no native session native-session and this \
-                              session never used it; continuing in a new empty session"
-                        .into(),
-                })
-                .unwrap();
-            relay
-                .record_observation(mj_core::relay::RelayObservation::SessionOpened {
-                    native_session_id: fresh,
-                    native_continuity_lost: false,
-                    resumed: false,
-                    replaced_unused_native_session_id: replaced,
-                })
-                .unwrap();
-        } else {
-            relay
-                .record_observation(mj_core::relay::RelayObservation::SessionOpened {
-                    native_session_id: "native-session".into(),
-                    native_continuity_lost: false,
-                    resumed: true,
-                    replaced_unused_native_session_id: None,
-                })
-                .unwrap();
-        }
-    }
-    if !relay.operational_state().goal.synchronized() && !checkpoint_only {
-        relay.record_session_update(serde_json::from_value(serde_json::json!({
-        "sessionUpdate":"session_info_update", "_meta":{"goal":null,"execution":{"version":1,"status":"idle"}}
-    })).unwrap()).unwrap();
-    }
+    // Queue-only connections never own or write the control journal.
+    let mut relay = None;
     let ready_at = Instant::now()
         + Duration::from_millis(
             std::env::var(LATCH_RELAY_STARTUP_DELAY_MS)
@@ -1012,36 +953,146 @@ fn latch_relay_child_serves_stdio() {
     let running = std::env::var_os(LATCH_RELAY_RUNNING).is_some();
     #[cfg(unix)]
     let answer_prompts = std::env::var_os(LATCH_RELAY_ANSWER_PROMPTS).is_some();
-    #[cfg(unix)]
-    if running && relay.operational_state().active_prompt.is_none() {
-        let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
-            request_id: "seed-running-request".into(),
-            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-            request: mj_core::relay::RelayRequest::Submit {
-                command_id: "seed-running-prompt".into(),
-                command: RelayCommand::Prompt {
-                    prompt: vec![ContentBlock::Text(TextContent::new("running"))],
-                },
-            },
-        });
-        assert!(matches!(
-            response.body,
-            mj_core::relay::RelayResponseBody::Ok {
-                payload: mj_core::relay::RelayResponsePayload::Accepted { .. }
-            }
-        ));
-        let claimed = relay
-            .claim_pending_commands(true)
-            .expect("seed the running prompt");
-        assert_eq!(claimed.len(), 1);
-        assert_eq!(claimed[0].command_id, "seed-running-prompt");
-    }
     let mut reader = std::io::stdin().lock();
     let mut writer = std::io::stdout().lock();
     let mut configured = false;
     while let Some(request) =
         mj_core::relay::read_relay_frame(&mut reader).expect("read a relay request")
     {
+        let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        let payload = match &request.request {
+            mj_core::relay::RelayRequest::Hello { supported, .. } => {
+                let negotiated = max_protocol
+                    .unwrap_or(mj_core::relay::RELAY_PROTOCOL_VERSION)
+                    .min(supported.max);
+                Some(mj_core::relay::RelayResponsePayload::Hello {
+                    negotiated,
+                    relay_version: if max_protocol.is_some() {
+                        "older-protocol-test"
+                    } else {
+                        "1.0.0"
+                    }
+                    .into(),
+                    session_id: LATCH_RELAY_SESSION.into(),
+                    worker_build: None,
+                })
+            }
+            mj_core::relay::RelayRequest::PollSubagentQueue { .. }
+            | mj_core::relay::RelayRequest::SubagentRequests => {
+                subagent_connection_response(&request).map(|response| match response.body {
+                    mj_core::relay::RelayResponseBody::Ok { payload } => payload,
+                    _ => unreachable!(),
+                })
+            }
+            _ => None,
+        };
+        if let Some(payload) = payload {
+            let protocol_version = match &payload {
+                mj_core::relay::RelayResponsePayload::Hello { negotiated, .. } => *negotiated,
+                _ => request.protocol_version,
+            };
+            mj_core::relay::write_relay_frame(
+                &mut writer,
+                &mj_core::relay::RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version,
+                    body: mj_core::relay::RelayResponseBody::Ok { payload },
+                },
+            )
+            .expect("answer a queue or hello request");
+            continue;
+        }
+        let relay = relay.get_or_insert_with(|| {
+            // Record this start so a parent test can tell a reconnect from a reused
+            // connection.
+            if let Some(starts) = std::env::var_os(LATCH_RELAY_STARTS) {
+                use std::io::Write;
+                let mut log = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(starts)
+                    .expect("open the relay start log");
+                writeln!(log, "{}", std::process::id()).expect("record this relay start");
+            }
+            let mut relay = if checkpoint_only {
+                mj_worker::relay::DurableRelay::open_for_checkpoint(
+                    Path::new(&root),
+                    LATCH_RELAY_SESSION,
+                    "1.0.0",
+                )
+            } else {
+                mj_worker::relay::DurableRelay::open(Path::new(&root), LATCH_RELAY_SESSION, "1.0.0")
+            }
+            .expect("open the test relay journal");
+            relay.set_turn_verdict_harness(HarnessKind::Codex);
+            if relay.operational_state().native_session_id.is_none() {
+                if let Ok(fresh) = std::env::var(LATCH_RELAY_FRESH_NATIVE) {
+                    let replaced = std::env::var(LATCH_RELAY_REPLACED_UNUSED).ok();
+                    // What a worker restored from a checkpoint journals when the
+                    // harness cannot reload the archived native session and this
+                    // session never used it.
+                    relay
+                        .record_observation(mj_core::relay::RelayObservation::SessionRestarted)
+                        .unwrap();
+                    relay
+                        .record_observation(mj_core::relay::RelayObservation::Warning {
+                            message: "Claude Code has no native session native-session and this \
+                                      session never used it; continuing in a new empty session"
+                                .into(),
+                        })
+                        .unwrap();
+                    relay
+                        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                            native_session_id: fresh,
+                            native_continuity_lost: false,
+                            resumed: false,
+                            replaced_unused_native_session_id: replaced,
+                        })
+                        .unwrap();
+                } else {
+                    relay
+                        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+                            native_session_id: "native-session".into(),
+                            native_continuity_lost: false,
+                            resumed: true,
+                            replaced_unused_native_session_id: None,
+                        })
+                        .unwrap();
+                }
+            }
+            if !relay.operational_state().goal.synchronized() && !checkpoint_only {
+                relay.record_session_update(serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"session_info_update", "_meta":{"goal":null,"execution":{"version":1,"status":"idle"}}
+            })).unwrap()).unwrap();
+            }
+            #[cfg(unix)]
+            if running && relay.operational_state().active_prompt.is_none() {
+                let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
+                    request_id: "seed-running-request".into(),
+                    protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    request: mj_core::relay::RelayRequest::Submit {
+                        command_id: "seed-running-prompt".into(),
+                        command: RelayCommand::Prompt {
+                            prompt: vec![ContentBlock::Text(TextContent::new("running"))],
+                        },
+                    },
+                });
+                assert!(matches!(
+                    response.body,
+                    mj_core::relay::RelayResponseBody::Ok {
+                        payload: mj_core::relay::RelayResponsePayload::Accepted { .. }
+                    }
+                ));
+                let claimed = relay
+                    .claim_pending_commands(true)
+                    .expect("seed the running prompt");
+                assert_eq!(claimed.len(), 1);
+                assert_eq!(claimed[0].command_id, "seed-running-prompt");
+            }
+            relay
+        });
         if !checkpoint_only && !configured && Instant::now() >= ready_at {
             relay
                 .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
@@ -1117,45 +1168,24 @@ fn latch_relay_child_serves_stdio() {
                 break;
             }
         }
-        let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok());
-        let response =
-            if let (Some(max_protocol), mj_core::relay::RelayRequest::Hello { supported, .. }) =
-                (max_protocol, &request.request)
-                && max_protocol < mj_core::relay::RELAY_PROTOCOL_VERSION
-            {
-                let negotiated = max_protocol.min(supported.max);
-                mj_core::relay::RelayResponseEnvelope {
-                    request_id: request.request_id.clone(),
-                    protocol_version: negotiated,
-                    body: mj_core::relay::RelayResponseBody::Ok {
-                        payload: mj_core::relay::RelayResponsePayload::Hello {
-                            negotiated,
-                            relay_version: "older-protocol-test".into(),
-                            session_id: LATCH_RELAY_SESSION.into(),
-                            worker_build: None,
-                        },
-                    },
-                }
-            } else if reject_release && requests_checkpoint_release(&request) {
-                unparseable_request_response(&request)
-            } else if let Some(response) = subagent_connection_response(&request) {
-                response
-            } else {
-                let mut request = request;
-                if max_protocol.is_some() {
-                    // Run the current durable relay's behavior while speaking
-                    // the older version negotiated by this test worker.
-                    request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
-                }
-                let mut response = relay.handle(request);
-                if let Some(max_protocol) = max_protocol {
-                    response.protocol_version =
-                        max_protocol.min(mj_core::relay::RELAY_PROTOCOL_VERSION);
-                }
-                response
-            };
+        let response = if reject_release && requests_checkpoint_release(&request) {
+            unparseable_request_response(&request)
+        } else if let Some(response) = subagent_connection_response(&request) {
+            response
+        } else {
+            let mut request = request;
+            if max_protocol.is_some() {
+                // Run the current durable relay's behavior while speaking
+                // the older version negotiated by this test worker.
+                request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
+            }
+            let mut response = relay.handle(request);
+            if let Some(max_protocol) = max_protocol {
+                response.protocol_version =
+                    max_protocol.min(mj_core::relay::RELAY_PROTOCOL_VERSION);
+            }
+            response
+        };
         mj_core::relay::write_relay_frame(&mut writer, &response).expect("answer a relay request");
         if checkpoint_only {
             relay.dispatch_checkpoint_only().unwrap();
@@ -1247,6 +1277,15 @@ fn subagent_connection_response(
     request: &mj_core::relay::RelayRequestEnvelope,
 ) -> Option<mj_core::relay::RelayResponseEnvelope> {
     let payload = match &request.request {
+        mj_core::relay::RelayRequest::PollSubagentQueue { acknowledged } => {
+            mj_core::relay::RelayResponsePayload::SubagentQueue {
+                page: mj_core::subagent::SubagentQueuePage {
+                    sequence: acknowledged.unwrap_or(0) + 1,
+                    changes: Vec::new(),
+                    has_more: false,
+                },
+            }
+        }
         mj_core::relay::RelayRequest::SubagentRequests => {
             mj_core::relay::RelayResponsePayload::SubagentRequests {
                 requests: Vec::new(),

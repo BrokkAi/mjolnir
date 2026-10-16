@@ -165,6 +165,7 @@ impl DurableRelay {
             | RelayRequest::InstallProjectMemorySnapshot { .. }
             | RelayRequest::ReplaceProjectMemoryTree { .. }
             | RelayRequest::CompleteSubagentRequest { .. }
+            | RelayRequest::PollSubagentQueue { .. }
             | RelayRequest::SetSubagentAdmission { .. } => {
                 return Ok(relay_error(
                     RelayErrorCode::InvalidState,

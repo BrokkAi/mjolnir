@@ -545,8 +545,10 @@ pub struct ManagedSessionSnapshot {
     pub worker_build: Option<String>,
     /// Pending parent-tool work fetched from the target worker.
     pub subagent_requests: Vec<crate::subagent::SubagentToolRequest>,
-    /// Recently completed tool work cached by the worker for idempotent calls.
-    pub subagent_results: Vec<crate::subagent::SubagentToolResult>,
+    /// Compact completion receipts; full tool replies remain worker-private.
+    pub subagent_completions: Vec<crate::subagent::SubagentCompletion>,
+    /// Delegation transport failures do not make the worker's controls unreachable.
+    pub subagent_queue_error: Option<String>,
 }
 
 /// What a projection's transcript window leaves out.

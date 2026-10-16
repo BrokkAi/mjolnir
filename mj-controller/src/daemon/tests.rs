@@ -2658,7 +2658,8 @@ fn ready_startup_view() -> ManagedSessionView {
     ManagedSessionView {
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational,
@@ -6784,6 +6785,20 @@ async fn startup_retry_keeps_earlier_uncertain_input_ahead_of_new_input() {
 #[cfg(unix)]
 #[tokio::test]
 async fn resumable_lifecycles_release_admission_and_reacquire_named_control() {
+    const CHILD: &str = "MJ_TEST_RESUMABLE_ADMISSION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "resumable_lifecycles_release_admission_and_reacquire_named_control",
+            ),
+        )
+        .env(CHILD, "1")
+        .isolated_store(directory.path())
+        .run();
+        return;
+    }
     for (id, kind, label) in [
         (
             "move-copy-admission",

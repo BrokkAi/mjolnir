@@ -26,10 +26,10 @@ impl ChildWaitFeed {
             .as_ref()?
             .view()
             .snapshot?
-            .subagent_results
+            .subagent_completions
             .iter()
             .find(|result| result.request_id == request_id)
-            .cloned()
+            .and_then(mj_core::subagent::SubagentCompletion::interrupted_wait_result)
     }
 
     fn committed(&self) -> Result<Option<Arc<crate::database::CommittedState>>> {

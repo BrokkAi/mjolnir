@@ -72,8 +72,10 @@ pub const RELAY_LEGACY_MAILBOX_PROTOCOL: u32 = 33;
 pub const RELAY_STRUCTURED_MAILBOX_PROTOCOL: u32 = 34;
 pub const RELAY_SESSION_MESSAGE_PROTOCOL: u32 = 36;
 pub const RELAY_CLAUDE_HOOK_STEERING_PROTOCOL: u32 = 37;
-/// Explicit, durable parent waits that leave child workers running.
-pub const RELAY_SUBAGENT_WAIT_PROTOCOL: u32 = 38;
+/// 38 replaces delegation-history snapshots with acknowledged queue changes.
+pub const RELAY_SUBAGENT_FEED_PROTOCOL: u32 = 38;
+/// 39 adds explicit, durable parent waits that leave child workers running.
+pub const RELAY_SUBAGENT_WAIT_PROTOCOL: u32 = 39;
 pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SUBAGENT_WAIT_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
@@ -86,6 +88,8 @@ pub const RELAY_GZIP_SKILLS_PROTOCOL: u32 = 23;
 /// The first protocol whose workers support conditional whole-tree replacement
 /// of session project memory, including deletion of omitted files.
 pub const RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL: u32 = 31;
+/// Completion replies at this version distinguish a live caller from a late result.
+pub const RELAY_SUBAGENT_DELIVERY_PROTOCOL: u32 = 31;
 /// Digest for the empty relay event prefix (ordinal zero).
 pub const RELAY_EVENT_GENESIS_DIGEST: &str = crate::archive::EVENT_FRONTIER_GENESIS_DIGEST;
 /// Domain separator for a v1 (chained) relay event digest. v1 records fold
