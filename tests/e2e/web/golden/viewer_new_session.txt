@@ -64,6 +64,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -74,7 +75,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/mnt/data","read_only":true}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/mnt/data","read_only":true},{"source":"/opt/data","destination":"/mnt/data-2","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/opt/data","destination":"/mnt/data-2","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false},{"source":"/srv/reference","destination":"/mnt/reference","read_only":true}]}]
 request: POST /api/paths/complete [{"target_id":"container","prefix":"/srv/data","kind":"directories"},{"target_id":"container","prefix":"/opt/data","kind":"directories"},{"target_id":"container","prefix":"/srv/cache","kind":"directories"},{"target_id":"container","prefix":"/srv/reference","kind":"directories"}]
@@ -121,6 +122,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -131,7 +133,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false},{"source":"/srv/reference","destination":"/mnt/reference","read_only":true}],"resource_allocation":{"kind":"container","cpus":6,"memory_bytes":13421772800}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/mnt/data","read_only":true}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/mnt/data","read_only":true},{"source":"/opt/data","destination":"/mnt/data-2","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/opt/data","destination":"/mnt/data-2","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/data","destination":"/repos","read_only":false,"access":"rw"},{"source":"/srv/cache","destination":"/mnt/cache","read_only":false},{"source":"/srv/reference","destination":"/mnt/reference","read_only":true}]}]
@@ -171,6 +173,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -181,7 +184,7 @@ The target provides its own isolated workspace.
 Back
 Checking…
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Checking…","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Checking…","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/missing","destination":"/mnt/missing","read_only":true}]}]
 request: POST /api/paths/complete [{"target_id":"container","prefix":"/srv/missing","kind":"directories"}]
@@ -220,6 +223,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -230,7 +234,7 @@ The target provides its own isolated workspace.
 Back
 Retry
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Retry","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Edit","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Remove","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Retry","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/missing","destination":"/mnt/missing","read_only":true}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/missing","destination":"/data","read_only":true}]}]
 request: POST /api/paths/complete [{"target_id":"container","prefix":"/srv/missing","kind":"directories"}]
@@ -250,6 +254,7 @@ Title (optional)
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -260,7 +265,7 @@ Create a separate session-owned clone on the selected or default branch.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"local","project_directory":"/work/recent","create_managed_worktree":true,"subagents":{"mode":"native"}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/missing","destination":"/mnt/missing","read_only":true}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[{"source":"/srv/missing","destination":"/data","read_only":true}]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]},{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"local","project_directory":"/work/recent","remote_repairs":[]}]
@@ -381,6 +386,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -391,7 +397,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"ec2","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"additional_mounts":[],"resource_allocation":{"kind":"aws-ec2","instance_type":"c7i.large","vcpus":2,"memory_bytes":4294967296}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"ec2","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
@@ -483,6 +489,7 @@ Title (optional)
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -493,7 +500,7 @@ Create a separate session-owned clone on the selected or default branch.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","remote_repairs":[]}]
 request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/linked","kind":"directories"}]
@@ -513,6 +520,7 @@ Title (optional)
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -523,7 +531,7 @@ Create a separate session-owned clone on the selected or default branch.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":true,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","create_managed_worktree":true,"subagents":{"mode":"native"}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/linked","remote_repairs":[]}]
@@ -562,6 +570,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -572,7 +581,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -609,6 +618,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -619,7 +629,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
@@ -657,6 +667,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -664,7 +675,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -701,6 +712,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -708,7 +720,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
@@ -746,6 +758,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -753,7 +766,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -790,6 +803,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -797,9 +811,203 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== review delegation None without configured models (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== delegation None without configured models (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== review delegation remembered None (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
+project creation requests: 0
+=== delegation remembered None (390x844) ===
+New session
+
+Step 4 of 4 · Review
+
+Account
+alpha
+Where to run
+container
+Container size
+8 CPU · 32 GiB memory
+Project
+existing
+Local changes
+Excluded (unpublished commits and dirty files)
+existing network source
+fetch https://github.com/example/repo.git · main · push https://github.com/example/repo.git
+Title (optional)
+Attached directories
+
+Source directories must exist on the selected target’s host.
+
+Host directory
+Container path (optional)
+Access
+read-only
+copy-on-write
+read-write
+
+Add mount
+Delegation
+Native
+Mjolnir
+None
+
+Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
+
+Create isolated checkout
+
+The target provides its own isolated workspace.
+
+Back
+Start
+Cancel
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"none","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+subagent selector count: 1
+action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"none"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
 === review for harness without subagent support (390x844) ===
@@ -835,6 +1043,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -845,7 +1054,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -882,6 +1091,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -892,7 +1102,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":true,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":true,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"gamma","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
@@ -930,6 +1140,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -940,7 +1151,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -959,6 +1170,7 @@ Title (optional)
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -969,7 +1181,7 @@ Use the selected directory directly.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"local","project_directory":"/work/recent","remote_repairs":[]}]
 project creation requests: 0
@@ -988,6 +1200,7 @@ Title (optional)
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -998,7 +1211,7 @@ Use the selected directory directly.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"","target_id":"remote","project_directory":"/remote/recent","remote_repairs":[]}]
 project creation requests: 0
@@ -1061,6 +1274,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -1071,7 +1285,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -1387,6 +1601,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -1394,7 +1609,7 @@ The target provides its own isolated workspace.
 Back
 Start
 Cancel
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
 project creation requests: 0
@@ -1431,6 +1646,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 Create isolated checkout
 
 The target provides its own isolated workspace.
@@ -1440,7 +1656,7 @@ Start
 Cancel
 
 Selected subagent model "removed" is unavailable. Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents.
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"mjolnir","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"mjolnir"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]
@@ -1478,6 +1694,7 @@ Add mount
 Delegation
 Native
 Mjolnir
+None
 
 Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents
 
@@ -1490,7 +1707,7 @@ Start
 Cancel
 
 boom
-controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"input","id":"new-title","label":null,"value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-source","label":"Mount source","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"input","id":"new-mount-destination","label":"Mount destination","value":"","checked":false,"disabled":false,"pressed":null},{"tag":"select","id":"new-mount-access","label":"Mount access","value":"ro","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Add mount","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"select","id":"new-subagents","label":"Native\nMjolnir\nNone","value":"native","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-managed-worktree","label":null,"value":"on","checked":false,"disabled":true,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Start","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 1
 action: POST /api/actions [{"action":"new","workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"create_managed_worktree":false,"subagents":{"mode":"native"},"additional_mounts":[],"resource_allocation":{"kind":"container","cpus":8,"memory_bytes":34359738368}}]
 request: POST /api/preflight/new [{"workspace_id":"test","profile_id":"alpha","bundle_id":"existing","target_id":"container","project_directory":null,"remote_repairs":[],"additional_mounts":[]}]

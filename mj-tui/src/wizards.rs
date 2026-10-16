@@ -47,13 +47,19 @@ use mj_chat::selection::FrameSurfaces;
 use mj_core::targets::{AdditionalMount, MountAccess, default_mount_destination};
 
 use crate::widgets::{
-    Truncate, centered_modal, centered_rect, dismissible_modal_title, format_resource_bytes,
+    Truncate, centered_modal_fixed, dismissible_modal_title, format_resource_bytes,
     truncate_to_cells,
 };
+
 use crate::{
     DashboardAction, DashboardState, Mode, RemoteRepositoryPreview, move_index,
     nth_enabled_profile, nth_key,
 };
+
+/// Keep the frame and action row in place while moving between wizard steps.
+fn wizard_modal(frame: &mut Frame<'_>, surfaces: &mut FrameSurfaces, area: Rect) -> Rect {
+    centered_modal_fixed(frame, surfaces, 84, 24, area)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WizardStep {

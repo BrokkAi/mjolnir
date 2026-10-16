@@ -1728,7 +1728,8 @@ function freshDraft() {
     resourceLoading: false,
     resourceError: '',
   };
-  draft.subagents = mjolnirAvailable(draft) ? delegationPolicy(snapshot?.last_subagent_policy) : { mode: 'native' };
+  draft.subagents = delegationPolicy(snapshot?.last_subagent_policy);
+  if (draft.subagents.mode === 'mjolnir' && !mjolnirAvailable(draft)) draft.subagents = { mode: 'native' };
   setNewTargetSizing(draft, draft.targetId);
   return draft;
 }
@@ -1739,7 +1740,7 @@ function subagentChoiceApplies(draft = newDraft) {
   return kind === 'claude' || kind === 'codex';
 }
 
-const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir']];
+const SUBAGENT_MODES = [['native', 'Native'], ['mjolnir', 'Mjolnir'], ['none', 'None']];
 const SUBAGENT_SETUP_REASON = "Set up Mjolnir sub-agents in mj's TUI Settings -> Sub-agents";
 
 function delegationPolicy(policy) {
@@ -1751,6 +1752,7 @@ function delegationPolicy(policy) {
     const subtle = choice(policy.subtle);
     return { mode: 'mjolnir', ...(straightforward ? { straightforward } : {}), ...(subtle ? { subtle } : {}) };
   }
+  if (policy?.mode === 'none') return { mode: 'none' };
   return { mode: ['mjolnir', 'single_model', 'all_models'].includes(policy?.mode) ? 'mjolnir' : 'native' };
 }
 
@@ -1914,7 +1916,7 @@ function renderNewForm() {
       describe(select.value);
       select.onchange = () => {
         newDraft.profileId = select.value;
-        if (!mjolnirAvailable(newDraft)) newDraft.subagents = { mode: 'native' };
+        if (newDraft.subagents.mode === 'mjolnir' && !mjolnirAvailable(newDraft)) newDraft.subagents = { mode: 'native' };
         describe(select.value);
       };
       field.append(select, description);

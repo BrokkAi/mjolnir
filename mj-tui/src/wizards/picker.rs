@@ -243,13 +243,7 @@ pub(crate) fn render_picker(
     form: &mut Dialog<WizardControl>,
     surfaces: &mut FrameSurfaces,
 ) {
-    let width_percent = if navigation.control == WizardControl::TargetList {
-        if area.width < 100 { 100 } else { 85 }
-    } else if area.width < 64 {
-        100
-    } else {
-        68
-    };
+    let popup = wizard_modal(frame, surfaces, area);
     let instance_rows = if matches!(navigation.resources, Some(ResourcePicker::Ec2 { .. })) {
         3
     } else {
@@ -261,20 +255,7 @@ pub(crate) fn render_picker(
         mj_chat::components::ButtonColumn::width(navigation.side_actions)
             + mj_chat::components::ButtonColumn::BODY_GAP
     };
-    let estimated = mj_chat::components::dialog_rect(area, width_percent, 1);
-    let help = wrap_lines(help, estimated.width.saturating_sub(4 + side_width));
-    let popup = centered_modal(
-        frame,
-        surfaces,
-        width_percent,
-        (choices.len().max(1) as u16
-            + help.len() as u16
-            + u16::from(!help.is_empty())
-            + instance_rows
-            + 5)
-        .clamp(6, 28),
-        area,
-    );
+    let help = wrap_lines(help, popup.width.saturating_sub(4 + side_width));
     let content = DialogShell::padded_inner(popup);
     let layout = DialogShell::layout(content, 1);
     let button_area = layout.actions;
