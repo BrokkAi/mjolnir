@@ -4949,7 +4949,14 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         1,
         "{allow:?}"
     );
-    for tool in ["spawn", "list_agents", "send_message", "wait", "close"] {
+    for tool in [
+        "spawn",
+        "list_agents",
+        "send_message",
+        "await_children",
+        "wait",
+        "close",
+    ] {
         assert!(
             allow.contains(&format!("mcp__mj-agents__{tool}")),
             "{tool}: {allow:?}"

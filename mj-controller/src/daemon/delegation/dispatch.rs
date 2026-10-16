@@ -105,11 +105,13 @@ impl SubagentDispatch {
             }
             // A cancelled wait's receipt can restore tentative report markers.
             // Finish that delivery before another wait can collect reports.
-            if matches!(entry.request.action, SubagentToolAction::WaitAgents)
-                && waiting_parents
-                    .entry(id.0.clone())
-                    .or_insert_with(|| id.1.clone())
-                    != &id.1
+            if matches!(
+                entry.request.action,
+                SubagentToolAction::WaitAgents | SubagentToolAction::AwaitChildren
+            ) && waiting_parents
+                .entry(id.0.clone())
+                .or_insert_with(|| id.1.clone())
+                != &id.1
             {
                 continue;
             }
@@ -184,7 +186,9 @@ impl SubagentDispatch {
 fn execution_lane(request: &SubagentToolRequest) -> usize {
     usize::from(matches!(
         request.action,
-        SubagentToolAction::LegacyInterruptAgent { .. } | SubagentToolAction::CloseAgent { .. }
+        SubagentToolAction::LegacyInterruptAgent { .. }
+            | SubagentToolAction::CloseAgent { .. }
+            | SubagentToolAction::AwaitChildren
     ))
 }
 
@@ -284,38 +288,45 @@ mod tests {
         assert!(queue.entries.is_empty());
     }
     // Hard-won: #1287: a replacement wait raced the cancelled wait's report rollback.
+    // Hard-won: #1302: await_children observed tentative collection before the withdrawn wait's receipt.
     #[test]
     fn replacement_wait_waits_for_receipt_without_blocking_other_work() {
-        let mut queue = SubagentDispatch::default();
-        let mut first = input("first", "a", 1);
-        first.action = SubagentToolAction::WaitAgents;
-        // A later request's wall clock need not sort after the admitted owner.
-        let mut second = input("second", "a", 0);
-        second.action = SubagentToolAction::WaitAgents;
-        let message = input("message", "a", 3);
-        queue.observe("p", &[first, message.clone()]);
-        let mut other = input("other", "b", 4);
-        other.action = SubagentToolAction::WaitAgents;
-        queue.observe("q", &[other]);
-        let now = Instant::now() + Duration::from_secs(1);
-        let ids =
-            |ready: Vec<(Identity, Job)>| ready.into_iter().map(|(id, _)| id.1).collect::<Vec<_>>();
-        assert_eq!(ids(queue.ready(now)), ["first", "message", "other"]);
-        queue.observe("p", &[second.clone(), message.clone()]);
-        assert!(queue.ready(now).is_empty());
-        let first_id = ("p".into(), "first".into());
-        queue.failed_task(&first_id);
-        assert!(queue.ready(Instant::now()).is_empty());
-        assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
-        queue.executed(&first_id, result("first"));
-        queue.observe("p", &[second, message]);
-        assert_eq!(ids(queue.ready(now)), ["first"]);
-        queue.delivered(&first_id, false);
-        assert!(queue.ready(Instant::now()).is_empty());
-        assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
-        assert!(queue.ready(now + Duration::from_secs(2)).is_empty());
-        queue.delivered(&first_id, true);
-        assert_eq!(ids(queue.ready(now)), ["second"]);
+        for action in [
+            SubagentToolAction::WaitAgents,
+            SubagentToolAction::AwaitChildren,
+        ] {
+            let mut queue = SubagentDispatch::default();
+            let mut first = input("first", "a", 1);
+            first.action = SubagentToolAction::WaitAgents;
+            // A later request's wall clock need not sort after the admitted owner.
+            let mut second = input("second", "a", 0);
+            second.action = action;
+            let message = input("message", "a", 3);
+            queue.observe("p", &[first, message.clone()]);
+            let mut other = input("other", "b", 4);
+            other.action = SubagentToolAction::WaitAgents;
+            queue.observe("q", &[other]);
+            let now = Instant::now() + Duration::from_secs(1);
+            let ids = |ready: Vec<(Identity, Job)>| {
+                ready.into_iter().map(|(id, _)| id.1).collect::<Vec<_>>()
+            };
+            assert_eq!(ids(queue.ready(now)), ["first", "message", "other"]);
+            queue.observe("p", &[second.clone(), message.clone()]);
+            assert!(queue.ready(now).is_empty());
+            let first_id = ("p".into(), "first".into());
+            queue.failed_task(&first_id);
+            assert!(queue.ready(Instant::now()).is_empty());
+            assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
+            queue.executed(&first_id, result("first"));
+            queue.observe("p", &[second, message]);
+            assert_eq!(ids(queue.ready(now)), ["first"]);
+            queue.delivered(&first_id, false);
+            assert!(queue.ready(Instant::now()).is_empty());
+            assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
+            assert!(queue.ready(now + Duration::from_secs(2)).is_empty());
+            queue.delivered(&first_id, true);
+            assert_eq!(ids(queue.ready(now)), ["second"]);
+        }
     }
     #[test]
     fn replacement_daemon_rebuilds_pending_work_from_the_worker_queue() {

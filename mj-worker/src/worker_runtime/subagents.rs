@@ -755,6 +755,8 @@ impl SubagentEndpoint {
         let turn = request.originating_command_id.as_deref()?;
         let next_action = if !relay.subagent_wait_turn_is_live(turn) {
             "The originating parent turn ended or was cancelled. Your children continue working; their reports have not been collected by this reply. Call wait from the next turn to collect them."
+        } else if relay.is_waiting_for_children() {
+            "The parent chose notification-driven waiting. This blocking wait is withdrawn without collecting reports. End this turn; children keep running and a report-ready notification or user input resumes you."
         } else if relay.boundary_steer_needs_turn(turn) {
             "A user correction is waiting at this tool boundary. Read it before calling wait again. Your children continue working; their reports have not been collected by this reply."
         } else {
@@ -840,7 +842,7 @@ impl SubagentEndpoint {
     ) -> Result<(bool, Option<SubagentToolResult>, u64)> {
         // One owner selects the originating turn and keeps it selected until
         // the request is durable; a later daemon never reconstructs this fact.
-        let relay = self
+        let mut relay = self
             .relay
             .as_ref()
             .map(|relay| relay.lock().expect("relay lock poisoned"));
@@ -856,6 +858,34 @@ impl SubagentEndpoint {
         // a new admission. Keep it attached to the original queued operation.
         if state.requests.contains_key(&request.request_id) {
             return Ok((true, None, mark));
+        }
+        if matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::WaitAgents
+        ) && let Some(relay) = relay.as_mut()
+        {
+            relay.collect_subagent_reports(&request.request_id)?;
+        }
+        if matches!(
+            request.action,
+            mj_core::subagent::SubagentToolAction::AwaitChildren
+        ) && let Some(relay) = relay.as_mut()
+        {
+            // Withdraw existing blocking waits before daemon dispatch. Their
+            // negative receipts restore any tentative report collection.
+            relay.await_subagent_notification(&request.request_id)?;
+            // Retire collectors while both owners are locked. Later input or
+            // a fresh collection can clear the wait intent before their socket
+            // task runs; their negative delivery decision must already be durable.
+            let interrupted = state
+                .requests
+                .keys()
+                .filter_map(|id| Self::interrupted_wait_result(relay, &state, id))
+                .collect::<Vec<_>>();
+            for result in interrupted {
+                self.store_result(&mut state, result, false)?;
+            }
+            self.completed.notify_waiters();
         }
         if request.action.mutates_child_state() && !state.mutating_admission_open {
             return Ok((false, Some(SubagentToolResult {
@@ -1975,8 +2005,9 @@ enabled = false
     }
 
     // Hard-won: #1287: a cancelled direct MCP wait consumed a later child report through its live socket.
+    // Hard-won: #1302: notification-driven waiting must withdraw a wrapped wait without consuming reports.
     #[test]
-    fn cancelled_wait_completion_is_serialized_with_its_turn_owner() {
+    fn wait_completion_is_serialized_with_its_turn_owner() {
         use crate::relay::test_support::{prompt, submit_relay};
         use mj_core::config::HarnessKind;
         use mj_core::relay::{RelayCommand, RelayCommandOutcome};
@@ -1987,6 +2018,10 @@ enabled = false
             },
             RelayCommand::CancelTurn,
             RelayCommand::Cancel,
+            RelayCommand::SetSubagentWait {
+                active_prompt_id: "original-turn".into(),
+                waiting: true,
+            },
         ] {
             for completion_first in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -2014,7 +2049,7 @@ enabled = false
                     "cancel-original-turn",
                     cancel.clone(),
                 );
-                {
+                if !matches!(cancel, RelayCommand::SetSubagentWait { .. }) {
                     let mut owner = relay.lock().unwrap();
                     owner.claim_pending_commands(true).unwrap();
                     owner
@@ -2049,12 +2084,17 @@ enabled = false
 
     // Hard-won: #1287: cancelled or superseded turns left their MCP waiter registered until its deadline.
     #[tokio::test]
-    async fn turn_end_retires_pending_wait_without_collecting_child_reports() {
+    async fn turn_control_retires_pending_wait_before_new_input_can_release_its_intent() {
         use crate::relay::test_support::{prompt, submit_relay};
         use mj_core::config::HarnessKind;
         use mj_core::relay::{RelayCommand, RelayCommandOutcome};
 
-        for replacement_turn in [false, true] {
+        for transition in [
+            "cancel",
+            "replacement",
+            "await_children",
+            "await_children_then_input",
+        ] {
             let root = tempfile::tempdir().unwrap();
             let mut owner = crate::relay::DurableRelay::open_for_harness(
                 root.path(),
@@ -2068,9 +2108,9 @@ enabled = false
             let relay = Arc::new(Mutex::new(owner));
             let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
             endpoint.relay = Some(relay.clone());
-            let mut request = request("waiting");
-            request.action = SubagentToolAction::WaitAgents;
-            endpoint.enqueue(request).unwrap();
+            let mut collecting = request("waiting");
+            collecting.action = SubagentToolAction::WaitAgents;
+            endpoint.enqueue(collecting).unwrap();
             let mut waiter = endpoint.register_waiter("waiting");
             let mut pending = Box::pin(endpoint.await_result_registered(
                 "waiting",
@@ -2084,9 +2124,26 @@ enabled = false
                 .await
                 .is_pending()
             );
+            if transition.starts_with("await_children") {
+                let mut control = request("notification-wait");
+                control.action = SubagentToolAction::AwaitChildren;
+                endpoint.enqueue(control).unwrap();
+                endpoint.complete(done("notification-wait")).unwrap();
+                // Retrying an earlier collecting request cannot withdraw the newer intent.
+                let mut retried = request("waiting");
+                retried.action = SubagentToolAction::WaitAgents;
+                endpoint.enqueue(retried).unwrap();
+            }
             {
                 let mut owner = relay.lock().unwrap();
-                if replacement_turn {
+                if transition.starts_with("await_children") {
+                    assert!(owner.subagent_wait_turn_is_live("original-turn"));
+                    assert!(owner.is_waiting_for_children());
+                    if transition == "await_children_then_input" {
+                        submit_relay(&mut owner, "user-steering", prompt("New priority"));
+                        assert!(!owner.is_waiting_for_children());
+                    }
+                } else if transition == "replacement" {
                     submit_relay(&mut owner, "cancel-original-turn", RelayCommand::CancelTurn);
                     owner.claim_pending_commands(true).unwrap();
                     owner
@@ -2123,6 +2180,12 @@ enabled = false
             assert!(!endpoint.complete(done("waiting")).unwrap());
             assert!(endpoint.state.lock().unwrap().live_waiters.is_empty());
             assert!(endpoint.snapshot().0.is_empty());
+            if transition == "await_children" {
+                let mut collect = request("fresh-collection");
+                collect.action = SubagentToolAction::WaitAgents;
+                endpoint.enqueue(collect).unwrap();
+                assert!(!relay.lock().unwrap().is_waiting_for_children());
+            }
         }
     }
 

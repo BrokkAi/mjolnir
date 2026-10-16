@@ -1118,6 +1118,7 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
         | RelayCommand::AdvanceRecoveryFloor { .. }
         | RelayCommand::InstallPromptContext { .. }
         | RelayCommand::RecordNotice { .. }
+        | RelayCommand::SetSubagentWait { .. }
         | RelayCommand::SeedAssessmentContext { .. }
         | RelayCommand::SetQuotaRecovery { .. }
         | RelayCommand::ResolveSteering { .. }

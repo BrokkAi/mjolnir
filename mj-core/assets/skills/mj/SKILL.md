@@ -76,14 +76,20 @@ child sessions in the same target and filesystem:
   pending messages and delivery failures, marked `via: mailbox` or `via: turn`.
 - `wait` — call without arguments to watch every child that is not stopped. It
   returns as soon as one has a new report, when nothing is unfinished, or when
-  this harness's wait window ends. A wait may end before work is done, and
-  another wait is normal. Each finish is
-  reported once; `send_message` can start another turn and produce another
+  this harness's wait window ends. One call collects every ready report. Each
+  finish is reported once; `send_message` can start another turn and produce another
   report. Status `reported` means new reports are in `output`;
   `nothing_to_wait_for` means no new report or unfinished child;
-  `still_running` means the wait window ended first. Call `wait` again later to
-  collect reports that become ready. A prompt may remind you to call `wait`,
-  but does not include child output.
+  `still_running` means the wait window ended first. A report-ready prompt
+  contains no child output; call `wait` to collect reports after it arrives.
+- `await_children` — returns immediately. With no independent work left, call
+  it and end the turn if status is `awaiting_children`. The parent session and
+  children keep running; this is not suspension or task completion. Mjolnir
+  respects this intentional wait and resumes the parent on a report-ready
+  notification or user input. If `reports_ready`, collect with `wait` now;
+  if `nothing_to_wait_for`, no child needs waiting or collection. Read user
+  steering before deciding what to do next. Do not renew empty blocking waits
+  or poll a yielding code-mode wrapper when no independent work remains.
 - `close` — stop a child and keep its conversation.
 
 Prefer these tools when they are listed; they work where the CLI cannot reach

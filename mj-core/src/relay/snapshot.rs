@@ -60,6 +60,11 @@ pub enum RelayCommand {
     Prompt {
         prompt: Vec<ContentBlock>,
     },
+    /// Arm or withdraw notification-driven waiting on the current parent turn.
+    SetSubagentWait {
+        active_prompt_id: String,
+        waiting: bool,
+    },
     /// Deliver the fixed reminder only while this completed turn is still current.
     HandbackReminder {
         completed_command_id: String,
@@ -186,6 +191,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
             Self::MailboxWake { events } => events
                 .iter()
@@ -232,6 +238,7 @@ impl RelayCommand {
         matches!(
             self,
             Self::ResolveSteering { .. }
+                | Self::SetSubagentWait { .. }
                 | Self::RemoveQueuedPrompt { .. }
                 | Self::ClearQueuedPrompts
                 | Self::CompleteCheckpoint { .. }
@@ -300,6 +307,7 @@ impl RelayCommand {
             Self::ReleaseCheckpoint { .. } => RelayCommandKind::ReleaseCheckpoint,
             Self::AdvanceRecoveryFloor { .. } => RelayCommandKind::AdvanceRecoveryFloor,
             Self::RecordNotice { .. }
+            | Self::SetSubagentWait { .. }
             | Self::SetQuotaRecovery { .. }
             | Self::SeedAssessmentContext { .. }
             | Self::InstallPromptContext { .. }

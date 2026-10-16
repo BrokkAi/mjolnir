@@ -1,7 +1,7 @@
 # Delegation policy
 
 The user selected Mjolnir delegation. Use Mjolnir's `spawn`, `wait`,
-`list_agents`, `send_message`, and `close` tools; Mjolnir supplies the configured
+`list_agents`, `await_children`, `send_message`, and `close` tools; Mjolnir supplies the configured
 child model and effort for each task type. Set `task_type` to `straightforward`
 for work with a clear method, including locating code, running commands or
 test suites, and implementing a settled design. Use `subtle` for ambiguous
@@ -69,15 +69,27 @@ You own the final synthesis and any requested commit or delivery.
 
 ## Collect results and continue
 
-When progress depends on children, call `wait` without arguments. It uses this
-harness's wait window, watches every child that is not stopped, and returns as
-soon as one has a new report. Each finish is reported once; a child resumed with
-`send_message` can report again after its next turn. If a wait times out, call it
-again when you need to collect a report. A wait may end before work is done,
-and another wait is normal. Avoid repeated status checks: every parent request
-carries your accumulated context. A prompt may
-remind you to call `wait`, but contains no child output. Use `list_agents` to
-reconcile uncertain child state.
+When no independent work remains, call `await_children`. It returns immediately.
+If its status is `awaiting_children`, end your current turn with a brief waiting
+status. Your session stays live and your children keep running; do not suspend
+or close the session, and do not describe the user's task as complete. Mjolnir
+respects this intentional wait instead of automatically continuing your turn.
+A report-ready notification or new user input resumes you.
+
+A notification says reports are ready; it contains no child output. Call `wait`
+without arguments once to collect every ready report and continue the task.
+With unfinished children and no independent work, call `await_children` and end
+the turn again. Each finish
+is collected once; a child resumed with `send_message` can report again. If
+`await_children` returns `reports_ready`, collect immediately. If it returns
+`nothing_to_wait_for`, no child needs waiting or report collection. Read user
+steering before deciding whether to work independently, collect, or await again.
+
+Bounded blocking `wait` calls remain useful when you expect a report soon.
+A wait may return `still_running` before work finishes. With no independent
+work left, use `await_children` and end the turn instead of renewing empty waits
+or polling a yielding code-mode wrapper. Every model request carries your
+accumulated context. Use `list_agents` to reconcile uncertain child state.
 
 Completed children are parked and consume no process slots. Use `send_message`
 when a follow-up benefits from the child's existing context. A fresh child with

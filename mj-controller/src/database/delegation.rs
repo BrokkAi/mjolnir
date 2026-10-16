@@ -34,6 +34,15 @@ pub(crate) fn list_subagent_parent_ids() -> Result<Vec<String>> {
         .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
+pub(crate) fn subagent_notification_epochs(parent: &str) -> Result<BTreeMap<String, u64>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT child_session_id, notification_epoch FROM subagent_sessions WHERE parent_session_id=?1",
+    )?;
+    let rows = statement.query_map([parent], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PreparedDelegation {
     pub request: SubagentToolRequest,
@@ -202,7 +211,7 @@ pub(crate) fn unreport_delegation_finishes(
                 }
                 relation.reported_finish = None;
                 transaction.execute(
-                "UPDATE subagent_sessions SET record_json=?2 WHERE child_session_id=?1 AND parent_session_id=?3",
+                "UPDATE subagent_sessions SET record_json=?2, notification_epoch=notification_epoch+1 WHERE child_session_id=?1 AND parent_session_id=?3",
                 params![child_id, serde_json::to_string(&relation)?, parent],
             )?;
             }

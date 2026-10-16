@@ -13,15 +13,16 @@ use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 
 /// Delegation policy is delivered through initialization, never a tool description.
-const DELEGATION_ROUTING: &str = "Delegate broad exploration, substantial reading, test suites, lint and format runs, and independent investigation before gathering that context yourself; keep only known-file lookups and small checks without a build. Implement through children by default: split the agreed design into independent slices, each with a spec, ownership boundaries and tests, and dispatch them together. Keep a slice only when it needs your whole context, briefing would cost more than doing it, or a child already failed it once; say why in one sentence. You own design, integrated review, the commit and final acceptance. Collect reports with wait or list_agents; nothing is pushed to you, and a prompt saying children finished has no child output. Read the short handback and decisive files in report_dir instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. In instructions, give the outcome, constraints, ownership boundaries and required evidence, with pointers to files, symbols, line ranges and earlier reports. Children share your target and filesystem, not your conversation; named files are pointers, not a whitelist. Children report failing tests, reasons and log paths; rerun only failures. Children can collect profiles and timings; decide performance design yourself. Do not duplicate work children are doing.";
-const MAILBOX_ROUTING: &str = " Use send_message for follow-up. With mailbox routing, a busy child receives messages together at its next tool boundary without turn cancellation; idle children wake and parked children resume.";
-const INPUT_ROUTING: &str = " Otherwise send_message queues an ordered turn after startup. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
+const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Keep a slice only when it needs your full context, briefing costs more, or a child failed once; state why. You own design, integrated review, commit and acceptance. Collect reports with wait; list_agents shows status. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
+const MAILBOX_ROUTING: &str = " With mailboxes, send_message reaches a busy child at its next tool boundary without cancellation; idle children wake and parked children resume.";
+const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
+const NOTIFICATION_ROUTING: &str = " With no independent work, call await_children; awaiting_children means end this turn with a waiting status. Children keep running; do not suspend, close, or claim completion. Automatic continuation respects this wait. Notifications or user input resume you. A notification has no reports: one wait collects every ready report. With unfinished children and no independent work, await_children and end the turn again. reports_ready means collect now; nothing_to_wait_for means no unfinished child or new report. Read steering first. Use bounded waits when useful; never renew empty waits or poll yielding wrappers.";
 
 /// Reports reach the model through `wait`; a prompt can tell the parent one is
 /// ready without including the child's output.
 static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{DELEGATION_ROUTING}{MAILBOX_ROUTING}{INPUT_ROUTING} Finished children are parked; send_message resumes one with its conversation intact. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
+        "{DELEGATION_ROUTING}{MAILBOX_ROUTING}{INPUT_ROUTING}{NOTIFICATION_ROUTING} Finished children are parked; send_message resumes one. Close unneeded children after reading errors."
     )
 });
 
@@ -29,7 +30,7 @@ static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another to
 
 static DELEGATION_ONLY_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{DELEGATION_ROUTING} Finished children are parked. Close children you no longer need, including failed ones after reading their error. The user can see children in the Sub-agents workspace."
+        "{DELEGATION_ROUTING}{NOTIFICATION_ROUTING} Finished children are parked. Close unneeded children after reading errors."
     )
 });
 
@@ -37,7 +38,7 @@ static DELEGATION_ONLY_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
 static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog. A direct wait suspends inference until a report arrives or this harness's wait window ends; if it returns still_running, call wait again to renew the wait.",
+        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog. A direct wait suspends inference for a bounded window. After still_running, use await_children and end the turn if you have no independent work.",
         SERVER_INSTRUCTIONS.as_str()
     )
 });
@@ -230,7 +231,7 @@ fn unanswered_reply(
             waited.as_secs(),
             Some(
                 "Mjolnir did not answer this wait in time, so the current child states are unknown. \
-                 Call wait again later to collect any reports that are ready.",
+                 Call wait again to collect ready reports; if no independent work remains, use await_children and end the turn once Mjolnir is reachable.",
             ),
         );
         if let Some(object) = payload.as_object_mut() {
@@ -522,6 +523,10 @@ fn call_with_budget_and_mailboxes(
             let _args: WaitArgs = serde_json::from_value(params.arguments)?;
             SubagentToolAction::WaitAgents
         }
+        "await_children" => {
+            let _args: WaitArgs = serde_json::from_value(params.arguments)?;
+            SubagentToolAction::AwaitChildren
+        }
         "close" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
             SubagentToolAction::CloseAgent {
@@ -655,9 +660,14 @@ fn tool_definitions_with_mailboxes(
         ),
         send_message_tool(),
         tool(
+            "await_children",
+            "Arrange notification-driven waiting for your unfinished children and return immediately, without collecting reports. If awaiting_children, end your current turn with a brief waiting status: children keep running, and a report-ready notification or user input resumes you. This is not session suspension or task completion. If reports_ready, call wait now to collect reports. If nothing_to_wait_for, no children need waiting or collection. Automatic continuation respects an accepted wait. New user input takes priority.",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+        tool(
             "wait",
             &format!(
-                "Wait for every child of yours that is not stopped. A child that you closed is not covered for report collection, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. A report is returned only once for each finish; a child resumed with send_message can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Status interrupted means incoming steering ended the wait: read the correction before waiting again; children continue working. Entries without a new report have no output. A wait may end before work is done, and another wait is normal. A finished child has parked true when its processes were released; send_message resumes it. A child being closed may remain as a status-only entry while state is \"stopping\" and leaves the wait result when stopped. Pending messages keep a child unfinished: pending_messages names queued requests and message_deliveries records delivery outcomes, with each delivery marked via \"mailbox\" or \"turn\". Mailbox messages stay pending until accepted by the child's worker. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
+                "Wait for every child of yours that is not stopped. A child that you closed is not covered for report collection, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. One call collects every ready report. A report is returned only once for each finish; a child resumed with send_message can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Status interrupted means incoming steering ended the wait: read the correction before waiting again; children continue working. Entries without a new report have no output. A wait may end before work is done. With no independent work, use await_children and end the turn. A finished child has parked true when its processes were released; send_message resumes it. A child being closed may remain as a status-only entry while state is \"stopping\" and leaves the wait result when stopped. Pending messages keep a child unfinished: pending_messages names queued requests and message_deliveries records delivery outcomes, with each delivery marked via \"mailbox\" or \"turn\". Mailbox messages stay pending until accepted by the child's worker. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
                 max_output = mj_core::subagent::MAX_HANDBACK_CHARS
             ),
             json!({"type":"object","properties":{},"additionalProperties":false}),
@@ -1168,7 +1178,7 @@ mod tests {
             .expect("wait definition");
         let description = wait["description"].as_str().unwrap_or_default();
         assert!(
-            description.contains("A wait may end before work is done, and another wait is normal."),
+            description.contains("A wait may end before work is done. With no independent work, use await_children and end the turn."),
             "{description}"
         );
         assert!(!description.contains("timeout_seconds"), "{description}");
@@ -1640,45 +1650,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_wait_accepts_no_arguments_and_omits_retired_fields() {
+    fn waiting_tools_preserve_the_mcp_to_worker_contract() {
         use std::io::{BufReader, Read};
         use std::os::unix::net::UnixListener;
 
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("subagents.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let (sent, received) = std::sync::mpsc::channel::<Value>();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(line.trim()).unwrap();
-            let request_id = request["request_id"].clone();
-            sent.send(request).unwrap();
-            let reply = json!({"accepted": true, "result": {
-                "request_id": request_id, "completed_at_ms": 1, "is_error": false,
-                "message": "{\"status\":\"nothing_to_wait_for\",\"agents\":[]}"
-            }});
-            let mut body = serde_json::to_vec(&reply).unwrap();
-            body.push(b'\n');
-            let mut stream = reader.into_inner();
-            stream.write_all(&body).unwrap();
-            stream.flush().unwrap();
-            let _ = stream.read(&mut [0u8; 1]);
-        });
-        let (value, is_error) = call_with_budget(
-            &socket,
-            Some(HarnessKind::Codex),
-            SubagentMcpRole::Parent,
-            Some(&json!({"name": "wait", "arguments": {}})),
-            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-            |_| Duration::from_secs(5),
-        )
-        .unwrap();
-        assert!(!is_error, "{value}");
-        let request = received.recv().unwrap();
-        assert_eq!(request["action"], json!({"action":"wait_agents"}));
+        for (name, action) in [
+            ("wait", "wait_agents"),
+            ("await_children", "await_children"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("subagents.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (sent, received) = std::sync::mpsc::channel::<Value>();
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                let request_id = request["request_id"].clone();
+                sent.send(request).unwrap();
+                let reply = json!({"accepted": true, "result": {
+                    "request_id": request_id, "completed_at_ms": 1, "is_error": false,
+                    "message": "{\"status\":\"nothing_to_wait_for\",\"agents\":[]}"
+                }});
+                let mut body = serde_json::to_vec(&reply).unwrap();
+                body.push(b'\n');
+                let mut stream = reader.into_inner();
+                stream.write_all(&body).unwrap();
+                stream.flush().unwrap();
+                let _ = stream.read(&mut [0u8; 1]);
+            });
+            let (value, is_error) = call_with_budget(
+                &socket,
+                Some(HarnessKind::Codex),
+                SubagentMcpRole::Parent,
+                Some(&json!({"name": name, "arguments": {}})),
+                &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
+                |_| Duration::from_secs(5),
+            )
+            .unwrap();
+            assert!(!is_error, "{value}");
+            let request = received.recv().unwrap();
+            assert_eq!(request["action"], json!({"action": action}));
+        }
     }
 
     #[test]
@@ -1710,7 +1725,7 @@ mod tests {
             "{description}"
         );
         assert!(
-            description.contains("A wait may end before work is done, and another wait is normal."),
+            description.contains("A wait may end before work is done. With no independent work, use await_children and end the turn."),
             "{description}"
         );
         assert!(!description.contains("timeout_seconds"), "{description}");

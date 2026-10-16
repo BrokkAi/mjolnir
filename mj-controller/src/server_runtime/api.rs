@@ -672,6 +672,18 @@ impl ApiBackend {
             result,
             reported_finishes,
         };
+        // Serialize notification submission with committing report collection.
+        // A notice admitted before this commit is withdrawn; a later reconciler
+        // sees the committed finish markers. Never hold this across the wait.
+        let notice_lock =
+            (!stored_result.reported_finishes.is_empty()).then(|| self.wait_prompt_lock(&parent));
+        let _notice_guard = match &notice_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        if notice_lock.is_some() {
+            self.withdraw_parent_wait_prompt_locked(&parent).await?;
+        }
         blocking("persist delegation result", {
             let result = stored_result.clone();
             move || crate::database::record_delegation_result_with_reports(parent, result)
@@ -1076,6 +1088,58 @@ impl ApiBackend {
                         "turn_id": delivery.turn_id,
                     }))
                 }
+            }
+            SubagentToolAction::AwaitChildren => {
+                let turn = request
+                    .originating_command_id
+                    .as_ref()
+                    .context("notification waiting requires a live parent turn")?;
+                let handle = self.sessions.session(parent_session_id.to_owned()).await?;
+                // The worker already admitted this exact command before queueing
+                // the tool request, interrupting old blocking waits. Replaying it
+                // cannot re-arm a wait that newer input has cleared.
+                handle
+                    .submit(
+                        format!("await-subagents-{}", request.request_id),
+                        RelayCommand::SetSubagentWait {
+                            active_prompt_id: turn.clone(),
+                            waiting: true,
+                        },
+                    )
+                    .await?;
+                let (_, children) = self.wait_children(parent_session_id).await?;
+                let ready = children.iter().any(|child| {
+                    child.state != "stopped"
+                        && child.identity.as_ref().is_some_and(|identity| {
+                            child.relation.reported_finish.as_ref() != Some(identity)
+                        })
+                });
+                let unfinished = children
+                    .iter()
+                    .any(|child| child.state != "stopped" && !child.finished);
+                if ready || !unfinished {
+                    handle
+                        .submit(
+                            format!("await-subagents-ready-{}", request.request_id),
+                            RelayCommand::SetSubagentWait {
+                                active_prompt_id: turn.clone(),
+                                waiting: false,
+                            },
+                        )
+                        .await?;
+                    return Ok(if ready {
+                        serde_json::json!({
+                            "status": "reports_ready",
+                            "next_action": "Call wait now to collect ready reports; this call collected nothing."
+                        })
+                    } else {
+                        serde_json::json!({"status": "nothing_to_wait_for"})
+                    });
+                }
+                Ok(serde_json::json!({
+                    "status": "awaiting_children",
+                    "next_action": "End this turn with a brief waiting status. Your children keep running. A report-ready notification or user input resumes you; call wait after a notification to collect reports. Do not suspend the session or claim task completion."
+                }))
             }
             SubagentToolAction::WaitAgents => {
                 // The budget runs from when the caller made the request, not
@@ -1543,22 +1607,43 @@ impl ApiBackend {
             return Ok(());
         }
         let (_, children) = self.wait_children(parent_id).await?;
-        let has_new_report = children.iter().any(|child| {
-            !self
-                .exports
-                .close_is_requested(&child.relation.child_session_id)
-                && !matches!(child.state.as_str(), "stopping" | "stopped")
-                && child.identity.as_ref().is_some_and(|identity| {
-                    child.relation.reported_finish.as_ref() != Some(identity)
-                })
-        });
-        if !has_new_report {
+        let epochs = blocking("load sub-agent notification epochs", {
+            let parent = parent_id.to_owned();
+            move || crate::database::subagent_notification_epochs(&parent)
+        })
+        .await?;
+        let mut ready_reports = children
+            .iter()
+            .filter_map(|child| {
+                let identity = child.identity.as_ref()?;
+                (!self
+                    .exports
+                    .close_is_requested(&child.relation.child_session_id)
+                    && !matches!(child.state.as_str(), "stopping" | "stopped")
+                    && child.relation.reported_finish.as_ref() != Some(identity))
+                .then_some((
+                    &child.relation.child_session_id,
+                    identity,
+                    epochs
+                        .get(&child.relation.child_session_id)
+                        .copied()
+                        .unwrap_or(0),
+                ))
+            })
+            .collect::<Vec<_>>();
+        if ready_reports.is_empty() {
             return Ok(());
         }
+        // The relay owns command admission and remembers accepted identities.
+        // Reconciliation, including after restart, cannot wake twice for the
+        // same report batch; a later finish has a different identity.
+        ready_reports.sort_by_key(|(child, _, _)| *child);
+        use sha2::{Digest, Sha256};
+        let identity = mj_core::hex::lower_hex(Sha256::digest(serde_json::to_vec(&ready_reports)?));
         submit_prompt_with_id(
             &handle,
             PARENT_WAIT_PROMPT_TEXT.to_owned(),
-            Some(new_command_id("subagent-wait")?),
+            Some(format!("subagent-wait-{identity}")),
         )
         .await?;
         Ok(())
@@ -1570,6 +1655,10 @@ impl ApiBackend {
     async fn withdraw_parent_wait_prompt(&self, parent_id: &str) -> Result<()> {
         let lock = self.wait_prompt_lock(parent_id);
         let _guard = lock.lock().await;
+        self.withdraw_parent_wait_prompt_locked(parent_id).await
+    }
+
+    async fn withdraw_parent_wait_prompt_locked(&self, parent_id: &str) -> Result<()> {
         let Ok(handle) = self.sessions.session(parent_id.to_owned()).await else {
             return Ok(());
         };

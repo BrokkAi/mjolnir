@@ -83,6 +83,16 @@ impl DurableRelay {
 
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
+            RelayCommand::SetSubagentWait { active_prompt_id, waiting } => {
+                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(active_prompt_id)
+                    || self.turn_cancellation_pending()
+                {
+                    return Err("The parent turn changed; child waiting was not changed".into());
+                }
+                if *waiting && !self.snapshot.queued_prompts.is_empty() {
+                    return Err("New input is already queued; finish this turn and read it".into());
+                }
+            }
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
             RelayCommand::Steer {
                 active_prompt_id,
@@ -907,6 +917,7 @@ impl DurableRelay {
             RelayCommand::ReleaseCheckpoint { .. } => RelayCommandOutcome::CheckpointReleased,
             RelayCommand::AdvanceRecoveryFloor { .. } => RelayCommandOutcome::RecoveryFloorAdvanced,
             RelayCommand::RecordNotice { .. }
+            | RelayCommand::SetSubagentWait { .. }
             | RelayCommand::SetQuotaRecovery { .. }
             | RelayCommand::SeedAssessmentContext { .. }
             | RelayCommand::InstallPromptContext { .. }
@@ -1891,7 +1902,13 @@ impl DurableRelay {
             .pending_mailbox_events
             .iter()
             .any(|event| event.wake)
-            && self.activity_is_idle()
+            && (self.activity_is_idle()
+                || (self
+                    .snapshot
+                    .continuation
+                    .awaiting_children_since_ms
+                    .is_some()
+                    && mj_core::activity::is_quiet(&self.activity_facts())))
             && !self.turn_cancellation_pending()
     }
 

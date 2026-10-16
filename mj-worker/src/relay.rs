@@ -674,6 +674,56 @@ impl DurableRelay {
             .map(|prompt| prompt.command_id.clone())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn is_waiting_for_children(&self) -> bool {
+        self.snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_some()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn await_subagent_notification(&mut self, request_id: &str) -> Result<()> {
+        let active_prompt_id = self
+            .originating_command_id()
+            .context("notification waiting requires a live parent turn")?;
+        if let Err(error) = self.submit_command(
+            &format!("await-subagents-{request_id}"),
+            RelayCommand::SetSubagentWait {
+                active_prompt_id,
+                waiting: true,
+            },
+        )? {
+            bail!("await child notification: {}", error.message);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn collect_subagent_reports(&mut self, request_id: &str) -> Result<()> {
+        if self
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_none()
+        {
+            return Ok(());
+        }
+        let Some(active_prompt_id) = self.originating_command_id() else {
+            return Ok(());
+        };
+        if let Err(error) = self.submit_command(
+            &format!("collect-subagents-{request_id}"),
+            RelayCommand::SetSubagentWait {
+                active_prompt_id,
+                waiting: false,
+            },
+        )? {
+            bail!("withdraw parent child wait: {}", error.message);
+        }
+        Ok(())
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
         state.acp_ready = Some(self.acp_ready);
@@ -837,6 +887,10 @@ impl DurableRelay {
         ) = self
             .replied_verdict
             .inference(self.turn_context.generation(), &facts);
+        if let Some(since) = self.snapshot.continuation.awaiting_children_since_ms {
+            facts.expected_continuation = Some(since);
+            facts.inferred_idle_since_ms = None;
+        }
         facts
     }
 

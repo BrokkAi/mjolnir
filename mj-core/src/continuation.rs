@@ -39,6 +39,10 @@ impl ContinuationConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationState {
+    /// Explicit parent wait, owned by the relay until new input or collection.
+    /// Children keep running; this is not suspension or task completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_children_since_ms: Option<i64>,
     pub user_command_id: Option<String>,
     pub attempts: u8,
     pub suppressed: bool,
@@ -85,7 +89,8 @@ pub fn is_quota_goal_resume(command_id: &str) -> bool {
 
 impl ContinuationState {
     pub fn eligible(&self) -> bool {
-        self.user_command_id.is_some()
+        self.awaiting_children_since_ms.is_none()
+            && self.user_command_id.is_some()
             && self.completed_command_id.is_some()
             && !self.suppressed
             && self.attempts < MAX_NUDGES

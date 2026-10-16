@@ -661,6 +661,7 @@ impl SessionControlBackend for FakeControl {
 struct WaitPromptSession {
     inner: FakeSession,
     view: Arc<std::sync::Mutex<ManagedSessionView>>,
+    accepted: Arc<std::sync::Mutex<BTreeMap<String, RelayCommand>>>,
 }
 
 impl SessionHandleBackend for WaitPromptSession {
@@ -701,6 +702,19 @@ impl SessionHandleBackend for WaitPromptSession {
         command_id: String,
         command: RelayCommand,
     ) -> BoxFuture<'_, Result<PendingRelaySubmit>> {
+        // The real relay is idempotent by command ID across reconnects.
+        let mut accepted = self.accepted.lock().unwrap();
+        if let Some(previous) = accepted.get(&command_id) {
+            assert_eq!(previous, &command);
+            let ordinal = self.inner.accepted_ordinal;
+            return Box::pin(async move {
+                Ok(PendingRelaySubmit::new(Box::pin(
+                    async move { Ok(ordinal) },
+                )))
+            });
+        }
+        accepted.insert(command_id.clone(), command.clone());
+        drop(accepted);
         let _ = self
             .inner
             .submitted
@@ -2092,6 +2106,7 @@ fn wait_prompt_backend(view: ManagedSessionView) -> WaitPromptBackend {
             view: None,
         },
         view: shared_view.clone(),
+        accepted: Default::default(),
     };
     let backend = Arc::new(ApiBackend::new(
         SessionControl::new(WaitPromptControl(session)),
@@ -4285,6 +4300,7 @@ async fn wait_reports_a_finished_child_once_and_replay_preserves_the_answer() {
     );
 }
 
+// Hard-won: #1302: restoring an undelivered report must renew its withdrawn notification.
 #[tokio::test]
 async fn an_undelivered_fallback_answer_restores_its_report_for_the_next_wait() {
     if !isolated_parked_test("an_undelivered_fallback_answer_restores_its_report_for_the_next_wait")
@@ -4294,7 +4310,10 @@ async fn an_undelivered_fallback_answer_restores_its_report_for_the_next_wait() 
     let _writer = crate::database::install_isolated_test_writer();
     store_parent_and_child("child-1");
     record_finished_child("child-1", "task-1", "fallback report", 3, 9, 7);
-    let (backend, _, _, _) = wait_prompt_backend(active_parent_view("working"));
+    let (backend, _, shared_view, mut submitted) =
+        wait_prompt_backend(active_parent_view("working"));
+    backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
+    let (first_notification_id, _) = submitted.try_recv().unwrap();
 
     let first = backend
         .execute_subagent_tool_durable(
@@ -4326,8 +4345,17 @@ async fn an_undelivered_fallback_answer_restores_its_report_for_the_next_wait() 
         .1
         .unwrap();
     assert_eq!(stored.reported_finishes.len(), 1);
-    crate::database::unreport_delegation_finishes("parent-1".into(), stored.reported_finishes)
+    for _ in 0..2 {
+        crate::database::unreport_delegation_finishes(
+            "parent-1".into(),
+            stored.reported_finishes.clone(),
+        )
         .unwrap();
+    }
+    assert_eq!(
+        crate::database::subagent_notification_epochs("parent-1").unwrap()["child-1"],
+        1
+    );
     assert!(
         crate::database::load_subagent("child-1")
             .unwrap()
@@ -4338,6 +4366,22 @@ async fn an_undelivered_fallback_answer_restores_its_report_for_the_next_wait() 
     );
 
     backend.ensure_parent_wait_prompt("parent-1").await.unwrap();
+    let next_notification_id = std::iter::from_fn(|| submitted.try_recv().ok())
+        .find_map(|(id, command)| matches!(command, RelayCommand::Prompt { .. }).then_some(id))
+        .expect("a restored report needs a fresh notification admission");
+    assert_ne!(first_notification_id, next_notification_id);
+    assert_eq!(
+        shared_view
+            .lock()
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .materialized
+            .queued_prompts
+            .len(),
+        1
+    );
     let next = durable_wait(&backend, "fallback-wait-retry").await;
     assert_eq!(next["status"], mj_core::subagent::WAIT_STATUS_REPORTED);
     assert_eq!(next["agents"][0]["output"], "fallback report", "{next}");
@@ -4763,6 +4807,7 @@ async fn wait_returns_nothing_to_wait_for_and_reports_reminder_turns() {
     assert!(progress.awaiting_prompt(None), "{progress:?}");
 }
 
+// Hard-won: #1302: reconciliation queued a duplicate wake while its reminder was active.
 #[tokio::test]
 async fn finished_child_queues_one_wait_prompt_for_an_idle_parent() {
     if !isolated_parked_test("finished_child_queues_one_wait_prompt_for_an_idle_parent") {
@@ -4791,13 +4836,10 @@ async fn finished_child_queues_one_wait_prompt_for_an_idle_parent() {
             .materialized
             .queued_prompts
             .len(),
-        1,
-        "an active reminder does not suppress a queued duplicate"
+        0,
+        "the same report batch cannot queue another model turn"
     );
-    assert_eq!(
-        delivered_prompts(&mut submitted),
-        [PARENT_WAIT_PROMPT_TEXT, PARENT_WAIT_PROMPT_TEXT]
-    );
+    assert_eq!(delivered_prompts(&mut submitted), [PARENT_WAIT_PROMPT_TEXT]);
 }
 
 #[tokio::test]
@@ -4873,6 +4915,7 @@ async fn parent_with_outstanding_wait_does_not_get_a_wait_prompt() {
     assert!(submitted.try_recv().is_err());
 }
 
+// Hard-won: #1302: notification reconciliation could race report collection and leave an empty wake.
 #[tokio::test]
 async fn queued_wait_prompt_coalesces_and_wait_withdraws_it() {
     if !isolated_parked_test("queued_wait_prompt_coalesces_and_wait_withdraws_it") {
@@ -4900,7 +4943,11 @@ async fn queued_wait_prompt_coalesces_and_wait_withdraws_it() {
         "a busy parent keeps one queued reminder"
     );
 
-    let answer = durable_wait(&backend, "wait-withdrawal").await;
+    let (answer, reconciled) = tokio::join!(
+        durable_wait(&backend, "wait-withdrawal"),
+        backend.ensure_parent_wait_prompt("parent-1")
+    );
+    reconciled.unwrap();
     assert_eq!(answer["status"], mj_core::subagent::WAIT_STATUS_REPORTED);
     assert!(
         shared_view
@@ -4994,4 +5041,62 @@ fn startup_cleanup_is_unfinished_even_after_startup_delivery_failed() {
     assert_eq!(state, "stopping");
     assert_eq!(output, record.last_error);
     assert!(!finished);
+}
+
+// Hard-won: #1302: waiting for notification must not consume the report that wakes the parent.
+#[tokio::test]
+async fn awaiting_children_arms_a_guarded_wait_without_collecting_reports() {
+    if !isolated_parked_test("awaiting_children_arms_a_guarded_wait_without_collecting_reports") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    let (backend, exports, _, mut submitted) = wait_prompt_backend(active_parent_view("work"));
+    exports.set_child_state(SessionState::Running);
+    let request = |id: &str| mj_core::subagent::SubagentToolRequest {
+        originating_command_id: Some("parent-turn".into()),
+        request_id: id.into(),
+        created_at_ms: mj_core::clock::epoch_millis(),
+        action: mj_core::subagent::SubagentToolAction::AwaitChildren,
+    };
+    let result = backend
+        .execute_subagent_tool_durable("parent-1".into(), request("await-1"))
+        .await
+        .unwrap();
+    assert!(!result.result.is_error, "{}", result.result.message);
+    let result: serde_json::Value = serde_json::from_str(&result.result.message).unwrap();
+    assert_eq!(result["status"], "awaiting_children");
+    let (_, command) = submitted.try_recv().unwrap();
+    assert!(
+        matches!(command, RelayCommand::SetSubagentWait { active_prompt_id, waiting: true }
+        if active_prompt_id == "parent-turn")
+    );
+    assert!(submitted.try_recv().is_err());
+
+    exports.set_child_state(SessionState::Parked);
+    record_finished_child("child-1", "task-1", "still uncollected", 3, 9, 7);
+    let result = backend
+        .execute_subagent_tool_durable("parent-1".into(), request("await-2"))
+        .await
+        .unwrap();
+    assert!(!result.result.is_error, "{}", result.result.message);
+    let result: serde_json::Value = serde_json::from_str(&result.result.message).unwrap();
+    assert_eq!(result["status"], "reports_ready");
+    let changes = std::iter::from_fn(|| submitted.try_recv().ok())
+        .map(|(_, command)| command)
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        changes.as_slice(),
+        [
+            RelayCommand::SetSubagentWait { waiting: true, .. },
+            RelayCommand::SetSubagentWait { waiting: false, .. }
+        ]
+    ));
+    let collected = durable_wait(&backend, "collect-after-notification").await;
+    assert_eq!(collected["agents"][0]["output"], "still uncollected");
+    let collected_again = durable_wait(&backend, "collect-once").await;
+    assert_eq!(
+        collected_again["status"],
+        mj_core::subagent::WAIT_STATUS_NOTHING_TO_WAIT_FOR
+    );
 }

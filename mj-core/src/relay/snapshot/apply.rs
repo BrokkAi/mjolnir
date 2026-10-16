@@ -372,7 +372,14 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 }
                 _ => {}
             }
+            if command.prompt_blocks().is_some() {
+                snapshot.continuation.awaiting_children_since_ms = None;
+            }
             match command {
+                RelayCommand::SetSubagentWait { waiting, .. } => {
+                    snapshot.continuation.awaiting_children_since_ms =
+                        waiting.then_some(event.recorded_at_ms);
+                }
                 RelayCommand::Prompt { prompt }
                     if !crate::continuation::is_generated_prompt(command_id)
                         && !crate::continuation::is_generated_prompt_text(
@@ -985,7 +992,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     snapshot.execution = RelayExecutionState::Idle;
                 }
                 (
-                    RelayCommand::RecordNotice { .. } | RelayCommand::SetQuotaRecovery { .. },
+                    RelayCommand::RecordNotice { .. }
+                    | RelayCommand::SetQuotaRecovery { .. }
+                    | RelayCommand::SetSubagentWait { .. },
                     RelayCommandOutcome::NoticeRecorded,
                 ) => {}
                 (RelayCommand::DeliverMailboxEvent { .. }, RelayCommandOutcome::NoticeRecorded) => {
@@ -1596,6 +1605,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     .pending_mailbox_events
                     .retain(|mailbox_event| !unique_keys.contains(&mailbox_event.key));
             }
+            snapshot.continuation.awaiting_children_since_ms = None;
             retain_delivered_mailbox_event_keys(
                 snapshot,
                 event_keys.iter().cloned(),

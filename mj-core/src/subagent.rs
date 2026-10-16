@@ -366,7 +366,7 @@ pub fn still_running_payload(waited_seconds: u64, note: Option<&str>) -> serde_j
 pub fn next_action(status: &str, new_reports: usize, unfinished: usize) -> String {
     match status {
         WAIT_STATUS_REPORTED if unfinished > 0 => format!(
-            "Collected {new_reports} new report(s). {unfinished} child session(s) are still unfinished; call wait again later to collect reports that become ready."
+            "Collected {new_reports} new report(s). {unfinished} child session(s) are still unfinished. With no independent work, call await_children and end the turn; collect reports after notification."
         ),
         WAIT_STATUS_REPORTED => format!(
             "Collected {new_reports} new report(s). Call wait again after a child has more work if you need another report."
@@ -375,7 +375,7 @@ pub fn next_action(status: &str, new_reports: usize, unfinished: usize) -> Strin
             "There are no new reports or unfinished children. Call wait again after spawning a child or giving one more input.".to_owned()
         }
         _ => {
-            "This harness's wait window ended before a new report was available. Call wait again later to collect reports that become ready.".to_owned()
+            "This harness's wait window ended before a new report was available. With no independent work, call await_children and end the turn. Call wait again after a report-ready notification to collect reports.".to_owned()
         }
     }
 }
@@ -448,6 +448,7 @@ pub enum SubagentToolAction {
         message: String,
     },
     WaitAgents,
+    AwaitChildren,
     /// An accepted request from an older parent worker. New MCP servers do
     /// not expose interrupt, and the daemon rejects this legacy action.
     #[serde(rename = "interrupt_agent")]
@@ -504,6 +505,7 @@ enum SubagentToolActionWire {
         message: String,
     },
     WaitAgents,
+    AwaitChildren,
     #[serde(rename = "interrupt_agent")]
     LegacyInterruptAgent {
         child_session_id: String,
@@ -599,6 +601,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 message,
             },
             SubagentToolActionWire::WaitAgents => Self::WaitAgents,
+            SubagentToolActionWire::AwaitChildren => Self::AwaitChildren,
             SubagentToolActionWire::LegacyInterruptAgent { child_session_id } => {
                 Self::LegacyInterruptAgent { child_session_id }
             }
@@ -713,7 +716,14 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &["spawn", "list_agents", "send_message", "wait", "close"],
+            Self::Parent => &[
+                "spawn",
+                "list_agents",
+                "send_message",
+                "await_children",
+                "wait",
+                "close",
+            ],
             Self::MessageOnly => &["send_message"],
             Self::Child => &["handback"],
         }
@@ -1404,6 +1414,7 @@ mod tests {
             SubagentToolAction::ListProfiles,
             SubagentToolAction::ListAgents,
             SubagentToolAction::WaitAgents,
+            SubagentToolAction::AwaitChildren,
             SubagentToolAction::Handback {
                 message: "done".into(),
             },

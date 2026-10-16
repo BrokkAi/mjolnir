@@ -106,6 +106,26 @@ impl DurableRelay {
     /// operations stay compiled on Windows so their tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
+        if self
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_some()
+        {
+            if let Some(mut assessment) = self.snapshot.assessment.clone().filter(|a| {
+                a.current()
+                    && (a.action != Some(mj_core::assessment::Action::Wait)
+                        || a.reason != "awaiting_subagents")
+            }) {
+                assessment.revision = self.snapshot.latest_ordinal + 1;
+                assessment.status = mj_core::assessment::Status::Assessed;
+                assessment.action = Some(mj_core::assessment::Action::Wait);
+                assessment.reason = "awaiting_subagents".into();
+                assessment.retry_at_ms = None;
+                self.store_assessment(assessment)?;
+            }
+            return Ok(());
+        }
         if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
             a.current()
                 && matches!(
@@ -251,7 +271,16 @@ impl DurableRelay {
                     && !c.final_reply_omitted
                     && c.evidence().validate().is_ok()
             });
-        let action = verdict.action(complete);
+        let action = if self
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_some()
+        {
+            Action::Wait
+        } else {
+            verdict.action(complete)
+        };
         // The quiet judgment is separate from the action: it only ever says
         // whether the listed leftover processes still matter, and only when
         // the request listed some.

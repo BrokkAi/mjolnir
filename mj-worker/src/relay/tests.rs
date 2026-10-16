@@ -5940,10 +5940,30 @@ fn drain_mailbox_for_test(relay: &mut DurableRelay, request_id: &str) -> (Option
     (text, count)
 }
 
+// Hard-won: #1302: delivered hook input must release an intentional parent wait.
 #[test]
 fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
     let hook_root = tempfile::tempdir().unwrap();
     let mut hook_relay = DurableRelay::open(hook_root.path(), SESSION, "test").unwrap();
+    hook_relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit_relay(
+        &mut hook_relay,
+        "hook-parent-turn",
+        prompt("Delegate and await"),
+    );
+    hook_relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut hook_relay,
+        "hook-await-children",
+        RelayCommand::SetSubagentWait {
+            active_prompt_id: "hook-parent-turn".into(),
+            waiting: true,
+        },
+    );
     let hook_event = mailbox_fixture_event("hook-event", false);
     submit_relay(
         &mut hook_relay,
@@ -5952,7 +5972,21 @@ fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
             event: hook_event.clone(),
         },
     );
+    assert!(
+        hook_relay
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_some()
+    );
     let (hook_text, hook_count) = drain_mailbox_for_test(&mut hook_relay, "hook-drain");
+    assert!(
+        hook_relay
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_none()
+    );
     assert_eq!(hook_count, 1);
     assert_eq!(
         hook_text.as_deref(),
@@ -6000,34 +6034,74 @@ fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
         0
     );
 
-    let wake_root = tempfile::tempdir().unwrap();
-    let mut wake_relay = DurableRelay::open(wake_root.path(), SESSION, "test").unwrap();
-    let wake_event = mailbox_fixture_event("wake-event", true);
-    submit_relay(
-        &mut wake_relay,
-        "wake-event-command",
-        RelayCommand::DeliverMailboxEvent {
-            event: wake_event.clone(),
-        },
-    );
-    let claimed = wake_relay.claim_pending_commands(true).unwrap();
-    assert_eq!(claimed.len(), 1);
-    assert!(matches!(
-        &claimed[0].command,
-        RelayCommand::MailboxWake { events } if events == std::slice::from_ref(&wake_event)
-    ));
-    assert!(claimed[0].hidden_prompt_context.is_none());
-    assert!(wake_relay.snapshot.pending_mailbox_events.is_empty());
-    assert!(
-        wake_relay
-            .snapshot
-            .delivered_mailbox_event_keys
-            .contains_key(&wake_event.key)
-    );
-    assert_eq!(
-        drain_mailbox_for_test(&mut wake_relay, "wake-hook-after-claim").1,
-        0
-    );
+    for waiting_for_children in [false, true] {
+        let wake_root = tempfile::tempdir().unwrap();
+        let mut wake_relay = DurableRelay::open(wake_root.path(), SESSION, "test").unwrap();
+        if waiting_for_children {
+            wake_relay
+                .record_observation(RelayObservation::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .unwrap();
+            submit_relay(
+                &mut wake_relay,
+                "waiting-parent",
+                prompt("Delegate and await reports"),
+            );
+            wake_relay.claim_pending_commands(true).unwrap();
+            submit_relay(
+                &mut wake_relay,
+                "await-reports",
+                RelayCommand::SetSubagentWait {
+                    active_prompt_id: "waiting-parent".into(),
+                    waiting: true,
+                },
+            );
+            wake_relay
+                .record_command_completed(
+                    "waiting-parent",
+                    RelayCommandOutcome::Prompt {
+                        stop_reason: "end_turn".into(),
+                        usage: None,
+                        diagnostic: None,
+                    },
+                )
+                .unwrap();
+        }
+        let wake_event = mailbox_fixture_event("wake-event", true);
+        submit_relay(
+            &mut wake_relay,
+            "wake-event-command",
+            RelayCommand::DeliverMailboxEvent {
+                event: wake_event.clone(),
+            },
+        );
+        let claimed = wake_relay.claim_pending_commands(true).unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(matches!(
+            &claimed[0].command,
+            RelayCommand::MailboxWake { events } if events == std::slice::from_ref(&wake_event)
+        ));
+        assert!(claimed[0].hidden_prompt_context.is_none());
+        assert!(wake_relay.snapshot.pending_mailbox_events.is_empty());
+        assert!(
+            wake_relay
+                .snapshot
+                .delivered_mailbox_event_keys
+                .contains_key(&wake_event.key)
+        );
+        assert_eq!(
+            drain_mailbox_for_test(&mut wake_relay, "wake-hook-after-claim").1,
+            0
+        );
+        assert!(
+            wake_relay
+                .snapshot
+                .continuation
+                .awaiting_children_since_ms
+                .is_none()
+        );
+    }
 }
 
 #[test]
