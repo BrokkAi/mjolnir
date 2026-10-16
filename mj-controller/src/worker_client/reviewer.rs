@@ -300,16 +300,66 @@ impl RelayClient {
         &mut self,
     ) -> Result<(
         Vec<mj_core::subagent::SubagentToolRequest>,
-        Vec<mj_core::subagent::SubagentToolResult>,
+        Vec<mj_core::subagent::SubagentCompletion>,
     )> {
+        if self.protocol_version >= mj_core::relay::RELAY_SUBAGENT_FEED_PROTOCOL {
+            use mj_core::subagent::SubagentQueueChange;
+            loop {
+                let payload = self
+                    .call(RelayRequest::PollSubagentQueue {
+                        acknowledged: self.subagent_acknowledged,
+                    })
+                    .await?;
+                let RelayResponsePayload::SubagentQueue { page } = payload else {
+                    bail!("relay returned an unexpected sub-agent queue page");
+                };
+                anyhow::ensure!(
+                    self.subagent_acknowledged
+                        .is_none_or(|previous| page.sequence > previous),
+                    "sub-agent queue page did not advance"
+                );
+                for change in page.changes {
+                    let id = change.request_id().to_owned();
+                    match change {
+                        SubagentQueueChange::Retired { .. } => {
+                            self.subagent_queue.remove(&id);
+                        }
+                        _ => {
+                            self.subagent_queue.insert(id, change);
+                        }
+                    }
+                }
+                self.subagent_acknowledged = Some(page.sequence);
+                if !page.has_more {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let mut requests = Vec::new();
+            let mut completions = Vec::new();
+            for entry in self.subagent_queue.values() {
+                match entry {
+                    SubagentQueueChange::Request(request) => requests.push(request.clone()),
+                    SubagentQueueChange::Completed(receipt) => completions.push(receipt.clone()),
+                    SubagentQueueChange::Retired { .. } => {
+                        unreachable!("retirement removes the entry")
+                    }
+                }
+            }
+            return Ok((requests, completions));
+        }
         let request = RelayRequest::SubagentRequests;
         if !request.supported_at(self.protocol_version) {
             return Ok((Vec::new(), Vec::new()));
         }
         match self.call(request).await {
-            Ok(RelayResponsePayload::SubagentRequests { requests, results }) => {
-                Ok((requests, results))
-            }
+            Ok(RelayResponsePayload::SubagentRequests { requests, results }) => Ok((
+                requests,
+                results
+                    .iter()
+                    .map(mj_core::subagent::SubagentCompletion::from)
+                    .collect(),
+            )),
             Ok(_) => bail!("relay returned an unexpected sub-agent request response"),
             // The worker refuses this only while its harness preparation is
             // pending or has failed. The harness and its MCP server are not

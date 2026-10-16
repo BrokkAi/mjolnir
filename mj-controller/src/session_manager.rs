@@ -70,6 +70,7 @@ pub use spawn::*;
 mod actor;
 use actor::*;
 mod standalone;
+mod subagent_queue;
 pub use standalone::*;
 
 #[cfg(test)]

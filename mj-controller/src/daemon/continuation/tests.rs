@@ -67,7 +67,8 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
             latest_credential_sync_signal: None,
             worker_build: None,
             subagent_requests: vec![],
-            subagent_results: vec![],
+            subagent_completions: vec![],
+            subagent_queue_error: None,
         }),
     }
 }

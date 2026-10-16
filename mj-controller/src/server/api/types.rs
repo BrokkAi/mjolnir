@@ -519,7 +519,10 @@ impl From<&mj_client::session::ManagedSessionView> for RelayHealth {
             },
             None if view.connected => Self {
                 state: RelayState::Connected,
-                detail: None,
+                detail: view
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.subagent_queue_error.clone()),
             },
             None => Self {
                 state: RelayState::Disconnected,

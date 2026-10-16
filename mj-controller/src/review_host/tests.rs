@@ -309,7 +309,8 @@ fn view_of(
     ManagedSessionView {
         snapshot: Some(ManagedSessionSnapshot {
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational,

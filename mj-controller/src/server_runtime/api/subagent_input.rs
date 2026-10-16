@@ -302,6 +302,12 @@ impl ApiBackend {
             .session_handle(parent.to_owned())
             .await?
             .and_then(|handle| handle.view().snapshot);
+        if let Some(error) = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.subagent_queue_error.as_ref())
+        {
+            anyhow::bail!("{error}");
+        }
         // The snapshot that scheduled these tools includes preceding requests.
         // The actor publishes completion updates; forcing a sync here would
         // race the lease used to deliver those very completions.
@@ -686,8 +692,8 @@ impl InputProgress {
                 _ => {}
             }
         }
-        for result in &snapshot.subagent_results {
-            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result.message) else {
+        for result in &snapshot.subagent_completions {
+            let Some(mut value) = result.input_delivery.clone() else {
                 continue;
             };
             let Some(child) = value

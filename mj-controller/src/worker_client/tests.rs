@@ -1421,14 +1421,16 @@ sys.stdin.read()
 // sub-agent polling, so its session could not sync, suspend or close.
 #[cfg(unix)]
 #[tokio::test]
-async fn sub_agent_polling_reads_a_preparation_rejection_as_no_requests() {
-    for (code, accepted) in [
-        (RelayErrorCode::InvalidState, true),
-        (RelayErrorCode::Internal, false),
+async fn sub_agent_polling_preserves_legacy_preparation_handling_and_reports_feed_errors() {
+    for (protocol, code, accepted) in [
+        (37, RelayErrorCode::InvalidState, true),
+        (37, RelayErrorCode::Internal, false),
+        (RELAY_PROTOCOL_VERSION, RelayErrorCode::InvalidState, false),
+        (RELAY_PROTOCOL_VERSION, RelayErrorCode::Internal, false),
     ] {
         let rejection = serde_json::to_value(RelayResponseEnvelope {
             request_id: "REQUEST_ID".into(),
-            protocol_version: RELAY_PROTOCOL_VERSION,
+            protocol_version: protocol,
             body: RelayResponseBody::Error {
                 error: RelayProtocolError {
                     code,
@@ -1450,9 +1452,9 @@ for line in sys.stdin:
     req = json.loads(line)
     method = req["request"]["method"]
     if method == "hello":
-        payload = {{"type": "hello", "data": {{"negotiated": {RELAY_PROTOCOL_VERSION}, "relay_version": "preparation-fixture", "session_id": "{SESSION_ID}"}}}}
-        print(json.dumps({{"request_id": req["request_id"], "protocol_version": {RELAY_PROTOCOL_VERSION}, "result": "ok", "payload": payload}}), flush=True)
-    elif method == "subagent_requests":
+        payload = {{"type": "hello", "data": {{"negotiated": {protocol}, "relay_version": "preparation-fixture", "session_id": "{SESSION_ID}"}}}}
+        print(json.dumps({{"request_id": req["request_id"], "protocol_version": {protocol}, "result": "ok", "payload": payload}}), flush=True)
+    elif method in ("subagent_requests", "poll_subagent_queue"):
         print(rejection.replace("REQUEST_ID", req["request_id"]), flush=True)
     else:
         raise AssertionError(method)

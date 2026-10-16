@@ -494,7 +494,8 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: relay.operational_state(),
@@ -1310,7 +1311,8 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
     ManagedSessionView {
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational,
@@ -4471,7 +4473,8 @@ fn session_wait_uses_the_workers_published_jev_activity() {
             materialized,
             operational: relay.operational_state(),
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             latest_credential_sync_signal: None,
             worker_build: None,
         }),

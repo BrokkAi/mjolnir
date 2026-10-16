@@ -631,7 +631,8 @@ fn ready_view(model: &str) -> ManagedSessionView {
     ManagedSessionView {
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Vec::new(),
-            subagent_results: Vec::new(),
+            subagent_completions: Vec::new(),
+            subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational,
@@ -3612,10 +3613,10 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
     assert_eq!(entry["pending_messages"], serde_json::json!(["input"]));
     assert_eq!(entry["pending_inputs"], entry["pending_messages"]);
     snapshot.subagent_requests.clear();
-    snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
+    snapshot.subagent_completions.push(mj_core::subagent::SubagentCompletion::from(&mj_core::subagent::SubagentToolResult {
         request_id: "input".into(), completed_at_ms: 2, is_error: true,
         message: serde_json::json!({"child_session_id":"child","status":"failed","created_at_ms":1,"error":"login refused"}).to_string(),
-    });
+    }));
     let failed = InputProgress::from_snapshot(&snapshot);
     assert_eq!(
         failed.status("child", old_report()),
@@ -3629,10 +3630,10 @@ fn pending_child_inputs_hide_old_reports_and_delivery_failures_are_observable() 
     assert_eq!(entry["message_deliveries"][0]["error"], "login refused");
     assert_eq!(entry["message_deliveries"][0]["via"], "turn");
     assert_eq!(entry["input_deliveries"], entry["message_deliveries"]);
-    snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
+    snapshot.subagent_completions.push(mj_core::subagent::SubagentCompletion::from(&mj_core::subagent::SubagentToolResult {
         request_id: "later".into(), completed_at_ms: 4, is_error: false,
         message: serde_json::json!({"child_session_id":"child","status":"submitted","created_at_ms":3,"turn_id":12}).to_string(),
-    });
+    }));
     assert_eq!(
         InputProgress::from_snapshot(&snapshot).status("child", old_report()),
         old_report()
@@ -3688,10 +3689,10 @@ async fn queued_input_is_visible_through_wait_and_list_agents() {
         let mut parent = ready_view("model");
         let snapshot = parent.snapshot.as_mut().unwrap();
         if failed {
-            snapshot.subagent_results.push(mj_core::subagent::SubagentToolResult {
+            snapshot.subagent_completions.push(mj_core::subagent::SubagentCompletion::from(&mj_core::subagent::SubagentToolResult {
                 request_id: "follow-up".into(), completed_at_ms: 2, is_error: true,
                 message: serde_json::json!({"child_session_id":"child-1","created_at_ms":1,"status":"failed","error":"restart refused"}).to_string(),
-            });
+            }));
         } else {
             snapshot
                 .subagent_requests
@@ -4197,16 +4198,14 @@ async fn worker_completed_wait_is_retired_without_collecting_child_reports() {
     record_finished_child("child-1", "task-1", "still collectible", 3, 9, 7);
     let mut view = ready_view("model");
     let yielded = serde_json::json!({"status": "interrupted", "agents": [], "waited_seconds": 1});
-    view.snapshot
-        .as_mut()
-        .unwrap()
-        .subagent_results
-        .push(mj_core::subagent::SubagentToolResult {
+    view.snapshot.as_mut().unwrap().subagent_completions.push(
+        mj_core::subagent::SubagentCompletion::from(&mj_core::subagent::SubagentToolResult {
             request_id: "yielded-wait".into(),
             completed_at_ms: mj_core::clock::epoch_millis(),
             is_error: false,
             message: yielded.to_string(),
-        });
+        }),
+    );
     // A replacement daemon sees the worker's completed answer before it
     // attempts to resume the durable wait. Even a ready report stays unread.
     let (backend, _, _, _) = wait_prompt_backend(view);

@@ -24,6 +24,156 @@ use mj_core::worker_launch::ProjectMemoryMcpDelivery;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
+async fn delegation_exchange(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    request: RelayRequest,
+) -> RelayResponsePayload {
+    let mut bytes = serde_json::to_vec(&RelayRequestEnvelope {
+        request_id: "delegation-regression".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request,
+    })
+    .unwrap();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await.unwrap();
+    let line = tokio::time::timeout(crate::test_support::IO_TIMEOUT, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(line.len() < mj_core::relay::MAX_FRAME_BYTES);
+    let response: RelayResponseEnvelope = serde_json::from_str(&line).unwrap();
+    match response.body {
+        RelayResponseBody::Ok { payload } => payload,
+        body => panic!("delegation exchange failed: {body:?}"),
+    }
+}
+
+// Hard-won: 82e4c8a44: retained child reports made a healthy worker unreachable.
+#[tokio::test]
+async fn oversized_legacy_delegation_history_replays_only_completion_receipts() {
+    use mj_core::subagent::{
+        SubagentQueueChange, SubagentToolAction, SubagentToolRequest, SubagentToolResult,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let results = (0..256)
+        .map(|i| {
+            let id = format!("historical-{i:03}");
+            (
+                id.clone(),
+                SubagentToolResult {
+                    request_id: id,
+                    completed_at_ms: i,
+                    is_error: false,
+                    message: format!("historical report {}", "λ".repeat(18_000)),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let body = serde_json::to_vec(&serde_json::json!({"requests":{},"results":results})).unwrap();
+    assert!(body.len() > mj_core::relay::MAX_FRAME_BYTES);
+    std::fs::write(root.join("subagents.json"), body).unwrap();
+    let endpoint = super::subagents::SubagentEndpoint::open(root).unwrap();
+    assert!(
+        std::fs::metadata(root.join("subagents.json"))
+            .unwrap()
+            .len()
+            < 100_000
+    );
+    let relay = Arc::new(Mutex::new(
+        DurableRelay::open(root, SESSION_ID, "test").unwrap(),
+    ));
+    let (wake, _) = mpsc::channel(1);
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let task = tokio::spawn(unix::serve_client_with_memory(
+        server,
+        relay,
+        wake,
+        test_credentials(),
+        unix::ConnectionRuntime {
+            subagents: Some(endpoint.clone()),
+            ..Default::default()
+        },
+        fatal_reports().0,
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let first = delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::PollSubagentQueue { acknowledged: None },
+    )
+    .await;
+    let replay = delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::PollSubagentQueue { acknowledged: None },
+    )
+    .await;
+    assert_eq!(
+        first, replay,
+        "a lost page acknowledgment must replay exactly"
+    );
+    let RelayResponsePayload::SubagentQueue { page } = first else {
+        panic!("missing queue")
+    };
+    assert_eq!(page.changes.len(), 256);
+    assert!(
+        page.changes
+            .iter()
+            .all(|c| matches!(c, SubagentQueueChange::Completed(_)))
+    );
+    let next = delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::PollSubagentQueue {
+            acknowledged: Some(page.sequence),
+        },
+    )
+    .await;
+    let RelayResponsePayload::SubagentQueue { page } = next else {
+        panic!("missing queue")
+    };
+    assert!(
+        page.changes.is_empty(),
+        "unchanged polls must not retransmit history"
+    );
+    let request = SubagentToolRequest {
+        originating_command_id: None,
+        request_id: "pending-after-reconnect".into(),
+        created_at_ms: 1000,
+        action: SubagentToolAction::ListAgents,
+    };
+    endpoint.enqueue(request.clone()).unwrap();
+    let next = delegation_exchange(
+        &mut lines,
+        &mut writer,
+        RelayRequest::PollSubagentQueue {
+            acknowledged: Some(page.sequence),
+        },
+    )
+    .await;
+    let RelayResponsePayload::SubagentQueue { page } = next else {
+        panic!("missing queue")
+    };
+    assert_eq!(page.changes, [SubagentQueueChange::Request(request)]);
+    assert!(matches!(
+        delegation_exchange(&mut lines, &mut writer, RelayRequest::Status).await,
+        RelayResponsePayload::Status(_)
+    ));
+    drop(writer);
+    drop(lines);
+    task.await.unwrap().unwrap();
+    let reopened = super::subagents::SubagentEndpoint::open(root).unwrap();
+    assert_eq!(
+        reopened.snapshot().1.len(),
+        256,
+        "private reply bodies survive reopen"
+    );
+}
+
 struct TestRuntimeEventSender(mpsc::Sender<RuntimeEvent>);
 
 impl TestRuntimeEventSender {

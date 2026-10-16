@@ -1486,7 +1486,8 @@ mod tests {
                     latest_credential_sync_signal: None,
                     worker_build: None,
                     subagent_requests: Vec::new(),
-                    subagent_results: Vec::new(),
+                    subagent_completions: Vec::new(),
+                    subagent_queue_error: None,
                 }),
             });
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);

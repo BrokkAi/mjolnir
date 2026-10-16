@@ -1932,6 +1932,7 @@ pub(super) async fn serve_client_with_memory(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut checkpoint_barriers = BTreeSet::new();
+    let mut subagent_feed = super::subagents::SubagentFeed::default();
     let serving_result = async {
         while let Some(line) =
             read_bounded_line(&mut reader, mj_core::relay::MAX_FRAME_BYTES).await?
@@ -2152,6 +2153,7 @@ pub(super) async fn serve_client_with_memory(
             if matches!(
                 &envelope.request,
                 RelayRequest::SubagentRequests
+                    | RelayRequest::PollSubagentQueue { .. }
                     | RelayRequest::CompleteSubagentRequest { .. }
                     | RelayRequest::SetSubagentAdmission { .. }
             ) {
@@ -2164,17 +2166,21 @@ pub(super) async fn serve_client_with_memory(
                     compaction_error(RelayErrorCode::InvalidState, &message)
                 } else {
                     match (&request_subagents, envelope.request) {
-                    (Some(endpoint), RelayRequest::SubagentRequests) => {
-                        let (requests, results) = endpoint.collect_for_daemon();
-                        RelayResponseBody::Ok {
-                            payload: RelayResponsePayload::SubagentRequests { requests, results },
+                    (endpoint, RelayRequest::PollSubagentQueue { acknowledged }) => {
+                        match subagent_feed.poll(endpoint.as_ref(), acknowledged) {
+                            Ok(page) => RelayResponseBody::Ok { payload: RelayResponsePayload::SubagentQueue { page } },
+                            Err(error) => compaction_error(RelayErrorCode::Internal, &format!("poll sub-agent queue: {error:#}")),
                         }
                     }
+                    (_, RelayRequest::SubagentRequests) => compaction_error(
+                        RelayErrorCode::InvalidRequest,
+                        "this worker uses poll_subagent_queue; historical reply snapshots are no longer served",
+                    ),
                     (Some(endpoint), RelayRequest::CompleteSubagentRequest { result }) => {
                         match endpoint.complete(result) {
                             Ok(delivered_to_waiter) => RelayResponseBody::Ok {
                                 payload: if protocol_version
-                                    >= mj_core::relay::RELAY_PROTOCOL_VERSION
+                                    >= mj_core::relay::RELAY_SUBAGENT_DELIVERY_PROTOCOL
                                 {
                                     RelayResponsePayload::SubagentRequestCompletedWithDelivery {
                                         delivered_to_waiter,
@@ -2200,12 +2206,6 @@ pub(super) async fn serve_client_with_memory(
                             ),
                         }
                     }
-                    (None, RelayRequest::SubagentRequests) => RelayResponseBody::Ok {
-                        payload: RelayResponsePayload::SubagentRequests {
-                            requests: Vec::new(),
-                            results: Vec::new(),
-                        },
-                    },
                     (None, RelayRequest::CompleteSubagentRequest { .. }) => compaction_error(
                         RelayErrorCode::InvalidRequest,
                         "this session has no Mjolnir sub-agent tools",

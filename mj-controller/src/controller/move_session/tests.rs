@@ -122,13 +122,48 @@ fn move_queue_relay_child() {
         std::env::var_os(MOVE_QUEUE_RELAY_MARKER).expect("relay crash marker is configured"),
     );
     let crash_after_first = !marker.exists();
-    let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
-        .expect("open move queue test relay");
+    // The delegation-only connection must not open a second journal writer.
+    let mut relay = None;
     let stdin = io::stdin();
     let mut input = stdin.lock();
     let stdout = io::stdout();
     let mut output = stdout.lock();
     while let Some(request) = read_relay_frame(&mut input).expect("read relay request") {
+        use mj_core::relay::{RelayResponseBody, RelayResponseEnvelope, RelayResponsePayload};
+        let payload = match &request.request {
+            RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
+                negotiated: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                relay_version: "1.0.0".into(),
+                session_id: MOVE_QUEUE_SESSION_ID.into(),
+                worker_build: None,
+            }),
+            RelayRequest::PollSubagentQueue { acknowledged } => {
+                Some(RelayResponsePayload::SubagentQueue {
+                    page: mj_core::subagent::SubagentQueuePage {
+                        sequence: acknowledged.unwrap_or(0) + 1,
+                        changes: Vec::new(),
+                        has_more: false,
+                    },
+                })
+            }
+            _ => None,
+        };
+        if let Some(payload) = payload {
+            write_relay_frame(
+                &mut output,
+                &RelayResponseEnvelope {
+                    request_id: request.request_id,
+                    protocol_version: request.protocol_version,
+                    body: RelayResponseBody::Ok { payload },
+                },
+            )
+            .expect("answer queue or hello");
+            continue;
+        }
+        let relay = relay.get_or_insert_with(|| {
+            DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
+                .expect("open move queue test relay")
+        });
         if let RelayRequest::Submit {
             command_id,
             command,
