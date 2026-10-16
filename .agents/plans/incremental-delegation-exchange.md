@@ -16,9 +16,11 @@ A healthy session must stay reachable after collecting many child reports. The w
 - [x] (2026-10-15 22:32Z) Updated compact controller observations and protocol compatibility. Delegation replication has its own supervised transport so failed polls cannot break control or idle upgrade admission.
 - [x] (2026-10-15 22:32Z) Added real-wire oversized-history regression, paging/completion ordering, durable acknowledgment retirement, MCP large-reply acknowledgment, and control-isolation coverage; test execution is pending.
 - [x] (2026-10-15) Focused checks passed: eight worker delegation cases including oversized history; 60 sub-agent unit tests plus one integration case; both corrected control-isolation and returned-lease regressions. Workspace Clippy, formatting, and diff whitespace checks passed.
-- [x] Full suites exercised all five touched crates. Final unit results: controller 2,006; worker 683; core 502 plus three integration cases; chat 412; CLI 212. All other integration targets passed; two native-recovery startup deadline failures passed on serial rerun. Final workspace Clippy passed. Test deadlines were unchanged; final suite concurrency was eight.
+- [x] Full suites exercised all five touched crates. Final unit results: controller 2,006; worker 683; core 502 plus three integration cases; chat 412; CLI 212. All other integration targets passed; two native-recovery startup deadline failures passed on serial rerun. Final workspace Clippy passed. Rust test deadlines were unchanged; final suite concurrency was eight.
 - [x] Matching standalone binaries built successfully. The complete isolated delegation/handoff e2e passed, including parked waits, messages, legacy attachments, task types, startup cleanup, retained usage, and session overrides. Measured handoff: 0.562 seconds. Log: `/mnt/optane/delegation-feed-e2e-recorded-turn.log`.
-- [ ] Commit, push current branch, install all matching binaries, and verify automatic daemon/worker handoff and the affected session.
+- [x] Committed implementation `f9d9cdb88`, merged the disjoint upstream UI change as `d69be1249`, and pushed master. Merge formatting and viewer unit checks passed.
+- [x] Standard release installation completed with all four matching binaries; HEAD stayed frozen throughout the builds. The daemon automatically handed off and confirmed it runs the installed executable.
+- [x] Live recovery verified: the affected session is connected and running; its worker negotiates protocol 38 and its SHA-256 matches the installed portable binary. Legacy results are imported, with private reply bodies preserved and new completions progressing.
 
 ## Surprises & Discoveries
 
@@ -62,7 +64,7 @@ The park-budget e2e run then exposed an accounting-baseline race in the old test
 ## Outcomes & Retrospective
 
 
-The redesign and Rust validation are complete. Reports stay in worker-private files, normal polls exchange bounded changes and compact receipts, and independent queue replication cannot disconnect session controls. The byte-boundary, lost-acknowledgment, restart, cancellation, and receipt-ordering regressions pass. The complete real-process e2e also passed with a 0.562-second daemon handoff. Commit, push, installation, and live recovery verification remain.
+The redesign and Rust validation are complete. Reports stay in worker-private files, normal polls exchange bounded changes and compact receipts, and delegation transport failures leave session controls attached. The byte-boundary, lost-acknowledgment, restart, cancellation, and receipt-ordering regressions pass. The complete real-process e2e also passed with a 0.562-second daemon handoff. Implementation `f9d9cdb88` and merge `d69be1249` were pushed to master and installed through the standard release installer. The daemon automatically handed off to the installed executable. The formerly unreachable session is connected and running on protocol 38; its live worker exactly matches the installed portable binary. No implementation or delivery work remains.
 
 ## Context and Orientation
 
@@ -117,6 +119,16 @@ A queue containing more than 8 MiB of historical result bodies must synchronize 
 
 Write reply files before publishing queue metadata so interrupted writes cannot expose missing accepted results. Keep page acknowledgment state separate from durable command effects. Repeated completion and acknowledgment are idempotent. Preserve worker files and work throughout installation. A busy worker waits for idle replacement; never cancel its turn to upgrade it. If legacy bulk state prevents ordinary connection, diagnose and implement bounded upgrade admission rather than deleting state or killing an active worker.
 
+## Delivery evidence
+
+The release installer completed both worker builds (4m30s and 11m49s) and the host build (24m37s), then installed `mj-worker`, `mj-worker-x86_64-unknown-linux-musl`, `mj-voice-worker`, and `mj`. The source and HEAD remained at `d69be1249` throughout. Build waits included shared scheduler and local ZFS pressure; the pool was healthy and had ample free space. No mount, storage layout, or build configuration changes were made.
+
+The installed management client reported daemon build `2.46.0+d69be124` and `This daemon runs this build.` The affected session's API relay health was `connected`, with no queue error, and its lifecycle was running. The live worker's hello negotiated protocol 38, and its executable SHA-256 equaled the installed portable worker's SHA-256.
+
+Initial recovery verification found a 100,495-byte queue with zero legacy results, 268 compact completions, and daemon acknowledgment of all 268. There were 267 private reply bodies totaling 8,749,603 bytes, with one caller receipt permitting one consumed body to retire. A pending request and additional completions confirm processing resumed. The prior 8,440,644-byte historical response is no longer sent through session synchronization.
+
+Evidence logs are `/mnt/optane/delegation-feed-install.log`, `/mnt/optane/delegation-installed-daemon-status.txt`, `/mnt/optane/delegation-recovered-session.json`, and `/mnt/optane/delegation-recovered-worker-verification.json`. Runtime incident identifiers remain out of the published plan.
+
 ## Artifacts and Notes
 
 
@@ -142,3 +154,5 @@ Revision note: recorded completed Rust validation, including the unchanged-deadl
 Revision note: aligned the e2e park observation with its existing production budget after tracing cleanup-induced failures; Rust source and validation remain unchanged.
 
 Revision note: recorded the ownership-based accounting wait and successful complete e2e before commit and delivery.
+
+Revision note (2026-10-16): recorded successful push, standard installation, automatic daemon handoff, matching live worker, and preserved private replies after recovery.
