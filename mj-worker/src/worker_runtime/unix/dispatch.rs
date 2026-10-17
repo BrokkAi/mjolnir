@@ -1094,7 +1094,10 @@ pub(crate) fn acp_command(claimed: &ClaimedRelayCommand) -> Option<CommandReques
                 active_prompt_id: active_prompt_id.clone(),
                 steering_prompt,
             }),
-        RelayCommand::CancelTurnFor { active_prompt_id } => Some(CommandRequest::CancelTurnFor {
+        RelayCommand::CancelTurnFor { active_prompt_id }
+        | RelayCommand::ApplyQueuedFor {
+            active_prompt_id, ..
+        } => Some(CommandRequest::CancelTurnFor {
             request_id,
             active_prompt_id: active_prompt_id.clone(),
         }),

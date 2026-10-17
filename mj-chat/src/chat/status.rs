@@ -212,16 +212,15 @@ impl ChatState {
     }
 
     pub(super) fn turn_control_intent(&self) -> TurnControlIntent {
-        if self.targeted_turn_control_supported
-            && self.prompt_in_flight
-            && self
-                .queued_prompts
-                .front()
-                .is_some_and(|queued| queued.kind.is_prompt())
+        match self
+            .turn_controls
+            .as_ref()
+            .and_then(|controls| controls.primary.as_ref())
+            .map(|action| action.kind)
         {
-            TurnControlIntent::Steer
-        } else {
-            TurnControlIntent::Cancel
+            Some(mj_core::relay::TurnControlKind::Steer) => TurnControlIntent::Steer,
+            Some(mj_core::relay::TurnControlKind::ApplyQueued) => TurnControlIntent::ApplyQueued,
+            _ => TurnControlIntent::Cancel,
         }
     }
 
@@ -620,6 +619,7 @@ impl ChatState {
             .iter()
             .map(|prompt| mj_core::relay::QueuedPrompt {
                 id: prompt.id.clone(),
+                kind: prompt.kind.clone(),
                 text: prompt.text.clone(),
                 attachments: Vec::new(),
                 created_at_ms: 0,

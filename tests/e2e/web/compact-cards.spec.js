@@ -891,11 +891,13 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
 });
 
 test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
   const parent = session('steering', 'project', 'Project', {
     queued: 1, capabilities: { prompt: true, interrupt_turn: true },
   });
   parent.targeted_turn_control_supported = true;
   parent.active_prompt_id = 'turn-one'; parent.chat_phase = 'running';
+  parent.turn_controls = { status: 'ready', primary: { kind: 'steer', command: { type: 'steer', data: { active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0' } } }, interrupt: { type: 'cancel_turn_for', data: { active_prompt_id: 'turn-one' } } };
   const state = await mount(page, [parent]);
   await card(page, 'steering').click();
   const composer = page.locator('#prompt-text');
@@ -905,6 +907,7 @@ test('composer steering survives reconnect and Escape never confirms cancellatio
   expect(state.actions[0]).toEqual({ action: 'turn-control', session_id: 'steering', command: {
     type: 'steer', data: { active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0' },
   } });
+  parent.turn_controls.status = 'pending'; parent.turn_controls.primary = null;
   parent.steering = { command_id: 'steer-one', active_prompt_id: 'turn-one', queued_prompt_id: 'queued-steering-0', status: 'pending' };
   await refresh(page, state);
   await expect(page.locator('#cancel-turn')).toHaveText('Steering…');
@@ -912,9 +915,10 @@ test('composer steering survives reconnect and Escape never confirms cancellatio
   expect(state.actions).toHaveLength(1);
   await reconnect(page, state);
   await expect(page.locator('#cancel-turn')).toBeDisabled();
+  parent.turn_controls.status = 'ready';
   parent.steering.status = 'failed'; parent.steering.message = 'Adapter refused steering';
   await refresh(page, state);
-  const cancel = page.getByRole('button', { name: 'Cancel turn and apply queued prompt', exact: true });
+  const cancel = page.locator('#turn-control-status').getByRole('button', { name: 'Interrupt', exact: true });
   await expect(cancel).toBeVisible();
   await composer.press('Escape');
   await expect(cancel).toHaveCount(0);
@@ -1015,7 +1019,7 @@ for (const queued of [0, 1]) {
     // screen renders, the composer is not the key target and Escape would
     // reach the page body instead of the turn control.
     await expect(page.locator('#cancel-turn')).toBeVisible();
-    await expect(page.locator('#cancel-turn')).toHaveText('Interrupt turn');
+    await expect(page.locator('#cancel-turn')).toHaveText('Interrupt');
     await page.locator('#prompt-text').press('Escape');
     await expect.poll(() => state.actions.length).toBe(1);
     expect(state.actions[0]).toEqual({ action: 'interrupt-turn', session_id: 'old-worker' });
@@ -1069,4 +1073,55 @@ test('earlier messages can be dismissed while loading', async ({ page }) => {
   release();
   await renderAfterFrame(page);
   await expect(page.getByText('Late answer', { exact: true })).toHaveCount(0);
+});
+
+// Hard-won: 8ba3d377e: queued model changes were offered as steerable prompts.
+test('mobile Apply queued preserves the published target and keeps interruption separate', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  const parent = session('settings-queue', 'project', 'A long project title', {
+    capabilities: { prompt: true, interrupt_turn: false, set_config: true },
+  });
+  parent.chat_phase = 'running'; parent.active_prompt_id = 'parent-turn';
+  parent.queued_prompts = [
+    { id: 'change-model', kind: { set_config: { key: 'model', value: 'fable' } }, text: '/model fable' },
+    { id: 'change-effort', kind: { set_config: { key: 'effort', value: 'high' } }, text: '/effort high' },
+    { id: 'question', kind: 'prompt', text: 'Compare Go with Rust' },
+  ];
+  parent.config_options = [{ key: 'model', current: 'opus', choices: [{ value: 'opus', name: 'Opus 5.5' }, { value: 'fable', name: 'Fable 5.1' }] }];
+  const command = { type: 'apply_queued_for', data: { active_prompt_id: 'parent-turn', queued_command_id: 'change-model' } };
+  parent.turn_controls = { status: 'ready', primary: { kind: 'apply_queued', command },
+    interrupt: { type: 'cancel_turn_for', data: { active_prompt_id: 'parent-turn' } },
+    message: 'Interrupts this turn to apply model: fable, effort: high and queued input. Sub-agents continue.' };
+  const state = await mount(page, [parent]);
+  await card(page, parent.id).click();
+  const apply = page.getByRole('button', { name: 'Apply queued', exact: true });
+  await expect(apply).toBeVisible();
+  await expect(page.locator('#turn-control-status')).toContainText('Sub-agents continue.');
+  const overflow = await page.evaluate(() => [...document.querySelectorAll('body *')].filter(e => {
+    const r = e.getBoundingClientRect(); return r.width > 0 && (r.right > innerWidth + 1 || r.left < -1);
+  }).map(e => ({ tag: e.tagName, id: e.id, cls: e.className, width: e.getBoundingClientRect().width, right: e.getBoundingClientRect().right })));
+  expect(overflow).toEqual([]);
+  const widths = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth,
+    elements: [...document.querySelectorAll('body *')].filter(e => e.scrollWidth > e.clientWidth + 1 && e.getBoundingClientRect().width > 0).map(e => ({id:e.id, cls:e.className, width:e.clientWidth, scroll:e.scrollWidth})) }));
+  expect(widths.scroll, JSON.stringify(widths)).toBeLessThanOrEqual(widths.width);
+  const bounds = await apply.boundingBox();
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(320);
+  await reconnect(page, state);
+  const press = await apply.boundingBox();
+  await page.mouse.move(press.x + press.width / 2, press.y + press.height / 2);
+  await page.mouse.down();
+  // The old turn ends and the next settings batch appears while the finger is down.
+  parent.active_prompt_id = 'replacement-turn';
+  parent.turn_controls = { ...parent.turn_controls,
+    primary: { kind: 'apply_queued', command: { type: 'apply_queued_for', data: { active_prompt_id: 'replacement-turn', queued_command_id: 'replacement-setting' } } },
+    interrupt: { type: 'cancel_turn_for', data: { active_prompt_id: 'replacement-turn' } },
+  };
+  await refresh(page, state);
+  await page.mouse.up();
+  await expect.poll(() => state.actions.length).toBe(1);
+  expect(state.actions[0].command).toEqual(command);
+  await page.getByLabel('More turn actions').click();
+  await page.getByRole('button', { name: 'Interrupt turn', exact: true }).click();
+  await expect.poll(() => state.actions.length).toBe(2);
+  expect(state.actions[1].command).toEqual(parent.turn_controls.interrupt);
 });

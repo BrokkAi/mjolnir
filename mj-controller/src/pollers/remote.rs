@@ -462,6 +462,7 @@ pub(super) fn queued_prompt_entries(
         .iter()
         .map(|prompt| mj_core::relay::QueuedPrompt {
             id: prompt.command_id.clone(),
+            kind: prompt.kind.clone(),
             text: mj_core::transcript::materialized_content_text(&prompt.content),
             attachments: Vec::new(),
             created_at_ms: prompt.queued_at_ms,

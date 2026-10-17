@@ -5745,3 +5745,65 @@ fn old_prompt_requests_remain_wire_compatible_and_recovery_ids_roundtrip() {
         serde_json::from_str(r#"{"text":"/clear","command_id":"restart-1"}"#).unwrap();
     assert_eq!(new.command_id.as_deref(), Some("restart-1"));
 }
+
+// Hard-won: 8ba3d377e: the Web control lost the type and identity of a queued setting.
+#[tokio::test]
+async fn published_apply_queued_crosses_the_api_without_retargeting_or_child_actions() {
+    let (app, mut actions, _snapshot_tx, _bundles) =
+        api_app(Arc::new(FakeBackend::default()), |snapshot| {
+            with_a_running_subagent(snapshot);
+            // A stale dashboard says idle; the worker must decide the exact command.
+            assert!(
+                !snapshot
+                    .sessions
+                    .0
+                    .get("session-1")
+                    .unwrap()
+                    .capabilities
+                    .interrupt_turn
+            );
+        });
+    let command = mj_core::relay::RelayCommand::ApplyQueuedFor {
+        active_prompt_id: "parent-turn".into(),
+        queued_command_id: "change-model".into(),
+    };
+    let response = tokio::spawn(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/turn-control"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&command).unwrap()))
+                .unwrap(),
+        ),
+    );
+    let request = match tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .expect("published control reaches the controller")
+    {
+        Some(request) => request,
+        None => {
+            let response = response.await.unwrap().unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            panic!(
+                "control returned {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+    };
+    assert_eq!(
+        request.action,
+        ControllerAction::TurnControl {
+            session_id: "session-1".into(),
+            command,
+        }
+    );
+    request
+        .reply
+        .send(super::super::ActionOutcome::accepted())
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::ACCEPTED
+    );
+    assert!(actions.try_recv().is_err());
+}

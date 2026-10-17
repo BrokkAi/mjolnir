@@ -10,21 +10,28 @@ const context = vm.createContext({});
 vm.runInContext(source.slice(begin, end), context);
 const state = session => JSON.parse(JSON.stringify(context.turnControlState(session)));
 
-test('queued input produces an identity-bound steer instead of cancellation', () => {
-  const result = state({ targeted_turn_control_supported: true, active_prompt_id: 'turn-1', queued_prompts: [{ id: 'queued-1' }] });
-  assert.deepEqual(result.command, { type: 'steer', data: { active_prompt_id: 'turn-1', queued_prompt_id: 'queued-1' } });
-  assert.equal(result.label, 'Steer queued prompt');
-  assert.equal(state({ targeted_turn_control_supported: true, active_prompt_id: 'turn-1' }).command.type, 'cancel_turn_for');
+// Hard-won: 8ba3d377e: the browser offered steering for a queued settings change.
+test('the worker controls the action even when the displayed queue has settings first', () => {
+  const command = { type: 'apply_queued_for', data: { active_prompt_id: 'turn-1', queued_command_id: 'model-change' } };
+  const result = state({ active_prompt_id: 'turn-1', queued_prompts: [{ id: 'model-change' }, { id: 'prompt-1' }],
+    turn_controls: { status: 'ready', primary: { kind: 'apply_queued', command }, interrupt: { type: 'cancel_turn_for', data: { active_prompt_id: 'turn-1' } }, message: 'Applies Fable after interrupting this turn.' } });
+  assert.deepEqual(result.command, command);
+  assert.equal(result.label, 'Apply queued');
+  assert.match(result.message, /Fable/);
+  assert.equal(result.interrupt.type, 'cancel_turn_for');
+  assert.equal(state({ targeted_turn_control_supported: true, active_prompt_id: 'turn-1', queued_prompts: [{ id: 'prompt-1' }] }).command.type, 'cancel_turn_for');
 });
 
 test('reconnected pending and uncertain operations cannot silently become cancellation', () => {
-  const session = { active_prompt_id: 'turn-1', queued_prompts: [{ id: 'queued-1' }], steering: { status: 'pending' } };
+  const session = { active_prompt_id: 'turn-1', queued_prompts: [{ id: 'queued-1' }],
+    turn_controls: { status: 'pending', primary: null, interrupt: null } };
   assert.equal(state(session).pending, true);
   assert.equal(state(session).label, 'Steering…');
-  session.steering.status = 'unconfirmed';
+  session.turn_controls.status = 'unconfirmed';
   assert.equal(state(session).uncertain, true);
-  assert.equal(state(session).label, 'Delivery unconfirmed');
+  assert.equal(state(session).label, 'Unconfirmed');
+  session.turn_controls.status = 'pending';
   session.cancelling_prompt_id = 'turn-1';
   assert.equal(state(session).pending, true);
-  assert.equal(state(session).label, 'Interrupting turn…');
+  assert.equal(state(session).label, 'Interrupting…');
 });

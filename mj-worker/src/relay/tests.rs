@@ -588,9 +588,9 @@ fn claude_explicit_steer_is_delivered_at_the_post_tool_batch_boundary() {
 }
 
 #[test]
-fn claude_explicit_steer_waits_for_turn_end_when_no_post_tool_batch_hook_exists() {
+fn admitted_claude_steer_returns_if_its_boundary_hook_becomes_unavailable() {
     let temp = tempfile::tempdir().unwrap();
-    let mut relay = running_claude_turn(temp.path(), false);
+    let mut relay = running_claude_turn(temp.path(), true);
     queue_prompt(&mut relay, "prompt-second", "Continue with this request.");
     submit_relay(
         &mut relay,
@@ -600,6 +600,8 @@ fn claude_explicit_steer_waits_for_turn_end_when_no_post_tool_batch_hook_exists(
             queued_prompt_id: "prompt-second".into(),
         },
     );
+    // Availability can change after an operation has already been admitted.
+    relay.set_steering_delivery_mode(HarnessKind::Claude, false);
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
 
     relay
@@ -642,13 +644,27 @@ fn claude_attachment_steer_is_left_for_the_next_normal_prompt() {
             ],
         },
     );
-    submit_relay(
-        &mut relay,
-        "attachment-steer",
-        RelayCommand::Steer {
-            active_prompt_id: "prompt-first".into(),
-            queued_prompt_id: "prompt-with-attachment".into(),
-        },
+    assert_eq!(
+        relay
+            .operational_state()
+            .turn_controls
+            .unwrap()
+            .primary
+            .unwrap()
+            .kind,
+        TurnControlKind::ApplyQueued
+    );
+    assert!(
+        relay
+            .submit_command(
+                "attachment-steer",
+                RelayCommand::Steer {
+                    active_prompt_id: "prompt-first".into(),
+                    queued_prompt_id: "prompt-with-attachment".into(),
+                }
+            )
+            .unwrap()
+            .is_err()
     );
     assert!(relay.claim_pending_commands(true).unwrap().is_empty());
     let (text, count, lease_id) = drain_post_tool_batch(&mut relay);
@@ -6544,4 +6560,167 @@ fn mailbox_wake_waits_for_checkpoint_close_and_cancellation() {
             .values()
             .any(|dispatch| matches!(&dispatch.command, RelayCommand::MailboxWake { .. }))
     );
+}
+
+// Hard-won: 8ba3d377e: settings at the queue head made both automatic and manual steering unusable.
+#[test]
+fn published_apply_queued_preserves_settings_order_and_survives_reconnect() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    submit_relay(&mut relay, "model-change", set_config("model", "fable"));
+    submit_relay(&mut relay, "effort-change", set_config("effort", "high"));
+    queue_prompt(&mut relay, "user-question", "Compare Go with Rust.");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    let controls = relay.operational_state().turn_controls.unwrap();
+    let action = controls.primary.unwrap();
+    assert_eq!(action.kind, TurnControlKind::ApplyQueued);
+    assert!(
+        controls
+            .message
+            .unwrap()
+            .contains("model: fable, effort: high")
+    );
+    let command = action.command;
+    assert_eq!(
+        command,
+        RelayCommand::ApplyQueuedFor {
+            active_prompt_id: "prompt-first".into(),
+            queued_command_id: "model-change".into(),
+        }
+    );
+    submit_relay(&mut relay, "apply-queued", command.clone());
+    assert_eq!(
+        relay.operational_state().turn_controls.unwrap().status,
+        TurnControlStatus::Pending
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].command, command);
+    // Cancellation drains before either settings or the next prompt can start.
+    finish_prompt(&mut relay, "prompt-first");
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    relay
+        .record_command_completed("apply-queued", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed[0].command_id, "model-change");
+    relay
+        .record_command_completed("model-change", RelayCommandOutcome::Configured)
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed[0].command_id, "effort-change");
+    relay
+        .record_command_completed("effort-change", RelayCommandOutcome::Configured)
+        .unwrap();
+    assert_eq!(
+        relay.claim_pending_commands(true).unwrap()[0].command_id,
+        "user-question"
+    );
+    let reconnected: RelayOperationalState =
+        serde_json::from_slice(&serde_json::to_vec(&relay.operational_state()).unwrap()).unwrap();
+    assert_eq!(
+        reconnected.active_prompt.unwrap().command_id,
+        "user-question"
+    );
+    finish_prompt(&mut relay, "user-question");
+    drop(relay);
+    let reopened = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(reopened.snapshot.config.get("model").unwrap(), "fable");
+    assert_eq!(reopened.snapshot.config.get("effort").unwrap(), "high");
+    assert_eq!(
+        reopened.snapshot.dispatches["user-question"].state,
+        RelayDispatchState::Completed
+    );
+    assert!(reopened.snapshot.queued_prompts.is_empty());
+}
+
+#[test]
+fn stale_published_controls_cannot_follow_a_replaced_queue_or_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    submit_relay(&mut relay, "model-change", set_config("model", "fable"));
+    let stale = relay
+        .operational_state()
+        .turn_controls
+        .unwrap()
+        .primary
+        .unwrap()
+        .command;
+    submit_relay(
+        &mut relay,
+        "remove-model",
+        RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: "model-change".into(),
+        },
+    );
+    submit_relay(&mut relay, "other-setting", set_config("effort", "high"));
+    assert!(
+        relay
+            .submit_command("stale-queue-click", stale)
+            .unwrap()
+            .is_err()
+    );
+    assert!(relay.snapshot.cancelling_prompt_id.is_none());
+    let stale = relay
+        .operational_state()
+        .turn_controls
+        .unwrap()
+        .primary
+        .unwrap()
+        .command;
+    finish_prompt(&mut relay, "prompt-first");
+    assert_eq!(
+        relay.claim_pending_commands(true).unwrap()[0].command_id,
+        "other-setting"
+    );
+    relay
+        .record_command_completed("other-setting", RelayCommandOutcome::Configured)
+        .unwrap();
+    queue_prompt(&mut relay, "later-turn", "A later request.");
+    relay.claim_pending_commands(true).unwrap();
+    assert!(
+        relay
+            .submit_command("stale-turn-click", stale)
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(
+        relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+        "later-turn"
+    );
+    assert!(relay.snapshot.cancelling_prompt_id.is_none());
+}
+
+#[test]
+fn apply_queued_rechecks_its_head_before_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = relay_steering_automatically(temp.path());
+    submit_relay(&mut relay, "model-change", set_config("model", "fable"));
+    let command = relay
+        .operational_state()
+        .turn_controls
+        .unwrap()
+        .primary
+        .unwrap()
+        .command;
+    submit_relay(&mut relay, "apply-queued", command);
+    submit_relay(
+        &mut relay,
+        "remove-model",
+        RelayCommand::RemoveQueuedPrompt {
+            queued_command_id: "model-change".into(),
+        },
+    );
+    submit_relay(&mut relay, "other-setting", set_config("effort", "high"));
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert_eq!(
+        relay.snapshot.dispatches["apply-queued"].state,
+        RelayDispatchState::Rejected
+    );
+    assert!(relay.snapshot.cancelling_prompt_id.is_none());
+    assert_eq!(
+        relay.snapshot.active_prompt.as_ref().unwrap().command_id,
+        "prompt-first"
+    );
+    assert_eq!(queued_command_ids(&relay), ["other-setting"]);
 }

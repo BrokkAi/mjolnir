@@ -7502,18 +7502,24 @@ const failedTurnControls = new Map();
 
 function turnControlState(session) {
   const steering = session?.steering;
-  const pending = Boolean(session?.cancelling_prompt_id) || steering?.status === 'pending';
-  const uncertain = steering?.status === 'unconfirmed';
+  const published = session?.turn_controls;
+  const pending = published ? published.status === 'pending'
+    : Boolean(session?.cancelling_prompt_id) || steering?.status === 'pending';
+  const uncertain = published ? published.status === 'unconfirmed' : steering?.status === 'unconfirmed';
   const failed = steering?.status === 'failed';
-  const targeted = session?.targeted_turn_control_supported === true;
-  const queued = targeted && (session?.queued_prompts || [])[0];
+  // Older workers expose explicit interruption only, never inferred steering.
+  const legacyInterrupt = session?.targeted_turn_control_supported && session?.active_prompt_id
+    ? { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } } : null;
+  const action = published?.primary;
   return {
     pending, uncertain, failed,
-    label: session?.cancelling_prompt_id ? 'Interrupting turn…' : steering?.status === 'pending' ? 'Steering…'
-      : uncertain ? 'Delivery unconfirmed' : queued ? 'Steer queued prompt' : 'Interrupt turn',
-    command: targeted && session?.active_prompt_id ? queued
-      ? { type: 'steer', data: { active_prompt_id: session.active_prompt_id, queued_prompt_id: queued.id || queued.command_id } }
-      : { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } } : null,
+    label: pending ? (session?.cancelling_prompt_id ? 'Interrupting…' : 'Steering…')
+      : uncertain ? 'Unconfirmed' : action?.kind === 'steer' ? 'Steer'
+      : action?.kind === 'apply_queued' ? 'Apply queued' : 'Interrupt',
+    message: published?.message || '',
+    command: published ? action?.command || null : legacyInterrupt,
+    interrupt: published ? published.interrupt : legacyInterrupt,
+    unavailable: published?.status === 'unavailable',
   };
 }
 
@@ -7528,22 +7534,54 @@ async function submitTurnControl(session, command) {
     await refresh();
   } catch (error) {
     failedTurnControls.set(session.id, { message: error.message, activePromptId: command.data?.active_prompt_id });
+    await refresh();
   } finally {
     pendingTurnControls.delete(session.id);
     if (currentSession === session.id) renderTurnControl(sessionById(session.id) || session);
   }
 }
 
+// A refresh between pointer-down and click must not move a press to a new turn.
+function bindTurnControlButton(target, binding) {
+  target._turnControlBinding = binding;
+  if (target._turnControlBound) return;
+  target._turnControlBound = true;
+  target.addEventListener('pointerdown', () => { target._turnControlPress = target._turnControlBinding; });
+  target.addEventListener('pointercancel', () => { target._turnControlPress = null; });
+  target.addEventListener('keydown', event => {
+    if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) target._turnControlPress = target._turnControlBinding;
+  });
+  target.onclick = async () => {
+    const owned = target._turnControlPress || target._turnControlBinding;
+    target._turnControlPress = null;
+    if (!owned || owned.sessionId !== currentSession) return;
+    const session = sessionById(owned.sessionId);
+    if (!session) return;
+    const menu = target.closest('details');
+    if (menu) menu.open = false;
+    if (owned.command) await submitTurnControl(session, owned.command);
+    else if (owned.legacy) await sendAction({ action: 'interrupt-turn', session_id: owned.sessionId });
+  };
+}
+
 function renderTurnControl(session) {
   const control = turnControlState(session);
   cancelTurnButton.textContent = control.label;
-  cancelTurnButton.disabled = control.pending || control.uncertain || pendingTurnControls.has(session.id);
+  cancelTurnButton.disabled = control.pending || control.uncertain || control.unavailable || pendingTurnControls.has(session.id);
+  cancelTurnButton.title = control.message || control.label;
+  bindTurnControlButton(cancelTurnButton, { sessionId: session.id, command: control.command, legacy: !session.turn_controls });
+  const actions = document.querySelector('#turn-actions');
+  const interrupt = document.querySelector('#interrupt-turn');
+  actions.hidden = !control.interrupt || control.command?.type === 'cancel_turn_for';
+  interrupt.disabled = pendingTurnControls.has(session.id);
+  bindTurnControlButton(interrupt, { sessionId: session.id, command: control.interrupt });
   let panel = document.querySelector('#turn-control-status');
   if (!panel) {
     panel = el('div', 'turn-control-status'); panel.id = 'turn-control-status';
-    panel.setAttribute('role', 'status'); cancelTurnButton.parentElement.append(panel);
+    panel.setAttribute('role', 'status'); document.querySelector('.conversation-header').after(panel);
   }
   panel.replaceChildren();
+  if (control.message && !control.pending && !control.uncertain) panel.append(el('p', 'turn-control-explanation', control.message));
   const signature = `${session.steering?.command_id}:${session.steering?.status}:${session.active_prompt_id || ''}`;
   const localError = failedTurnControls.get(session.id);
   if (!(control.uncertain || control.failed || localError) || dismissedTurnControls.get(session.id) === signature) return;
@@ -7552,9 +7590,10 @@ function renderTurnControl(session) {
   const keep = button('Keep queued');
   keep.onclick = () => { dismissedTurnControls.set(session.id, signature); panel.replaceChildren(); };
   panel.append(keep);
-  if (session.active_prompt_id && !session.cancelling_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
-    const cancel = button(control.uncertain ? 'Cancel turn' : 'Cancel turn and apply queued prompt');
-    cancel.onclick = () => submitTurnControl(session, { type: 'cancel_turn_for', data: { active_prompt_id: session.active_prompt_id } });
+  if (control.interrupt && session.active_prompt_id && (localError ? localError.activePromptId === session.active_prompt_id : session.steering?.active_prompt_id === session.active_prompt_id)) {
+    const cancel = button('Interrupt');
+    cancel.title = 'Interrupt this turn; queued input stays ordered.';
+    cancel.onclick = () => submitTurnControl(session, control.interrupt);
     panel.append(cancel);
   } else if (control.uncertain && !session.active_prompt_id) {
     const retry = button('Retry queued prompt');
@@ -7593,7 +7632,8 @@ function renderConversationHeader(session) {
     'hidden',
     isTransitioningSession(session)
       || isLoadingConversationSession(session)
-      || !session.capabilities?.interrupt_turn,
+      || (session.turn_controls ? !(session.turn_controls.primary || session.turn_controls.interrupt
+        || ['pending', 'unconfirmed'].includes(session.turn_controls.status)) : !session.capabilities?.interrupt_turn),
   );
 
   renderTurnControl(session);
@@ -8085,13 +8125,7 @@ feedScroll.addEventListener('scroll', () => {
   if (atTail()) jumpToLatest.classList.add('hidden');
 });
 
-cancelTurnButton.onclick = async () => {
-  const session = sessionById(currentSession);
-  const control = turnControlState(session);
-  if (control.pending || control.uncertain) return;
-  if (control.command) await submitTurnControl(session, control.command);
-  else await sendAction({ action: 'interrupt-turn', session_id: currentSession });
-};
+
 modelSelect.onchange = () => {
   const session = activeSession();
   if (!session) return;
@@ -8194,7 +8228,10 @@ promptText.addEventListener('keydown', e => {
     const panel = document.querySelector('#turn-control-status');
     const keep = panel?.querySelector('button');
     if (keep) keep.click();
-    else if (!cancelTurnButton.disabled && !cancelTurnButton.classList.contains('hidden')) cancelTurnButton.click();
+    else if (!cancelTurnButton.disabled && !cancelTurnButton.classList.contains('hidden')) {
+      cancelTurnButton._turnControlPress = cancelTurnButton._turnControlBinding;
+      cancelTurnButton.click();
+    }
     return;
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {

@@ -76,7 +76,9 @@ pub const RELAY_CLAUDE_HOOK_STEERING_PROTOCOL: u32 = 37;
 pub const RELAY_SUBAGENT_FEED_PROTOCOL: u32 = 38;
 /// 39 adds explicit, durable parent waits that leave child workers running.
 pub const RELAY_SUBAGENT_WAIT_PROTOCOL: u32 = 39;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SUBAGENT_WAIT_PROTOCOL;
+/// 40 publishes worker-owned controls and binds Apply queued to a queue head.
+pub const RELAY_TURN_CONTROLS_PROTOCOL: u32 = 40;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_TURN_CONTROLS_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

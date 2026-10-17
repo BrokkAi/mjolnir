@@ -625,6 +625,7 @@ pub(super) fn viewer_snapshot_selected(
             .flatten()
             .map(|prompt| ViewerQueuedPrompt {
                 id: prompt.id.clone(),
+                kind: prompt.kind.clone(),
                 text: prompt.text.clone(),
                 created_at: prompt.created_at_ms.to_string(),
             })
@@ -699,6 +700,7 @@ pub(super) fn viewer_snapshot_selected(
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =
             live.is_some_and(|state| state.supports_targeted_turn_control());
+        session.turn_controls = live.and_then(|s| s.turn_controls.clone());
         session.steering = live.and_then(|s| s.steering.clone());
         session.active_prompt_id =
             live.and_then(|s| s.active_prompt.as_ref().map(|p| p.command_id.clone()));

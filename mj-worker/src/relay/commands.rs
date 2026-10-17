@@ -81,6 +81,121 @@ impl DurableRelay {
         Ok(())
     }
 
+    /// One serialized owner chooses the actions we publish and admit.
+    pub(super) fn turn_controls(&self) -> TurnControls {
+        let mut controls = TurnControls {
+            status: TurnControlStatus::Unavailable,
+            primary: None,
+            interrupt: None,
+            message: None,
+        };
+        let Some(active) = self.snapshot.active_prompt.as_ref() else {
+            if self
+                .snapshot
+                .steering
+                .as_ref()
+                .is_some_and(|s| s.status == SteeringStatus::Unconfirmed)
+            {
+                controls.status = TurnControlStatus::Unconfirmed;
+                controls.message = Some("Delivery unconfirmed".into());
+            }
+            return controls;
+        };
+        if self.checkpoint_only || self.snapshot.checkpoint_barrier.is_some() {
+            controls.message = Some("A checkpoint is in progress.".into());
+            return controls;
+        }
+        if self.turn_cancellation_pending() {
+            controls.status = TurnControlStatus::Pending;
+            controls.message = Some("Interrupting…".into());
+            return controls;
+        }
+        let interrupt = RelayCommand::CancelTurnFor {
+            active_prompt_id: active.command_id.clone(),
+        };
+        controls.interrupt = Some(interrupt.clone());
+        if let Some(steering) = self.snapshot.steering.as_ref().filter(|s| s.holds_queue()) {
+            controls.status = if steering.status == SteeringStatus::Unconfirmed {
+                TurnControlStatus::Unconfirmed
+            } else {
+                TurnControlStatus::Pending
+            };
+            controls.message = Some(if controls.status == TurnControlStatus::Unconfirmed {
+                "Delivery unconfirmed".into()
+            } else {
+                "Steering…".into()
+            });
+            return controls;
+        }
+        controls.status = TurnControlStatus::Ready;
+        let mut primary = TurnControlAction {
+            kind: TurnControlKind::Interrupt,
+            command: interrupt,
+        };
+        if let Some(head) = self.snapshot.queued_prompts.first() {
+            let can_steer = match &head.payload {
+                StoredQueuedRelayPayload::Prompt { prompt } => {
+                    !mj_core::acp::prompt_is_slash_command(prompt)
+                        && match self.steering_delivery_mode {
+                            SteeringDeliveryMode::Acp => self.steering_supported != Some(false),
+                            SteeringDeliveryMode::ClaudePostToolBatch => {
+                                mj_core::acp::steering_text_context(prompt).is_some()
+                            }
+                            SteeringDeliveryMode::ClaudeTurnEnd => false,
+                        }
+                        && self
+                            .snapshot
+                            .dispatches
+                            .get(&head.command_id)
+                            .is_some_and(|d| d.state == RelayDispatchState::Queued)
+                }
+                StoredQueuedRelayPayload::SetConfig { .. } => false,
+            };
+            primary = if can_steer {
+                TurnControlAction {
+                    kind: TurnControlKind::Steer,
+                    command: RelayCommand::Steer {
+                        active_prompt_id: active.command_id.clone(),
+                        queued_prompt_id: head.command_id.clone(),
+                    },
+                }
+            } else {
+                controls.message = Some(match &head.payload {
+                    StoredQueuedRelayPayload::SetConfig { .. } => {
+                        let settings = self
+                            .snapshot
+                            .queued_prompts
+                            .iter()
+                            .take_while(|q| {
+                                matches!(q.payload, StoredQueuedRelayPayload::SetConfig { .. })
+                            })
+                            .filter_map(|q| match &q.payload {
+                                StoredQueuedRelayPayload::SetConfig { key, value } => {
+                                    Some(format!("{key}: {value}"))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "Interrupts this turn to apply {settings} and queued input. Sub-agents continue."
+                        )
+                    }
+                    _ => "Interrupts this turn to run queued input. Sub-agents continue.".into(),
+                });
+                TurnControlAction {
+                    kind: TurnControlKind::ApplyQueued,
+                    command: RelayCommand::ApplyQueuedFor {
+                        active_prompt_id: active.command_id.clone(),
+                        queued_command_id: head.command_id.clone(),
+                    },
+                }
+            };
+        }
+        controls.primary = Some(primary);
+        controls
+    }
+
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
             RelayCommand::SetSubagentWait { active_prompt_id, waiting } => {
@@ -94,47 +209,16 @@ impl DurableRelay {
                 }
             }
             RelayCommand::BeginCheckpoint { .. } if self.snapshot.steering.as_ref().is_some_and(|s| s.holds_queue()) => return Err("Resolve uncertain steering delivery before checkpointing or moving this session".into()),
-            RelayCommand::Steer {
-                active_prompt_id,
-                queued_prompt_id,
-            } => {
-                if self.snapshot.checkpoint_barrier.is_some() {
-                    return Err("A checkpoint is already admitted".into());
-                }
-                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id)
-                    != Some(active_prompt_id)
+            RelayCommand::Steer { .. }
+            | RelayCommand::ApplyQueuedFor { .. }
+            | RelayCommand::CancelTurnFor { .. } => {
+                let controls = self.turn_controls();
+                if controls.primary.as_ref().is_some_and(|action| &action.command == command)
+                    || controls.interrupt.as_ref() == Some(command)
                 {
-                    return Err("The requested turn is no longer running".into());
+                    return Ok(());
                 }
-                if !self.snapshot.queued_prompts.first().is_some_and(|q|
-                    q.command_id == *queued_prompt_id && matches!(q.payload, StoredQueuedRelayPayload::Prompt { .. }))
-                {
-                    return Err("The queued prompt changed; steering was not sent".into());
-                }
-                if self
-                    .snapshot
-                    .steering
-                    .as_ref()
-                    .is_some_and(|s| s.holds_queue())
-                    || self.snapshot.cancelling_prompt_id.is_some()
-                {
-                    return Err(
-                        "Turn control is already pending; no additional request was sent".into(),
-                    );
-                }
-            }
-            RelayCommand::CancelTurnFor { active_prompt_id } => {
-                if self.snapshot.checkpoint_barrier.is_some() {
-                    return Err("A checkpoint is already admitted".into());
-                }
-                if self.snapshot.active_prompt.as_ref().map(|p| &p.command_id)
-                    != Some(active_prompt_id)
-                {
-                    return Err("The requested turn is no longer running".into());
-                }
-                if self.turn_cancellation_pending() {
-                    return Err("Cancellation is already pending".into());
-                }
+                return Err("Turn or queue changed; refresh the available controls".into());
             }
             RelayCommand::Cancel | RelayCommand::CancelTurn
                 if self.turn_cancellation_pending() =>
@@ -990,10 +1074,17 @@ impl DurableRelay {
                     RelayCommand::Steer {
                         active_prompt_id, ..
                     }
-                    | RelayCommand::CancelTurnFor { active_prompt_id } => active_prompt_id,
+                    | RelayCommand::CancelTurnFor { active_prompt_id }
+                    | RelayCommand::ApplyQueuedFor {
+                        active_prompt_id, ..
+                    } => active_prompt_id,
                     _ => return None,
                 };
-                (self.snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(target))
+                let queue_changed = matches!(&d.command,
+                    RelayCommand::ApplyQueuedFor { queued_command_id, .. }
+                    if self.snapshot.queued_prompts.first().map(|q| &q.command_id) != Some(queued_command_id)
+                );
+                (queue_changed || self.snapshot.active_prompt.as_ref().map(|p| &p.command_id) != Some(target))
                     .then_some(id.clone())
             })
             .collect();
@@ -1001,7 +1092,7 @@ impl DurableRelay {
             self.record_command_rejected(
                 &id,
                 mj_core::event_outcome::OutcomeReason::AdmissionRejected,
-                "The requested turn is no longer running",
+                "Turn or queue changed before control delivery",
             )?;
         }
         self.submit_automatic_steer()?;
@@ -1229,19 +1320,13 @@ impl DurableRelay {
         {
             return None;
         }
-        let head = self.snapshot.queued_prompts.first()?;
-        let StoredQueuedRelayPayload::Prompt { prompt } = &head.payload else {
-            return None;
-        };
-        // Commands run at turn boundaries, not inside another turn.
-        if mj_core::acp::prompt_is_slash_command(prompt)
-            || (self.steering_delivery_mode == SteeringDeliveryMode::ClaudePostToolBatch
-                && mj_core::acp::steering_text_context(prompt).is_none())
-            || self.snapshot.dispatches.get(&head.command_id)?.state != RelayDispatchState::Queued
-        {
-            return None;
+        match self.turn_controls().primary?.command {
+            RelayCommand::Steer {
+                active_prompt_id,
+                queued_prompt_id,
+            } => Some((active_prompt_id, queued_prompt_id)),
+            _ => None,
         }
-        Some((active.clone(), head.command_id.clone()))
     }
 
     /// Advance only lifecycle commands after the old owning process was stopped.
@@ -1455,6 +1540,7 @@ impl DurableRelay {
                         RelayCommand::Cancel
                             | RelayCommand::Steer { .. }
                             | RelayCommand::CancelTurnFor { .. }
+                            | RelayCommand::ApplyQueuedFor { .. }
                             | RelayCommand::CancelTurn
                             | RelayCommand::GoalControl { .. }
                     )
@@ -1920,6 +2006,7 @@ impl DurableRelay {
                     RelayCommand::Cancel
                         | RelayCommand::CancelTurn
                         | RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ApplyQueuedFor { .. }
                 ) && matches!(
                     dispatch.state,
                     RelayDispatchState::Queued

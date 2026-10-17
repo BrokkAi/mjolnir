@@ -97,6 +97,7 @@ impl ChatRemoteOperation {
                 match intent {
                     TurnControlIntent::Cancel => "Interrupting turn…",
                     TurnControlIntent::Steer => "Steering turn…",
+                    TurnControlIntent::ApplyQueued => "Applying queued input…",
                 }
                 .into(),
             )),

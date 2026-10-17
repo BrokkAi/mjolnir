@@ -351,6 +351,7 @@ struct QueuedPrompt {
 enum TurnControlIntent {
     Cancel,
     Steer,
+    ApplyQueued,
 }
 
 impl TurnControlIntent {
@@ -358,6 +359,7 @@ impl TurnControlIntent {
         match self {
             Self::Cancel => "Esc interrupts",
             Self::Steer => "Esc steers next",
+            Self::ApplyQueued => "Esc applies queued · Ctrl-Esc interrupts",
         }
     }
 
@@ -365,6 +367,7 @@ impl TurnControlIntent {
         let action = match self {
             Self::Cancel => "Cancellation",
             Self::Steer => "Steering request",
+            Self::ApplyQueued => "Applying queued input",
         };
         format!("{action} failed: {error}")
     }
@@ -712,6 +715,7 @@ pub struct ChatState {
     prompt_in_flight: bool,
     steering_supported: Option<bool>,
     targeted_turn_control_supported: bool,
+    turn_controls: Option<mj_core::relay::TurnControls>,
     active_prompt_id: Option<String>,
     steering: Option<mj_core::relay::SteeringOperation>,
     cancelling_prompt_id: Option<String>,
@@ -881,6 +885,7 @@ impl ChatState {
             },
             steering_supported: None,
             targeted_turn_control_supported: false,
+            turn_controls: None,
             active_prompt_id: None,
             steering: None,
             cancelling_prompt_id: None,

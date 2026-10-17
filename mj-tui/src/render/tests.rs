@@ -2798,6 +2798,7 @@ fn golden_dashboard_session_render() {
         .queued_prompts
         .push(mj_core::relay::QueuedPrompt {
             id: "queued-1".into(),
+            kind: mj_core::state::QueuedCommandKind::Prompt,
             text: "later".into(),
             attachments: Vec::new(),
             created_at_ms: 1,
@@ -2885,6 +2886,7 @@ fn golden_dashboard_session_render() {
             .queued_prompts
             .push(mj_core::relay::QueuedPrompt {
                 id: "queued".into(),
+                kind: mj_core::state::QueuedCommandKind::Prompt,
                 text: "follow-up".into(),
                 attachments: Vec::new(),
                 created_at_ms: 1,

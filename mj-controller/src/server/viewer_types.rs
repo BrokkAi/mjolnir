@@ -204,6 +204,7 @@ impl ViewerSnapshot {
                     restart_recreates_container:
                         mj_core::state::ContainerSettings::recreation_required(session),
                     targeted_turn_control_supported: false,
+                    turn_controls: None,
                     native_subagents: Vec::new(),
                     steering: None,
                     active_prompt_id: None,
@@ -459,6 +460,8 @@ pub struct ViewerSession {
     pub base: Option<String>,
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_controls: Option<mj_core::relay::TurnControls>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_subagents: Vec<mj_core::native_agent::NativeAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -885,6 +888,11 @@ pub struct ViewerWorkspace {
 #[serde(deny_unknown_fields)]
 pub struct ViewerQueuedPrompt {
     pub id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "mj_core::state::QueuedCommandKind::is_prompt"
+    )]
+    pub kind: mj_core::state::QueuedCommandKind,
     pub text: String,
     pub created_at: String,
 }

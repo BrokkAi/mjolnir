@@ -729,6 +729,11 @@ impl DurableRelay {
         state.acp_ready = Some(self.acp_ready);
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
+        // Harness-initiated turns have no owned prompt ID. Keep their existing
+        // explicit interrupt surface; queue steering always needs an owned turn.
+        state.turn_controls = (self.snapshot.active_prompt.is_some()
+            || self.snapshot.harness_turn.is_none())
+        .then(|| self.turn_controls());
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
         state.tools_in_flight = self.foreground_tools.snapshot();

@@ -447,6 +447,7 @@ fn bootstrap_uses_snapshot_queue_without_duplicating_replayed_additions() {
         event: WorkerEvent::QueuedPromptAdded {
             prompt: mj_core::relay::QueuedPrompt {
                 id: "queued-0001".into(),
+                kind: QueuedCommandKind::Prompt,
                 text: "next".into(),
                 attachments: vec![],
                 created_at_ms: 1,
@@ -2047,6 +2048,21 @@ mod golden_cases {
         chat.mark_prompt_submitted("continue");
         chat.steering_supported = Some(true);
         chat.targeted_turn_control_supported = true;
+        chat.active_prompt_id = Some("active".into());
+        chat.turn_controls = Some(mj_core::relay::TurnControls {
+            status: mj_core::relay::TurnControlStatus::Ready,
+            primary: Some(mj_core::relay::TurnControlAction {
+                kind: mj_core::relay::TurnControlKind::Steer,
+                command: mj_core::relay::RelayCommand::Steer {
+                    active_prompt_id: "active".into(),
+                    queued_prompt_id: "next".into(),
+                },
+            }),
+            interrupt: Some(mj_core::relay::RelayCommand::CancelTurnFor {
+                active_prompt_id: "active".into(),
+            }),
+            message: None,
+        });
         chat.queued_prompts.push_back(queued("next", "follow up"));
         for width in [32, 48, 56, 80] {
             state(

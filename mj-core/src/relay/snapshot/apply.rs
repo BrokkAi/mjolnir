@@ -361,9 +361,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         message: None,
                     });
                 }
-                RelayCommand::CancelTurnFor { active_prompt_id } => {
-                    snapshot.cancelling_prompt_id = Some(active_prompt_id.clone())
-                }
+                RelayCommand::CancelTurnFor { active_prompt_id }
+                | RelayCommand::ApplyQueuedFor {
+                    active_prompt_id, ..
+                } => snapshot.cancelling_prompt_id = Some(active_prompt_id.clone()),
                 RelayCommand::Cancel | RelayCommand::CancelTurn => {
                     snapshot.cancelling_prompt_id = snapshot
                         .active_prompt
@@ -464,6 +465,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 RelayCommand::Cancel
                 | RelayCommand::CancelTurn
                 | RelayCommand::CancelTurnFor { .. }
+                | RelayCommand::ApplyQueuedFor { .. }
                 | RelayCommand::ClearContext
                 | RelayCommand::GoalControl { .. }
                 | RelayCommand::RestoreExecutionMode
@@ -481,7 +483,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if (cancels_capacity_retry(command) && user_control)
                 || matches!(
                     command,
-                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ClearContext
+                    RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ApplyQueuedFor { .. }
+                        | RelayCommand::ClearContext
                 )
             {
                 snapshot.continuation.quota_recovery = None;
@@ -492,7 +496,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if cancels_capacity_retry(command)
                 || matches!(
                     command,
-                    RelayCommand::CancelTurnFor { .. } | RelayCommand::ClearContext
+                    RelayCommand::CancelTurnFor { .. }
+                        | RelayCommand::ApplyQueuedFor { .. }
+                        | RelayCommand::ClearContext
                 )
             {
                 // A checkpoint barrier is housekeeping, so it leaves a pending
@@ -817,7 +823,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 | (RelayCommand::CancelTurn, RelayCommandOutcome::Cancelled)
                 // A cancel acknowledgement does not end its originating
                 // prompt, and must never retarget cancellation to a later one.
-                | (RelayCommand::CancelTurnFor { .. }, RelayCommandOutcome::Cancelled) => {}
+                | (RelayCommand::CancelTurnFor { .. } | RelayCommand::ApplyQueuedFor { .. }, RelayCommandOutcome::Cancelled) => {}
                 (
                     RelayCommand::ResolveSteering { steering_id },
                     RelayCommandOutcome::NoticeRecorded,
@@ -1108,7 +1114,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 };
                 steering.message = Some(message.clone());
             }
-            if let RelayCommand::CancelTurnFor { active_prompt_id } = &command
+            if let RelayCommand::CancelTurnFor { active_prompt_id }
+            | RelayCommand::ApplyQueuedFor {
+                active_prompt_id, ..
+            } = &command
                 && snapshot.cancelling_prompt_id.as_ref() == Some(active_prompt_id)
             {
                 snapshot.cancelling_prompt_id = None;
@@ -1855,7 +1864,9 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 } else if cancels_capacity_retry(command)
                     || matches!(
                         command,
-                        RelayCommand::ClearContext | RelayCommand::CancelTurnFor { .. }
+                        RelayCommand::ClearContext
+                            | RelayCommand::CancelTurnFor { .. }
+                            | RelayCommand::ApplyQueuedFor { .. }
                     )
                 {
                     a.status = Status::Superseded;

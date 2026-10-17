@@ -608,6 +608,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        turn_controls: None,
         config_options: vec![option],
         modes: None,
         available_commands: Vec::new(),

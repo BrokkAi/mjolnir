@@ -30,24 +30,24 @@ pub(super) fn dialog() -> Dialog<Control> {
 
 impl ChatState {
     pub(super) fn escape_command(&self) -> Option<RelayCommand> {
-        if !self.targeted_turn_control_supported {
-            return Some(RelayCommand::CancelTurn);
+        if let Some(controls) = &self.turn_controls {
+            return controls
+                .primary
+                .as_ref()
+                .map(|action| action.command.clone());
         }
-        let Some(active_prompt_id) = self.active_prompt_id.clone() else {
-            return Some(RelayCommand::CancelTurn);
-        };
-        if let Some(queued) = self.queued_prompts.front().filter(|q| q.kind.is_prompt()) {
-            Some(RelayCommand::Steer {
-                active_prompt_id,
-                queued_prompt_id: queued.id.clone(),
-            })
-        } else {
-            Some(RelayCommand::CancelTurnFor { active_prompt_id })
-        }
+        // Older workers publish no availability; expose interruption only.
+        Some(match self.active_prompt_id.clone() {
+            Some(active_prompt_id) if self.targeted_turn_control_supported => {
+                RelayCommand::CancelTurnFor { active_prompt_id }
+            }
+            _ => RelayCommand::CancelTurn,
+        })
     }
 
     pub(super) fn sync_turn_control(&mut self, state: &RelayOperationalState) {
         self.targeted_turn_control_supported = state.supports_targeted_turn_control();
+        self.turn_controls = state.turn_controls.clone();
         let changed = self.steering != state.steering;
         if self.turn_control_awaiting_state.as_ref().is_some_and(|id| {
             state.steering.as_ref().is_some_and(|s| s.command_id == *id)
@@ -110,7 +110,10 @@ impl ChatState {
                 .active_prompt_id
                 .clone()
                 .filter(|id| self.turn_control_target.as_ref() == Some(id))
-                .map(|active_prompt_id| RelayCommand::CancelTurnFor { active_prompt_id }),
+                .and_then(|active_prompt_id| match self.turn_controls.as_ref() {
+                    Some(controls) => controls.interrupt.clone(),
+                    None => Some(RelayCommand::CancelTurnFor { active_prompt_id }),
+                }),
             Control::Retry if self.active_prompt_id.is_none() => {
                 self.steering
                     .as_ref()

@@ -33,10 +33,12 @@ use super::{
 mod apply;
 mod budget;
 mod digest;
+mod turn_control;
 
 pub use apply::*;
 pub use budget::*;
 pub use digest::*;
+pub use turn_control::*;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -133,6 +135,11 @@ pub enum RelayCommand {
     CancelTurnFor {
         active_prompt_id: String,
     },
+    /// Interrupt this turn only while the intended queued change is still first.
+    ApplyQueuedFor {
+        active_prompt_id: String,
+        queued_command_id: String,
+    },
     /// Release held input only after the user reviews uncertain delivery.
     ResolveSteering {
         steering_id: String,
@@ -191,6 +198,7 @@ impl RelayCommand {
 
     pub fn minimum_protocol(&self) -> u32 {
         match self {
+            Self::ApplyQueuedFor { .. } => super::RELAY_TURN_CONTROLS_PROTOCOL,
             Self::SetSubagentWait { .. } => super::RELAY_SUBAGENT_WAIT_PROTOCOL,
             Self::DeliverMailboxEvent { event } => event.body.minimum_relay_protocol(),
             Self::MailboxWake { events } => events
@@ -268,6 +276,7 @@ impl RelayCommand {
                 | Self::CancelTurn
                 | Self::Steer { .. }
                 | Self::CancelTurnFor { .. }
+                | Self::ApplyQueuedFor { .. }
                 | Self::Cancel
                 | Self::Close { .. }
         )
@@ -299,6 +308,7 @@ impl RelayCommand {
             Self::CancelTurn => RelayCommandKind::CancelTurn,
             Self::Steer { .. } => RelayCommandKind::Steer,
             Self::CancelTurnFor { .. } => RelayCommandKind::CancelTurn,
+            Self::ApplyQueuedFor { .. } => RelayCommandKind::CancelTurn,
             Self::ResolveSteering { .. } => RelayCommandKind::ResolveSteering,
             Self::Cancel => RelayCommandKind::Cancel,
             Self::Close { .. } => RelayCommandKind::Close,
@@ -707,6 +717,9 @@ pub struct RelayOperationalState {
     /// Older workers do not report the optional ACP steering extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering_supported: Option<bool>,
+    /// Actions decided by the worker against its ordered command queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_controls: Option<TurnControls>,
     pub config_options: Vec<SessionConfigOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
@@ -1607,6 +1620,7 @@ impl RelaySnapshot {
             runtime: self.runtime.clone(),
             // Steering support belongs to the connected harness, like readiness.
             steering_supported: None,
+            turn_controls: None,
             config_options: self.config_options.clone(),
             modes: self.modes.clone(),
             available_commands: self.available_commands.clone(),
