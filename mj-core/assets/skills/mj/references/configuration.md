@@ -458,9 +458,10 @@ command-line tool must match the version Mjolnir links.
 ## Sub-agents `[subagents]`
 
 A Claude or Codex session can use Mjolnir's `spawn` tool. Create and Move offer
-Native or Mjolnir. Native uses the harness's own delegation. Each Mjolnir task
-type needs a global choice, configured in Settings → Sub-agents or config.toml,
-or a session override:
+Native or Mjolnir. Native uses the harness's own delegation. Mjolnir needs a
+straightforward choice, configured in Settings → Sub-agents or config.toml, or a
+session override. The subtle choice is optional, but cannot be configured without
+straightforward:
 
 ```toml
 [subagents]
@@ -481,15 +482,17 @@ claude = true
 
 Each choice requires a non-empty model. Effort is optional and must be offered
 by that model when specified; omitted effort uses the harness default. Adaptive
-effort is no longer supported. Both choices must be available to the parent's
-eligible profiles before Mjolnir can be selected. Legacy per-profile subagent
+effort is no longer supported. Each configured choice must be available to the
+parent's eligible profiles before Mjolnir can be selected. Legacy per-profile subagent
 settings are ignored and dropped on save, with no migration to global choices.
 
-`spawn` takes `task_type`: `straightforward` for work with a clear method, such
-as locating code, running commands or tests, or implementing a settled design;
-`subtle` for judgment, ambiguous diagnosis, design choices, or risk of subtle
-bugs. A subtle task gets a smarter, more expensive agent. Judge difficulty,
-not brief length. Mjolnir chooses the eligible profile offering that task type's
+With both types configured, `spawn` takes `task_type`: `straightforward` for
+work with a clear method, such as locating code, running commands or tests, or
+implementing a settled design; `subtle` for judgment, ambiguous diagnosis,
+design choices, or risk of subtle bugs. A subtle task gets a smarter, more
+expensive agent. Judge difficulty, not brief length. With only straightforward
+configured, `spawn` and the parent's delegation instructions do not mention task
+types, and every child uses the straightforward choice. Mjolnir chooses the eligible profile offering that task type's
 model and effort with the most quota. The agent cannot override the selection.
 Children cannot delegate. `mj new --subagents native|mjolnir|none` defaults to
 Native; `mj move --subagents native|mjolnir|none` retains the recorded policy when

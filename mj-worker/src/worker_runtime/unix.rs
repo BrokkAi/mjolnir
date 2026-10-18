@@ -341,6 +341,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             path: root.join(super::subagents::SUBAGENT_SOCKET),
             role,
             agent_mailboxes_enabled: config.agent_mailboxes_enabled,
+            subtle_subagents: config.subtle_subagents,
             profile_registration,
         }),
         project_memory: config.project_memory,
@@ -1541,6 +1542,7 @@ async fn prepare_and_start_harness(
             let role = subagent_role;
             let policy = config.execution_policy;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
+            let subtle_subagents = config.subtle_subagents;
             let (registered, environment) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -1553,6 +1555,7 @@ async fn prepare_and_start_harness(
                         role,
                         policy,
                         mailboxes_enabled,
+                        subtle_subagents,
                     )?;
                     Ok((registered, environment))
                 })

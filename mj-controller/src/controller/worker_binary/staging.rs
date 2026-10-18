@@ -120,6 +120,7 @@ pub(super) fn configure_claude_subagent_mcp(
     worker_root: &str,
     role: Option<mj_core::subagent::SubagentMcpRole>,
     agent_mailboxes_enabled: bool,
+    subtle_subagents: bool,
 ) -> Result<()> {
     use mj_core::subagent::SUBAGENT_MCP_SERVER;
 
@@ -136,40 +137,49 @@ pub(super) fn configure_claude_subagent_mcp(
                 )
             })?;
         if let Some(role) = role {
-            servers.insert(
-                SUBAGENT_MCP_SERVER.into(),
-                serde_json::json!({
-                "type":"stdio",
-                // Delegation is part of the session's core toolset, like
-                // Claude's native Agent tool, rather than optional discovery.
-                "alwaysLoad":true,
-                // Remote roots are home-relative; worker startup resolves
-                // both paths on the target before launching Claude.
-                "command":mj_core::target_path::text(&mj_core::target_path::join(
+            let mut server = serde_json::json!({
+            "type":"stdio",
+            // Delegation is part of the session's core toolset, like
+            // Claude's native Agent tool, rather than optional discovery.
+            "alwaysLoad":true,
+            // Remote roots are home-relative; worker startup resolves
+            // both paths on the target before launching Claude.
+            "command":mj_core::target_path::text(&mj_core::target_path::join(
+                Path::new(worker_root),
+                Path::new("hel"),
+            )),
+            "args":[
+                "worker",
+                "subagent-mcp",
+                "--socket",
+                mj_core::target_path::text(&mj_core::target_path::join(
                     Path::new(worker_root),
-                    Path::new("hel"),
+                    Path::new(mj_worker_socket_name()),
                 )),
-                "args":[
-                    "worker",
-                    "subagent-mcp",
-                    "--socket",
-                    mj_core::target_path::text(&mj_core::target_path::join(
-                        Path::new(worker_root),
-                        Path::new(mj_worker_socket_name()),
-                    )),
-                    // Claude's own limit is on silence, which the server's
-                    // progress notifications break, so this keeps the full
-                    // advertised wait. Naming the harness anyway keeps both
-                    // delivery paths explicit.
-                    "--harness",
-                    mj_core::config::HarnessKind::Claude.id(),
-                    "--role",
-                    role.id(),
-                    "--agent-mailboxes-enabled",
-                    agent_mailboxes_enabled.to_string()
-                ]
-                }),
-            );
+                // Claude's own limit is on silence, which the server's
+                // progress notifications break, so this keeps the full
+                // advertised wait. Naming the harness anyway keeps both
+                // delivery paths explicit.
+                "--harness",
+                mj_core::config::HarnessKind::Claude.id(),
+                "--role",
+                role.id(),
+                "--agent-mailboxes-enabled",
+                agent_mailboxes_enabled.to_string()
+            ]
+            });
+            if !subtle_subagents {
+                // Written only when off, so a launch offering both types keeps
+                // the arguments an older worker accepts.
+                server["args"]
+                    .as_array_mut()
+                    .expect("arguments are an array")
+                    .extend([
+                        serde_json::json!("--subtle-subagents"),
+                        serde_json::json!("false"),
+                    ]);
+            }
+            servers.insert(SUBAGENT_MCP_SERVER.into(), server);
         } else {
             servers.remove(SUBAGENT_MCP_SERVER);
         }

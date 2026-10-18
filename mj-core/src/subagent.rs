@@ -229,8 +229,32 @@ fn choice_list(label: &str, choices: &[crate::acp::SessionConfigChoice]) -> Stri
     format!("{label}: {values}.")
 }
 
-pub fn delegation_policy(limit: usize) -> String {
-    include_str!("../assets/subagent-delegation.md").replace("$N", &limit.to_string())
+/// How the delegation policy describes spawn choices when both task types are offered.
+const TWO_TASK_TYPES: &str = "Mjolnir supplies the configured
+child model and effort for each task type. Set `task_type` to `straightforward`
+for work with a clear method, including locating code, running commands or
+test suites, and implementing a settled design. Use `subtle` for ambiguous
+diagnosis, design choices, and work with a high risk of subtle bugs. A subtle
+task gets a smarter, more expensive agent. Judge difficulty, not brief length.";
+
+/// The same description when only the straightforward type is configured.
+/// There is no choice to make, so task types are not mentioned.
+const ONE_TASK_TYPE: &str = "Mjolnir supplies the configured
+child model and effort.";
+
+/// The parent's delegation policy. `offers_subtle` is false when only the
+/// straightforward task type is configured.
+pub fn delegation_policy(limit: usize, offers_subtle: bool) -> String {
+    include_str!("../assets/subagent-delegation.md")
+        .replace(
+            "$TASK_TYPES",
+            if offers_subtle {
+                TWO_TASK_TYPES
+            } else {
+                ONE_TASK_TYPE
+            },
+        )
+        .replace("$N", &limit.to_string())
 }
 
 /// Longest time a sub-agent completion wait may remain pending.
@@ -2484,6 +2508,25 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn delegation_policy_mentions_task_types_only_when_subtle_is_offered() {
+        let both = delegation_policy(4, true);
+        assert!(
+            both.contains("Set `task_type` to `straightforward`"),
+            "{both}"
+        );
+        assert!(both.contains("A subtle\ntask gets a smarter, more expensive agent."));
+        let one = delegation_policy(4, false);
+        assert!(
+            one.contains("`close` tools; Mjolnir supplies the configured\nchild model and effort.\nUp to 4 children"),
+            "{one}"
+        );
+        for text in ["task_type", "task type", "subtle", "$TASK_TYPES", "$N"] {
+            assert!(!one.contains(text), "{text}: {one}");
+        }
+        assert!(!both.contains("$TASK_TYPES"));
+    }
+
     #[test]
     fn durable_legacy_spawn_selectors_are_ignored_and_task_type_defaults() {
         let action: SubagentToolAction = serde_json::from_value(serde_json::json!({

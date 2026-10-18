@@ -3953,6 +3953,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         agent_mailboxes_enabled: true,
+        subtle_subagents: true,
         initial_model: None,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -4080,6 +4081,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         agent_mailboxes_enabled: true,
+        subtle_subagents: true,
         initial_model: None,
         review_capture: false,
         target_environment: Default::default(),
@@ -4180,6 +4182,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
         agent_mailboxes_enabled: true,
+        subtle_subagents: true,
         initial_model: None,
         review_capture: false,
         goal_resume_request: Default::default(),
@@ -4913,8 +4916,14 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"model":"opus","permissions":{"allow":["Bash(ls:*)"],"deny":["WebFetch"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Child), true)
-        .unwrap();
+    configure_claude_subagent_mcp(
+        stage.path(),
+        "/worker",
+        Some(SubagentMcpRole::Child),
+        true,
+        true,
+    )
+    .unwrap();
     let (settings, allow) = allowed(stage.path());
     assert_eq!(allow, ["Bash(ls:*)", "mcp__mj-agents__handback"]);
     assert_eq!(
@@ -4925,8 +4934,14 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
 
     // A profile with no settings file gets one.
     let stage = tempfile::tempdir().unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Child), true)
-        .unwrap();
+    configure_claude_subagent_mcp(
+        stage.path(),
+        "/worker",
+        Some(SubagentMcpRole::Child),
+        true,
+        true,
+    )
+    .unwrap();
     assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__handback"]);
 
     // A parent delegates without asking; a rule the person already has is
@@ -4937,9 +4952,24 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         r#"{"permissions":{"allow":["mcp__mj-agents__wait"]}}"#,
     )
     .unwrap();
-    configure_claude_subagent_mcp(stage.path(), "/worker", Some(SubagentMcpRole::Parent), true)
-        .unwrap();
+    configure_claude_subagent_mcp(
+        stage.path(),
+        "/worker",
+        Some(SubagentMcpRole::Parent),
+        true,
+        true,
+    )
+    .unwrap();
     let (_, allow) = allowed(stage.path());
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap()).unwrap();
+    assert!(
+        !config["mcpServers"]["mj-agents"]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("--subtle-subagents")),
+        "the default stays off the command line for older workers"
+    );
     assert_eq!(allow[0], "mcp__mj-agents__wait");
     assert_eq!(
         allow
@@ -4975,12 +5005,37 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         "/worker",
         Some(SubagentMcpRole::MessageOnly),
         true,
+        true,
     )
     .unwrap();
     let config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap()).unwrap();
     assert_eq!(config["mcpServers"]["mj-agents"]["args"][7], "message_only");
     assert_eq!(allowed(stage.path()).1, ["mcp__mj-agents__send_message"]);
+
+    // With only the straightforward type configured, the parent's server
+    // is told so and offers no task type.
+    let stage = tempfile::tempdir().unwrap();
+    configure_claude_subagent_mcp(
+        stage.path(),
+        "/worker",
+        Some(SubagentMcpRole::Parent),
+        true,
+        false,
+    )
+    .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(stage.path().join(".claude.json")).unwrap()).unwrap();
+    let args = config["mcpServers"]["mj-agents"]["args"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        args[args.len() - 2..],
+        [
+            serde_json::json!("--subtle-subagents"),
+            serde_json::json!("false")
+        ]
+    );
 }
 
 #[test]
@@ -5380,22 +5435,29 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
                 subtle: None,
             },
         ] {
-            let stage = tempfile::tempdir().unwrap();
-            let destination = stage.path().join(harness.agent_instructions_file());
-            copy_profile_entry(&source, &destination).unwrap();
-            append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
-            append_subagent_policy(harness, stage.path(), &policy, 9).unwrap();
-            let actual = std::fs::read_to_string(&destination).unwrap();
-            let expected = if matches!(policy, SubagentPolicy::Mjolnir { .. }) {
-                format!(
-                    "User instructions without final newline\n\n{}",
-                    mj_core::subagent::delegation_policy(9)
-                )
-            } else {
-                "User instructions without final newline".into()
-            };
-            assert_eq!(actual, expected);
-            assert!(!actual.contains("$N"));
+            for offers_subtle in [true, false] {
+                let stage = tempfile::tempdir().unwrap();
+                let destination = stage.path().join(harness.agent_instructions_file());
+                copy_profile_entry(&source, &destination).unwrap();
+                append_subagent_policy(harness, stage.path(), &policy, 9, offers_subtle).unwrap();
+                append_subagent_policy(harness, stage.path(), &policy, 9, offers_subtle).unwrap();
+                let actual = std::fs::read_to_string(&destination).unwrap();
+                let expected = if matches!(policy, SubagentPolicy::Mjolnir { .. }) {
+                    format!(
+                        "User instructions without final newline\n\n{}",
+                        mj_core::subagent::delegation_policy(9, offers_subtle)
+                    )
+                } else {
+                    "User instructions without final newline".into()
+                };
+                assert_eq!(actual, expected);
+                assert!(!actual.contains("$N"));
+                assert!(!actual.contains("$TASK_TYPES"));
+                assert_eq!(
+                    actual.contains("task_type"),
+                    offers_subtle && matches!(policy, SubagentPolicy::Mjolnir { .. })
+                );
+            }
             assert_eq!(
                 std::fs::read_to_string(&source).unwrap(),
                 "User instructions without final newline"

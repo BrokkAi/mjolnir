@@ -342,14 +342,27 @@ impl SubagentConfig {
             crate::subagent::SubagentTaskType::Subtle => self.subtle.as_ref(),
         }
     }
+    /// A session's choice for `task_type`: its own override, else the global one.
+    pub fn effective_choice<'a>(
+        &'a self,
+        policy: &'a crate::subagent::SubagentPolicy,
+        task_type: crate::subagent::SubagentTaskType,
+    ) -> Option<&'a SubagentChoice> {
+        policy
+            .override_choice(task_type)
+            .or_else(|| self.choice(task_type))
+    }
+    /// Whether a parent with `policy` may spawn subtle children. Without a
+    /// subtle choice, every child uses the straightforward choice.
+    pub fn offers_subtle(&self, policy: &crate::subagent::SubagentPolicy) -> bool {
+        self.effective_choice(policy, crate::subagent::SubagentTaskType::Subtle)
+            .is_some()
+    }
+    /// Straightforward is required; subtle is optional.
     pub fn is_configured(&self) -> bool {
         self.straightforward
             .as_ref()
             .is_some_and(|choice| !choice.model.trim().is_empty())
-            && self
-                .subtle
-                .as_ref()
-                .is_some_and(|choice| !choice.model.trim().is_empty())
     }
     /// The deprecated `enabled` key is never written, so a section holding
     /// only that key is still a default section and stays out of the file.
@@ -373,6 +386,10 @@ impl SubagentConfig {
                 );
             }
         }
+        anyhow::ensure!(
+            self.subtle.is_none() || self.straightforward.is_some(),
+            "[subagents.subtle] requires [subagents.straightforward]; configure straightforward alone or both"
+        );
         if !(1..=64).contains(&self.max_concurrent) {
             bail!("[subagents] `max_concurrent` must be between 1 and 64");
         }

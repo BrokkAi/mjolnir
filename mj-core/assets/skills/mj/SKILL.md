@@ -62,10 +62,12 @@ reachable from here, and continue with the task by yourself.
 Some sessions are given an MCP server named `mj-agents`. It delegates work to
 child sessions in the same target and filesystem:
 
-- `spawn` — start a child with required `task_type` (`straightforward` for a
-  clear method, `subtle` for judgment or risk of subtle bugs). The user configures
-  both model/effort choices globally in Settings → Sub-agents; returns `child_session_id` at once, before the child
-  has started running.
+- `spawn` — start a child. When the user configured both task types, `task_type`
+  is required (`straightforward` for a clear method, `subtle` for judgment or
+  risk of subtle bugs). When only straightforward is configured, `spawn` has no
+  `task_type`. The user configures model/effort choices globally in Settings →
+  Sub-agents; returns `child_session_id` at once, before the child has started
+  running.
 - `list_agents` — this parent's children and their status.
 - `send_message` — send follow-up work to one child. With mailboxes enabled and
   a worker that supports structured events, a running child receives it at its

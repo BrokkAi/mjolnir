@@ -92,13 +92,24 @@ pub(crate) async fn resolve_subagent_policy_selection(
         ));
     }
     let config = backend.subagent_config().await?;
-    let choice = policy
-        .override_choice(task_type)
-        .or_else(|| config.choice(task_type))
-        .ok_or_else(|| ApiFailure::conflict(format!(
-            "Configure [subagents.{}] or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
-            task_type.id(), task_type.id()
-        )))?;
+    let choice = config.effective_choice(policy, task_type).ok_or_else(|| {
+        // A parent launched while subtle was configured can still ask for it.
+        if task_type == mj_core::subagent::SubagentTaskType::Subtle
+            && config
+                .effective_choice(policy, mj_core::subagent::SubagentTaskType::Straightforward)
+                .is_some()
+        {
+            ApiFailure::conflict(
+                "The user configured only the straightforward task type; spawn this child with task_type `straightforward`",
+            )
+        } else {
+            ApiFailure::conflict(format!(
+                "Configure [subagents.{}] or pass --subagent-{} <MODEL> before spawning this Mjolnir sub-agent",
+                task_type.id(),
+                task_type.id()
+            ))
+        }
+    })?;
     if choice.effort.as_deref() == Some("adaptive") {
         return Err(ApiFailure::bad_request(
             "adaptive sub-agent effort is not supported",
@@ -1226,5 +1237,48 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("[subagents.subtle]"));
         assert!(error.message.contains("--subagent-subtle"));
+
+        // With only straightforward configured, a subtle request names the
+        // type the parent can use.
+        let straightforward_only: Arc<dyn SubagentBackend> = Arc::new(FakeSelectionBackend {
+            discovery_fails: false,
+            config: SubagentConfig {
+                straightforward: Some(SubagentChoice {
+                    model: "no-effort".into(),
+                    effort: None,
+                }),
+                ..Default::default()
+            },
+            candidates: SubagentCandidates {
+                offered: vec![candidate("best", Some(70), &["no-effort"])],
+                unavailable: vec![],
+            },
+        });
+        let policy = SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        let error = resolve_subagent_policy_selection(
+            &straightforward_only,
+            "parent",
+            &policy,
+            SubagentTaskType::Subtle,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.message.contains("task_type `straightforward`"),
+            "{}",
+            error.message
+        );
+        let selected = resolve_subagent_policy_selection(
+            &straightforward_only,
+            "parent",
+            &policy,
+            SubagentTaskType::Straightforward,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected.model, "no-effort");
     }
 }

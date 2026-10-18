@@ -52,7 +52,9 @@ pub(crate) async fn discover_for(
     .await
 }
 
-/// Validate the session override or both global choices against eligible profiles.
+/// Validate the session's straightforward choice, and its subtle choice when
+/// it has one, against eligible profiles. Subtle is optional; straightforward
+/// is not.
 pub async fn validate_session_subagent_policy(
     config: &Config,
     profile_id: &str,
@@ -69,25 +71,26 @@ pub async fn validate_session_subagent_policy(
         .context("parent profile unavailable")?
         .kind;
     if !kind.supports_delegation_tools() && !policy.is_native() {
-        return Err(refuse("Mjolnir sub-agents are supported only by Claude and Codex; configure [subagents.straightforward] and [subagents.subtle] choices".into()));
+        return Err(refuse("Mjolnir sub-agents are supported only by Claude and Codex; configure [subagents.straightforward] and optionally [subagents.subtle]".into()));
     }
     if !policy.uses_mjolnir() {
         return Ok(());
     }
-    for task_type in [
-        mj_core::subagent::SubagentTaskType::Straightforward,
-        mj_core::subagent::SubagentTaskType::Subtle,
-    ] {
-        let choice = policy
-            .override_choice(task_type)
-            .or_else(|| config.subagents.choice(task_type))
-            .ok_or_else(|| {
-                refuse(format!(
-                    "Mjolnir requires [subagents.{}] or --subagent-{} <MODEL>",
-                    task_type.id(),
-                    task_type.id()
-                ))
-            })?;
+    use mj_core::subagent::SubagentTaskType;
+    if config
+        .subagents
+        .effective_choice(policy, SubagentTaskType::Straightforward)
+        .is_none()
+    {
+        return Err(refuse(
+            "Mjolnir requires [subagents.straightforward] or --subagent-straightforward <MODEL>"
+                .into(),
+        ));
+    }
+    for task_type in [SubagentTaskType::Straightforward, SubagentTaskType::Subtle] {
+        let Some(choice) = config.subagents.effective_choice(policy, task_type) else {
+            continue;
+        };
         let options = subagent_options_for(
             config.clone(),
             profile_id.to_owned(),
@@ -723,6 +726,17 @@ mod tests {
         )
         .await
         .unwrap();
+        // Subtle is optional: the straightforward choice alone is enough.
+        validate_session_subagent_policy(
+            &draft,
+            "unsaved",
+            &mj_core::subagent::SubagentPolicy::Mjolnir {
+                straightforward: None,
+                subtle: None,
+            },
+        )
+        .await
+        .unwrap();
         draft.subagents.straightforward = None;
         let missing = validate_session_subagent_policy(
             &draft,
@@ -740,6 +754,10 @@ mod tests {
         assert_eq!(
             Refusal::of(&missing).unwrap().code(),
             Some(mj_core::subagent::CHOICE_UNAVAILABLE_CODE)
+        );
+        assert!(
+            missing.to_string().contains("[subagents.straightforward]"),
+            "subtle alone is never enough: {missing:#}"
         );
         let options = subagent_options_for(draft, "unsaved".into(), Some("chosen".into()))
             .await

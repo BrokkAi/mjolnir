@@ -212,7 +212,7 @@ pub(super) fn configure_codex_mcp(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
 ) -> Result<bool> {
-    configure_codex_mcp_with_mailboxes(root, home, role, policy, true)
+    configure_codex_mcp_with_mailboxes(root, home, role, policy, true, true)
 }
 
 fn configure_codex_mcp_with_mailboxes(
@@ -221,6 +221,7 @@ fn configure_codex_mcp_with_mailboxes(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
     mailboxes_enabled: bool,
+    subtle_subagents: bool,
 ) -> Result<bool> {
     // Earlier local workers used the person's original profile, directly or
     // through <root>/profile as a symlink. Keep those on ACP until restaging;
@@ -259,11 +260,26 @@ fn configure_codex_mcp_with_mailboxes(
         .with_context(|| format!("mcp_servers in {} must be a table", path.display()))?;
     if let Some(role) = role {
         let worker = std::env::current_exe().context("locate worker for Codex delegation")?;
+        let mut args = vec![
+            "worker".to_owned(),
+            "subagent-mcp".to_owned(),
+            "--socket".to_owned(),
+            root.join(SUBAGENT_SOCKET).to_string_lossy().into_owned(),
+            "--harness".to_owned(),
+            "codex".to_owned(),
+            "--role".to_owned(),
+            role.id().to_owned(),
+            "--agent-mailboxes-enabled".to_owned(),
+            mailboxes_enabled.to_string(),
+        ];
+        if !subtle_subagents {
+            // Written only when off, so a launch offering both types keeps
+            // the arguments an older worker accepts.
+            args.extend(["--subtle-subagents".to_owned(), "false".to_owned()]);
+        }
         let mut server = serde_json::json!({
             "command": worker,
-            "args": ["worker", "subagent-mcp", "--socket", root.join(SUBAGENT_SOCKET),
-                     "--harness", "codex", "--role", role.id(),
-                     "--agent-mailboxes-enabled", mailboxes_enabled.to_string()],
+            "args": args,
             // Expose the tools up front, including when code mode is enabled.
             "omit_tools_from": ["deferred"]
         });
@@ -315,9 +331,17 @@ pub(super) fn configure_codex_profile(
     role: Option<mj_core::subagent::SubagentMcpRole>,
     policy: mj_core::config::ExecutionPolicy,
     mailboxes_enabled: bool,
+    subtle_subagents: bool,
 ) -> Result<bool> {
     configure_codex_mailbox_hook(root, environment, mailboxes_enabled)?;
-    configure_codex_mcp_with_mailboxes(root, home, role, policy, mailboxes_enabled)
+    configure_codex_mcp_with_mailboxes(
+        root,
+        home,
+        role,
+        policy,
+        mailboxes_enabled,
+        subtle_subagents,
+    )
 }
 
 /// Put the mailbox hook in codex-acp's per-thread config override. Its state

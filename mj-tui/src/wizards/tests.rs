@@ -5765,14 +5765,26 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
             subtle: None
         }
     );
+    // Subtle is optional: straightforward alone keeps Mjolnir available.
     dashboard.config.subagents.subtle = None;
+    dashboard.set_profile_capabilities(Default::default());
+    assert_eq!(
+        new_wizard(&dashboard).subagents.policy,
+        SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None
+        }
+    );
+    // Subtle alone is never enough.
+    dashboard.config.subagents.straightforward = None;
+    dashboard.config.subagents.subtle = Some(choice.clone());
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Native
     );
     assert!(new_wizard(&dashboard).subagents.error().is_none());
-    dashboard.config.subagents.subtle = Some(choice.clone());
+    dashboard.config.subagents.straightforward = Some(choice.clone());
     dashboard.set_profile_capabilities(Default::default());
     let Mode::New(wizard) = &mut dashboard.mode else {
         unreachable!()
@@ -5787,13 +5799,13 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
     wizard
         .subagents
         .apply(&Interaction::ComboBoxCommit(WizardControl::Subagents, 1));
-    dashboard.config.subagents.subtle = None;
+    dashboard.config.subagents.straightforward = None;
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(
         new_wizard(&dashboard).subagents.policy,
         SubagentPolicy::Native
     );
-    dashboard.config.subagents.subtle = Some(choice);
+    dashboard.config.subagents.straightforward = Some(choice);
     dashboard.state.last_subagent_policy = SubagentPolicy::Native;
     dashboard.set_profile_capabilities(Default::default());
     assert_eq!(

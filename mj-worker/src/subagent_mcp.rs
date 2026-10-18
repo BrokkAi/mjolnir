@@ -283,20 +283,39 @@ fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Opti
     ))
 }
 
+/// What a parent's tool set offers, from the worker's launch configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentTools {
+    /// Whether `send_message` and mailbox routing are offered.
+    pub agent_mailboxes_enabled: bool,
+    /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
+    /// no `task_type` and every child uses the straightforward choice.
+    pub subtle_subagents: bool,
+}
+
+impl Default for ParentTools {
+    fn default() -> Self {
+        Self {
+            agent_mailboxes_enabled: true,
+            subtle_subagents: true,
+        }
+    }
+}
+
 pub fn run_mcp_stdio(
     socket: &Path,
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
-    agent_mailboxes_enabled: bool,
+    options: ParentTools,
 ) -> Result<()> {
     let stdin = std::io::stdin();
-    run_with_mailboxes(
+    run_with_options(
         stdin.lock(),
         std::io::stdout(),
         socket,
         harness,
         role,
-        agent_mailboxes_enabled,
+        options,
     )
 }
 
@@ -313,18 +332,26 @@ fn run<R: BufRead, W: Write + Send + Sync + 'static>(
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
 ) -> Result<()> {
-    run_with_mailboxes(reader, writer, socket, harness, role, true)
+    run_with_options(
+        reader,
+        writer,
+        socket,
+        harness,
+        role,
+        ParentTools::default(),
+    )
 }
 
-fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
+fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     reader: R,
     writer: W,
     socket: &Path,
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
-    agent_mailboxes_enabled: bool,
+    options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
+    let agent_mailboxes_enabled = options.agent_mailboxes_enabled;
     let parent_instructions = match harness {
         Some(HarnessKind::Codex) if agent_mailboxes_enabled => CODEX_SERVER_INSTRUCTIONS.as_str(),
         Some(HarnessKind::Codex) => DELEGATION_ONLY_INSTRUCTIONS.as_str(),
@@ -334,7 +361,7 @@ fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (
             parent_instructions,
-            tool_definitions_with_mailboxes(harness, agent_mailboxes_enabled),
+            tool_definitions_with_options(harness, options),
         ),
         SubagentMcpRole::MessageOnly => (
             if agent_mailboxes_enabled {
@@ -359,14 +386,7 @@ fn run_with_mailboxes<R: BufRead, W: Write + Send + Sync + 'static>(
             tools,
             progress_interval: crate::mcp_stdio::PROGRESS_INTERVAL,
             call: move |params: Option<&Value>, progress: &crate::mcp_stdio::Progress| {
-                call_with_mailboxes(
-                    &socket,
-                    harness,
-                    role,
-                    params,
-                    progress,
-                    agent_mailboxes_enabled,
-                )
+                call_with_options(&socket, harness, role, params, progress, options)
             },
         },
     )
@@ -385,7 +405,10 @@ struct CallParams {
 struct SpawnArgs {
     task_name: String,
     instructions: String,
-    task_type: mj_core::subagent::SubagentTaskType,
+    /// Required when the subtle type is offered. Without it, the spawn tool
+    /// has no task type and a call that omits one is straightforward.
+    #[serde(default)]
+    task_type: Option<mj_core::subagent::SubagentTaskType>,
     #[serde(default)]
     working_directory: PathBuf,
 }
@@ -422,25 +445,32 @@ fn call(
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
 ) -> Result<(Value, bool)> {
-    call_with_mailboxes(socket, harness, role, params, progress, true)
+    call_with_options(
+        socket,
+        harness,
+        role,
+        params,
+        progress,
+        ParentTools::default(),
+    )
 }
 
-fn call_with_mailboxes(
+fn call_with_options(
     socket: &Path,
     harness: Option<HarnessKind>,
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
-    agent_mailboxes_enabled: bool,
+    options: ParentTools,
 ) -> Result<(Value, bool)> {
-    call_with_budget_and_mailboxes(
+    call_with_budget_and_options(
         socket,
         harness,
         role,
         params,
         progress,
         |action| reply_timeout(action, harness),
-        agent_mailboxes_enabled,
+        options,
     )
 }
 
@@ -455,18 +485,27 @@ fn call_with_budget(
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
 ) -> Result<(Value, bool)> {
-    call_with_budget_and_mailboxes(socket, _harness, role, params, progress, budget, true)
+    call_with_budget_and_options(
+        socket,
+        _harness,
+        role,
+        params,
+        progress,
+        budget,
+        ParentTools::default(),
+    )
 }
 
-fn call_with_budget_and_mailboxes(
+fn call_with_budget_and_options(
     socket: &Path,
     _harness: Option<HarnessKind>,
     role: SubagentMcpRole,
     params: Option<&Value>,
     progress: &crate::mcp_stdio::Progress,
     budget: impl Fn(&SubagentToolAction) -> Duration,
-    agent_mailboxes_enabled: bool,
+    options: ParentTools,
 ) -> Result<(Value, bool)> {
+    let agent_mailboxes_enabled = options.agent_mailboxes_enabled;
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input" && role != SubagentMcpRole::Child;
     let mailbox_tool_enabled = params.name != "send_message" || agent_mailboxes_enabled;
@@ -490,10 +529,19 @@ fn call_with_budget_and_mailboxes(
             if instructions.is_empty() {
                 bail!("spawn instructions cannot be empty");
             }
+            // A subtle request without a subtle choice still reaches the
+            // daemon: the configuration may have gained one since launch.
+            let task_type = match args.task_type {
+                Some(task_type) => task_type,
+                None if !options.subtle_subagents => {
+                    mj_core::subagent::SubagentTaskType::Straightforward
+                }
+                None => bail!("missing field `task_type`"),
+            };
             SubagentToolAction::Spawn {
                 task_name: args.task_name,
                 instructions: instructions.to_owned(),
-                task_type: args.task_type,
+                task_type,
                 working_directory: args.working_directory,
                 // Legacy accepted requests keep these wire fields; new calls omit them.
                 context: None,
@@ -648,29 +696,60 @@ fn send(
 
 #[cfg(test)]
 fn tool_definitions(_harness: Option<HarnessKind>) -> Vec<Value> {
-    tool_definitions_with_mailboxes(_harness, true)
+    tool_definitions_with_options(_harness, ParentTools::default())
 }
 
-fn tool_definitions_with_mailboxes(
+/// How `spawn` opens when the parent chooses between two task types.
+const SPAWN_TWO_TASK_TYPES: &str = "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type.";
+
+/// How `spawn` opens when only the straightforward type is configured.
+const SPAWN_ONE_TASK_TYPE: &str = "Start a child in your target and filesystem using the configured model and effort. The user configures the model and effort.";
+
+/// The parent's `spawn` tool. With only the straightforward type configured
+/// there is no choice to make, so it has no `task_type`.
+fn spawn_tool(subtle_subagents: bool) -> Value {
+    let (lead, selection) = if subtle_subagents {
+        (
+            SPAWN_TWO_TASK_TYPES,
+            "the task type's configured model and effort",
+        )
+    } else {
+        (SPAWN_ONE_TASK_TYPE, "the configured model and effort")
+    };
+    let mut properties = json!({
+        "task_name":{"type":"string"},
+        "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
+        "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
+        "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
+    });
+    let mut required = json!(["task_name", "instructions", "task_type"]);
+    if !subtle_subagents {
+        properties
+            .as_object_mut()
+            .expect("properties are an object")
+            .remove("task_type");
+        required = json!(["task_name", "instructions"]);
+    }
+    tool(
+        "spawn",
+        &format!(
+            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+        ),
+        json!({
+            "type":"object",
+            "properties":properties,
+            "required":required,"additionalProperties":false
+        }),
+    )
+}
+
+fn tool_definitions_with_options(
     _harness: Option<HarnessKind>,
-    agent_mailboxes_enabled: bool,
+    options: ParentTools,
 ) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
     let mut definitions = vec![
-        tool(
-            "spawn",
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`.",
-            json!({
-                "type":"object",
-                "properties":{
-                    "task_name":{"type":"string"},
-                    "instructions":{"type":"string","description":"The assignment, context, constraints and required evidence. Point to relevant files, symbols, line ranges and earlier reports; the child reads them in the shared filesystem."},
-                    "task_type":{"type":"string","enum":["straightforward","subtle"],"description":"`subtle` gets a smarter, more expensive agent than `straightforward`; choose it for work that needs judgment or risks subtle bugs."},
-                    "working_directory":{"type":"string","description":"Launch directory on the parent's target. Absolute paths are used as-is; relative paths resolve against the parent's working directory. The directory must exist. Defaults to the parent's working directory."}
-                },
-                "required":["task_name","instructions","task_type"],"additionalProperties":false
-            }),
-        ),
+        spawn_tool(options.subtle_subagents),
         tool(
             "list_agents",
             "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing.",
@@ -696,7 +775,7 @@ fn tool_definitions_with_mailboxes(
             child,
         ),
     ];
-    if !agent_mailboxes_enabled {
+    if !options.agent_mailboxes_enabled {
         definitions.retain(|definition| definition["name"] != "send_message");
     }
     definitions
@@ -738,6 +817,117 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    const MAILBOXES_DISABLED: ParentTools = ParentTools {
+        agent_mailboxes_enabled: false,
+        subtle_subagents: true,
+    };
+
+    const STRAIGHTFORWARD_ONLY: ParentTools = ParentTools {
+        agent_mailboxes_enabled: true,
+        subtle_subagents: false,
+    };
+
+    fn spawn_definition(options: ParentTools) -> Value {
+        tool_definitions_with_options(None, options)
+            .into_iter()
+            .find(|tool| tool["name"] == "spawn")
+            .unwrap()
+    }
+
+    #[test]
+    fn spawn_offering_both_task_types_keeps_its_description() {
+        let spawn = spawn_definition(ParentTools::default());
+        assert_eq!(
+            spawn["description"],
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+        );
+        assert_eq!(
+            spawn["inputSchema"]["properties"]["task_type"]["enum"],
+            json!(["straightforward", "subtle"])
+        );
+    }
+
+    #[test]
+    fn spawn_with_only_straightforward_offers_no_task_type() {
+        let spawn = spawn_definition(STRAIGHTFORWARD_ONLY);
+        let description = spawn["description"].as_str().unwrap();
+        assert!(!description.contains("task_type"), "{description}");
+        assert!(!description.contains("subtle"), "{description}");
+        assert!(!description.contains("task type"), "{description}");
+        assert!(
+            description.starts_with(
+                "Start a child in your target and filesystem using the configured model and effort."
+            ),
+            "{description}"
+        );
+        assert!(
+            spawn["inputSchema"]["properties"]
+                .get("task_type")
+                .is_none()
+        );
+        assert_eq!(
+            spawn["inputSchema"]["required"],
+            json!(["task_name", "instructions"])
+        );
+    }
+
+    #[test]
+    fn spawn_offering_both_task_types_requires_one() {
+        let error = call(
+            Path::new("unused.sock"),
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i"}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("missing field `task_type`"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_with_only_straightforward_sends_straightforward() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("subagents.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: SubagentToolRequest = serde_json::from_str(&line).unwrap();
+            assert!(matches!(
+                request.action,
+                SubagentToolAction::Spawn {
+                    task_type: mj_core::subagent::SubagentTaskType::Straightforward,
+                    ..
+                }
+            ));
+            reader
+                .into_inner()
+                .write_all(b"{\"result\":{\"child_session_id\":\"child\"}}\n")
+                .unwrap();
+        });
+        let (value, is_error) = call_with_budget_and_options(
+            &socket,
+            None,
+            SubagentMcpRole::Parent,
+            Some(&json!({"name":"spawn", "arguments":{"task_name":"t", "instructions":"i"}})),
+            &crate::mcp_stdio::Progress::silent(Duration::from_secs(1)),
+            |_| Duration::from_secs(5),
+            STRAIGHTFORWARD_ONLY,
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert!(!is_error, "{value}");
+        assert_eq!(value["child_session_id"], "child");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -996,13 +1186,13 @@ mod tests {
         );
         for role in [SubagentMcpRole::Parent, SubagentMcpRole::Parent] {
             let output = Arc::new(Mutex::new(Vec::new()));
-            run_with_mailboxes(
+            run_with_options(
                 input.as_bytes(),
                 ContractWriter(output.clone()),
                 Path::new("unused.sock"),
                 Some(HarnessKind::Codex),
                 role,
-                false,
+                MAILBOXES_DISABLED,
             )
             .unwrap();
             let output = output.lock().unwrap();
@@ -1028,13 +1218,13 @@ mod tests {
             );
         }
         let output = Arc::new(Mutex::new(Vec::new()));
-        run_with_mailboxes(
+        run_with_options(
             input.as_bytes(),
             ContractWriter(output.clone()),
             Path::new("unused.sock"),
             Some(HarnessKind::Codex),
             SubagentMcpRole::MessageOnly,
-            false,
+            MAILBOXES_DISABLED,
         )
         .unwrap();
         let output = output.lock().unwrap();
@@ -1098,13 +1288,13 @@ mod tests {
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
         );
         let output = Arc::new(Mutex::new(Vec::new()));
-        run_with_mailboxes(
+        run_with_options(
             input.as_bytes(),
             ContractWriter(output.clone()),
             Path::new("unused.sock"),
             Some(HarnessKind::Claude),
             SubagentMcpRole::Parent,
-            false,
+            MAILBOXES_DISABLED,
         )
         .unwrap();
         let output = output.lock().unwrap();
@@ -1689,7 +1879,7 @@ mod tests {
             stream.flush().unwrap();
             let _ = stream.read(&mut [0u8; 1]);
         });
-        let (value, is_error) = call_with_budget_and_mailboxes(
+        let (value, is_error) = call_with_budget_and_options(
             &socket,
             None,
             SubagentMcpRole::Parent,
@@ -1699,7 +1889,7 @@ mod tests {
             })),
             &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
             |_| Duration::from_secs(5),
-            false,
+            MAILBOXES_DISABLED,
         )
         .unwrap();
         assert!(!is_error, "{value}");
