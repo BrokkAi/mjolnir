@@ -188,21 +188,15 @@ impl SubagentDraft {
                     .is_some_and(|p| p.kind.supports_delegation_tools())
                 {
                     Err("Mjolnir sub-agents need a Claude or Codex profile".into())
-                } else if (self
-                    .last_mjolnir_policy
-                    .as_deref()
-                    .unwrap_or(&self.policy)
-                    .override_choice(mj_core::subagent::SubagentTaskType::Straightforward)
+                } else if config
+                    .subagents
+                    .effective_choice(
+                        self.last_mjolnir_policy.as_deref().unwrap_or(&self.policy),
+                        mj_core::subagent::SubagentTaskType::Straightforward,
+                    )
                     .is_some()
-                    || config.subagents.straightforward.is_some())
-                    && (self
-                        .last_mjolnir_policy
-                        .as_deref()
-                        .unwrap_or(&self.policy)
-                        .override_choice(mj_core::subagent::SubagentTaskType::Subtle)
-                        .is_some()
-                        || config.subagents.subtle.is_some())
                 {
+                    // Subtle is optional; straightforward alone enables Mjolnir.
                     Ok(SubagentOptions::default())
                 } else {
                     Err("Set up Mjolnir sub-agents in Settings -> Sub-agents".into())

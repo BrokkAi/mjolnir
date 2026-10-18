@@ -581,23 +581,15 @@ fn validate_action_against(
             command,
         } => {
             validate_public_id(session_id)?;
-            let session = require_session_record(snapshot, session_id)?;
-            let allowed = match command {
-                mj_core::relay::RelayCommand::CancelTurnFor { .. } => {
-                    session.capabilities.interrupt_turn
-                }
-                mj_core::relay::RelayCommand::Steer { .. }
-                | mj_core::relay::RelayCommand::ResolveSteering { .. } => {
-                    session.capabilities.prompt
-                }
-                _ => false,
-            };
-            if !allowed {
-                return Err(ApiError::bad_request(
-                    "this turn-control action is unavailable",
-                ));
+            require_session_record(snapshot, session_id)?;
+            // These commands carry exact worker-owned targets. A dashboard's
+            // older activity/capability snapshot cannot admit or refuse them.
+            // The worker validates availability and identity atomically.
+            if !is_turn_control_command(command) {
+                return Err(ApiError::bad_request("unsupported turn-control command"));
             }
         }
+
         ControllerAction::InterruptTurn { session_id } => {
             validate_public_id(session_id)?;
             let session = require_session_record(snapshot, session_id)?;

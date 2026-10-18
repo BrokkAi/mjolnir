@@ -122,6 +122,14 @@ fn default_agent_mailboxes_enabled() -> bool {
     true
 }
 
+fn default_subtle_subagents() -> bool {
+    true
+}
+
+fn is_default_subtle_subagents(value: &bool) -> bool {
+    *value
+}
+
 /// Internal launch directive: include this absolute Git config file in the
 /// worker-owned session global config, then remove the key before harness use.
 pub const SESSION_GIT_CONFIG_INCLUDE_PATH: &str = "MJ_SESSION_GIT_CONFIG_INCLUDE_PATH";
@@ -169,6 +177,15 @@ pub struct WorkerLaunchConfig {
     /// Running workers pick up changes on their next resume or restart.
     #[serde(default = "default_agent_mailboxes_enabled")]
     pub agent_mailboxes_enabled: bool,
+    /// Whether a delegating parent may choose the subtle task type. False when
+    /// only the straightforward type is configured: the spawn tool then has no
+    /// `task_type` and every child uses the straightforward choice. Launch
+    /// files written before this field offered both types.
+    #[serde(
+        default = "default_subtle_subagents",
+        skip_serializing_if = "is_default_subtle_subagents"
+    )]
+    pub subtle_subagents: bool,
     /// The model this session was created for, when its creator chose one: a
     /// sub-agent's spawn model. The harness opens a new session on it rather
     /// than on the profile default; once the session has accepted a model,
@@ -640,6 +657,30 @@ mod tests {
         disabled["agent_mailboxes_enabled"] = serde_json::json!(false);
         let launch: WorkerLaunchConfig = serde_json::from_value(disabled).unwrap();
         assert!(!launch.agent_mailboxes_enabled);
+    }
+
+    /// Older controllers required both task types, so a launch without the
+    /// field offers subtle. Only the straightforward-only case is written, so
+    /// a launch offering both stays readable by an older worker.
+    #[test]
+    fn subtle_subagents_defaults_on_and_is_written_only_when_off() {
+        let launch: WorkerLaunchConfig = serde_json::from_value(launch_json()).unwrap();
+        assert!(launch.subtle_subagents);
+        assert!(
+            serde_json::to_value(&launch)
+                .unwrap()
+                .get("subtle_subagents")
+                .is_none()
+        );
+
+        let mut only_straightforward = launch_json();
+        only_straightforward["subtle_subagents"] = serde_json::json!(false);
+        let launch: WorkerLaunchConfig = serde_json::from_value(only_straightforward).unwrap();
+        assert!(!launch.subtle_subagents);
+        assert_eq!(
+            serde_json::to_value(&launch).unwrap()["subtle_subagents"],
+            false
+        );
     }
 
     // Hard-won: f9a3130c: upgraded workers on older launches demanded an unstaged Claude registration.

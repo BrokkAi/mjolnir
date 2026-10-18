@@ -513,6 +513,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        turn_controls: None,
         config_options: Vec::new(),
         modes: Some(SessionModeState::new(
             "default",

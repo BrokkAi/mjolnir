@@ -39,6 +39,11 @@ pub struct ActivePrompt {
 #[serde(deny_unknown_fields)]
 pub struct QueuedPrompt {
     pub id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::state::QueuedCommandKind::is_prompt"
+    )]
+    pub kind: crate::state::QueuedCommandKind,
     pub text: String,
     pub attachments: Vec<Attachment>,
     pub created_at_ms: i64,

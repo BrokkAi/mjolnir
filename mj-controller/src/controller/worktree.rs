@@ -2005,6 +2005,7 @@ fn copy_source_origin_refs(
         ],
         "read cached origin branches",
     )?;
+    let mut updates = String::new();
     for line in refs.lines() {
         let (name, oid) = line
             .split_once(' ')
@@ -2012,15 +2013,17 @@ fn copy_source_origin_refs(
         if name == "refs/remotes/origin/HEAD" {
             continue;
         }
-        execute_checked(
-            executor,
-            managed_git_command(
-                &checkout.target,
-                staging,
-                ["update-ref", name, oid],
-                "preserve cached origin branch",
-            ),
-        )?;
+        updates.push_str(&format!("update {name} {oid}\n"));
+    }
+    if !updates.is_empty() {
+        let command = managed_git_command(
+            &checkout.target,
+            staging,
+            ["update-ref", "--stdin"],
+            "preserve cached origin branches",
+        );
+        let output = executor.execute_with_stdin(&command, &mut updates.as_bytes())?;
+        command_stdout(output, &command.purpose)?;
     }
     Ok(())
 }

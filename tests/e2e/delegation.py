@@ -98,6 +98,13 @@ def main():
             "        if wait_for_prompt_cancel():",
             '        if "second turn" in text:\n            os.environ["MJ_FAKE_ACP_PROMPT_DELAY_MS"] = "15000"\n        if wait_for_prompt_cancel():',
         )
+        # Leave enough headroom to check parent-only control under a loaded test host.
+        script = script.replace(
+            '    delay_ms = int(os.environ.get("MJ_FAKE_ACP_PROMPT_DELAY_MS", "0"))',
+            '    delay_ms = int(os.environ.get("MJ_FAKE_ACP_PROMPT_DELAY_MS", "0"))\n'
+            '    if "Return a short fixture report." in globals().get("text", ""):\n'
+            '        delay_ms = 30000',
+        )
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
         env = lab.environment()
@@ -322,6 +329,64 @@ def main():
             raise RuntimeError(f"worker did not begin prompt: {text}")
 
         wait_prompt(child, "Return a short fixture report.")
+        # Hard-won: 8ba3d377e: queued settings prevented steering a parent's user input.
+        # Drive the real daemon and worker; the child must retain its own turn.
+        def submit_parent(command_id, command):
+            # This suite deliberately disables HTTP; use the daemon's normal
+            # session-command transport, which forwards the same published command.
+            return lab.daemon_request({
+                "action": "submit_session_command",
+                "arguments": {"session_id": parent, "command_id": command_id, "command": command},
+            })
+
+        submit_parent("hold-parent-settings", {"type": "prompt", "data": {
+            "prompt": [{"type": "text", "text": "Hold the parent turn for queued settings."}],
+        }})
+        wait_prompt(parent, "Hold the parent turn for queued settings.")
+        child_before = worker_status(child)["active_prompt"]
+        assert child_before is not None
+        submit_parent("parent-model-settings", {"type": "set_config", "data": {"key": "model", "value": "subtle-fixture"}})
+        submit_parent("parent-effort-settings", {"type": "set_config", "data": {"key": "effort", "value": "low"}})
+        submit_parent("parent-after-settings", {"type": "prompt", "data": {
+            "prompt": [{"type": "text", "text": "Run after the pending settings."}],
+        }})
+        controls = worker_status(parent)["turn_controls"]
+        assert controls["primary"]["kind"] == "apply_queued", controls
+        assert controls["interrupt"]["type"] == "cancel_turn_for", controls
+        command = controls["primary"]["command"]
+        applied = lab.daemon_request({
+            "action": "submit_session_command",
+            "arguments": {"session_id": parent, "command_id": "apply-queued-settings-regression", "command": command},
+        })
+        assert applied["reply"] == "ordinal", applied
+        wait_prompt(parent, "Run after the pending settings.")
+        parent_after = worker_status(parent)
+        child_after = worker_status(child)
+        assert child_after["active_prompt"] == child_before, (child_before, child_after)
+        assert parent_after["config"]["model"] == "subtle-fixture", parent_after
+        assert parent_after["config"]["effort"] == "low", parent_after
+        assert not parent_after["queued_prompts"], parent_after
+        # The same stale control may not stop this replacement parent turn.
+        try:
+            lab.daemon_request({
+                "action": "submit_session_command",
+                "arguments": {"session_id": parent, "command_id": "stale-apply-settings-regression", "command": command},
+            })
+        except reliability_lab.ScenarioFailure as error:
+            assert "changed" in str(error).lower(), error
+        else:
+            raise AssertionError("stale Apply queued was accepted for a later turn")
+        assert worker_status(parent)["active_prompt"] == parent_after["active_prompt"]
+        # Restore the original idle-parent setup before the existing wait tests.
+        # A wait attached to this fixture turn would correctly be interrupted
+        # when the fixture finishes, rather than consuming the child's report.
+        submit_parent("settle-parent-settings-case", parent_after["turn_controls"]["interrupt"])
+        deadline = time.monotonic() + 10
+        while worker_status(parent)["active_prompt"] is not None:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("parent settings fixture did not settle after interruption")
+            time.sleep(0.05)
+        assert worker_status(child)["active_prompt"] == child_before
         # Handback travels through the child's durable queue while its turn runs.
         tool(child, "handback", {"message": "first report without a dashboard"})
         first = tool(parent, "wait_agents")

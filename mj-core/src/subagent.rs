@@ -229,8 +229,37 @@ fn choice_list(label: &str, choices: &[crate::acp::SessionConfigChoice]) -> Stri
     format!("{label}: {values}.")
 }
 
-pub fn delegation_policy(limit: usize) -> String {
-    include_str!("../assets/subagent-delegation.md").replace("$N", &limit.to_string())
+/// How the delegation policy describes spawn choices when both task types are offered.
+const TWO_TASK_TYPES: &str = "Mjolnir supplies the configured
+child model and effort for each task type. Set `task_type` to `straightforward`
+for work with a clear method, including locating code, running commands or
+test suites, and implementing a settled design. Use `subtle` for ambiguous
+diagnosis, design choices, and work with a high risk of subtle bugs. A subtle
+task gets a smarter, more expensive agent. Judge difficulty, not brief length.";
+
+/// The same description when only the straightforward type is configured.
+/// There is no type to choose, so the parent delegates only straightforward
+/// work and keeps work that needs judgment.
+const ONE_TASK_TYPE: &str = "Mjolnir supplies the configured
+child model and effort. Delegate only straightforward work: work with a clear
+method, including locating code, running commands or test suites, and
+implementing a settled design. Do work that needs judgment yourself, including
+ambiguous diagnosis, design choices, and changes with a high risk of subtle
+bugs. Judge difficulty, not brief length.";
+
+/// The parent's delegation policy. `offers_subtle` is false when only the
+/// straightforward task type is configured.
+pub fn delegation_policy(limit: usize, offers_subtle: bool) -> String {
+    include_str!("../assets/subagent-delegation.md")
+        .replace(
+            "$TASK_TYPES",
+            if offers_subtle {
+                TWO_TASK_TYPES
+            } else {
+                ONE_TASK_TYPE
+            },
+        )
+        .replace("$N", &limit.to_string())
 }
 
 /// Longest time a sub-agent completion wait may remain pending.
@@ -366,7 +395,7 @@ pub fn still_running_payload(waited_seconds: u64, note: Option<&str>) -> serde_j
 pub fn next_action(status: &str, new_reports: usize, unfinished: usize) -> String {
     match status {
         WAIT_STATUS_REPORTED if unfinished > 0 => format!(
-            "Collected {new_reports} new report(s). {unfinished} child session(s) are still unfinished; call wait again later to collect reports that become ready."
+            "Collected {new_reports} new report(s). {unfinished} child session(s) are still unfinished. With no independent work, call await_children and end the turn; collect reports after notification."
         ),
         WAIT_STATUS_REPORTED => format!(
             "Collected {new_reports} new report(s). Call wait again after a child has more work if you need another report."
@@ -375,7 +404,7 @@ pub fn next_action(status: &str, new_reports: usize, unfinished: usize) -> Strin
             "There are no new reports or unfinished children. Call wait again after spawning a child or giving one more input.".to_owned()
         }
         _ => {
-            "This harness's wait window ended before a new report was available. Call wait again later to collect reports that become ready.".to_owned()
+            "This harness's wait window ended before a new report was available. With no independent work, call await_children and end the turn. Call wait again after a report-ready notification to collect reports.".to_owned()
         }
     }
 }
@@ -448,6 +477,7 @@ pub enum SubagentToolAction {
         message: String,
     },
     WaitAgents,
+    AwaitChildren,
     /// An accepted request from an older parent worker. New MCP servers do
     /// not expose interrupt, and the daemon rejects this legacy action.
     #[serde(rename = "interrupt_agent")]
@@ -504,6 +534,7 @@ enum SubagentToolActionWire {
         message: String,
     },
     WaitAgents,
+    AwaitChildren,
     #[serde(rename = "interrupt_agent")]
     LegacyInterruptAgent {
         child_session_id: String,
@@ -599,6 +630,7 @@ impl<'de> Deserialize<'de> for SubagentToolAction {
                 message,
             },
             SubagentToolActionWire::WaitAgents => Self::WaitAgents,
+            SubagentToolActionWire::AwaitChildren => Self::AwaitChildren,
             SubagentToolActionWire::LegacyInterruptAgent { child_session_id } => {
                 Self::LegacyInterruptAgent { child_session_id }
             }
@@ -819,7 +851,14 @@ impl SubagentMcpRole {
     #[must_use]
     pub fn tool_names(self) -> &'static [&'static str] {
         match self {
-            Self::Parent => &["spawn", "list_agents", "send_message", "wait", "close"],
+            Self::Parent => &[
+                "spawn",
+                "list_agents",
+                "send_message",
+                "await_children",
+                "wait",
+                "close",
+            ],
             Self::MessageOnly => &["send_message"],
             Self::Child => &["handback"],
         }
@@ -1510,6 +1549,7 @@ mod tests {
             SubagentToolAction::ListProfiles,
             SubagentToolAction::ListAgents,
             SubagentToolAction::WaitAgents,
+            SubagentToolAction::AwaitChildren,
             SubagentToolAction::Handback {
                 message: "done".into(),
             },
@@ -2473,6 +2513,35 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn delegation_policy_offers_a_task_type_only_when_subtle_is_configured() {
+        let both = delegation_policy(4, true);
+        assert!(
+            both.contains("Set `task_type` to `straightforward`"),
+            "{both}"
+        );
+        assert!(both.contains("A subtle\ntask gets a smarter, more expensive agent."));
+        // With only straightforward, there is no choice: the parent delegates
+        // straightforward work and keeps work that needs judgment.
+        let one = delegation_policy(4, false);
+        assert!(
+            one.contains("`close` tools; Mjolnir supplies the configured\nchild model and effort. Delegate only straightforward work: "),
+            "{one}"
+        );
+        assert!(
+            one.contains("Do work that needs judgment yourself"),
+            "{one}"
+        );
+        assert!(
+            one.contains("Judge difficulty, not brief length.\nUp to 4 children"),
+            "{one}"
+        );
+        for text in ["task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"] {
+            assert!(!one.contains(text), "{text}: {one}");
+        }
+        assert!(!both.contains("$TASK_TYPES"));
+    }
+
     #[test]
     fn durable_legacy_spawn_selectors_are_ignored_and_task_type_defaults() {
         let action: SubagentToolAction = serde_json::from_value(serde_json::json!({

@@ -1012,7 +1012,7 @@ pub(crate) fn subagent_policy(
     retired_effort: Option<&str>,
 ) -> Result<Option<mj_core::subagent::SubagentPolicy>> {
     use mj_core::subagent::SubagentPolicy;
-    const REMEDY: &str = "Configure [subagents.straightforward] and [subagents.subtle] in config.toml or TUI Settings -> Sub-agents";
+    const REMEDY: &str = "Configure [subagents.straightforward], and optionally [subagents.subtle], in config.toml or TUI Settings -> Sub-agents";
     if retired_model.is_some() || retired_effort.is_some() {
         bail!(
             "--subagent-model and --subagent-effort are retired; use --subagent-straightforward, --subagent-straightforward-effort, --subagent-subtle, and --subagent-subtle-effort"

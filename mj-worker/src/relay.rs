@@ -674,11 +674,66 @@ impl DurableRelay {
             .map(|prompt| prompt.command_id.clone())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn is_waiting_for_children(&self) -> bool {
+        self.snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_some()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn await_subagent_notification(&mut self, request_id: &str) -> Result<()> {
+        let active_prompt_id = self
+            .originating_command_id()
+            .context("notification waiting requires a live parent turn")?;
+        if let Err(error) = self.submit_command(
+            &format!("await-subagents-{request_id}"),
+            RelayCommand::SetSubagentWait {
+                active_prompt_id,
+                waiting: true,
+            },
+        )? {
+            bail!("await child notification: {}", error.message);
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn collect_subagent_reports(&mut self, request_id: &str) -> Result<()> {
+        if self
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_none()
+        {
+            return Ok(());
+        }
+        let Some(active_prompt_id) = self.originating_command_id() else {
+            return Ok(());
+        };
+        if let Err(error) = self.submit_command(
+            &format!("collect-subagents-{request_id}"),
+            RelayCommand::SetSubagentWait {
+                active_prompt_id,
+                waiting: false,
+            },
+        )? {
+            bail!("withdraw parent child wait: {}", error.message);
+        }
+        Ok(())
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         let mut state = self.snapshot.operational_state();
         state.acp_ready = Some(self.acp_ready);
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
+        // Harness-initiated turns have no owned prompt ID. Keep their existing
+        // explicit interrupt surface; queue steering always needs an owned turn.
+        state.turn_controls = (self.snapshot.active_prompt.is_some()
+            || self.snapshot.harness_turn.is_none())
+        .then(|| self.turn_controls());
         state.last_acp_activity_at_ms = self.acp_activity.last_at_ms();
         state.current_step_started_at_ms = self.step_clock.started_at_ms();
         state.tools_in_flight = self.foreground_tools.snapshot();
@@ -837,6 +892,10 @@ impl DurableRelay {
         ) = self
             .replied_verdict
             .inference(self.turn_context.generation(), &facts);
+        if let Some(since) = self.snapshot.continuation.awaiting_children_since_ms {
+            facts.expected_continuation = Some(since);
+            facts.inferred_idle_since_ms = None;
+        }
         facts
     }
 

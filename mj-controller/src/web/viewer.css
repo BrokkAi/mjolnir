@@ -2216,3 +2216,18 @@ body[data-connection='reconnecting'] .connection {
     display: none;
   }
 }
+
+/* Keep the primary action compact; its explanation wraps below the header. */
+.turn-controls { display: flex; flex: none; align-items: center; gap: 4px; }
+.turn-controls:has(#cancel-turn.hidden) { display: none; }
+#turn-actions { position: relative; }
+#turn-actions summary { cursor: pointer; list-style: none; padding: 6px 8px; min-height: 36px; box-sizing: border-box; }
+#turn-actions summary::-webkit-details-marker { display: none; }
+#turn-actions > button { position: absolute; right: 0; top: 100%; z-index: 20; white-space: nowrap; }
+.turn-control-status { min-width: 0; overflow-wrap: anywhere; }
+.turn-control-status p { margin: 4px 0; font-size: 12px; }
+.turn-control-status > button { margin: 4px 6px 4px 0; }
+@media (max-width: 480px) {
+  .conversation-header .model-select { max-width: 64px; }
+  .turn-controls > button { padding-inline: 8px; }
+}

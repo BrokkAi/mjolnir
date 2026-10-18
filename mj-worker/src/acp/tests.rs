@@ -856,6 +856,7 @@ fn worker_socket(role: SubagentMcpRole) -> SubagentMcpSocket {
         path: "/worker/subagents.sock".into(),
         role,
         agent_mailboxes_enabled: true,
+        subtle_subagents: true,
         profile_registration: false,
     }
 }
@@ -5004,6 +5005,7 @@ for line in sys.stdin:
             path: temp.path().join("subagents.sock"),
             role: SubagentMcpRole::Parent,
             agent_mailboxes_enabled: true,
+            subtle_subagents: true,
             profile_registration: false,
         }),
         clear_context_request: None,

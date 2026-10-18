@@ -236,6 +236,7 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             agent_info: None,
             runtime: None,
             steering_supported: None,
+            turn_controls: None,
             config_options: Vec::new(),
             modes: None,
             available_commands: Vec::new(),

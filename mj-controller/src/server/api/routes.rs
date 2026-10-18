@@ -26,6 +26,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
             "/sessions/{session_id}/subagents",
             get(list_subagents).post(spawn_subagent),
         )
+        .route("/sessions/{session_id}/turn-control", post(turn_control))
         .route("/sessions/{session_id}/prompt", post(prompt))
         .route(
             "/sessions/{session_id}/message",

@@ -191,6 +191,13 @@ impl ChatState {
             {
                 return ChatAction::None;
             }
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                return self
+                    .turn_controls
+                    .as_ref()
+                    .and_then(|controls| controls.interrupt.clone())
+                    .map_or(ChatAction::None, ChatAction::TurnControl);
+            }
             if self.steering.as_ref().is_some_and(|s| s.holds_queue()) {
                 if self
                     .steering
@@ -201,7 +208,11 @@ impl ChatState {
                 }
                 return ChatAction::None;
             }
-            return if self.turn_interruptible() {
+            let available = self.turn_controls.as_ref().map_or_else(
+                || self.turn_interruptible(),
+                |controls| controls.primary.is_some() || !self.active_user_shells.is_empty(),
+            );
+            return if available {
                 ChatAction::Cancel
             } else {
                 ChatAction::None

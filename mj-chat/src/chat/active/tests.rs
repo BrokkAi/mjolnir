@@ -398,6 +398,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
                 agent_info: None,
                 runtime: None,
                 steering_supported: None,
+                turn_controls: None,
                 config_options: Vec::new(),
                 modes: None,
                 available_commands: Vec::new(),
@@ -1523,7 +1524,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
 
     use mj_core::relay::{ActiveRelayPrompt, RelayCommand};
 
-    for protocol in [None, Some(16), Some(17)] {
+    for protocol in [None, Some(16), Some(17), Some(40)] {
         for (supported, queue_kind, hint, sending, _requested) in [
             (
                 Some(true),
@@ -1577,13 +1578,42 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             );
             let mut materialized = MaterializedSession::empty("steering-session");
             let targeted = protocol.is_some_and(|version| version >= 17);
-            let hint = if targeted { hint } else { "Esc interrupts" };
-            let sending = if targeted {
+            let published = protocol.is_some_and(|version| version >= 40);
+            let steering = published
+                && supported != Some(false)
+                && queue_kind.as_ref().is_some_and(|kind| kind.is_prompt());
+            let apply = published && queue_kind.is_some() && !steering;
+            let hint = if steering {
+                hint
+            } else if apply {
+                "Esc applies queued"
+            } else {
+                "Esc interrupts"
+            };
+            let sending = if steering {
                 sending
+            } else if apply {
+                "Applying queued input…"
             } else {
                 "Interrupting turn…"
             };
-            let steering = targeted && queue_kind.as_ref().is_some_and(|kind| kind.is_prompt());
+            let expected = if !targeted {
+                RelayCommand::CancelTurn
+            } else if steering {
+                RelayCommand::Steer {
+                    active_prompt_id: "running-prompt".into(),
+                    queued_prompt_id: "queued-correction".into(),
+                }
+            } else if apply {
+                RelayCommand::ApplyQueuedFor {
+                    active_prompt_id: "running-prompt".into(),
+                    queued_command_id: "queued-correction".into(),
+                }
+            } else {
+                RelayCommand::CancelTurnFor {
+                    active_prompt_id: "running-prompt".into(),
+                }
+            };
             if let Some(kind) = queue_kind {
                 materialized.queued_prompts.push(MaterializedQueuedPrompt {
                     accepted_ordinal: None,
@@ -1597,6 +1627,25 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             let operational = &mut view.snapshot.as_mut().unwrap().operational;
             operational.relay_protocol_version = protocol;
             operational.steering_supported = supported;
+            if published {
+                operational.turn_controls = Some(mj_core::relay::TurnControls {
+                    status: mj_core::relay::TurnControlStatus::Ready,
+                    primary: Some(mj_core::relay::TurnControlAction {
+                        kind: if steering {
+                            mj_core::relay::TurnControlKind::Steer
+                        } else if apply {
+                            mj_core::relay::TurnControlKind::ApplyQueued
+                        } else {
+                            mj_core::relay::TurnControlKind::Interrupt
+                        },
+                        command: expected.clone(),
+                    }),
+                    interrupt: Some(RelayCommand::CancelTurnFor {
+                        active_prompt_id: "running-prompt".into(),
+                    }),
+                    message: None,
+                });
+            }
             operational.active_prompt = Some(ActiveRelayPrompt {
                 command_id: "running-prompt".into(),
                 created_at_ms: 0,
@@ -1606,6 +1655,15 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             let screen = drawn_transcript(&mut chat.state, 100, 24).join("\n");
             assert!(screen.contains(hint), "{screen}");
 
+            if published {
+                assert_eq!(
+                    chat.state
+                        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL)),
+                    ChatAction::TurnControl(RelayCommand::CancelTurnFor {
+                        active_prompt_id: "running-prompt".into()
+                    })
+                );
+            }
             let previous_feedback = chat.state.notice();
             chat.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
             assert_eq!(chat.state.notice(), previous_feedback);
@@ -1626,21 +1684,7 @@ async fn escape_names_steering_through_submission_and_acceptance() {
             })
             .await
             .expect("turn control request completes");
-            assert_eq!(
-                fixture.submitted.recv().await,
-                Some(if !targeted {
-                    RelayCommand::CancelTurn
-                } else if steering {
-                    RelayCommand::Steer {
-                        active_prompt_id: "running-prompt".into(),
-                        queued_prompt_id: "queued-correction".into(),
-                    }
-                } else {
-                    RelayCommand::CancelTurnFor {
-                        active_prompt_id: "running-prompt".into(),
-                    }
-                })
-            );
+            assert_eq!(fixture.submitted.recv().await, Some(expected));
 
             // A newer view may already have consumed the queue. The reply
             // must still describe the request that was actually submitted.

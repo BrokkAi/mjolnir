@@ -23,6 +23,89 @@ use crate::targets::{
 
 use super::*;
 
+// Hard-won: 68ea3d747: copying origin refs spawned one process per branch.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
+)]
+fn managed_clone_copies_large_origin_ref_sets_in_one_command() {
+    struct RecordingExecutor(RefCell<Vec<String>>);
+    impl CommandExecutor for RecordingExecutor {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.0.borrow_mut().push(command.purpose.clone());
+            ProcessExecutor.execute(command)
+        }
+
+        fn execute_with_stdin(
+            &self,
+            command: &CommandSpec,
+            input: &mut (dyn std::io::Read + Send),
+        ) -> Result<CommandOutput> {
+            self.0.borrow_mut().push(command.purpose.clone());
+            ProcessExecutor.execute_with_stdin(command, input)
+        }
+    }
+
+    let source = committed_repository();
+    let base = test_git(source.path(), &["rev-parse", "HEAD"]);
+    let refs: String = (0..1500)
+        .map(|i| format!("update refs/remotes/origin/branch-{i:04} {base}\n"))
+        .collect();
+    assert!(refs.len() > 64 * 1024);
+    let command = CommandSpec::new(
+        "git",
+        [
+            "-C",
+            source.path().to_str().unwrap(),
+            "update-ref",
+            "--stdin",
+        ],
+    );
+    let output = ProcessExecutor
+        .execute_with_stdin(&command, &mut refs.as_bytes())
+        .unwrap();
+    assert_eq!(output.status, 0);
+    test_git(
+        source.path(),
+        &["remote", "add", "origin", FIXTURE_FETCH_URL],
+    );
+    test_git(
+        source.path(),
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/branch-0000",
+        ],
+    );
+    let checkout = ManagedWorktree {
+        kind: ManagedCheckoutKind::Clone,
+        source_project_directory: source.path().to_path_buf(),
+        source_repository: source.path().to_path_buf(),
+        worktree_root: source.path().join(".mj/clones/batched-refs"),
+        branch: "master".into(),
+        target: ManagedWorktreeTarget::Local,
+        base_commit: Some(base),
+    };
+    let executor = RecordingExecutor(RefCell::new(Vec::new()));
+    create_managed_clone(&executor, &checkout).unwrap();
+    let copied = test_git(
+        &checkout.worktree_root,
+        &[
+            "for-each-ref",
+            "--format=update %(refname) %(objectname)",
+            "refs/remotes/origin",
+        ],
+    );
+    assert_eq!(copied, refs.trim_end());
+    let commands = executor.0.borrow();
+    let copies: Vec<_> = commands
+        .iter()
+        .filter(|purpose| purpose.starts_with("preserve cached origin branch"))
+        .collect();
+    assert_eq!(copies.len(), 1);
+}
+
 #[test]
 #[cfg_attr(
     windows,

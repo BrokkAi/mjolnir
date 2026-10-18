@@ -72,12 +72,13 @@ pub(super) fn append_subagent_policy(
     destination: &Path,
     policy: &mj_core::subagent::SubagentPolicy,
     limit: usize,
+    offers_subtle: bool,
 ) -> Result<()> {
     if matches!(policy, mj_core::subagent::SubagentPolicy::Mjolnir { .. }) {
         append_staged_instructions(
             harness,
             destination,
-            &mj_core::subagent::delegation_policy(limit),
+            &mj_core::subagent::delegation_policy(limit, offers_subtle),
         )?;
     }
     Ok(())

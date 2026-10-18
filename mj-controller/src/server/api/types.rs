@@ -151,6 +151,8 @@ pub struct ApiSession {
     pub last_turn_diagnostic: Option<mj_core::diagnostic::TurnDiagnostic>,
     #[serde(default)]
     pub config_options: Vec<crate::server::ViewerConfigOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_controls: Option<mj_core::relay::TurnControls>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_elicitations: Vec<mj_core::elicitation::ElicitationRequest>,
 }
@@ -185,6 +187,7 @@ impl From<&ViewerSession> for ApiSession {
             last_turn_outcome: None,
             last_turn_diagnostic: None,
             config_options: session.config_options.clone(),
+            turn_controls: session.turn_controls.clone(),
             pending_elicitations: session.pending_elicitations.clone(),
         }
     }

@@ -2384,3 +2384,38 @@ fn legacy_profile_subagents_load_without_migration_and_disappear_on_save() {
             .contains("adaptive")
     );
 }
+
+#[test]
+fn subtle_subagents_are_optional_but_never_configured_alone() {
+    use crate::subagent::SubagentPolicy;
+    let choice = |model: &str| SubagentChoice {
+        model: model.into(),
+        effort: None,
+    };
+    let mut config = Config::default();
+    config.subagents.straightforward = Some(choice("plain"));
+    config.validate().unwrap();
+    assert!(config.subagents.is_configured());
+    let policy = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    };
+    assert!(!config.subagents.offers_subtle(&policy));
+    // A session override can add the subtle type for one session.
+    let with_subtle = SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: Some(Box::new(choice("smart"))),
+    };
+    assert!(config.subagents.offers_subtle(&with_subtle));
+    config.subagents.subtle = Some(choice("smart"));
+    config.validate().unwrap();
+    assert!(config.subagents.offers_subtle(&policy));
+
+    config.subagents.straightforward = None;
+    assert!(!config.subagents.is_configured());
+    let error = config.validate().unwrap_err().to_string();
+    assert!(
+        error.contains("[subagents.subtle] requires [subagents.straightforward]"),
+        "{error}"
+    );
+}

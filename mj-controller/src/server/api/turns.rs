@@ -527,6 +527,25 @@ pub(super) struct DestroyRequest {
     pub(super) delete_branch: bool,
 }
 
+/// Submit an exact worker-published control without selecting a newer target.
+pub(super) async fn turn_control(
+    State(state): State<ServerState>,
+    Path(session_id): Path<String>,
+    Json(command): Json<mj_core::relay::RelayCommand>,
+) -> Result<StatusCode, ApiFailure> {
+    if !crate::server::is_turn_control_command(&command) {
+        return Err(ApiFailure::bad_request("unsupported turn-control command"));
+    }
+    send_action(
+        &state,
+        ControllerAction::TurnControl {
+            session_id,
+            command,
+        },
+    )
+    .await
+}
+
 pub(super) async fn interrupt_turn(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,

@@ -1501,6 +1501,20 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons cannot decode persisted AwaitChildren requests
+    // and discard the worker-owned child-wait intent from continuation state.
+    if version < 84 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE subagent_sessions ADD COLUMN notification_epoch INTEGER NOT NULL DEFAULT 0 CHECK(notification_epoch >= 0);
+             UPDATE schema_compatibility SET minimum_compatible_version = 84 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (84, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 84;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2003,7 +2017,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
-        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
+        connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
         let upgraded = open_writer(&path).unwrap();
@@ -2215,7 +2229,11 @@ mod reader_tests {
             let schema = read_schema_state(&writer).unwrap();
             assert_eq!(schema.revision, SCHEMA_VERSION);
             assert_eq!(schema.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
-            assert!(schema.ensure_supported_by(78).is_err());
+            assert!(
+                schema
+                    .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION - 1)
+                    .is_err()
+            );
             assert_eq!(
                 writer
                     .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
@@ -2289,6 +2307,7 @@ mod reader_tests {
                  CREATE INDEX prompt_history_session_recent
                      ON prompt_history(session_id, history_id DESC);
                  CREATE INDEX prompt_history_recent ON prompt_history(history_id DESC);
+                 ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
                  DELETE FROM schema_migrations WHERE version >= 77;
                  UPDATE schema_compatibility SET minimum_compatible_version = 74;
                  PRAGMA user_version = 76;",
@@ -2384,8 +2403,8 @@ mod reader_tests {
     }
 
     /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 83 adds acknowledged container recreation.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 83;
+    /// `SCHEMA_VERSION`. Migration 84 adds persisted notification-driven parent waits.
+    const MINIMUM_COMPATIBLE_VERSION: i64 = 84;
 
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
@@ -2399,6 +2418,18 @@ mod reader_tests {
             connection.execute_batch("DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET;").unwrap();
         }
         // Historical fixtures must remove columns introduced by later revisions.
+        if version < 84
+            && legacy_schema::table_has_column(
+                &connection,
+                "subagent_sessions",
+                "notification_epoch",
+            )
+            .unwrap()
+        {
+            connection
+                .execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;")
+                .unwrap();
+        }
         if version < 76
             && legacy_schema::table_has_column(&connection, "mailbox_outbox", "failure").unwrap()
         {
@@ -2449,7 +2480,7 @@ mod reader_tests {
              DROP TABLE subagent_preference;
              DELETE FROM schema_migrations WHERE version >= 56;
              UPDATE schema_compatibility SET minimum_compatible_version = 55;
-             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 55;",
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 55;",
             )
             .unwrap();
         drop(connection);
@@ -2489,7 +2520,7 @@ mod reader_tests {
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 48;
              UPDATE schema_compatibility SET minimum_compatible_version = 47;
-             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 47;",
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 47;",
             )
             .unwrap();
         drop(connection);
@@ -2521,7 +2552,7 @@ mod reader_tests {
                 "ALTER TABLE sessions DROP COLUMN target_runtime_json;
              DELETE FROM schema_migrations WHERE version >= 46;
              UPDATE schema_compatibility SET minimum_compatible_version = 44;
-             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 45;",
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 45;",
             )
             .unwrap();
         forget_verified_schema(&path);
@@ -2555,7 +2586,7 @@ mod reader_tests {
              DROP TABLE native_agent_replay;
              DELETE FROM schema_migrations WHERE version >= 39;
              UPDATE schema_compatibility SET minimum_compatible_version = 32;
-             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 38;
+             DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 38;
              COMMIT;",
             )
             .unwrap();

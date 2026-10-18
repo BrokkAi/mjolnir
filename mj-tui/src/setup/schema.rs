@@ -816,12 +816,10 @@ pub(super) fn help(path: &[String]) -> &'static str {
         "archive_after_days" => {
             "After this many days, indexed suspended sessions lose their checkpoint and attachments. Blank keeps all."
         }
-        "subagents" => {
-            "Set both task types to enable Mjolnir sub-agents. Parents choose a task type per spawn."
-        }
+        "subagents" => "Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.",
         "straightforward" => "Work with a clear method. Choose a model and its effort.",
         "subtle" => {
-            "Work needing judgment. Choose a smarter model or higher effort than Straightforward."
+            "Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward."
         }
         "eligible_profiles" => {
             "Check profiles that Claude and Codex parents may use in addition to their own profile."

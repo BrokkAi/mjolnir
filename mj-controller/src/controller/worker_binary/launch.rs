@@ -146,6 +146,7 @@ impl Controller {
             &profile_stage,
             &launch.subagents,
             self.config.subagents.max_concurrent,
+            launch.subtle_subagents,
         )?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         if profile.kind == mj_core::config::HarnessKind::Claude {
@@ -159,6 +160,7 @@ impl Controller {
                 worker_root,
                 launch.subagent_mcp_role(),
                 launch.agent_mailboxes_enabled,
+                launch.subtle_subagents,
             )?;
         }
         // A session without project memory gets no replica, no baseline and
@@ -459,6 +461,10 @@ impl Controller {
             .clone()
             .unwrap_or_default()
             .for_launch(profile.kind, subagent.is_some());
+        // Only a delegating parent's spawn tool reads this. Other sessions keep
+        // the default, so their launch files do not change.
+        launch.subtle_subagents = !launch.subagents.uses_mjolnir()
+            || self.config.subagents.offers_subtle(&launch.subagents);
         // Registration decided whether this child can be given the tool.
         launch.handback_tool = subagent.as_ref().is_some_and(|child| child.handback_tool);
         // The child's harness opens on its spawn model instead of switching
@@ -931,6 +937,7 @@ pub(super) fn worker_launch_config_with_checkout(
             subagents: mj_core::subagent::SubagentPolicy::Native,
             handback_tool: false,
             agent_mailboxes_enabled: true,
+            subtle_subagents: true,
             initial_model: None,
             review_capture: false,
             harness: profile.kind,

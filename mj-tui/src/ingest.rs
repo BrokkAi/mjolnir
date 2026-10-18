@@ -428,6 +428,7 @@ impl PreparedMaterializedSessionDetail {
             .iter()
             .map(|prompt| mj_core::relay::QueuedPrompt {
                 id: prompt.command_id.clone(),
+                kind: prompt.kind.clone(),
                 text: materialized_content_text(&prompt.content),
                 attachments: Vec::new(),
                 created_at_ms: prompt.queued_at_ms,

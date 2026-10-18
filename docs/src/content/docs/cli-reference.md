@@ -166,8 +166,8 @@ uses its configured defaults; attached directories remain part of the fixed
 workspace selection.
 
 `--subagents native` switches to harness delegation; `--subagents mjolnir`
-uses the global task choices in `[subagents.straightforward]` and
-`[subagents.subtle]`, or provide a session override for either type.
+uses the global task choices in `[subagents.straightforward]` and, when
+configured, `[subagents.subtle]`, or provide a session override for either type.
 `--subagent-straightforward M` and `--subagent-subtle M` independently override
 the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
@@ -294,10 +294,10 @@ cannot be combined with a session that runs directly in the selected directory.
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude or Codex profile and is not offered in the TUI or browser. Mjolnir requires a Claude or Codex parent and both global task choices
-  in `[subagents.straightforward]` and `[subagents.subtle]`, unless that type
-  has a session override. Configure global defaults in config.toml or TUI
-  Settings → Sub-agents.
+  needs a Claude or Codex profile and is not offered in the TUI or browser. Mjolnir requires a Claude or Codex parent and a straightforward
+  choice in `[subagents.straightforward]` or a session override. The subtle
+  choice in `[subagents.subtle]` is optional. Configure global defaults in
+  config.toml or TUI Settings → Sub-agents.
   `--subagent-straightforward M` and `--subagent-subtle M` override only their
   named task type; an unspecified type uses its global choice. Either implies
   `--subagents mjolnir` and cannot be combined with `native` or `none`. Each
@@ -305,7 +305,10 @@ cannot be combined with a session that runs directly in the selected directory.
   default and `adaptive` is invalid. The retired `--subagent-model` and
   `--subagent-effort` flags fail with guidance to use the four per-type flags.
   `single-model` and `all-models` remain rejected.
-  Each spawn selects `straightforward` or `subtle`;
+  When both types are configured, each spawn selects `straightforward` or
+  `subtle`. With only straightforward, the spawn tool has no task type,
+  every child uses the straightforward choice, and the parent is told to
+  delegate only straightforward work.
   Mjolnir chooses an eligible profile offering its model and effort by quota.
 - `mj new --review-model <name>`, `--review-effort <name>` and
   `--review-tier quick|extended` review every turn of the new session with

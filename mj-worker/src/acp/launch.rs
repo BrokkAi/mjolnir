@@ -7,6 +7,8 @@ pub struct SubagentMcpSocket {
     pub path: PathBuf,
     pub role: mj_core::subagent::SubagentMcpRole,
     pub agent_mailboxes_enabled: bool,
+    /// Whether a parent's spawn tool offers the subtle task type.
+    pub subtle_subagents: bool,
     /// False for legacy shared Codex homes, which must retain ACP delivery.
     pub profile_registration: bool,
 }
@@ -251,22 +253,27 @@ pub(super) fn extra_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
         && !socket.profile_registration
     {
         let worker = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("hel"));
+        let mut args = vec![
+            "worker".into(),
+            "subagent-mcp".into(),
+            "--socket".into(),
+            socket.path.to_string_lossy().into_owned(),
+            // The server bounds a `wait` by what this harness's own MCP
+            // client will hold open.
+            "--harness".into(),
+            spec.harness.id().to_owned(),
+            "--role".into(),
+            socket.role.id().to_owned(),
+            "--agent-mailboxes-enabled".into(),
+            socket.agent_mailboxes_enabled.to_string(),
+        ];
+        if !socket.subtle_subagents {
+            // Only the non-default value is passed, for older workers.
+            args.extend(["--subtle-subagents".into(), "false".into()]);
+        }
         servers.push(McpServer::Stdio(approve_owned_mcp(
             spec,
-            McpServerStdio::new(mj_core::subagent::SUBAGENT_MCP_SERVER, worker).args(vec![
-                "worker".into(),
-                "subagent-mcp".into(),
-                "--socket".into(),
-                socket.path.to_string_lossy().into_owned(),
-                // The server bounds a `wait` by what this harness's own MCP
-                // client will hold open.
-                "--harness".into(),
-                spec.harness.id().to_owned(),
-                "--role".into(),
-                socket.role.id().to_owned(),
-                "--agent-mailboxes-enabled".into(),
-                socket.agent_mailboxes_enabled.to_string(),
-            ]),
+            McpServerStdio::new(mj_core::subagent::SUBAGENT_MCP_SERVER, worker).args(args),
         )));
     }
     servers

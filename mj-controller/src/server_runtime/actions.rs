@@ -415,12 +415,7 @@ pub(super) async fn apply_phone_action(
             command,
         } => {
             anyhow::ensure!(
-                matches!(
-                    command,
-                    RelayCommand::Steer { .. }
-                        | RelayCommand::CancelTurnFor { .. }
-                        | RelayCommand::ResolveSteering { .. }
-                ),
+                crate::server::is_turn_control_command(&command),
                 "unsupported turn-control command"
             );
             services

@@ -1,5 +1,15 @@
 use super::*;
 
+pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) -> bool {
+    matches!(
+        command,
+        mj_core::relay::RelayCommand::Steer { .. }
+            | mj_core::relay::RelayCommand::ApplyQueuedFor { .. }
+            | mj_core::relay::RelayCommand::CancelTurnFor { .. }
+            | mj_core::relay::RelayCommand::ResolveSteering { .. }
+    )
+}
+
 /// The complete set of operations a phone may ask the controller to perform.
 /// Secret/config editing is intentionally not representable here, and the one
 /// destructive variant, `ForceClose`, is not representable on the wire: it is

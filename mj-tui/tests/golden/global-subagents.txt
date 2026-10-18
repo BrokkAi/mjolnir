@@ -4,7 +4,7 @@
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Sub-agents                                                                        │                     │
-│hel ───────────────  │ Set both task types to enable Mjolnir sub-agents. Parents choose a task type per spawn.      │                     │
+│hel ───────────────  │ Set Straightforward to enable Mjolnir sub-agents. Subtle is optional.                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │   Maximum concurrent children                                                             6  │                     │
@@ -88,7 +88,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╰───────────────────                                                                                                                       │
 ╭ Sessions ─────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 │ Create   Open   Fi  │ Settings › Sub-agents › Subtle                                                               │                     │
-│hel ───────────────  │ Work needing judgment. Choose a smarter model or higher effort than Straightforward.         │                     │
+│hel ───────────────  │ Optional. Work needing judgment. Use a smarter model or higher effort than Straightforward.  │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │                                                                                              │                     │
 │  │ No messages yet  │   Model                                                                           smarter ▾  │                     │

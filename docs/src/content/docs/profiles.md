@@ -13,12 +13,15 @@ reasoning effort. Choose those per session with `/model` and `/effort`, so the
 available choices can come from the provider's current catalog.
 
 Configure Mjolnir sub-agents in **Settings → Sub-agents**. Set a model and,
-when offered, effort for both **Straightforward** and **Subtle** tasks. These
-choices apply globally. Choose a smarter model or higher effort for Subtle.
-Parents choose a task type each time they delegate work.
+when offered, effort for **Straightforward** tasks. **Subtle** is optional; if
+you set it, choose a smarter model or higher effort than Straightforward. Subtle
+cannot be set without Straightforward. These choices apply globally. With both
+set, parents choose a task type each time they delegate work. With only
+Straightforward, parents delegate only straightforward work and do work that
+needs judgment themselves.
 
 **Create** and **Move…** offer **Native** or **Mjolnir** delegation. Mjolnir
-requires a Claude or Codex profile and both task types to be configured.
+requires a Claude or Codex profile and a configured Straightforward task.
 Existing sessions keep their recorded policy; leaving Move's choice unchanged
 retains it.
 

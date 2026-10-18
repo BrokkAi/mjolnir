@@ -126,6 +126,10 @@ enum WorkerCommand {
         /// Disable parent-to-child mailbox messages for this worker's config.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         agent_mailboxes_enabled: bool,
+        /// False when only the straightforward task type is configured: the
+        /// spawn tool then offers no task type.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        subtle_subagents: bool,
     },
     /// Print a unified diff of the session's work in one repository.
     Diff {
@@ -511,9 +515,16 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             harness,
             role,
             agent_mailboxes_enabled,
-        } => {
-            mj_worker::subagent_mcp::run_mcp_stdio(&socket, harness, role, agent_mailboxes_enabled)
-        }
+            subtle_subagents,
+        } => mj_worker::subagent_mcp::run_mcp_stdio(
+            &socket,
+            harness,
+            role,
+            mj_worker::subagent_mcp::ParentTools {
+                agent_mailboxes_enabled,
+                subtle_subagents,
+            },
+        ),
         WorkerCommand::Diff {
             repository,
             base,
