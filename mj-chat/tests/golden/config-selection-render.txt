@@ -388,7 +388,7 @@ Tab pane · Ctrl-V paste · Enter send · Ctrl-R history │ ctrl+b then : palet
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Light theme (100x24) ===
@@ -414,7 +414,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Darcula theme (100x24) ===
@@ -440,7 +440,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in High Contrast theme (100x24) ===
@@ -466,7 +466,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Campbell theme (100x24) ===
@@ -492,7 +492,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in One Half Dark theme (100x24) ===
@@ -518,7 +518,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in One Half Light theme (100x24) ===
@@ -544,7 +544,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Solarized Dark theme (100x24) ===
@@ -570,7 +570,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Solarized Light theme (100x24) ===
@@ -596,7 +596,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Terminal Dark theme (100x24) ===
@@ -622,7 +622,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Terminal Light theme (100x24) ===
@@ -648,7 +648,7 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys
 
 === ASCII selector in Monochrome theme (100x24) ===
@@ -674,5 +674,5 @@ Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - 
 + mic  Luna v · high v ----------------------------------------------------------------------------+
 |> What would you like to build?                                                                   |
 |                                                                                                  |
-+ Subagents - 0/1 > ---------------------------------------------------- Enter  send   /  commands +
++ Subagents - 0 > ------------------------------------------------------ Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send - Ctrl-R history | ctrl+b then : palette - ? keys

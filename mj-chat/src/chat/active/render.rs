@@ -551,10 +551,9 @@ pub(crate) fn render_composer_band(
     let subagents_ready = chat.subagent_count() > 0;
     let subagent_label = if subagents_ready {
         Some(format!(
-            " Subagents{}{}/{} {} ",
+            " Subagents{}{} {} ",
             theme::footer_separator(),
             chat.subagent_working_count,
-            chat.subagent_count(),
             theme::glyphs().navigate
         ))
     } else {

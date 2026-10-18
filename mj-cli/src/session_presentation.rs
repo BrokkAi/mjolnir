@@ -40,7 +40,7 @@ pub(crate) fn apply_session_activity(
 /// counts it can change.
 ///
 /// A child's worker reporting a turn changes no record, so the parent's
-/// composer footer (`Subagents · N/M`) would otherwise keep the count from the
+/// composer footer (`Subagents · N`) would otherwise keep the count from the
 /// last record change and read `0/M` for the child's whole turn (I2-7).
 pub(crate) fn apply_worker_activity(
     dashboard: &mut DashboardState,

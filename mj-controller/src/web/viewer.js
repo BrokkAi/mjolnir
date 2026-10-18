@@ -7577,7 +7577,7 @@ function renderConversationHeader(session) {
   const total = children.length + native.length;
   for (const button of [subagentsButton, subagentsDesktopButton]) {
     if (!button) continue;
-    button.textContent = `Subagents · ${working}/${total}`;
+    button.textContent = `Subagents · ${working}`;
     button.title = `${total} retained agents`;
     button.classList.toggle(
       'hidden',

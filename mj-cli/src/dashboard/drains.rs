@@ -676,7 +676,7 @@ pub(crate) fn refresh_open_chats(
 }
 
 /// Hands every open conversation the dashboard's count of its sub-agents and
-/// of how many are working, which the composer footer shows as `N/M`.
+/// of how many are working, which the composer footer displays.
 ///
 /// The working count changes whenever a child's worker reports different
 /// activity, which is not a change to any record, so it is refreshed from the
