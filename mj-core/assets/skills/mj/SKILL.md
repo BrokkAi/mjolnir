@@ -65,7 +65,7 @@ child sessions in the same target and filesystem:
 - `spawn` — start a child. When the user configured both task types, `task_type`
   is required (`straightforward` for a clear method, `subtle` for judgment or
   risk of subtle bugs). When only straightforward is configured, `spawn` has no
-  `task_type`. The user configures model/effort choices globally in Settings →
+  `task_type` and the parent delegates only straightforward work. The user configures model/effort choices globally in Settings →
   Sub-agents; returns `child_session_id` at once, before the child has started
   running.
 - `list_agents` — this parent's children and their status.
