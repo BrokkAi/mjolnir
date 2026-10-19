@@ -224,7 +224,9 @@ mod tests {
 
     use std::fs;
 
-    use crate::import::test_fixtures::{MUSE_ID, grok_session, kimi_session, write_muse_session};
+    use crate::import::test_fixtures::{
+        MUSE_ID, grok_session, kimi_session, native_cwd, write_muse_session,
+    };
 
     const KIMI_ID: &str = "session_90c30a64-54f7-4261-90f1-e75b1c14311c";
     const KIMI_WIRE: &str = concat!(
@@ -277,14 +279,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
-    )]
     fn kimi_sessions_are_indexed_from_their_profile_home() {
         let directory = tempfile::tempdir().unwrap();
         let home = profile_home(&directory, "kimi");
-        let session_path = kimi_session(&home, KIMI_ID, "/work/app", "Native title", KIMI_WIRE);
+        let cwd = native_cwd("/work/app");
+        let session_path = kimi_session(&home, KIMI_ID, &cwd, "Native title", KIMI_WIRE);
 
         let adapter = HarnessAdapter::in_home(HarnessKind::Kimi, home.clone()).unwrap();
         assert_eq!(adapter.name(), "kimi-code");
@@ -295,7 +294,7 @@ mod tests {
 
         let session = adapter.parse_key(&key).unwrap();
         assert_eq!(session.tool, "kimi-code");
-        assert_eq!(session.project, "/work/app");
+        assert_eq!(session.project, cwd);
         // Kimi records a title of its own, so the conversation is not consulted.
         assert_eq!(session.title, "Native title");
         assert_eq!(texts(&session, Role::User), vec!["first prompt"]);
@@ -303,14 +302,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
-    )]
     fn grok_sessions_are_indexed_from_their_profile_home() {
         let directory = tempfile::tempdir().unwrap();
         let home = profile_home(&directory, "grok");
-        let session_path = grok_session(&home, "/work/app", GROK_HISTORY);
+        let cwd = native_cwd("/work/app");
+        let session_path = grok_session(&home, &cwd, GROK_HISTORY);
 
         let adapter = HarnessAdapter::in_home(HarnessKind::Grok, home.clone()).unwrap();
         assert_eq!(adapter.name(), "grok-build");
@@ -321,7 +317,7 @@ mod tests {
 
         let session = adapter.parse_key(&key).unwrap();
         assert_eq!(session.tool, "grok-build");
-        assert_eq!(session.project, "/work/app");
+        assert_eq!(session.project, cwd);
         // This session has no summary of its own, so the first prompt names it.
         assert_eq!(session.title, "first prompt");
         assert_eq!(texts(&session, Role::User), vec!["first prompt"]);
