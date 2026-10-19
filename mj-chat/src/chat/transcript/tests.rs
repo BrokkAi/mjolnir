@@ -953,18 +953,18 @@ fn clicking_a_collapsed_member_expands_only_that_call_and_splits_the_run() {
 
     drawn_transcript(&mut chat, 80, 24);
     assert!(
-        chat.transcript_tool_click_targets
+        chat.transcript_click_targets
             .iter()
             .any(|target| target.start_seq == 2)
     );
     let target = chat
-        .transcript_tool_click_targets
+        .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 2)
         .copied()
         .expect("the second summary segment is clickable");
     let transcript_inner = Rect::new(1, 1, 78, 22);
-    assert!(chat.transcript_tool_click_targets.iter().all(|target| {
+    assert!(chat.transcript_click_targets.iter().all(|target| {
         transcript_inner.contains(Position::new(target.rect.x, target.rect.y))
             && transcript_inner.contains(Position::new(
                 target.rect.right().saturating_sub(1),
@@ -991,7 +991,7 @@ fn clicking_a_collapsed_member_expands_only_that_call_and_splits_the_run() {
     ));
 
     let expanded = chat
-        .transcript_tool_click_targets
+        .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 2)
         .copied()
@@ -3751,19 +3751,19 @@ fn golden_rich_transcript_tool_presentation() {
     ]);
     let _ = golden_chat_buffer(&mut chat, 80, 24);
     let target = chat
-        .transcript_tool_click_targets
+        .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 2)
         .copied()
         .expect("completed tool is clickable");
     let running_target = chat
-        .transcript_tool_click_targets
+        .transcript_click_targets
         .iter()
         .find(|target| target.start_seq == 1)
         .copied()
         .expect("running tool is clickable");
     let targets = chat
-        .transcript_tool_click_targets
+        .transcript_click_targets
         .iter()
         .map(|target| target.start_seq)
         .collect::<BTreeSet<_>>();
@@ -4068,7 +4068,7 @@ fn golden_rich_transcript_tool_presentation() {
     ]);
     let _ = golden_chat_buffer(&mut chat, 30, 24);
     let second_targets = chat
-        .transcript_tool_click_targets
+        .transcript_click_targets
         .iter()
         .filter(|target| target.start_seq == 2)
         .copied()
@@ -4210,6 +4210,137 @@ fn golden_rich_transcript_tool_presentation() {
         "inline with one output line and ASCII symbols",
         80,
         36,
+        &rows,
+        &[],
+    );
+
+    let delivery =
+        include_str!("../../../../mj-transcript/tests/golden/mailbox-delivery-transcript.txt");
+    let batch = delivery
+        .split_once("19: Mailbox events:\n")
+        .unwrap()
+        .1
+        .split_once("\n20: ")
+        .unwrap()
+        .0;
+    let mut mailbox = ChatState::new(&snapshot(), &[]);
+    mailbox.entries.push(ChatEntry::plain(2, ChatRole::System, format!(
+        "Mailbox events:\n{batch}\n  - Child task Check parser finished: failed\n    支持 Unicode and <script>literal text</script>.\n    - A report bullet stays in this event."
+    )));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 60, 36));
+    append_transcript_golden_state(&mut output, "mailbox events collapsed", 60, 36, &rows, &[]);
+    let second_child = mailbox
+        .transcript_click_targets
+        .iter()
+        .find(|target| target.mailbox_event == Some(11))
+        .copied()
+        .unwrap();
+    mailbox.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second_child.rect.x,
+        row: second_child.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 36));
+    append_transcript_golden_state(
+        &mut output,
+        "only the second repeated event expands after resize",
+        44,
+        36,
+        &rows,
+        &[],
+    );
+    assert_eq!(mailbox.expanded_mailbox_events, BTreeSet::from([(2, 11)]));
+    let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
+    let report_start = cached.mailbox.as_ref().unwrap().mailbox_headers[11].0 + 1;
+    let report_end = cached.lines.len() - 2;
+    let pane = transcript_pane(&mailbox);
+    let copied_report = mailbox
+        .transcript_selection_text(&SelectionRange {
+            start: ContentPos::new(pane.top_row + report_start, 0),
+            end: ContentPos::new(pane.top_row + report_end, pane.rect.width - 1),
+        })
+        .unwrap();
+    assert_eq!(
+        copied_report,
+        "Child task Check parser finished: failed\n支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
+    );
+    output.push_str(&format!("copied report: {copied_report:?}\n\n"));
+    mailbox.entries[0]
+        .text
+        .push_str("\n  - Your PR #4625 was merged.");
+    mailbox.entries[0].revision += 1;
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 36));
+    append_transcript_golden_state(
+        &mut output,
+        "mailbox update retains the open event",
+        44,
+        36,
+        &rows,
+        &[],
+    );
+    let first_child = mailbox
+        .transcript_click_targets
+        .iter()
+        .find(|target| target.mailbox_event == Some(10))
+        .copied()
+        .unwrap();
+    mailbox.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: first_child.rect.x,
+        row: first_child.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 48));
+    append_transcript_golden_state(
+        &mut output,
+        "both reports expand independently",
+        44,
+        48,
+        &rows,
+        &[],
+    );
+    mailbox.anchor = TranscriptAnchor::Row { entry: 0, row: 9 };
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
+    append_transcript_golden_state(
+        &mut output,
+        "mailbox report scrolled before collapse",
+        44,
+        24,
+        &rows,
+        &[],
+    );
+    let second_child = mailbox
+        .transcript_click_targets
+        .iter()
+        .find(|target| target.mailbox_event == Some(11))
+        .copied()
+        .unwrap();
+    mailbox.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: second_child.rect.x,
+        row: second_child.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(mailbox.anchor, TranscriptAnchor::Row { entry: 0, row: 9 });
+    let rows = crate::theme::with_symbols(crate::theme::SymbolSet::Ascii, || {
+        crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 48))
+    });
+    append_transcript_golden_state(
+        &mut output,
+        "one report collapsed with ASCII arrows",
+        44,
+        48,
+        &rows,
+        &[],
+    );
+    mailbox.render_mode = TranscriptRenderMode::Raw;
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 60, 48));
+    append_transcript_golden_state(
+        &mut output,
+        "raw mailbox text remains complete",
+        60,
+        48,
         &rows,
         &[],
     );

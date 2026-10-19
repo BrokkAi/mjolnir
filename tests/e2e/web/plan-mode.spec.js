@@ -216,6 +216,7 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
     snapshotRequests: 0,
     readRequests: 0,
     conversationRequests: 0,
+    conversation: conversation(),
     runtimeUpdates: 0,
     rejectNextPlanMode: false,
     rejectNextAnswer: false,
@@ -251,7 +252,7 @@ async function mockViewerApi(page, initialPending = [], configOptions = [], sess
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(conversation()),
+      body: JSON.stringify(state.conversation),
     });
   });
   await page.route(`**/api/sessions/${SESSION_ID}/client-state`, async route => {
@@ -444,6 +445,59 @@ test('golden_viewer_conversation', async ({ context }) => {
   );
   await captureConversationState(output, page, 'review status describes automatic review', state);
   await page.close();
+
+  const mailboxPage = await context.newPage();
+  await mailboxPage.clock.install({ time: new Date('2030-06-15T15:00:00Z') });
+  const mailboxState = await mockViewerApi(mailboxPage);
+  // Consume the shared Rust projection's exact browser response, so both
+  // surfaces exercise the same real delivery text and event boundaries.
+  mailboxState.conversation = JSON.parse(fs.readFileSync(
+    path.resolve(__dirname, '../../../mj-client/tests/golden/mailbox-browser-transcript.txt'), 'utf8',
+  ));
+  await publishSnapshotDelta(mailboxPage, mailboxState);
+  const events = mailboxPage.locator('#conversation-feed .mailbox-event');
+  await expect(events).toHaveCount(12);
+  const captureMailbox = async label => {
+    await captureConversationState(output, mailboxPage, label, mailboxState);
+    const folds = await events.evaluateAll(nodes => nodes.map(node => ({
+      header: node.querySelector('.mailbox-event-label').textContent,
+      open: node.open,
+      arrow: getComputedStyle(node.querySelector('summary'), '::before').content.replaceAll('"', ''),
+    })));
+    output.push(`mailbox events: ${JSON.stringify(folds)}`);
+    const layout = await events.locator('.mailbox-event-label').evaluateAll(nodes => nodes.map(node => ({
+      height: node.getBoundingClientRect().height,
+      lineHeight: parseFloat(getComputedStyle(node).lineHeight),
+    })));
+    expect(layout.every(row => row.height <= row.lineHeight + 1)).toBe(true);
+    expect(await mailboxPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  };
+  await captureMailbox('mailbox events are one line each on the phone');
+  await events.nth(11).locator('summary').click();
+  await expect(events.nth(11)).toHaveAttribute('open', '');
+  await expect(events.nth(10)).not.toHaveAttribute('open', '');
+  await expect(events.nth(11).locator('.entry-body')).toContainText('支持 Unicode and <script>literal text</script>.');
+  await expect(events.nth(11).locator('.entry-body')).toContainText('- A report bullet stays in this event.');
+  await expect(events.nth(11).locator('script')).toHaveCount(0);
+  await captureMailbox('click opens only the second repeated mailbox event');
+  const mailboxEntry = mailboxState.conversation.entries[0];
+  mailboxEntry.lines.push('  - Your PR #4625 was merged.');
+  mailboxEntry.mailbox_events.push(['Your PR #4625 was merged.']);
+  mailboxEntry.updated_seq += 1;
+  mailboxState.conversation.latest_seq += 1;
+  await publishSnapshotDelta(mailboxPage, mailboxState);
+  await expect(events).toHaveCount(13);
+  await expect(events.nth(11)).toHaveAttribute('open', '');
+  await expect(events.nth(12)).not.toHaveAttribute('open', '');
+  await captureMailbox('live mailbox update preserves the open report');
+  await events.nth(11).locator('summary').focus();
+  await mailboxPage.keyboard.press('Enter');
+  await expect(events.nth(11)).not.toHaveAttribute('open', '');
+  await mailboxPage.setViewportSize({ width: 320, height: 568 });
+  await captureMailbox('keyboard collapses mailbox detail at narrow phone width');
+  await mailboxPage.setViewportSize({ width: 900, height: 900 });
+  await captureMailbox('desktop mailbox events stay on one line');
+  await mailboxPage.close();
 
   const longPage = await context.newPage();
   await longPage.setViewportSize({ width: 320, height: 568 });

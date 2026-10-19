@@ -85,8 +85,8 @@ use rendering::{TranscriptRenderMode, sanitize_terminal_text};
 pub use rendering::{truncate_line_to_width, wrap_styled_line};
 use second_opinion::{SecondOpinion, SecondOpinionIntent};
 use transcript::{
-    ToolDiffstatRequest, TranscriptAnchor, TranscriptLinkFrame, TranscriptRenderCache,
-    TranscriptScrollbarState, TranscriptSelectionSpace, TranscriptToolClickTarget,
+    ToolDiffstatRequest, TranscriptAnchor, TranscriptClickTarget, TranscriptLinkFrame,
+    TranscriptRenderCache, TranscriptScrollbarState, TranscriptSelectionSpace,
     materialized_chat_entries_reusing,
 };
 use turn_review::{TurnReview, TurnReviewIntent};
@@ -656,8 +656,10 @@ pub struct ChatState {
     /// Completed tool calls the user has opened in the Rich transcript.
     /// Presentation state is local to this chat and keyed by durable entry.
     expanded_tool_calls: BTreeSet<u64>,
+    /// Open mailbox events, keyed by durable entry position and event index.
+    expanded_mailbox_events: BTreeSet<(u64, usize)>,
     /// Screen-coordinate targets rebuilt with every transcript frame.
-    transcript_tool_click_targets: Vec<TranscriptToolClickTarget>,
+    transcript_click_targets: Vec<TranscriptClickTarget>,
     /// Where the last transcript frame drew its rows, for resolving a click
     /// on a link against the rows that frame painted.
     transcript_link_frame: Option<TranscriptLinkFrame>,
@@ -843,7 +845,8 @@ impl ChatState {
             render_cache: TranscriptRenderCache::default(),
             transcript_scrollbar: TranscriptScrollbarState::default(),
             expanded_tool_calls: BTreeSet::new(),
-            transcript_tool_click_targets: Vec::new(),
+            expanded_mailbox_events: BTreeSet::new(),
+            transcript_click_targets: Vec::new(),
             transcript_link_frame: None,
             notices: Notices::default(),
             feedback: Notices::default(),

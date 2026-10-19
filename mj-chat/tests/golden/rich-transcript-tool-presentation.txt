@@ -993,6 +993,298 @@ expanded tools: {2}
 +--------------------------------------------------- Enter  send   /  commands +
 Tab pane - Ctrl-V paste - Enter send | ctrl+b then : palette - ? keys
 
+=== mailbox events collapsed (60x36) ===
+╭ Conversation ────────────────────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macro values for CQ07▐│
+│ ▸ Comment on your PR #4623 by alice: Please check the ‹…▐│
+│ ▸ New issue #4624 Per-unit resolution summary: shared t…▐│
+│ ▸ Review on your PR #4623 by bob (changes requested): C…▐│
+│ ▸ Review comment on your PR #4623 by carol: This assert…▐│
+│ ▸ Your PR #4623 was merged by dana.                     ▐│
+│ ▸ Your PR #4623 was closed without merging.             ▐│
+│ ▸ Your PR #4624 was merged.                             ▐│
+│ ▸ Your PR #4623 was reopened.                           ▐│
+│ ▸ External event: A plain event from the CLI.           ▐│
+│ ▸ Child task Check parser finished: failed              ▐│
+│ ▸ Child task Check parser finished: failed              ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+
+=== only the second repeated event expands after resize (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macr…▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▾ Child task Check parser finished: fai…▐│
+│ │ Child task Check parser finished:     ▐│
+│ │ failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ▐│
+│ │ - A report bullet stays in this event.▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+copied report: "Child task Check parser finished: failed\n支持 Unicode and <script>literal text</script>.\n- A report bullet stays in this event."
+
+
+=== mailbox update retains the open event (44x36) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macr…▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▸ Child task Check parser finished: fai…▐│
+│ ▾ Child task Check parser finished: fai…▐│
+│ │ Child task Check parser finished:     ▐│
+│ │ failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ▐│
+│ │ - A report bullet stays in this event.▐│
+│ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== both reports expand independently (44x48) ===
+╭ Conversation ────────────────────────────╮
+│ ▸ New PR #4623 Model Rust built-in macr…▐│
+│ ▸ Comment on your PR #4623 by alice: Pl…▐│
+│ ▸ New issue #4624 Per-unit resolution s…▐│
+│ ▸ Review on your PR #4623 by bob (chang…▐│
+│ ▸ Review comment on your PR #4623 by ca…▐│
+│ ▸ Your PR #4623 was merged by dana.     ▐│
+│ ▸ Your PR #4623 was closed without merg…▐│
+│ ▸ Your PR #4624 was merged.             ▐│
+│ ▸ Your PR #4623 was reopened.           ▐│
+│ ▸ External event: A plain event from th…▐│
+│ ▾ Child task Check parser finished: fai…▐│
+│ │ Child task Check parser finished:     ▐│
+│ │ failed                                ▐│
+│ │ State: failed                         ▐│
+│ │ Failure: verification timed out       ▐│
+│ │ Report directory: /reports/child-1    ▐│
+│ │ Report truncated; see the report      ▐│
+│ │ directory for details.                ▐│
+│ │ Fixed ‹parser›.                       ▐│
+│ │ Tests passed: "parser".               ▐│
+│ ▾ Child task Check parser finished: fai…▐│
+│ │ Child task Check parser finished:     ▐│
+│ │ failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ▐│
+│ │ - A report bullet stays in this event.▐│
+│ ▸ Your PR #4625 was merged.             ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+│                                         ▐│
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== mailbox report scrolled before collapse (44x24) ===
+╭ Conversation · message 1 of 1 · End to f…╮
+│ ▸ External event: A plain event from th…││
+│ ▾ Child task Check parser finished: fai…││
+│ │ Child task Check parser finished:     ││
+│ │ failed                                ││
+│ │ State: failed                         ││
+│ │ Failure: verification timed out       ▐│
+│ │ Report directory: /reports/child-1    ▐│
+│ │ Report truncated; see the report      ▐│
+│ │ directory for details.                ▐│
+│ │ Fixed ‹parser›.                       ▐│
+│ │ Tests passed: "parser".               ▐│
+│ ▾ Child task Check parser finished: fai…▐│
+│ │ Child task Check parser finished:     ▐│
+│ │ failed                                ▐│
+│ │ 支 持  Unicode and <script>literal      ▐│
+│ │ text</script>.                        ││
+│ │ - A report bullet stays in this event.││
+╰──────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────╮
+│> Message the agent, or / for commands    │
+│                                          │
+╰──────────────────────────────────────────╯
+Tab pane │ ctrl+b then : palette · ? keys
+
+=== one report collapsed with ASCII arrows (44x48) ===
++ Conversation ----------------------------+
+| ▸ New PR #4623 Model Rust built-in macr.#|
+| ▸ Comment on your PR #4623 by alice: Pl.#|
+| ▸ New issue #4624 Per-unit resolution s.#|
+| ▸ Review on your PR #4623 by bob (chang.#|
+| ▸ Review comment on your PR #4623 by ca.#|
+| ▸ Your PR #4623 was merged by dana.     #|
+| ▸ Your PR #4623 was closed without merg.#|
+| ▸ Your PR #4624 was merged.             #|
+| ▸ Your PR #4623 was reopened.           #|
+| ▸ External event: A plain event from th.#|
+| v Child task Check parser finished: fai.#|
+| | Child task Check parser finished:     #|
+| | failed                                #|
+| | State: failed                         #|
+| | Failure: verification timed out       #|
+| | Report directory: /reports/child-1    #|
+| | Report truncated; see the report      #|
+| | directory for details.                #|
+| | Fixed ‹parser›.                       #|
+| | Tests passed: "parser".               #|
+| ▸ Child task Check parser finished: fai.#|
+| ▸ Your PR #4625 was merged.             #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
+|                                         #|
++------------------------------------------+
++ mic -------------------------------------+
+|> Message the agent, or / for commands    |
+|                                          |
++------------------------------------------+
+Tab pane | ctrl+b then : palette - ? keys
+
+=== raw mailbox text remains complete (60x48) ===
+╭ Conversation · raw source ───────────────────────────────╮
+│ ─ Mjolnir                                               ▐│
+│ │ Mailbox events:                                       ▐│
+│ │   - New PR #4623 Model Rust built-in macro values for ▐│
+│ │   CQ07                                                ▐│
+│ │   - Comment on your PR #4623 by alice: Please check   ▐│
+│ │   the ‹macro› case.                                   ▐│
+│ │   - New issue #4624 Per-unit resolution summary:      ▐│
+│ │   shared tables, driver and Go producer (Milestone 1) ▐│
+│ │   - Review on your PR #4623 by bob (changes           ▐│
+│ │   requested): Could you revise the error path?        ▐│
+│ │   - Review comment on your PR #4623 by carol: This    ▐│
+│ │   assertion needs a case.                             ▐│
+│ │   - Your PR #4623 was merged by dana.                 ▐│
+│ │   - Your PR #4623 was closed without merging.         ▐│
+│ │   - Your PR #4624 was merged.                         ▐│
+│ │   - Your PR #4623 was reopened.                       ▐│
+│ │   - External event: A plain event from the CLI.       ▐│
+│ │   - Child task Check parser finished: failed          ▐│
+│ │     State: failed                                     ▐│
+│ │     Failure: verification timed out                   ▐│
+│ │     Report directory: /reports/child-1                ▐│
+│ │     Report truncated; see the report directory for    ▐│
+│ │     details.                                          ▐│
+│ │     Fixed ‹parser›.                                   ▐│
+│ │     Tests passed: "parser".                           ▐│
+│ │   - Child task Check parser finished: failed          ▐│
+│ │     支 持  Unicode and <script>literal text</script>.   ▐│
+│ │     - A report bullet stays in this event.            ▐│
+│ │   - Your PR #4625 was merged.                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+│                                                         ▐│
+╰──────────────────────────────────────────────────────────╯
+╭ 🎙︎ ───────────────────────────────────────────────────────╮
+│> Message the agent, or / for commands                    │
+│                                                          │
+╰─────────────────────────────── Enter  send   /  commands ╯
+Tab pane · Ctrl-V paste │ ctrl+b then : palette · ? keys
+
 === dedicated delivered messages wrap between agent replies (44x36) ===
 ╭ Conversation ────────────────────────────╮
 │ ● Agent · 15:00                         ▐│

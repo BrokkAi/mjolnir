@@ -47,6 +47,27 @@ pub enum EntryCollapse {
 pub const BROWSER_TRANSCRIPT_LINES: usize = 1_000;
 pub const BROWSER_LINE_BYTES: usize = 4 * 1024;
 
+/// Interpret the durable mailbox list shared by historical and live clients.
+/// Event bullets have two spaces; report bodies have four, so report bullets
+/// remain part of their event instead of becoming new events.
+pub fn mailbox_event_lines<'a>(
+    role: ChatRole,
+    mut lines: impl Iterator<Item = &'a str>,
+) -> Vec<Vec<String>> {
+    if role != ChatRole::System || lines.next() != Some("Mailbox events:") {
+        return Vec::new();
+    }
+    let mut events: Vec<Vec<String>> = Vec::new();
+    for line in lines {
+        if let Some(header) = line.strip_prefix("  - ") {
+            events.push(vec![header.to_owned()]);
+        } else if let Some(event) = events.last_mut() {
+            event.push(line.strip_prefix("    ").unwrap_or(line).to_owned());
+        }
+    }
+    events
+}
+
 /// The historical reader uses the canonical text interpretation on both
 /// surfaces, without the live feed's presentation collapse or tail clipping.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -121,6 +142,16 @@ pub fn browser_transcript(
             }
         }
         remaining = remaining.saturating_sub(entry.lines.len());
+        // Derive disclosures after clipping so hidden detail cannot bypass
+        // the browser transcript's line budget.
+        entry.mailbox_events = mailbox_event_lines(
+            if entry.role == "system" {
+                ChatRole::System
+            } else {
+                ChatRole::Agent
+            },
+            entry.lines.iter().map(String::as_str),
+        );
     }
     entries.retain(|entry| !entry.lines.is_empty());
     if remaining == 0 {
@@ -629,6 +660,7 @@ pub fn browser_entry(entry: &ChatEntry) -> BrowserTranscriptEntry {
         role,
         label,
         recorded_at_ms: entry.recorded_at_ms,
+        mailbox_events: Vec::new(),
         lines: source
             .into_iter()
             .map(|line| {
@@ -1176,6 +1208,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         label,
         recorded_at_ms,
         lines,
+        mailbox_events,
         glyph,
         tone,
         tool_status,
@@ -1188,6 +1221,7 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
         && previous.label == *label
         && previous.recorded_at_ms == *recorded_at_ms
         && previous.lines == *lines
+        && previous.mailbox_events == *mailbox_events
         && previous.glyph == *glyph
         && previous.tone == *tone
         && previous.tool_status == *tool_status
@@ -1198,6 +1232,51 @@ fn same_rendering(previous: &BrowserTranscriptEntry, next: &BrowserTranscriptEnt
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn golden_mailbox_browser_transcript() {
+        // Use the actual delivery projection's golden text as browser input.
+        let delivery =
+            include_str!("../../mj-transcript/tests/golden/mailbox-delivery-transcript.txt");
+        let batch = delivery
+            .split_once("19: Mailbox events:\n")
+            .unwrap()
+            .1
+            .split_once("\n20: ")
+            .unwrap()
+            .0;
+        let entry = ChatEntry::plain(
+            2,
+            ChatRole::System,
+            format!(
+                "Mailbox events:\n{batch}\n  - Child task Check parser finished: failed\n    支持 Unicode and <script>literal text</script>.\n    - A report bullet stays in this event."
+            ),
+        );
+        let browser = browser_transcript(&[entry], 2, 0, None);
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "mailbox-browser-transcript",
+            &serde_json::to_string_pretty(&browser).unwrap(),
+        );
+    }
+
+    #[test]
+    fn mailbox_disclosures_respect_the_browser_line_budget() {
+        let entry = ChatEntry::plain(
+            2,
+            ChatRole::System,
+            format!(
+                "Mailbox events:\n  - Child report\n{}",
+                "    large report line\n".repeat(BROWSER_TRANSCRIPT_LINES + 1),
+            ),
+        );
+        let browser = browser_transcript(&[entry], 2, 0, None);
+        assert_eq!(browser.entries[0].lines.len(), BROWSER_TRANSCRIPT_LINES);
+        assert!(
+            browser.entries[0].mailbox_events.is_empty(),
+            "clipped events must not retain hidden report text"
+        );
+    }
 
     #[test]
     fn golden_delivered_message_browser_history() {
