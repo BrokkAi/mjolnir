@@ -455,12 +455,10 @@ agent's context, the harness is offered no memory directory, and the session's
 sub-agents get none either. The `mj-memory` history tools are not offered
 either. The choice is stored with the session and kept on resume and Move.
 
-`no_mailbox` (boolean, default `false`) gives the session no agent mailbox:
-GitHub watch events are not routed to it, messages from other sessions are
-refused, `POST /sessions/{id}/events` answers `409`, and its harness gets
-no mailbox hook or message tool. Its sub-agents get none either. It only turns
-the session's mailbox off: `[mailbox]` and other sessions are unchanged, and
-with `[mailbox]` off no session has a mailbox whatever this says.
+`no_github_events` (boolean, default `false`) prevents the GitHub watcher from
+registering the session as a delivery target. Sub-agents inherit the flag. This
+is the flag's only effect. Global `[github.watch] enabled` and `[jev] enabled` settings control GitHub
+event production.
 
 On a container target, the session gets the same CPU and memory limit that
 the viewer's create form selects: the size last chosen for that host, else

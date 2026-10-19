@@ -78,7 +78,9 @@ pub const RELAY_SUBAGENT_FEED_PROTOCOL: u32 = 38;
 pub const RELAY_SUBAGENT_WAIT_PROTOCOL: u32 = 39;
 /// 40 publishes worker-owned controls and binds Apply queued to a queue head.
 pub const RELAY_TURN_CONTROLS_PROTOCOL: u32 = 40;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_TURN_CONTROLS_PROTOCOL;
+/// 41 adds structured child reports and always installs mailbox drain hooks.
+pub const RELAY_SUBAGENT_FINISHED_PROTOCOL: u32 = 41;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_SUBAGENT_FINISHED_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

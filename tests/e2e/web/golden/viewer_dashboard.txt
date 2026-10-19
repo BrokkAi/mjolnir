@@ -1670,4 +1670,4 @@ Idle
 Parent session
 Live
 Earlier messages
-Subagents · 0/2
+Subagents · 0

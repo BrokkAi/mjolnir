@@ -490,7 +490,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "local".into(),
         resource_allocation: Some(SessionResourceAllocation::Container {
             cpus: 8,
@@ -1290,19 +1290,19 @@ fn a_session_keeps_its_project_memory_and_mailbox_opt_outs_through_lifecycle_wri
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.no_project_memory = true;
-    record.no_mailbox = true;
+    record.no_github_events = true;
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
     assert!(loaded.sessions["session-1"].no_project_memory);
-    assert!(loaded.sessions["session-1"].no_mailbox);
+    assert!(loaded.sessions["session-1"].no_github_events);
     let ordinary = session("session-2", "project-1");
     save_session_to(&database, &ordinary).unwrap();
     let loaded = load_state_from(&database).unwrap();
     assert!(!loaded.sessions["session-2"].no_project_memory);
-    assert!(!loaded.sessions["session-2"].no_mailbox);
+    assert!(!loaded.sessions["session-2"].no_github_events);
 }
 
 // Hard-won: d92ab7ce: the lifecycle UPDATE omitted build_cache_json and live sessions reloaded without their mounted cache
@@ -5934,7 +5934,7 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
             review,
             "system:mailbox:delivered:github:repo#7:review:1".to_owned(),
             TranscriptBody::System {
-                text: "External events:\n  - Review on your PR #7".into(),
+                text: "Mailbox events:\n  - Review on your PR #7".into(),
             },
         ),
     ] {

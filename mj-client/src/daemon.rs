@@ -367,10 +367,10 @@ pub struct CreateSessionRequest {
     /// `mj_core::state::SessionRecord::no_project_memory`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_project_memory: bool,
-    /// Start the session with no agent mailbox. See
-    /// `mj_core::state::SessionRecord::no_mailbox`.
+    /// Exclude this session from GitHub watcher delivery targets. See
+    /// `mj_core::state::SessionRecord::no_github_events`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub no_mailbox: bool,
+    pub no_github_events: bool,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     pub workspace_id: String,

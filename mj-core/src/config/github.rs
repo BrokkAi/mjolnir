@@ -29,6 +29,12 @@ impl GithubConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GithubWatchConfig {
+    /// Whether the watcher produces GitHub events. Jev must also be enabled.
+    #[serde(
+        default = "super::default_true",
+        skip_serializing_if = "super::is_true"
+    )]
+    pub enabled: bool,
     /// Delay between polls, bounded to avoid a tight retry loop.
     pub interval_seconds: u64,
     /// GitHub REST API base URL; configurable for isolated fake-server tests.
@@ -44,6 +50,7 @@ impl GithubWatchConfig {
 impl Default for GithubWatchConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             interval_seconds: 60,
             api_base: "https://api.github.com".into(),
         }

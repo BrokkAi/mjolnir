@@ -57,24 +57,24 @@ impl PollControl {
         if (self.0)() {
             Ok(())
         } else {
-            Err(anyhow::Error::new(MailboxesDisabled))
+            Err(anyhow::Error::new(GithubEventsDisabled))
         }
     }
 }
 
 #[derive(Debug)]
-struct MailboxesDisabled;
+struct GithubEventsDisabled;
 
-impl std::fmt::Display for MailboxesDisabled {
+impl std::fmt::Display for GithubEventsDisabled {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("agent mailboxes disabled during GitHub poll")
+        formatter.write_str("GitHub events disabled during poll")
     }
 }
 
-impl std::error::Error for MailboxesDisabled {}
+impl std::error::Error for GithubEventsDisabled {}
 
-fn is_mailboxes_disabled(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<MailboxesDisabled>().is_some()
+fn is_github_events_disabled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<GithubEventsDisabled>().is_some()
 }
 
 trait GithubClassifier: Send + Sync {
@@ -102,7 +102,7 @@ async fn run_with_classifier(
 ) -> Result<()> {
     loop {
         let projection = state.controller_projection();
-        let mailboxes_enabled = projection.config.agent_mailboxes_enabled();
+        let mailboxes_enabled = projection.config.github_events_enabled();
         let config = projection.config.github.watch;
         let delay = if mailboxes_enabled {
             Duration::from_secs(config.interval_seconds).clamp(MIN_INTERVAL, MAX_INTERVAL)
@@ -117,7 +117,7 @@ async fn run_with_classifier(
             return Ok(());
         }
         let projection = state.controller_projection();
-        if !projection.config.agent_mailboxes_enabled() {
+        if !projection.config.github_events_enabled() {
             continue;
         }
         let config = projection.config.github.watch;
@@ -148,7 +148,7 @@ async fn run_with_classifier(
                         poll_state
                             .controller_projection()
                             .config
-                            .agent_mailboxes_enabled()
+                            .github_events_enabled()
                     });
                     let result = poll_repository(
                         &owner,
@@ -182,7 +182,7 @@ async fn run_with_classifier(
                 result = jobs.join_next() => {
                     match result.context("GitHub watch task disappeared")? {
                         Ok((owner, repo, Ok(()))) => tracing::debug!(%owner, %repo, "GitHub repository poll completed"),
-                        Ok((owner, repo, Err(error))) if is_mailboxes_disabled(&error) => tracing::debug!(%owner, %repo, "GitHub repository poll stopped because agent mailboxes were disabled"),
+                        Ok((owner, repo, Err(error))) if is_github_events_disabled(&error) => tracing::debug!(%owner, %repo, "GitHub repository poll stopped because GitHub events were disabled"),
                         Ok((owner, repo, Err(error))) => tracing::warn!(%owner, %repo, error = %format!("{error:#}"), "GitHub repository poll failed; durable cursors remain available for retry"),
                         Err(error) => tracing::warn!(%error, "GitHub repository poll task panicked"),
                     }
@@ -197,10 +197,10 @@ fn sessions_by_github_repo(
 ) -> BTreeMap<(String, String), Vec<SessionRecord>> {
     let mut sessions_by_repo = BTreeMap::<(String, String), Vec<SessionRecord>>::new();
     for session in state.sessions.values() {
-        // A session started with `--no-mailbox` is never a delivery target.
+        // A session started with `--no-github-events` is never a delivery target.
         if !session.state.has_live_worker()
             || state.is_subagent_session(&session.id)
-            || session.no_mailbox
+            || session.no_github_events
         {
             continue;
         }
@@ -457,7 +457,7 @@ async fn poll_repository_items(
             return Ok(());
         }
         if let Err(error) = api.control.check_enabled() {
-            if is_mailboxes_disabled(&error) {
+            if is_github_events_disabled(&error) {
                 save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false)
                     .await?;
                 return Ok(());
@@ -507,7 +507,7 @@ async fn poll_repository_items(
             .into_iter()
             .collect::<Result<Vec<_>>>();
         if let Err(error) = classification_result {
-            if is_mailboxes_disabled(&error) {
+            if is_github_events_disabled(&error) {
                 save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false)
                     .await?;
                 return Ok(());
@@ -525,7 +525,7 @@ async fn poll_repository_items(
         .iter()
         .max_by(|a, b| compare_watermark(&a.created_at, a.id, &b.created_at, b.id));
     if let Err(error) = api.control.check_enabled() {
-        if is_mailboxes_disabled(&error) {
+        if is_github_events_disabled(&error) {
             save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false).await?;
             return Ok(());
         }
@@ -1631,7 +1631,7 @@ impl GithubApi {
                 cache.consecutive_failures = 0;
                 Ok(Some(login))
             }
-            Err(error) if is_mailboxes_disabled(&error) => Err(error),
+            Err(error) if is_github_events_disabled(&error) => Err(error),
             Err(error) => {
                 cache.consecutive_failures = cache.consecutive_failures.saturating_add(1);
                 let exponent = u32::from(cache.consecutive_failures.saturating_sub(1).min(8));
@@ -1897,14 +1897,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(is_mailboxes_disabled(&error));
+        assert!(is_github_events_disabled(&error));
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
             "Jev is not called after opt-out"
         );
         assert_eq!(state.requests.load(Ordering::SeqCst), 1);
-        assert!(is_mailboxes_disabled(
+        assert!(is_github_events_disabled(
             &api.get_json("ping", &[], None).await.unwrap_err()
         ));
         assert_eq!(
@@ -2086,10 +2086,10 @@ mod tests {
             .sessions
             .insert(session.id.clone(), session.clone());
         assert!(sessions_by_github_repo(&projection).contains_key(&("acme".into(), "repo".into())));
-        // A session started with `--no-mailbox` is not a delivery target.
+        // A session started with `--no-github-events` is not a delivery target.
         let mut opted_out = session.clone();
-        opted_out.id = "no-mailbox-session".into();
-        opted_out.no_mailbox = true;
+        opted_out.id = "no-github-events-session".into();
+        opted_out.no_github_events = true;
         let mut with_opt_out = projection.clone();
         with_opt_out
             .sessions

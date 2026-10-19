@@ -686,102 +686,38 @@ fn handback_reminder_rejects_a_newer_native_turn_after_it_settles() {
     );
 }
 
-// Hard-won: #1302: an intentional child wait was eligible for automatic continuation.
 #[test]
-fn a_parent_child_wait_survives_restart_and_new_input_releases_it() {
-    for (next_id, next_text) in [
-        ("user-steering", "While waiting, inspect the README"),
-        (
-            "subagent-wait-reports",
-            mj_core::continuation::PARENT_WAIT_PROMPT_TEXT,
-        ),
-    ] {
-        let root = tempfile::tempdir().unwrap();
-        let mut relay = open(root.path());
-        submit_relay(
-            &mut relay,
-            "parent-turn",
-            prompt("Delegate the task, then wait for the child"),
-        );
-        submit_relay(
-            &mut relay,
-            "arm-wait",
-            RelayCommand::SetSubagentWait {
-                active_prompt_id: "parent-turn".into(),
-                waiting: true,
-            },
-        );
-        completed(&mut relay, "parent-turn");
-        assert!(!relay.snapshot.continuation.eligible());
-        // Even a conflicting semantic verdict cannot authorize a nudge.
-        assert!(
-            relay
-                .submit_command("unwanted-nudge", request(&relay))
-                .unwrap()
-                .is_err()
-        );
-        relay.prepare_pending_assessment().unwrap();
-        assert_eq!(
-            relay.snapshot.assessment.as_ref().unwrap().action,
-            Some(mj_core::assessment::Action::Wait)
-        );
-        assert!(relay.pending_replied_verdict().is_none());
-        assert!(!relay.operational_state().activity.unwrap().is_idle());
-        let since = relay
+fn legacy_subagent_wait_journal_command_is_a_noop_after_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "parent-turn", prompt("Delegate the work"));
+    let command: RelayCommand = serde_json::from_value(
+        serde_json::json!({"type":"set_subagent_wait","data":{"active_prompt_id":"parent-turn", "waiting":true}}),
+    )
+    .unwrap();
+    submit_relay(&mut relay, "legacy-wait", command);
+    assert!(
+        relay
             .snapshot
             .continuation
             .awaiting_children_since_ms
-            .unwrap();
-        drop(relay);
-        let mut relay = open(root.path());
-        assert_eq!(
-            relay.snapshot.continuation.awaiting_children_since_ms,
-            Some(since)
-        );
-        assert!(!relay.snapshot.continuation.eligible());
-        submit_relay(&mut relay, next_id, prompt(next_text));
-        assert!(
-            relay
-                .snapshot
-                .continuation
-                .awaiting_children_since_ms
-                .is_none()
-        );
-        completed(&mut relay, next_id);
-        assert!(relay.snapshot.continuation.eligible());
-    }
-}
-
-// Hard-won: #1302: parent waiting must not discard steering accepted at the same boundary.
-#[test]
-fn parent_child_wait_admission_and_steering_have_one_serialized_winner() {
-    for input_first in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let mut relay = open(root.path());
-        submit_relay(&mut relay, "parent-turn", prompt("Delegate, then wait"));
-        if input_first {
-            submit_relay(&mut relay, "steering", prompt("New priority"));
-        }
-        let accepted = relay
-            .submit_command(
-                "arm-wait",
-                RelayCommand::SetSubagentWait {
-                    active_prompt_id: "parent-turn".into(),
-                    waiting: true,
-                },
-            )
-            .unwrap();
-        assert_eq!(accepted.is_ok(), !input_first);
-        if !input_first {
-            submit_relay(&mut relay, "steering", prompt("New priority"));
-        }
-        assert!(
-            relay
-                .snapshot
-                .continuation
-                .awaiting_children_since_ms
-                .is_none()
-        );
-        assert_eq!(relay.snapshot.queued_prompts.len(), 1);
-    }
+            .is_none()
+    );
+    completed(&mut relay, "parent-turn");
+    assert!(relay.snapshot.continuation.eligible());
+    let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
+    legacy["continuation"]["awaiting_children_since_ms"] = 123.into();
+    let decoded: mj_core::relay::RelaySnapshot = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.continuation.awaiting_children_since_ms, Some(123));
+    assert!(decoded.continuation.eligible());
+    drop(relay);
+    let relay = open(root.path());
+    assert!(
+        relay
+            .snapshot
+            .continuation
+            .awaiting_children_since_ms
+            .is_none()
+    );
+    assert!(relay.snapshot.continuation.eligible());
 }

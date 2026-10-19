@@ -47,9 +47,9 @@ pub enum ControllerAction {
         /// Start the session with no project memory.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         no_project_memory: bool,
-        /// Start the session with no agent mailbox.
+        /// Exclude this session from GitHub watcher delivery targets.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        no_mailbox: bool,
+        no_github_events: bool,
         /// Which workspace the session belongs to. Optional on the wire so a
         /// viewer cached from before workspaces reached the phone still parses,
         /// but a controller holding more than one workspace refuses an empty

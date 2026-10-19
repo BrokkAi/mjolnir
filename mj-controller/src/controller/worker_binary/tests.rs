@@ -4979,14 +4979,7 @@ fn the_staged_claude_profile_allows_its_own_sub_agent_tools() {
         1,
         "{allow:?}"
     );
-    for tool in [
-        "spawn",
-        "list_agents",
-        "send_message",
-        "await_children",
-        "wait",
-        "close",
-    ] {
+    for tool in ["spawn", "list_agents", "send_message", "close"] {
         assert!(
             allow.contains(&format!("mcp__mj-agents__{tool}")),
             "{tool}: {allow:?}"
@@ -5060,9 +5053,9 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
     .unwrap();
 
     let remote_root = ".local/share/hel/workers/session";
-    configure_claude_mailbox_hook(stage.path(), remote_root, true).unwrap();
+    configure_claude_mailbox_hook(stage.path(), remote_root).unwrap();
     let first = std::fs::read(&path).unwrap();
-    configure_claude_mailbox_hook(stage.path(), remote_root, true).unwrap();
+    configure_claude_mailbox_hook(stage.path(), remote_root).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), first);
 
     let settings: serde_json::Value = serde_json::from_slice(&first).unwrap();
@@ -5096,7 +5089,7 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
         mj_core::mailbox::MAILBOX_HOOK_TIMEOUT_SECS
     );
 
-    configure_claude_mailbox_hook(stage.path(), "/worker path/session", true).unwrap();
+    configure_claude_mailbox_hook(stage.path(), "/worker path/session").unwrap();
     let restaged: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let updated_commands = restaged["hooks"]["PostToolBatch"]
@@ -5109,19 +5102,6 @@ fn staged_claude_mailbox_hook_merges_and_restages_without_duplicates() {
         .collect::<Vec<_>>();
     assert_eq!(updated_commands.len(), 1);
     assert!(updated_commands[0].contains("'/worker path/session/control.sock'"));
-}
-
-#[test]
-fn staged_claude_mailbox_hook_is_absent_when_mailboxes_are_disabled() {
-    let stage = tempfile::tempdir().unwrap();
-    let path = stage.path().join("settings.json");
-    let original =
-        br#"{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"user-hook"}]}]}}"#;
-    std::fs::write(&path, original).unwrap();
-
-    configure_claude_mailbox_hook(stage.path(), "/worker/session", false).unwrap();
-
-    assert_eq!(std::fs::read(path).unwrap(), original);
 }
 
 #[cfg(unix)]

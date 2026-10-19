@@ -182,13 +182,10 @@ pub(crate) struct NewArgs {
     /// project memory.
     #[arg(long)]
     no_project_memory: bool,
-    /// Give this session no agent mailbox: GitHub watch events and peer
-    /// messages are not routed to it, and its harness gets no mailbox hook or
-    /// message tool. Sub-agents of the session get none either. Does not
-    /// change `[mailbox]` or other sessions, and cannot turn mailboxes on
-    /// when `[mailbox]` is off.
+    /// Exclude this session from GitHub watcher delivery targets.
+    /// Sub-agents inherit the choice.
     #[arg(long)]
-    no_mailbox: bool,
+    no_github_events: bool,
     /// Container CPU limit. Omitted takes the target's default size: the
     /// size last chosen for that host, else 8 CPUs, capped at the host's.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
@@ -1116,7 +1113,7 @@ pub(crate) async fn new_session(args: NewArgs, requested_workspace: Option<Strin
         subagents: new_subagent_policy(&args)?,
         review: new_session_review(&args),
         no_project_memory: args.no_project_memory,
-        no_mailbox: args.no_mailbox,
+        no_github_events: args.no_github_events,
         create_managed_worktree: None,
         at: args.at.clone(),
         branch: args.branch.clone(),
@@ -2701,15 +2698,16 @@ mod tests {
             let mut argv = vec!["mj", "new", "--bundle", "product"];
             argv.extend_from_slice(extra);
             match Cli::try_parse_from(argv).unwrap().command {
-                Some(Command::New(args)) => (args.no_project_memory, args.no_mailbox),
+                Some(Command::New(args)) => (args.no_project_memory, args.no_github_events),
                 _ => panic!("expected the new command"),
             }
         };
+        assert!(Cli::try_parse_from(["mj", "new", "--bundle", "product", "--no-mailbox"]).is_err());
         assert_eq!(parse(&[]), (false, false));
         assert_eq!(parse(&["--no-project-memory"]), (true, false));
-        assert_eq!(parse(&["--no-mailbox"]), (false, true));
+        assert_eq!(parse(&["--no-github-events"]), (false, true));
         assert_eq!(
-            parse(&["--no-mailbox", "--no-project-memory"]),
+            parse(&["--no-github-events", "--no-project-memory"]),
             (true, true)
         );
     }

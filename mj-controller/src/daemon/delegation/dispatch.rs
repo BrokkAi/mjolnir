@@ -74,26 +74,14 @@ impl SubagentDispatch {
             .map(|(id, e)| (e.request.created_at_ms, id.clone()))
             .collect::<Vec<_>>();
         ordered.sort();
-        // Long waits and child startup cannot occupy the reserved control lane.
+        // Child startup cannot occupy the reserved control lane.
         let mut executing = [0usize; 2];
         let mut delivering = 0usize;
-        let mut waiting_parents = BTreeMap::new();
-        for (id, entry) in &self.entries {
+        for entry in self.entries.values() {
             match entry.phase {
                 Phase::Executing => executing[execution_lane(&entry.request)] += 1,
                 Phase::Delivering(_) => delivering += 1,
                 _ => {}
-            }
-            if matches!(entry.request.action, SubagentToolAction::WaitAgents)
-                && matches!(
-                    entry.phase,
-                    Phase::Executing
-                        | Phase::Recovery(_)
-                        | Phase::Delivery(..)
-                        | Phase::Delivering(_)
-                )
-            {
-                waiting_parents.insert(id.0.clone(), id.1.clone());
             }
         }
         let mut children = BTreeSet::new();
@@ -101,18 +89,6 @@ impl SubagentDispatch {
         for (_, id) in ordered {
             let entry = self.entries.get_mut(&id).expect("pending entry");
             if matches!(entry.phase, Phase::Finished) {
-                continue;
-            }
-            // A cancelled wait's receipt can restore tentative report markers.
-            // Finish that delivery before another wait can collect reports.
-            if matches!(
-                entry.request.action,
-                SubagentToolAction::WaitAgents | SubagentToolAction::AwaitChildren
-            ) && waiting_parents
-                .entry(id.0.clone())
-                .or_insert_with(|| id.1.clone())
-                != &id.1
-            {
                 continue;
             }
             let ordered_child = match &entry.request.action {
@@ -186,9 +162,7 @@ impl SubagentDispatch {
 fn execution_lane(request: &SubagentToolRequest) -> usize {
     usize::from(matches!(
         request.action,
-        SubagentToolAction::LegacyInterruptAgent { .. }
-            | SubagentToolAction::CloseAgent { .. }
-            | SubagentToolAction::AwaitChildren
+        SubagentToolAction::LegacyInterruptAgent { .. } | SubagentToolAction::CloseAgent { .. }
     ))
 }
 
@@ -287,47 +261,7 @@ mod tests {
         queue.observe("p", &[]);
         assert!(queue.entries.is_empty());
     }
-    // Hard-won: #1287: a replacement wait raced the cancelled wait's report rollback.
-    // Hard-won: #1302: await_children observed tentative collection before the withdrawn wait's receipt.
-    #[test]
-    fn replacement_wait_waits_for_receipt_without_blocking_other_work() {
-        for action in [
-            SubagentToolAction::WaitAgents,
-            SubagentToolAction::AwaitChildren,
-        ] {
-            let mut queue = SubagentDispatch::default();
-            let mut first = input("first", "a", 1);
-            first.action = SubagentToolAction::WaitAgents;
-            // A later request's wall clock need not sort after the admitted owner.
-            let mut second = input("second", "a", 0);
-            second.action = action;
-            let message = input("message", "a", 3);
-            queue.observe("p", &[first, message.clone()]);
-            let mut other = input("other", "b", 4);
-            other.action = SubagentToolAction::WaitAgents;
-            queue.observe("q", &[other]);
-            let now = Instant::now() + Duration::from_secs(1);
-            let ids = |ready: Vec<(Identity, Job)>| {
-                ready.into_iter().map(|(id, _)| id.1).collect::<Vec<_>>()
-            };
-            assert_eq!(ids(queue.ready(now)), ["first", "message", "other"]);
-            queue.observe("p", &[second.clone(), message.clone()]);
-            assert!(queue.ready(now).is_empty());
-            let first_id = ("p".into(), "first".into());
-            queue.failed_task(&first_id);
-            assert!(queue.ready(Instant::now()).is_empty());
-            assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
-            queue.executed(&first_id, result("first"));
-            queue.observe("p", &[second, message]);
-            assert_eq!(ids(queue.ready(now)), ["first"]);
-            queue.delivered(&first_id, false);
-            assert!(queue.ready(Instant::now()).is_empty());
-            assert_eq!(ids(queue.ready(now + Duration::from_secs(2))), ["first"]);
-            assert!(queue.ready(now + Duration::from_secs(2)).is_empty());
-            queue.delivered(&first_id, true);
-            assert_eq!(ids(queue.ready(now)), ["second"]);
-        }
-    }
+
     #[test]
     fn replacement_daemon_rebuilds_pending_work_from_the_worker_queue() {
         let request = input("first", "a", 1);

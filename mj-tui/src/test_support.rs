@@ -226,7 +226,6 @@ pub(crate) fn config() -> Config {
     Config {
         keys: Default::default(),
         jev: Default::default(),
-        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -339,7 +338,7 @@ pub(crate) fn stopped_session() -> SessionRecord {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: vec![],

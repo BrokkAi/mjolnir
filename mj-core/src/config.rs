@@ -460,23 +460,16 @@ impl JevConfig {
     }
 }
 
-/// External events delivered to agent mailboxes through harness hooks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Legacy GitHub event source switch, read but never written.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct MailboxConfig {
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+struct LegacyMailboxConfig {
     pub enabled: bool,
 }
 
-impl Default for MailboxConfig {
+impl Default for LegacyMailboxConfig {
     fn default() -> Self {
         Self { enabled: true }
-    }
-}
-
-impl MailboxConfig {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
     }
 }
 
@@ -525,24 +518,16 @@ impl Config {
         self.continuation.enabled && self.jev.enabled
     }
 
-    /// Agent mailboxes deliver external events and use Jev to classify GitHub
-    /// activity, so both switches must be enabled.
+    /// The GitHub watcher uses Jev to classify activity, so both switches
+    /// must be enabled. Neither switch disables mailbox delivery.
     #[must_use]
-    pub fn agent_mailboxes_enabled(&self) -> bool {
-        self.mailbox.enabled && self.jev.enabled
-    }
-
-    /// Whether one session has an agent mailbox. A session's own opt-out
-    /// (`mj new --no-mailbox`) only turns its mailbox off; it never turns
-    /// mailboxes on when the global switch is off.
-    #[must_use]
-    pub fn agent_mailboxes_enabled_for(&self, session: &crate::state::SessionRecord) -> bool {
-        self.agent_mailboxes_enabled() && !session.no_mailbox
+    pub fn github_events_enabled(&self) -> bool {
+        self.github.watch.enabled && self.jev.enabled
     }
 }
 
-// Breaking: older writers cannot preserve the global task-type tables.
-pub const CONFIG_VERSION: u32 = 17;
+// Breaking: older writers cannot preserve the GitHub watcher switch in its new section.
+pub const CONFIG_VERSION: u32 = 18;
 /// The page that documents config.toml, schema version included.
 pub const CONFIGURATION_DOCUMENTATION_URL: &str = "https://mjolnir.brokk.ai/configuration/";
 pub const PRODUCT_DIR: &str = "mjolnir";
@@ -620,7 +605,6 @@ pub struct Config {
     pub github: GithubConfig,
     pub review: ReviewConfig,
     pub continuation: crate::continuation::ContinuationConfig,
-    pub mailbox: MailboxConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
@@ -670,8 +654,8 @@ struct StoredConfig {
         skip_serializing_if = "crate::continuation::ContinuationConfig::is_default"
     )]
     continuation: crate::continuation::ContinuationConfig,
-    #[serde(default, skip_serializing_if = "MailboxConfig::is_default")]
-    mailbox: MailboxConfig,
+    #[serde(default, skip_serializing)]
+    mailbox: LegacyMailboxConfig,
     #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
     sessionwiki: SessionWikiConfig,
     #[serde(default, skip_serializing_if = "SubagentConfig::is_default")]
@@ -828,7 +812,7 @@ impl TryFrom<StoredConfig> for Config {
             spinner,
             theme,
             phone,
-            github,
+            mut github,
             review,
             continuation,
             mailbox,
@@ -843,6 +827,7 @@ impl TryFrom<StoredConfig> for Config {
             mut machines,
             targets,
         } = stored;
+        github.watch.enabled &= mailbox.enabled;
         if let Some(app) = &github.app {
             app.validate()?;
         }
@@ -894,14 +879,15 @@ impl TryFrom<StoredConfig> for Config {
             sessions_side,
             advanced,
             notify,
-            // Versions 1 through 14 acquire this build's defaults in memory
+            // Versions 1 through 17 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
             // machines from runtimes; version 13 adds automatic continuation;
             // version 14 moves the global cache opt-out onto machines; version
             // 15 stops writing the default image into a container target;
             // 16 adds native tool cache storage; 17 replaces per-profile
-            // delegation selectors with global task choices, without migrating them.
-            version: if matches!(version, 1..=16) {
+            // delegation selectors with global task choices, without migrating them;
+            // 18 moves the GitHub event switch to github.watch.enabled.
+            version: if matches!(version, 1..=17) {
                 CONFIG_VERSION
             } else {
                 version
@@ -912,7 +898,6 @@ impl TryFrom<StoredConfig> for Config {
             github,
             review,
             continuation,
-            mailbox,
             sessionwiki,
             subagents,
             jev,
@@ -952,7 +937,7 @@ impl From<Config> for StoredConfig {
             github: config.github,
             review: config.review,
             continuation: config.continuation,
-            mailbox: config.mailbox,
+            mailbox: LegacyMailboxConfig::default(),
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
             build_cache: LegacyBuildCacheConfig::default(),
@@ -980,7 +965,6 @@ impl Default for Config {
             github: GithubConfig::default(),
             review: ReviewConfig::default(),
             continuation: crate::continuation::ContinuationConfig::enabled(),
-            mailbox: MailboxConfig::default(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),

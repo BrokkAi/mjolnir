@@ -1333,6 +1333,8 @@ test('Create sends the selected delegation policy across the browser action wire
     vm.runInContext(sourceBetween('async function commitNew()', '\n/// Resume is a workspace-scoped list'), context);
     await vm.runInContext('commitNew()', context);
     assert.deepEqual(posted[0].subagents, { mode });
+    assert.equal(posted[0].no_github_events, false);
+    assert.equal(Object.hasOwn(posted[0], 'no_mailbox'), false);
     assert.equal(Object.hasOwn(posted[0], 'resource_allocation'), false);
   }
 });

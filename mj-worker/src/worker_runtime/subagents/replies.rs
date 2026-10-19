@@ -120,7 +120,6 @@ impl SubagentEndpoint {
             state.completions.remove(&id);
             state.caller_acknowledged.remove(&id);
             state.daemon_acknowledged.remove(&id);
-            state.delivered_to_waiter.remove(&id);
         }
         Ok(())
     }
@@ -159,13 +158,15 @@ mod tests {
                 endpoint.enqueue(request.clone()).unwrap(),
                 Some(result.clone())
             );
-            assert!(
-                !endpoint
-                    .complete(SubagentToolResult {
-                        message: "duplicate must not replace the reply".into(),
-                        ..result.clone()
-                    })
-                    .unwrap()
+            endpoint
+                .complete(SubagentToolResult {
+                    message: "duplicate must not replace the reply".into(),
+                    ..result.clone()
+                })
+                .unwrap();
+            assert_eq!(
+                endpoint.enqueue(request.clone()).unwrap(),
+                Some(result.clone())
             );
             endpoint.acknowledge_replies(&ids, !caller_first).unwrap();
             assert!(!endpoint.result_path(&request.request_id).exists());

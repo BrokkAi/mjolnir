@@ -216,7 +216,7 @@ fn sample_state() -> State {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: vec![AdditionalMount {
@@ -259,7 +259,6 @@ fn sample_state() -> State {
 fn sample_config() -> Config {
     Config {
         jev: Default::default(),
-        mailbox: Default::default(),
         keys: Default::default(),
         advanced: Default::default(),
         notify: Default::default(),
@@ -329,9 +328,12 @@ fn sample_session() -> SessionRecord {
 
 #[test]
 fn session_records_written_before_container_overrides_still_load() {
-    let session = sample_session();
+    let mut session = sample_session();
+    session.no_github_events = true;
     let mut json = serde_json::to_value(&session).expect("serialize session");
     let object = json.as_object_mut().expect("session object");
+    let opt_out = object.remove("no_github_events").unwrap();
+    object.insert("no_mailbox".into(), opt_out);
     assert!(object.remove("container_cpus").is_none());
     assert!(object.remove("container_memory").is_none());
 

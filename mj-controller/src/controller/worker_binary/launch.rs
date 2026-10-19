@@ -150,11 +150,7 @@ impl Controller {
         )?;
         apply_staged_execution_setting(profile.kind, launch.execution_policy, &profile_stage)?;
         if profile.kind == mj_core::config::HarnessKind::Claude {
-            configure_claude_mailbox_hook(
-                &profile_stage,
-                worker_root,
-                launch.agent_mailboxes_enabled,
-            )?;
+            configure_claude_mailbox_hook(&profile_stage, worker_root)?;
             configure_claude_subagent_mcp(
                 &profile_stage,
                 worker_root,
@@ -455,7 +451,7 @@ impl Controller {
         }
         apply_jev_switch(&mut launch, self.config.jev.enabled);
         apply_continuation_switch(&mut launch, self.config.automatic_continuation_enabled());
-        launch.agent_mailboxes_enabled = self.config.agent_mailboxes_enabled_for(session);
+        launch.agent_mailboxes_enabled = true;
         launch.subagents = session
             .subagents
             .clone()

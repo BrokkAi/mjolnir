@@ -718,7 +718,7 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
     SessionLaunchOptions {
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         at: None,
         branch: None,
         base: None,
@@ -1655,38 +1655,21 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     );
 }
 
-#[test]
-fn a_sessions_mailbox_opt_out_only_turns_its_mailbox_off() {
-    let mut session =
-        super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
-    let mut config = registration_config();
-    config.mailbox.enabled = true;
-    config.jev.enabled = true;
-    assert!(config.agent_mailboxes_enabled_for(&session));
-    session.no_mailbox = true;
-    assert!(!config.agent_mailboxes_enabled_for(&session));
-    // With the global switch off, no session has a mailbox, flag or not.
-    config.mailbox.enabled = false;
-    assert!(!config.agent_mailboxes_enabled_for(&session));
-    session.no_mailbox = false;
-    assert!(!config.agent_mailboxes_enabled_for(&session));
-}
-
-/// `mj new --no-project-memory --no-mailbox` is per session: the session and
-/// its sub-agents launch without project memory or a mailbox, no memory is
-/// synchronized for them, and a session started without the flags keeps both.
+/// `mj new --no-project-memory --no-github-events` is per session: the session and
+/// its children inherit both flags. Project memory is absent while peer
+/// messaging remains available regardless of the GitHub target opt-out.
 #[test]
 #[cfg_attr(
     windows,
     ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
 )]
-fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
+fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_events() {
     const MARKER: &str = "MJ_TEST_SUBAGENT_OPT_OUT_CHILD";
     if std::env::var_os(MARKER).is_none() {
         let directory = tempfile::tempdir().unwrap();
         run_registration_child(
             MARKER,
-            "a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox",
+            "a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_events",
             directory.path(),
         );
         return;
@@ -1697,7 +1680,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let mailboxes = config.agent_mailboxes_enabled();
+    let mailboxes = true;
     let mut controller = Controller {
         config,
         state: State::default(),
@@ -1714,7 +1697,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
             worker_root: mj_core::config::data_dir().join("workers").join(id),
         });
         session.no_project_memory = opted_out;
-        session.no_mailbox = opted_out;
+        session.no_github_events = opted_out;
         session
     };
     let opted_out_id = "0123456789abcdef0123456789abcdef";
@@ -1742,7 +1725,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
         .unwrap()
         .child_session_id;
     assert!(controller.state.sessions[&child_id].no_project_memory);
-    assert!(controller.state.sessions[&child_id].no_mailbox);
+    assert!(controller.state.sessions[&child_id].no_github_events);
 
     let launch = |controller: &Controller, id: &str| {
         controller
@@ -1761,7 +1744,7 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_mailbox() {
     for id in [opted_out_id, child_id.as_str()] {
         let launch = launch(&controller, id);
         assert!(launch.project_memory.is_none(), "{id}");
-        assert!(!launch.agent_mailboxes_enabled, "{id}");
+        assert!(launch.agent_mailboxes_enabled, "{id}");
         assert_eq!(
             controller.project_memory_sync_target(id).unwrap(),
             None,

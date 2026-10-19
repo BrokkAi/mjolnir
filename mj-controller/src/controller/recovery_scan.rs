@@ -574,7 +574,7 @@ fn adopted_session_record(
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: target_id.to_owned(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

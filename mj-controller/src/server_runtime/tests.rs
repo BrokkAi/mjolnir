@@ -1131,7 +1131,6 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
         config: Config {
             keys: Default::default(),
             jev: Default::default(),
-            mailbox: Default::default(),
             subagents: Default::default(),
             version: CONFIG_VERSION,
             sessions_side: Default::default(),
@@ -1545,7 +1544,7 @@ fn new_action() -> ControllerAction {
     ControllerAction::New {
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         at: None,
         branch: None,
         base: None,
@@ -1588,7 +1587,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         managed_worktree: None,
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),

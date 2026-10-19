@@ -583,8 +583,8 @@ pub struct SessionLaunchOptions {
     pub review: Option<mj_core::config::SessionReview>,
     /// Start with no project memory; see `SessionRecord::no_project_memory`.
     pub no_project_memory: bool,
-    /// Start with no agent mailbox; see `SessionRecord::no_mailbox`.
-    pub no_mailbox: bool,
+    /// Exclude this session from GitHub watcher delivery targets; see `SessionRecord::no_github_events`.
+    pub no_github_events: bool,
     pub initial_prompt: Option<String>,
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
@@ -877,7 +877,7 @@ impl Controller {
             subagents,
             review,
             no_project_memory,
-            no_mailbox,
+            no_github_events,
             initial_prompt,
             workspace_id,
             additional_mounts,
@@ -1041,7 +1041,7 @@ impl Controller {
             managed_worktree: None,
             review,
             no_project_memory,
-            no_mailbox,
+            no_github_events,
             target_template_id: target_id.to_string(),
             resource_allocation,
             additional_mounts: additional_mounts.clone(),

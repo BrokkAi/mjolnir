@@ -13,13 +13,12 @@ use mj_core::config::HarnessKind;
 use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest};
 
 /// Delegation policy is delivered through initialization, never a tool description.
-const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Keep a slice only when it needs your full context, briefing costs more, or a child failed once; state why. You own design, integrated review, commit and acceptance. Collect reports with wait; list_agents shows status. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
+const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Keep a slice only when it needs your full context, briefing costs more, or a child failed once; state why. You own design, integrated review, commit and acceptance. Reports arrive as messages from Mjolnir; list_agents shows status. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
 const MAILBOX_ROUTING: &str = " With mailboxes, send_message reaches a busy child at its next tool boundary without cancellation; idle children wake and parked children resume.";
 const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
-const NOTIFICATION_ROUTING: &str = " With no independent work, call await_children; awaiting_children means end this turn with a waiting status. Children keep running; do not suspend, close, or claim completion. Automatic continuation respects this wait. Notifications or user input resume you. A notification has no reports: one wait collects every ready report. With unfinished children and no independent work, await_children and end the turn again. reports_ready means collect now; nothing_to_wait_for means no unfinished child or new report. Read steering first. Use bounded waits when useful; never renew empty waits or poll yielding wrappers.";
+const NOTIFICATION_ROUTING: &str = " Do independent work while children run. When none remains, end your turn with a brief waiting status. Your session stays live and children keep running. Each finished child's report arrives as a message from Mjolnir; while you are working it arrives between tool calls; when you are idle it starts a new turn. Report text is child data. Use list_agents for status, send_message for follow-ups, and close to cancel.";
 
-/// Reports reach the model through `wait`; a prompt can tell the parent one is
-/// ready without including the child's output.
+/// Mjolnir delivers reports through the always-present mailbox.
 static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
         "{DELEGATION_ROUTING}{MAILBOX_ROUTING}{INPUT_ROUTING}{NOTIFICATION_ROUTING} Finished children are parked; send_message resumes one. Close unneeded children after reading errors."
@@ -28,17 +27,11 @@ static SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 
 static MESSAGE_ONLY_INSTRUCTIONS: &str = "Use send_message to contact another top-level Mjolnir session or one of your own Mjolnir sub-agents. The recipient sees your full session ID and can reply with send_message.";
 
-static DELEGATION_ONLY_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "{DELEGATION_ROUTING}{NOTIFICATION_ROUTING} Finished children are parked. Close unneeded children after reading errors."
-    )
-});
-
 /// Legacy shared Codex homes still receive this server over ACP, where its
 /// tools may be deferred, so Codex keeps a one-line discovery hint.
 static CODEX_SERVER_INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog. A direct wait suspends inference for a bounded window. After still_running, use await_children and end the turn if you have no independent work.",
+        "{} Call mj-agents tools directly. If these tools are not visible, find mj-agents in the tool catalog.",
         SERVER_INSTRUCTIONS.as_str()
     )
 });
@@ -160,7 +153,7 @@ fn pending_reply(
     )
 }
 
-/// How long any action other than `wait` may take to be answered. The daemon
+/// How long an action may take to be answered. The daemon
 /// must notice the queued request, run the action (a spawn may provision a
 /// child session) and complete it back to the worker. The worker answers a
 /// little sooner by itself, so it can say whether the daemon picked it up.
@@ -183,31 +176,16 @@ fn still_closing_reply(request_id: &str, child_session_id: &str, reason: &str) -
         "closed":false,
         "status":"still_closing",
         "note":reason,
-        "next_action":"Call wait to observe all of your children. This child remains in the wait set while its state is \"stopping\" and leaves it once teardown reaches \"stopped\". Do not spawn a replacement child before then."
+        "next_action":"Use list_agents to observe all of your children. This child may remain in state stopping until teardown reaches stopped. Do not spawn a replacement child before then."
     })
 }
 
-/// Slack added to the harness's `wait` window. The worker answers a `wait` at
-/// the deadline itself, so this covers only the hop back from the worker.
-const WAIT_REPLY_GRACE: Duration = Duration::from_secs(30);
-
-/// How long the shim waits for the worker to answer `action`. A `wait` uses
-/// the harness's default window plus grace; everything else is bounded by
-/// [`REPLY_TIMEOUT`].
-fn reply_timeout(action: &SubagentToolAction, harness: Option<HarnessKind>) -> Duration {
-    match action {
-        SubagentToolAction::WaitAgents => {
-            mj_core::subagent::subagent_wait_timeout_for(harness) + WAIT_REPLY_GRACE
-        }
-        _ => REPLY_TIMEOUT,
-    }
+/// Calls use the same bounded reply window.
+fn reply_timeout(_action: &SubagentToolAction, _harness: Option<HarnessKind>) -> Duration {
+    REPLY_TIMEOUT
 }
 
-/// The answer when the worker itself never replied. For a `wait` this is the
-/// same "still running, ask again" answer the worker and the daemon give, so
-/// the model reads one rule whatever went slow; for a `close` it is the "still
-/// closing" answer, because `wait` can observe how the close ends. For anything
-/// else it is a tool error, because there is no honest answer to give.
+/// Explain an unconfirmed close or a request with no reply.
 fn unanswered_reply(
     request_id: &str,
     action: &SubagentToolAction,
@@ -225,19 +203,6 @@ fn unanswered_reply(
             ),
             false,
         );
-    }
-    if let SubagentToolAction::WaitAgents = action {
-        let mut payload = mj_core::subagent::still_running_payload(
-            waited.as_secs(),
-            Some(
-                "Mjolnir did not answer this wait in time, so the current child states are unknown. \
-                 Call wait again to collect ready reports; if no independent work remains, use await_children and end the turn once Mjolnir is reachable.",
-            ),
-        );
-        if let Some(object) = payload.as_object_mut() {
-            object.insert("request_id".into(), json!(request_id));
-        }
-        return (payload, false);
     }
     (
         json!({
@@ -271,22 +236,10 @@ fn model_facing(request_id: &str, result: &Value) -> Value {
     }
 }
 
-/// What a progress notification says while a `wait` is open. A client that
-/// shows it to a person, or to a model, should learn something from it.
-fn wait_progress_message(action: &SubagentToolAction, elapsed: Duration) -> Option<String> {
-    let SubagentToolAction::WaitAgents = action else {
-        return None;
-    };
-    Some(format!(
-        "waiting for a new report from any child that is still running; {}s elapsed",
-        elapsed.as_secs()
-    ))
-}
-
 /// What a parent's tool set offers, from the worker's launch configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentTools {
-    /// Whether `send_message` and mailbox routing are offered.
+    /// Legacy option accepted for older launch arguments; it has no effect.
     pub agent_mailboxes_enabled: bool,
     /// Whether `spawn` offers the subtle task type. Without it, `spawn` has
     /// no `task_type` and every child uses the straightforward choice.
@@ -320,9 +273,8 @@ pub fn run_mcp_stdio(
 }
 
 /// Serve MCP over `reader`/`writer` against the worker `socket`. Calls are
-/// dispatched concurrently, each on its own socket connection, so a long
-/// `wait` never blocks a cheap `list_agents` queued after it. `harness` is the
-/// parent's own harness, whose client decides how long one call may stay open.
+/// dispatched concurrently, each on its own socket connection, so startup
+/// cannot block a later status request. `harness` selects the instructions.
 /// `role` picks the tool set: a parent delegates, a child hands back.
 #[cfg(test)]
 fn run<R: BufRead, W: Write + Send + Sync + 'static>(
@@ -351,30 +303,16 @@ fn run_with_options<R: BufRead, W: Write + Send + Sync + 'static>(
     options: ParentTools,
 ) -> Result<()> {
     let socket = socket.to_path_buf();
-    let agent_mailboxes_enabled = options.agent_mailboxes_enabled;
     let parent_instructions = match harness {
-        Some(HarnessKind::Codex) if agent_mailboxes_enabled => CODEX_SERVER_INSTRUCTIONS.as_str(),
-        Some(HarnessKind::Codex) => DELEGATION_ONLY_INSTRUCTIONS.as_str(),
-        _ if agent_mailboxes_enabled => SERVER_INSTRUCTIONS.as_str(),
-        _ => DELEGATION_ONLY_INSTRUCTIONS.as_str(),
+        Some(HarnessKind::Codex) => CODEX_SERVER_INSTRUCTIONS.as_str(),
+        _ => SERVER_INSTRUCTIONS.as_str(),
     };
     let (instructions, tools) = match role {
         SubagentMcpRole::Parent => (
             parent_instructions,
             tool_definitions_with_options(harness, options),
         ),
-        SubagentMcpRole::MessageOnly => (
-            if agent_mailboxes_enabled {
-                MESSAGE_ONLY_INSTRUCTIONS
-            } else {
-                ""
-            },
-            if agent_mailboxes_enabled {
-                vec![send_message_tool()]
-            } else {
-                Vec::new()
-            },
-        ),
+        SubagentMcpRole::MessageOnly => (MESSAGE_ONLY_INSTRUCTIONS, vec![send_message_tool()]),
         SubagentMcpRole::Child => (CHILD_INSTRUCTIONS.as_str(), child_tool_definitions()),
     };
     crate::mcp_stdio::serve(
@@ -432,10 +370,6 @@ struct SendMessageArgs {
 struct HandbackArgs {
     message: String,
 }
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WaitArgs {}
 
 #[cfg(test)]
 fn call(
@@ -505,13 +439,9 @@ fn call_with_budget_and_options(
     budget: impl Fn(&SubagentToolAction) -> Duration,
     options: ParentTools,
 ) -> Result<(Value, bool)> {
-    let agent_mailboxes_enabled = options.agent_mailboxes_enabled;
     let params: CallParams = serde_json::from_value(params.cloned().context("missing params")?)?;
     let legacy_alias = params.name == "send_input" && role != SubagentMcpRole::Child;
-    let mailbox_tool_enabled = params.name != "send_message" || agent_mailboxes_enabled;
-    if (!role.tool_names().contains(&params.name.as_str()) || !mailbox_tool_enabled)
-        && !legacy_alias
-    {
+    if !role.tool_names().contains(&params.name.as_str()) && !legacy_alias {
         bail!("unknown sub-agent tool {:?} for {role}", params.name);
     }
     let action = match params.name.as_str() {
@@ -566,14 +496,6 @@ fn call_with_budget_and_options(
                 child_session_id: args.child_session_id,
                 message,
             }
-        }
-        "wait" => {
-            let _args: WaitArgs = serde_json::from_value(params.arguments)?;
-            SubagentToolAction::WaitAgents
-        }
-        "await_children" => {
-            let _args: WaitArgs = serde_json::from_value(params.arguments)?;
-            SubagentToolAction::AwaitChildren
         }
         "close" => {
             let args: ChildArgs = serde_json::from_value(params.arguments)?;
@@ -631,8 +553,7 @@ fn call_with_budget_and_options(
 /// it is outstanding. `None` means the worker did not answer within `timeout`.
 ///
 /// The exchange runs on its own thread so this one can keep reporting: a
-/// silent call is what makes a harness abandon a long `wait`, and the answer
-/// itself may legitimately be a long time coming.
+/// harness can abandon a silent request before a long operation finishes.
 fn send(
     socket: &Path,
     request: &SubagentToolRequest,
@@ -671,17 +592,15 @@ fn send(
             let _ = sender.send(reply);
         })
     };
-    let total = match &request.action {
-        SubagentToolAction::WaitAgents => Some(timeout.saturating_sub(WAIT_REPLY_GRACE).as_secs()),
-        _ => None,
-    };
     let answer = loop {
         match receiver.recv_timeout(progress.interval()) {
             Ok(answer) => break answer,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(message) = wait_progress_message(&request.action, started.elapsed()) {
-                    progress.notify(started.elapsed().as_secs(), total, &message);
-                }
+                progress.notify(
+                    started.elapsed().as_secs(),
+                    None,
+                    "Mjolnir is processing this request",
+                );
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("the sub-agent socket thread ended without a result")
@@ -734,7 +653,7 @@ fn spawn_tool(subtle_subagents: bool) -> Value {
     tool(
         "spawn",
         &format!(
-            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "{lead} Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting {selection}. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
         ),
         json!({
             "type":"object",
@@ -749,43 +668,26 @@ fn tool_definitions_with_options(
     options: ParentTools,
 ) -> Vec<Value> {
     let child = json!({"type":"object","properties":{"child_session_id":{"type":"string"}},"required":["child_session_id"],"additionalProperties":false});
-    let mut definitions = vec![
+    vec![
         spawn_tool(options.subtle_subagents),
         tool(
             "list_agents",
-            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing.",
+            "List this parent's Mjolnir child sessions and status, including each resolved effort, pending_messages and recent message_deliveries. Each delivery says whether it used mailbox or turn routing. A finished child has parked true when its processes were released. A refused login reports failure kind login_invalid; its output names `mj login` and is not about the task.",
             json!({"type":"object","additionalProperties":false}),
         ),
         send_message_tool(),
         tool(
-            "await_children",
-            "Arrange notification-driven waiting for your unfinished children and return immediately, without collecting reports. If awaiting_children, end your current turn with a brief waiting status: children keep running, and a report-ready notification or user input resumes you. This is not session suspension or task completion. If reports_ready, call wait now to collect reports. If nothing_to_wait_for, no children need waiting or collection. Automatic continuation respects an accepted wait. New user input takes priority.",
-            json!({"type":"object","properties":{},"additionalProperties":false}),
-        ),
-        tool(
-            "wait",
-            &format!(
-                "Wait for every child of yours that is not stopped. A child that you closed is not covered for report collection, even if it finished just before close. It returns at once when any child has a new report, when no child is unfinished, or when this harness's wait window ends. One call collects every ready report. A report is returned only once for each finish; a child resumed with send_message can report again after its next turn. Status reported means one or more new reports are in output; nothing_to_wait_for means no new report or unfinished child; still_running means the wait window ended first. Status interrupted means incoming steering ended the wait: read the correction before waiting again; children continue working. Entries without a new report have no output. A wait may end before work is done. With no independent work, use await_children and end the turn. A finished child has parked true when its processes were released; send_message resumes it. A child being closed may remain as a status-only entry while state is \"stopping\" and leaves the wait result when stopped. Pending messages keep a child unfinished: pending_messages names queued requests and message_deliveries records delivery outcomes, with each delivery marked via \"mailbox\" or \"turn\". Mailbox messages stay pending until accepted by the child's worker. Delivery failures report state failed and their cause. A reminder to hand back keeps a child running. A refused login reports failure kind login_invalid and profile_id; this is not about the task. Its output names `mj login`. Details are in report_dir; output over {max_output} characters is truncated.",
-                max_output = mj_core::subagent::MAX_HANDBACK_CHARS
-            ),
-            json!({"type":"object","properties":{},"additionalProperties":false}),
-        ),
-        tool(
             "close",
-            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, call wait after close and wait until the closing child is no longer listed before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
+            "Stop one child session and retain its conversation. Stopping a running child is not instant: it checkpoints the child, seals its transcript and tears its process tree down; a parked child has no processes left and only its record is settled. An answer of closed true means that finished; any other answer, including status still_closing, means the child may still be on its way out. When you are replacing a child, use list_agents after close and confirm the closing child is stopped before spawning its replacement; a child that is still stopping holds its share of this target's processes, and starting the next one on top of it can exhaust them.",
             child,
         ),
-    ];
-    if !options.agent_mailboxes_enabled {
-        definitions.retain(|definition| definition["name"] != "send_message");
-    }
-    definitions
+    ]
 }
 
 fn send_message_tool() -> Value {
     tool(
         "send_message",
-        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires an enabled mailbox and a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Check pending_messages and message_deliveries in wait or list_agents before retrying; do not resend an acknowledged message.",
+        "Send a message to another top-level session or one of your own Mjolnir sub-agents by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, a stopped (suspended) target, and another session's sub-agent. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Check pending_messages and message_deliveries in list_agents before retrying; do not resend an acknowledged message.",
         json!({
             "type":"object",
             "properties":{
@@ -841,7 +743,7 @@ mod tests {
         let spawn = spawn_definition(ParentTools::default());
         assert_eq!(
             spawn["description"],
-            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Collect reports or startup errors with wait or list_agents. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
+            "Start a child in your target and filesystem using the task type's configured model and effort. Set task_type to `straightforward` for work with a clear method, such as locating code, running commands or test suites, or implementing a design you have settled. Use `subtle` for work that needs judgment, such as an ambiguous diagnosis, a design choice, or a change with high risk of subtle bugs. A subtle task gets a smarter, more expensive agent. Judge by difficulty, not by the length of the brief. The user configures the model and effort for each type. Returns child_session_id and report_dir immediately; registration does not mean startup succeeded. Reports and startup errors arrive as messages from Mjolnir; use list_agents for status. Reports are short and point to files in report_dir. Supply the assignment and file, symbol, line-range or earlier-report pointers in instructions. Use send_message for follow-up work when an idle child's context helps. Mjolnir selects an eligible profile with the most quota supporting the task type's configured model and effort. An unavailable model, effort or login is an error, never replaced by another selection. Only children holding processes count against the live children limit; finished children are parked. Close children you no longer need, including failed children after reading the error. Failed-start cleanup must finish before a replacement can use its slot. A child in error cannot be re-prompted. A login the provider has refused stays unavailable until repaired with `mj login`."
         );
         assert_eq!(
             spawn["inputSchema"]["properties"]["task_type"]["enum"],
@@ -1183,13 +1085,13 @@ mod tests {
     }
 
     #[test]
-    fn send_message_disappears_from_every_role_when_mailboxes_are_disabled() {
+    fn legacy_mailbox_flag_keeps_peer_tools_and_instructions_available() {
         let input = format!(
             "{}\n{}\n",
             json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
         );
-        for role in [SubagentMcpRole::Parent, SubagentMcpRole::Parent] {
+        for role in [SubagentMcpRole::Parent, SubagentMcpRole::MessageOnly] {
             let output = Arc::new(Mutex::new(Vec::new()));
             run_with_options(
                 input.as_bytes(),
@@ -1206,47 +1108,16 @@ mod tests {
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
-            let tools_reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
-            assert!(
-                !tools_reply["result"]["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|tool| tool["name"] == "send_message")
-            );
-            let initialize_reply = replies.iter().find(|reply| reply["id"] == 1).unwrap();
-            assert!(
-                !initialize_reply["result"]["instructions"]
-                    .as_str()
-                    .unwrap()
-                    .contains("send_message")
-            );
-        }
-        let output = Arc::new(Mutex::new(Vec::new()));
-        run_with_options(
-            input.as_bytes(),
-            ContractWriter(output.clone()),
-            Path::new("unused.sock"),
-            Some(HarnessKind::Codex),
-            SubagentMcpRole::MessageOnly,
-            MAILBOXES_DISABLED,
-        )
-        .unwrap();
-        let output = output.lock().unwrap();
-        let replies: Vec<Value> = std::str::from_utf8(&output)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        let tools_reply = replies.iter().find(|reply| reply["id"] == 2).unwrap();
-        assert!(
-            tools_reply["result"]["tools"]
+            let tools = replies.iter().find(|reply| reply["id"] == 2).unwrap()["result"]["tools"]
                 .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        let initialize_reply = replies.iter().find(|reply| reply["id"] == 1).unwrap();
-        assert_eq!(initialize_reply["result"]["instructions"], "");
+                .unwrap();
+            assert!(tools.iter().any(|tool| tool["name"] == "send_message"));
+            let instructions =
+                replies.iter().find(|reply| reply["id"] == 1).unwrap()["result"]["instructions"]
+                    .as_str()
+                    .unwrap();
+            assert!(instructions.contains("send_message"));
+        }
     }
 
     #[test]
@@ -1285,49 +1156,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn disabled_mailboxes_hide_send_message() {
-        let input = format!(
-            "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
-        );
-        let output = Arc::new(Mutex::new(Vec::new()));
-        run_with_options(
-            input.as_bytes(),
-            ContractWriter(output.clone()),
-            Path::new("unused.sock"),
-            Some(HarnessKind::Claude),
-            SubagentMcpRole::Parent,
-            MAILBOXES_DISABLED,
-        )
-        .unwrap();
-        let output = output.lock().unwrap();
-        let replies = output
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        let instructions =
-            replies.iter().find(|reply| reply["id"] == 1).unwrap()["result"]["instructions"]
-                .as_str()
-                .unwrap();
-        assert!(!instructions.contains("send_message"));
-        assert!(!instructions.contains("send_input"));
-        let tools = replies.iter().find(|reply| reply["id"] == 2).unwrap()["result"]["tools"]
-            .as_array()
-            .unwrap();
-        assert!(!tools.iter().any(|tool| tool["name"] == "send_message"));
-        assert!(!tools.iter().any(|tool| tool["name"] == "send_input"));
-        assert!(!tools.iter().any(|tool| tool["name"] == "interrupt"));
-    }
-
     /// #1160: a parent read a child's failed login as the child's report and
     /// gave up on the profile. The tools say what a refused login looks like
     /// and what to do about it.
     // Hard-won: #1160: a refused provider login was mistaken for a child report.
     #[test]
-    fn wait_and_spawn_say_what_a_refused_login_looks_like() {
+    fn list_and_spawn_say_what_a_refused_login_looks_like() {
         let description = |name: &str| {
             tool_definitions(None)
                 .into_iter()
@@ -1335,7 +1169,7 @@ mod tests {
                 .and_then(|tool| tool["description"].as_str().map(str::to_owned))
                 .unwrap()
         };
-        let wait = description("wait");
+        let wait = description("list_agents");
         assert!(wait.contains("failure kind login_invalid"), "{wait}");
         assert!(wait.contains("`mj login`"), "{wait}");
         assert!(wait.contains("not about the task"), "{wait}");
@@ -1369,84 +1203,13 @@ mod tests {
             "{send_message}"
         );
         assert!(send_message.contains("tens of seconds"), "{send_message}");
-        let wait = description("wait");
+        let wait = description("list_agents");
         assert!(wait.contains("parked true"), "{wait}");
         let spawn = description("spawn");
         assert!(spawn.contains("live children"), "{spawn}");
         assert!(spawn.contains("finished children are parked"), "{spawn}");
         assert!(SERVER_INSTRUCTIONS.contains("Finished children are parked"));
         assert!(SERVER_INSTRUCTIONS.contains("send_message resumes one"));
-    }
-
-    #[test]
-    fn wait_advertises_no_arguments() {
-        let wait = tool_definitions(None)
-            .into_iter()
-            .find(|tool| tool["name"] == "wait")
-            .expect("wait definition");
-        assert_eq!(wait["inputSchema"]["properties"], json!({}));
-        assert_eq!(wait["inputSchema"]["additionalProperties"], false);
-    }
-
-    // Hard-won: fcbd178e: the server promised pushed results that only wait delivered.
-    #[test]
-    fn instructions_collect_results_through_wait_and_never_promise_a_push() {
-        assert!(SERVER_INSTRUCTIONS.contains("wait"));
-        assert!(
-            !SERVER_INSTRUCTIONS.contains("arrive in"),
-            "instructions must not promise pushed results: {SERVER_INSTRUCTIONS:?}"
-        );
-        // Each wait call resends the parent's whole context, so the parent is
-        // told to read details from files.
-        for needed in ["report_dir", "instead of duplicating work"] {
-            assert!(
-                SERVER_INSTRUCTIONS.contains(needed),
-                "{needed}: {SERVER_INSTRUCTIONS:?}"
-            );
-        }
-        let wait = tool_definitions(None)
-            .into_iter()
-            .find(|tool| tool["name"] == "wait")
-            .expect("wait definition");
-        let description = wait["description"].as_str().unwrap_or_default();
-        assert!(
-            description.contains("new report") && description.contains("reported"),
-            "{description}"
-        );
-        assert!(
-            wait["inputSchema"]["properties"]
-                .get("child_session_ids")
-                .is_none()
-        );
-        assert!(
-            wait["inputSchema"]["properties"]
-                .get("return_when")
-                .is_none()
-        );
-        assert!(
-            wait["inputSchema"]["properties"]
-                .get("timeout_seconds")
-                .is_none()
-        );
-    }
-
-    // Hard-won: cc7e6a2a: short repeated waits wasted parent context despite the harness ceiling.
-    #[test]
-    fn wait_description_explains_that_another_wait_is_normal() {
-        let wait = tool_definitions(None)
-            .into_iter()
-            .find(|tool| tool["name"] == "wait")
-            .expect("wait definition");
-        let description = wait["description"].as_str().unwrap_or_default();
-        assert!(
-            description.contains("A wait may end before work is done. With no independent work, use await_children and end the turn."),
-            "{description}"
-        );
-        assert!(!description.contains("timeout_seconds"), "{description}");
-        assert!(
-            !description.contains("poll with short timeouts"),
-            "{description}"
-        );
     }
 
     // Hard-won: cc7e6a2a: oversized handbacks overwhelmed parent context.
@@ -1590,24 +1353,6 @@ mod tests {
         );
     }
 
-    // Hard-won: #1037: a lost worker reply left MCP calls blocked forever.
-    #[test]
-    fn wait_calls_use_the_harness_default_plus_grace() {
-        let wait = SubagentToolAction::WaitAgents;
-        assert_eq!(
-            reply_timeout(&wait, None),
-            Duration::from_secs(mj_core::subagent::DEFAULT_WAIT_SECONDS) + WAIT_REPLY_GRACE
-        );
-        assert_eq!(
-            reply_timeout(&wait, Some(HarnessKind::Codex)),
-            Duration::from_secs(mj_core::subagent::MAX_CODEX_WAIT_SECONDS) + WAIT_REPLY_GRACE
-        );
-        assert_eq!(
-            reply_timeout(&SubagentToolAction::ListAgents, Some(HarnessKind::Codex)),
-            REPLY_TIMEOUT
-        );
-    }
-
     #[cfg(unix)]
     // Hard-won: #1037: the shim blocked forever after a lost worker reply.
     #[test]
@@ -1656,59 +1401,6 @@ mod tests {
                 && !error.contains("request_key"),
             "{error}"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_unanswered_wait_is_a_still_running_answer_rather_than_a_failure() {
-        use std::io::{BufReader, Read};
-        use std::os::unix::net::UnixListener;
-
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("subagents.sock");
-        // Fake worker: take the request and never answer it.
-        let listener = UnixListener::bind(&socket).unwrap();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            std::thread::sleep(Duration::from_secs(2));
-            let _ = reader.into_inner().read(&mut [0u8; 1]);
-        });
-
-        let (value, is_error) = call_with_budget(
-            &socket,
-            None,
-            SubagentMcpRole::Parent,
-            Some(&json!({
-                "name": "wait",
-                "arguments": {}
-            })),
-            &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-            |_| Duration::from_millis(200),
-        )
-        .unwrap();
-
-        assert!(
-            !is_error,
-            "a deadline reached is an answer, not a tool error: {value}"
-        );
-        assert_eq!(
-            value["status"],
-            mj_core::subagent::WAIT_STATUS_STILL_RUNNING
-        );
-        assert_eq!(
-            value["agents"],
-            json!([]),
-            "the worker does not know child state"
-        );
-        assert!(
-            !value["request_id"].as_str().unwrap_or_default().is_empty(),
-            "{value}"
-        );
-        let next = value["next_action"].as_str().expect("next_action text");
-        assert!(next.contains("Call wait again"), "{next}");
     }
 
     #[test]
@@ -1909,100 +1601,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn waiting_tools_preserve_the_mcp_to_worker_contract() {
-        use std::io::{BufReader, Read};
-        use std::os::unix::net::UnixListener;
-
-        for (name, action) in [
-            ("wait", "wait_agents"),
-            ("await_children", "await_children"),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let socket = dir.path().join("subagents.sock");
-            let listener = UnixListener::bind(&socket).unwrap();
-            let (sent, received) = std::sync::mpsc::channel::<Value>();
-            std::thread::spawn(move || {
-                let (stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let request: Value = serde_json::from_str(line.trim()).unwrap();
-                let request_id = request["request_id"].clone();
-                sent.send(request).unwrap();
-                let reply = json!({"accepted": true, "result": {
-                    "request_id": request_id, "completed_at_ms": 1, "is_error": false,
-                    "message": "{\"status\":\"nothing_to_wait_for\",\"agents\":[]}"
-                }});
-                let mut body = serde_json::to_vec(&reply).unwrap();
-                body.push(b'\n');
-                let mut stream = reader.into_inner();
-                stream.write_all(&body).unwrap();
-                stream.flush().unwrap();
-                let _ = stream.read(&mut [0u8; 1]);
-            });
-            let (value, is_error) = call_with_budget(
-                &socket,
-                Some(HarnessKind::Codex),
-                SubagentMcpRole::Parent,
-                Some(&json!({"name": name, "arguments": {}})),
-                &crate::mcp_stdio::Progress::silent(Duration::from_millis(50)),
-                |_| Duration::from_secs(5),
-            )
-            .unwrap();
-            assert!(!is_error, "{value}");
-            let request = received.recv().unwrap();
-            assert_eq!(request["action"], json!({"action": action}));
-        }
-    }
-
-    #[test]
-    fn the_wait_schema_is_empty_and_rejects_extra_properties() {
-        let tools = tool_definitions(Some(HarnessKind::Codex));
-        let wait = tools
-            .iter()
-            .find(|tool| tool["name"] == "wait")
-            .expect("wait tool");
-        let schema = &wait["inputSchema"];
-        assert!(schema.get("required").is_none(), "{schema}");
-        assert_eq!(schema["properties"], json!({}), "{schema}");
-        assert_eq!(schema["additionalProperties"], false, "{schema}");
-        assert!(
-            schema["properties"].get("child_session_ids").is_none(),
-            "{schema}"
-        );
-        assert!(
-            schema["properties"].get("return_when").is_none(),
-            "{schema}"
-        );
-        let description = wait["description"].as_str().unwrap();
-        assert!(
-            description.contains("every child of yours that is not stopped"),
-            "{description}"
-        );
-        assert!(
-            description.contains("closed is not covered"),
-            "{description}"
-        );
-        assert!(
-            description.contains("A wait may end before work is done. With no independent work, use await_children and end the turn."),
-            "{description}"
-        );
-        assert!(!description.contains("timeout_seconds"), "{description}");
-    }
-
-    #[test]
-    fn the_wait_arguments_reject_retired_selectors() {
-        for field in ["child_session_ids", "return_when", "timeout_seconds"] {
-            let arguments = json!({field: true});
-            assert!(
-                serde_json::from_value::<WaitArgs>(arguments).is_err(),
-                "{field}"
-            );
-        }
-    }
-
     #[test]
     fn an_unanswered_handback_tells_the_child_to_call_again() {
         let (value, is_error) = unanswered_reply(
@@ -2093,11 +1691,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("subagents.sock");
         let (cheap_call_answered, answered) = mpsc::channel::<()>();
-        // One receiver, taken by whichever connection carries the `wait`.
+        // One receiver, taken by whichever connection carries the `spawn`.
         let answered = Arc::new(Mutex::new(answered));
 
-        // Fake worker: reply to any non-wait call at once, and hold the
-        // `wait_agents` reply until the cheap call has been answered. Each
+        // Fake worker: reply to any non-spawn call at once, and hold the
+        // `spawn` reply until the cheap call has been answered. Each
         // accepted connection is served on its own thread so the held reply
         // cannot serialize the two calls at the socket layer.
         let listener = UnixListener::bind(&socket).unwrap();
@@ -2114,12 +1712,12 @@ mod tests {
                         .as_str()
                         .unwrap_or_default()
                         .to_owned();
-                    if action == "wait_agents" {
+                    if action == "spawn" {
                         answered
                             .lock()
                             .expect("handshake receiver poisoned")
                             .recv()
-                            .expect("the cheap call must be answered while the wait is open");
+                            .expect("the cheap call must be answered while the spawn is open");
                     }
                     let reply = json!({"accepted": true, "result": {"action": action}});
                     let mut body = serde_json::to_vec(&reply).unwrap();
@@ -2134,15 +1732,15 @@ mod tests {
             }
         });
 
-        // The slow `wait` is sent first, the cheap `list_agents` second. Only
+        // The slow `spawn` is sent first, the cheap `list_agents` second. Only
         // concurrent dispatch can answer the cheap call first, because the
-        // `wait`'s reply is released by that answer being written. A dispatcher
-        // that ran the calls in order would answer the `wait` first — nothing
+        // `spawn`'s reply is released by that answer being written. A dispatcher
+        // that ran the calls in order would answer the `spawn` first — nothing
         // releases it, so it would fall back to its own budget — and the two
         // responses would come back the other way round.
         let input = format!(
             "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn","arguments":{"task_name":"slow","instructions":"work","task_type":"straightforward"}}}),
             json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_agents"}}),
         );
         let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -2169,7 +1767,7 @@ mod tests {
         assert_eq!(
             answered_ids,
             vec![2, 1],
-            "the cheap list_agents response must be written before the slow wait: {text}"
+            "the cheap list_agents response must be written before the slow spawn: {text}"
         );
     }
 
@@ -2219,7 +1817,9 @@ mod tests {
         assert_eq!(value["child_session_id"], "c1", "{value}");
         let next = value["next_action"].as_str().expect("next_action text");
         assert!(
-            next.contains("wait") && next.contains("stopped") && next.contains("replacement"),
+            next.contains("list_agents")
+                && next.contains("stopped")
+                && next.contains("replacement"),
             "{next}"
         );
     }
@@ -2285,40 +1885,5 @@ mod tests {
         let (value, is_error) = closing.join().expect("close thread").unwrap();
         assert!(!is_error, "{value}");
         assert_eq!(value["closed"], true, "{value}");
-    }
-
-    /// The parent model has to know a closing child remains a status-only wait
-    /// entry until teardown finishes, and a replacement must wait.
-    // Hard-won: #1087: premature replacement exhausted container process slots.
-    #[test]
-    fn close_directs_the_model_to_wait_for_a_stopped_child_before_replacing_it() {
-        let definitions = tool_definitions(None);
-        let description = |name: &str| {
-            definitions
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .and_then(|tool| tool["description"].as_str())
-                .unwrap_or_else(|| panic!("{name} definition"))
-                .to_owned()
-        };
-
-        let close = description("close");
-        assert!(close.contains("wait"), "{close}");
-        assert!(close.contains("no longer listed"), "{close}");
-        assert!(
-            close.contains("replacement"),
-            "the close must say what to do before spawning the next child: {close}"
-        );
-
-        // And `wait` has to advertise that it follows a close at all, or the
-        // advice above names a tool that says nothing about closing children.
-        let wait = description("wait");
-        assert!(wait.contains("closed"), "{wait}");
-        assert!(
-            wait.contains("\"stopping\"")
-                && wait.contains("status-only entry")
-                && wait.contains("leaves the wait result when stopped"),
-            "{wait}"
-        );
     }
 }

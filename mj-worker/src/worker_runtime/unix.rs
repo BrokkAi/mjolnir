@@ -1581,7 +1581,6 @@ async fn prepare_and_start_harness(
             let configure_subagents = subagent_role.is_some();
             let registration_required =
                 subagent_role != Some(mj_core::subagent::SubagentMcpRole::MessageOnly);
-            let mailboxes_enabled = config.agent_mailboxes_enabled;
             let (registered, mailbox_hook_available) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
@@ -1594,11 +1593,8 @@ async fn prepare_and_start_harness(
                             registration_required,
                         )?;
                     }
-                    let mailbox_hook_available = super::subagents::configure_claude_mailbox_hook(
-                        &root,
-                        &home,
-                        mailboxes_enabled,
-                    )?;
+                    let mailbox_hook_available =
+                        super::subagents::configure_claude_mailbox_hook(&root, &home)?;
                     Ok((true, mailbox_hook_available))
                 })
                 .await?;

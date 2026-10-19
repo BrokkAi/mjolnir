@@ -86,14 +86,14 @@ impl RuntimeState {
                     drop(controller);
                     state.reload_controller().await?;
                     if let Err(prompt_error) = state
-                        .ensure_parent_wait_prompt(&parent_session_id)
+                        .reconcile_parent_reports(&parent_session_id)
                         .await
                     {
                         tracing::warn!(
                             child_session_id = %session_id,
                             parent_session_id,
                             error = format!("{prompt_error:#}"),
-                            "could not reconcile the parent's sub-agent wait prompt after provisioning failure"
+                            "could not enqueue the parent's finished child reports after provisioning failure"
                         );
                     }
                     return Err(error);
@@ -104,14 +104,14 @@ impl RuntimeState {
         if let Err(error) = started {
             self.reload_controller().await?;
             if let Err(prompt_error) = self
-                .ensure_parent_wait_prompt(&relation.parent_session_id)
+                .reconcile_parent_reports(&relation.parent_session_id)
                 .await
             {
                 tracing::warn!(
                     child_session_id = %relation.child_session_id,
                     parent_session_id = %relation.parent_session_id,
                     error = format!("{prompt_error:#}"),
-                    "could not reconcile the parent's sub-agent wait prompt after provisioning failure"
+                    "could not enqueue the parent's finished child reports after provisioning failure"
                 );
             }
             return Err(error);
@@ -193,7 +193,7 @@ impl RuntimeState {
                     subagents: request.subagents,
                     review: request.review,
                     no_project_memory: request.no_project_memory,
-                    no_mailbox: request.no_mailbox,
+                    no_github_events: request.no_github_events,
                     initial_prompt: request.initial_prompt,
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
@@ -382,7 +382,7 @@ mod delegation_replay_tests {
             }),
             review: None,
             no_project_memory: false,
-            no_mailbox: false,
+            no_github_events: false,
             initial_prompt: None,
             workspace_id: workspace.id,
             profile_id: "codex".into(),

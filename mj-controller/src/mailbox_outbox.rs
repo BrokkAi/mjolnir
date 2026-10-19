@@ -16,7 +16,7 @@ use crate::session_manager::SessionManagerControl;
 
 const TRUSTED_PARENT_MESSAGE_PROTOCOL_ERROR: &str = "This queued parent message reached an older mj worker that cannot receive structured mailbox events; it was not delivered.";
 const SESSION_MESSAGE_PROTOCOL_ERROR: &str = "This queued session message reached an older mj worker that cannot receive its sender information; it was not delivered.";
-const PENDING_BATCH: usize = 256;
+const PENDING_BATCH_PER_SESSION: usize = 256;
 const SESSION_CONCURRENCY: usize = 8;
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKER_SWEEP: Duration = Duration::from_secs(5);
@@ -71,13 +71,6 @@ async fn process_pending(
             "removed pending mailbox messages for stopped children"
         );
     }
-    if !state
-        .controller_projection()
-        .config
-        .agent_mailboxes_enabled()
-    {
-        return Ok(());
-    }
     let pruned =
         tokio::task::spawn_blocking(crate::database::prune_mailbox_events_for_missing_sessions)
             .await
@@ -88,10 +81,26 @@ async fn process_pending(
             "removed mailbox events for destroyed sessions"
         );
     }
-    let entries =
-        tokio::task::spawn_blocking(|| crate::database::pending_mailbox_events(PENDING_BATCH))
-            .await
-            .context("mailbox outbox read task failed")??;
+    // Lifecycle recovery can settle a finish after startup reconciliation.
+    // Rebuild missing events from durable state on the same bounded sweep
+    // that retries their delivery, including after a missed completion update.
+    let parents = tokio::task::spawn_blocking(crate::database::list_subagent_parent_ids)
+        .await
+        .context("parent report reconciliation read task failed")??;
+    for parent in parents {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
+        if let Err(error) = state.reconcile_parent_reports(&parent).await {
+            tracing::warn!(parent_session_id = %parent, error = %format!("{error:#}"),
+                "parent report reconciliation failed; the next mailbox sweep will retry");
+        }
+    }
+    let entries = tokio::task::spawn_blocking(|| {
+        crate::database::pending_mailbox_events(PENDING_BATCH_PER_SESSION)
+    })
+    .await
+    .context("mailbox outbox read task failed")??;
     let mut by_session = BTreeMap::new();
     for entry in entries {
         by_session
@@ -248,7 +257,7 @@ pub(crate) async fn deliver_mailbox_event(
     state: std::sync::Arc<dyn crate::server_runtime::api::ExportRuntime>,
     sessions: &SessionManagerControl,
     session_id: &str,
-    event: mj_core::mailbox::MailboxEvent,
+    mut event: mj_core::mailbox::MailboxEvent,
     unpark_parked: bool,
 ) -> Result<MailboxEventDelivery> {
     let Some(record) = state.session_record(session_id) else {
@@ -289,6 +298,16 @@ pub(crate) async fn deliver_mailbox_event(
         || protocol.is_none_or(|version| version < mj_core::relay::RELAY_LEGACY_MAILBOX_PROTOCOL)
     {
         return Ok(MailboxEventDelivery::Pending);
+    }
+    if matches!(
+        event.body,
+        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }
+    ) && protocol
+        .is_some_and(|version| version < mj_core::relay::RELAY_SUBAGENT_FINISHED_PROTOCOL)
+    {
+        event.body = mj_core::mailbox::MailboxEventBody::PlainText {
+            text: mj_core::mailbox::render_mailbox_event(&event),
+        };
     }
     let command_id = mailbox_command_id(&event.key);
     match tokio::time::timeout(

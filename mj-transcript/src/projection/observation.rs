@@ -890,7 +890,7 @@ fn delivered_external_events(
         mutation,
         delivery,
         stable_id,
-        format!("External events:\n  - {}", lines.join("\n  - ")),
+        format!("Mailbox events:\n  - {}", lines.join("\n  - ")),
     );
 }
 

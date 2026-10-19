@@ -115,15 +115,14 @@ enum WorkerCommand {
     SubagentMcp {
         #[arg(long)]
         socket: PathBuf,
-        /// The parent's harness, whose MCP client decides how long a single
-        /// `wait` may stay open. Omitted means no harness-specific ceiling.
+        /// Harness used to choose the MCP server instructions.
         #[arg(long)]
         harness: Option<mj_core::config::HarnessKind>,
         /// `parent` serves the delegation tools; `child` serves only
         /// `handback`, a child's report to the session that started it.
         #[arg(long, default_value_t = mj_core::subagent::SubagentMcpRole::Parent)]
         role: mj_core::subagent::SubagentMcpRole,
-        /// Disable parent-to-child mailbox messages for this worker's config.
+        /// Accepted for older launch arguments; tool availability is unchanged.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         agent_mailboxes_enabled: bool,
         /// False when only the straightforward task type is configured: the

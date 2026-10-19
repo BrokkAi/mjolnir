@@ -5993,7 +5993,7 @@ fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
             .snapshot
             .continuation
             .awaiting_children_since_ms
-            .is_some()
+            .is_none()
     );
     let (hook_text, hook_count) = drain_mailbox_for_test(&mut hook_relay, "hook-drain");
     assert!(
@@ -6053,12 +6053,12 @@ fn mailbox_delivery_claims_are_at_most_once_across_hook_prompt_and_wake() {
     for waiting_for_children in [false, true] {
         let wake_root = tempfile::tempdir().unwrap();
         let mut wake_relay = DurableRelay::open(wake_root.path(), SESSION, "test").unwrap();
+        wake_relay
+            .record_observation(RelayObservation::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
         if waiting_for_children {
-            wake_relay
-                .record_observation(RelayObservation::SessionConfigured {
-                    config_options: Vec::new(),
-                })
-                .unwrap();
             submit_relay(
                 &mut wake_relay,
                 "waiting-parent",
@@ -6142,6 +6142,27 @@ fn pending_mailbox_events_and_dedup_keys_survive_journal_replay() {
         std::slice::from_ref(&event)
     );
     assert!(replayed.snapshot.delivered_mailbox_event_keys.is_empty());
+    let mut structured_retry = event.clone();
+    structured_retry.body = mj_core::mailbox::MailboxEventBody::SubagentFinished {
+        report: Box::new(
+            serde_json::from_value(serde_json::json!({
+                "child_session_id": "child", "task_name": "audit", "state": "completed",
+                "finished": true, "output": "the report", "report_dir": null
+            }))
+            .unwrap(),
+        ),
+    };
+    submit_relay(
+        &mut replayed,
+        "restart-event-command",
+        RelayCommand::DeliverMailboxEvent {
+            event: structured_retry,
+        },
+    );
+    assert_eq!(
+        replayed.snapshot.pending_mailbox_events.as_slice(),
+        std::slice::from_ref(&event)
+    );
 
     assert_eq!(drain_mailbox_for_test(&mut replayed, "restart-drain").1, 1);
     assert!(
@@ -6723,4 +6744,93 @@ fn apply_queued_rechecks_its_head_before_dispatch() {
         "prompt-first"
     );
     assert_eq!(queued_command_ids(&relay), ["other-setting"]);
+}
+
+#[test]
+fn hookless_mid_turn_mailbox_event_starts_a_wake_turn_after_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "parent-working",
+        prompt("Do the independent work"),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    let event = mailbox_fixture_event("child-report-without-a-hook", true);
+    submit_relay(
+        &mut relay,
+        "deliver-child-report",
+        RelayCommand::DeliverMailboxEvent {
+            event: event.clone(),
+        },
+    );
+    assert!(relay.claim_pending_commands(true).unwrap().is_empty());
+    assert_eq!(
+        relay.snapshot.pending_mailbox_events.as_slice(),
+        std::slice::from_ref(&event)
+    );
+    // No drain hook runs. Completion itself makes the pending wake eligible.
+    relay
+        .record_command_completed(
+            "parent-working",
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(
+        matches!(&claimed[0].command, RelayCommand::MailboxWake { events } if events == std::slice::from_ref(&event))
+    );
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    let wake_id = claimed[0].command_id.clone();
+    relay
+        .record_command_completed(
+            &wake_id,
+            RelayCommandOutcome::Prompt {
+                stop_reason: "end_turn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        relay
+            .apply_replied_decision(
+                relay.turn_context.generation(),
+                mj_core::activity::verdict::Decision::ExpectContinuation,
+                200,
+            )
+            .unwrap(),
+        "applied"
+    );
+    assert!(!relay.activity_is_idle());
+    let later = mailbox_fixture_event("later-child-report-without-a-hook", true);
+    submit_relay(
+        &mut relay,
+        "deliver-later-child-report",
+        RelayCommand::DeliverMailboxEvent {
+            event: later.clone(),
+        },
+    );
+    let claimed = relay.claim_pending_commands(true).unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert!(
+        matches!(&claimed[0].command, RelayCommand::MailboxWake { events } if events == &[later])
+    );
+    assert!(relay.snapshot.pending_mailbox_events.is_empty());
+    assert!(
+        relay
+            .snapshot
+            .delivered_mailbox_event_keys
+            .contains_key(&event.key)
+    );
 }

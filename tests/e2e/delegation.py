@@ -2,7 +2,6 @@
 """Delegation without web access, then durable accounting, in a named instance."""
 
 import argparse
-import concurrent.futures
 import json
 from pathlib import Path
 import socket
@@ -83,7 +82,7 @@ def main():
             '        result = {"configOptions": config_options}',
         )
         config = lab.config / "config.toml"
-        config.write_text(config.read_text() + '\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n[subagents.subtle]\nmodel = "subtle-fixture"\neffort = "low"\n')
+        config.write_text(config.read_text() + '\n[github.watch]\nenabled = false\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n[subagents.subtle]\nmodel = "subtle-fixture"\neffort = "low"\n')
         # This fixture never owns a native goal. Report that alongside every
         # execution update, including after loading a parked conversation.
         script = script.replace(
@@ -328,6 +327,25 @@ def main():
                 time.sleep(0.05)
             raise RuntimeError(f"worker did not begin prompt: {text}")
 
+        def wait_report(session, finished_child, text):
+            wait_prompt(session, text)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    rows = database.execute(
+                        "SELECT event_json FROM mailbox_outbox WHERE target_session_id=? AND event_key LIKE 'subagent-finished-%' AND accepted_at IS NOT NULL",
+                        (session,),
+                    ).fetchall()
+                if any(
+                    (body := json.loads(row[0])["body"])["type"] == "subagent_finished"
+                    and body["report"]["child_session_id"] == finished_child
+                    and body["report"]["output"] == text
+                    for row in rows
+                ):
+                    return
+                time.sleep(0.1)
+            raise RuntimeError(f"report was not acknowledged in the outbox: {session}, {finished_child}, {rows}")
+
         wait_prompt(child, "Return a short fixture report.")
         # Hard-won: 8ba3d377e: queued settings prevented steering a parent's user input.
         # Drive the real daemon and worker; the child must retain its own turn.
@@ -389,9 +407,12 @@ def main():
         assert worker_status(child)["active_prompt"] == child_before
         # Handback travels through the child's durable queue while its turn runs.
         tool(child, "handback", {"message": "first report without a dashboard"})
-        first = tool(parent, "wait_agents")
-        assert first["status"] == "reported", first
-        assert first["agents"][0]["output"] == "first report without a dashboard", first
+        wait_report(parent, child, "first report without a dashboard")
+        # Older workers receive immediate guidance without collecting reports.
+        for action in ("wait_agents", "await_children"):
+            legacy_reply = tool(parent, action)
+            assert legacy_reply["status"] == "reports_arrive_as_messages", legacy_reply
+            assert "end your turn" in legacy_reply["next_action"], legacy_reply
 
         def wait_parked(session):
             # Match the park lifecycle's existing 120-second deadline. Cleanup
@@ -412,85 +433,56 @@ def main():
             raise RuntimeError(f"child completion did not park {session}: {row}")
 
         wait_parked(child)
-        # A wait on a parked child whose report is already delivered answers
-        # at once, not after its timeout.
-        asked = time.monotonic()
-        parked = tool(parent, "wait_agents")
-        parked_seconds = time.monotonic() - asked
-        assert parked["status"] == "nothing_to_wait_for", parked
-        assert parked["agents"][0]["output"] is None, parked
-        assert parked_seconds < 5, f"wait on a parked child took {parked_seconds}"
-        # Wait always watches the parent's children and answers immediately
-        # when no new report or unfinished child remains.
-        idless = tool(parent, "wait_agents")
-        assert idless["status"] == "nothing_to_wait_for", idless
-        assert [agent["child_session_id"] for agent in idless["agents"]] == [child], idless
-        assert idless["agents"][0]["output"] is None, idless
-        # Submit the next wait while send_message is still starting the parked
-        # child. It must not answer with the old report or return early, and
-        # the daemon must not re-park the child under the input. Then replace
-        # only this instance's daemon: workers and their accepted input
-        # survive, and the replacement rebuilds delegation.
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            tool(
-                parent,
-                "send_message",
-                {"child_session_id": child, "message": "second turn"},
-            )
-            waiting = pool.submit(
-                tool,
-                parent,
-                "wait_agents",
-            )
-            wait_prompt(child, "second turn")
-            assert not waiting.done(), "wait answered before the second report"
-            time.sleep(1)
-            started = time.monotonic()
-            cli("daemon", "restart")
-            elapsed = time.monotonic() - started
-            assert elapsed < 30, (
-                f"daemon replacement waited for a worker turn: {elapsed}"
-            )
-            message = tool(
-                parent,
-                "send_message",
-                {"child_session_id": child, "message": "after daemon replacement"},
-            )
-            assert message["via"] == "mailbox", message
-            assert message["status"] == "queued", (
-                "a child message is queued without cancelling its turn"
-            )
-            hook = run_mailbox_hook(child)
-            additional_context = hook.get("hookSpecificOutput", {}).get(
-                "additionalContext", ""
-            )
-            assert "after daemon replacement" in additional_context, hook
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                listed = tool(parent, "list_agents")
-                deliveries = listed["agents"][0].get("message_deliveries", [])
-                if any(
-                    delivery["request_id"] == message["request_id"]
-                    and delivery["status"] == "delivered"
-                    for delivery in deliveries
-                ):
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError(f"child mailbox message was not delivered: {listed}")
-            assert listed["agents"][0]["state"] == "running", (
-                "send_message must not cancel the child's current turn"
-            )
-            tool(
-                child,
-                "handback",
-                {"message": "second report across daemon replacement"},
-            )
-            second = waiting.result(timeout=40)
-            assert second["status"] == "reported", second
-            assert second["agents"][0]["output"] == (
-                "second report across daemon replacement"
-            ), second
+        # Accepted child work and reports survive a daemon replacement.
+        tool(
+            parent,
+            "send_message",
+            {"child_session_id": child, "message": "second turn"},
+        )
+        wait_prompt(child, "second turn")
+        time.sleep(1)
+        started = time.monotonic()
+        cli("daemon", "restart")
+        elapsed = time.monotonic() - started
+        assert elapsed < 30, (
+            f"daemon replacement waited for a worker turn: {elapsed}"
+        )
+        message = tool(
+            parent,
+            "send_message",
+            {"child_session_id": child, "message": "after daemon replacement"},
+        )
+        assert message["via"] == "mailbox", message
+        assert message["status"] == "queued", (
+            "a child message is queued without cancelling its turn"
+        )
+        hook = run_mailbox_hook(child)
+        additional_context = hook.get("hookSpecificOutput", {}).get(
+            "additionalContext", ""
+        )
+        assert "after daemon replacement" in additional_context, hook
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            listed = tool(parent, "list_agents")
+            deliveries = listed["agents"][0].get("message_deliveries", [])
+            if any(
+                delivery["request_id"] == message["request_id"]
+                and delivery["status"] == "delivered"
+                for delivery in deliveries
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"child mailbox message was not delivered: {listed}")
+        assert listed["agents"][0]["state"] == "running", (
+            "send_message must not cancel the child's current turn"
+        )
+        tool(
+            child,
+            "handback",
+            {"message": "second report across daemon replacement"},
+        )
+        wait_report(parent, child, "second report across daemon replacement")
         tool(parent, "list_agents")
         wait_parked(child)
         # Delegation above works with the viewer disabled. Usage is an HTTP
@@ -517,6 +509,16 @@ def main():
         # The old worker wire shape remains supported for requests accepted
         # before an upgrade, including exact source ranges and parent context.
         (lab.project / "legacy.rs").write_text("excluded\nlegacy source evidence\nexcluded\n")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            sessions = json.loads(cli("sessions", "--json"))
+            rows = sessions if isinstance(sessions, list) else sessions.get("sessions", [])
+            record = next((row for row in rows if row.get("id") == parent), {})
+            if record.get("is_idle"):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"parent did not finish its report wake turn: {record}")
         cli("put-file", "--session", parent, "--path", "legacy.rs", str(lab.project / "legacy.rs"))
         legacy = tool(parent, "spawn", {
             "task_name": "legacy-accepted",
@@ -527,7 +529,7 @@ def main():
         wait_prompt(legacy, "legacy source evidence")
         wait_prompt(legacy, "retained parent context")
         tool(legacy, "handback", {"message": "legacy content retained"})
-        tool(parent, "wait_agents")
+        wait_report(parent, legacy, "legacy content retained")
         wait_parked(legacy)
 
         # Both global task types are resolved into the frozen child selection.
@@ -538,7 +540,7 @@ def main():
                 row = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (session,)).fetchone()
                 assert row == (model, effort), (session, row)
         tool(subtle, "handback", {"message": "subtle configured selection verified"})
-        tool(parent, "wait_agents")
+        wait_report(parent, subtle, "subtle configured selection verified")
         wait_parked(subtle)
 
         # Simulate a daemon exiting after it records failed startup but before
@@ -558,15 +560,9 @@ def main():
             raise RuntimeError(f"startup teardown did not settle after restart: {row}")
         assert child_usage == json.loads(cli("usage", "--session", child, "--json"))
 
-        # Hard-won: d3312d34: a failed child queues a parent prompt that can
-        # otherwise become an unfinished turn while the parent is destroyed.
-        startup_failure = tool(parent, "wait_agents")
-        assert startup_failure["status"] == "reported", startup_failure
-        assert any(
-            agent["child_session_id"] == child
-            and agent["output"] == "fixture startup failure"
-            for agent in startup_failure["agents"]
-        ), startup_failure
+        # Hard-won: d3312d34: a failed child's report turn can remain unfinished during destroy.
+        # Hard-won: #1302: startup cleanup can settle after initial report reconciliation.
+        wait_report(parent, child, "fixture startup failure")
         message_text = "check the last change from the user"
         message = json.loads(
             cli("message", "--session", parent, "--json", message_text)
@@ -612,8 +608,8 @@ def main():
                 row = database.execute("SELECT json_extract(record_json, '$.model'), json_extract(record_json, '$.effort') FROM subagent_sessions WHERE child_session_id=?", (override_child,)).fetchone()
                 expected = ("tiny", "high") if task_type == "straightforward" else ("tiny", "low")
                 assert row == expected, (task_type, expected, row)
-            tool(override_child, "handback", {"message": "session override verified"})
-            tool(overridden, "wait_agents")
+            tool(override_child, "handback", {"message": f"session override verified for {task_type}"})
+            wait_report(overridden, override_child, f"session override verified for {task_type}")
             wait_parked(override_child)
             cli("destroy", "--session", override_child)
         cli("destroy", "--session", overridden)

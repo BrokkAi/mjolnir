@@ -62,7 +62,7 @@ pub enum RelayCommand {
     Prompt {
         prompt: Vec<ContentBlock>,
     },
-    /// Arm or withdraw notification-driven waiting on the current parent turn.
+    /// Legacy protocol-39 command, decoded and replayed without changing state.
     SetSubagentWait {
         active_prompt_id: String,
         waiting: bool,

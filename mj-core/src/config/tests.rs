@@ -604,7 +604,6 @@ fn sample_config() -> Config {
         phone: PhoneConfig::default(),
         github: GithubConfig::default(),
         continuation: Default::default(),
-        mailbox: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -962,8 +961,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
     fs::write(&path, "version = 1\n").unwrap();
     let legacy = Config::load_from(&path).unwrap();
     assert_eq!(legacy.github, GithubConfig::default());
-    assert!(legacy.mailbox.enabled);
-    assert!(legacy.agent_mailboxes_enabled());
+    assert!(legacy.github.watch.enabled);
+    assert!(legacy.github_events_enabled());
     legacy.save_to(&path).unwrap();
     assert!(!fs::read_to_string(&path).unwrap().contains("[github"));
 
@@ -983,8 +982,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
     });
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
-    configured.mailbox.enabled = false;
-    assert!(!configured.agent_mailboxes_enabled());
+    configured.github.watch.enabled = false;
+    assert!(!configured.github_events_enabled());
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("[github.app]"), "{body}");
@@ -992,14 +991,47 @@ fn github_app_configuration_is_optional_and_round_trips() {
     assert!(body.contains("[github.app.session_permissions]"), "{body}");
     assert!(body.contains("[github.app.token_permissions]"), "{body}");
     assert!(body.contains("[github.watch]"), "{body}");
-    assert!(body.contains("[mailbox]\nenabled = false"), "{body}");
+    assert!(!body.contains("[mailbox]"), "{body}");
+    assert!(body.contains("[github.watch]\nenabled = false"), "{body}");
     let serialized: toml::Value = toml::from_str(&body).unwrap();
-    assert!(serialized["github"]["watch"].get("enabled").is_none());
+    assert_eq!(
+        serialized["github"]["watch"]["enabled"].as_bool(),
+        Some(false)
+    );
     assert_eq!(Config::load_from(&path).unwrap(), configured);
 
     let mut jev_off = Config::default();
     jev_off.jev.enabled = false;
-    assert!(!jev_off.agent_mailboxes_enabled());
+    assert!(!jev_off.github_events_enabled());
+
+    for (legacy, current, expected) in [
+        (Some(false), None, false),
+        (None, Some(false), false),
+        (Some(false), Some(true), false),
+        (Some(true), Some(false), false),
+        (Some(true), Some(true), true),
+    ] {
+        let mut body = "version = 17\n".to_owned();
+        if let Some(enabled) = legacy {
+            body.push_str(&format!("[mailbox]\nenabled = {enabled}\n"));
+        }
+        if let Some(enabled) = current {
+            body.push_str(&format!("[github.watch]\nenabled = {enabled}\n"));
+        }
+        fs::write(&path, body).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.github.watch.enabled, expected);
+        loaded.save_to(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("[mailbox]"), "{saved}");
+        assert_eq!(
+            Config::load_from(&path).unwrap().github.watch.enabled,
+            expected
+        );
+        if !expected {
+            assert!(saved.contains("[github.watch]\nenabled = false"), "{saved}");
+        }
+    }
 
     fs::write(
         &path,

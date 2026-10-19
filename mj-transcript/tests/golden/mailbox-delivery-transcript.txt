@@ -1,5 +1,5 @@
 Session: session-mailbox
-2: External events:
+2: Mailbox events:
   - Comment on your PR #12 by alice: The first comment line.
 4: Message from your parent agent
 
@@ -14,7 +14,7 @@ The lock is fixed; please verify it.
 18: Message from the user
 
 Please check the final result.
-18: External events:
+18: Mailbox events:
   - New PR #4623 Model Rust built-in macro values for CQ07
   - Comment on your PR #4623 by alice: Please check the ‹macro› case.
   - New issue #4624 Per-unit resolution summary: shared tables, driver and Go producer (Milestone 1)
@@ -34,6 +34,6 @@ The first review item.
 21: Message from untitled-session
 
 The second item arrives in the same acknowledgment.
-21: External events:
+21: Mailbox events:
   - Review comment on your PR #4623 by gina: A late review note arrives mid-turn.
 23: Responding after delivery.

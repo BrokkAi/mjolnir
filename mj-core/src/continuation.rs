@@ -10,7 +10,7 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 pub const CONFIDENCE: f64 = 0.90;
 pub const QUESTIONS: &str = include_str!("continuation/questions.json");
 pub const PROMPT: &str = "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.";
-/// Generated sub-agent reminder; it carries no new user authorization.
+/// Historical sub-agent reminder, retained to exclude old journal prompts from authorization.
 pub const PARENT_WAIT_PROMPT_TEXT: &str =
     "One or more sub-agents finished. Call wait to collect their reports.";
 
@@ -39,8 +39,7 @@ impl ContinuationConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationState {
-    /// Explicit parent wait, owned by the relay until new input or collection.
-    /// Children keep running; this is not suspension or task completion.
+    /// Legacy protocol-39 snapshot field; no longer affects continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_children_since_ms: Option<i64>,
     pub user_command_id: Option<String>,
@@ -89,8 +88,7 @@ pub fn is_quota_goal_resume(command_id: &str) -> bool {
 
 impl ContinuationState {
     pub fn eligible(&self) -> bool {
-        self.awaiting_children_since_ms.is_none()
-            && self.user_command_id.is_some()
+        self.user_command_id.is_some()
             && self.completed_command_id.is_some()
             && !self.suppressed
             && self.attempts < MAX_NUDGES

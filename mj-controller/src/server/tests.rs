@@ -71,7 +71,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
     let config = Config {
         keys: Default::default(),
         jev: Default::default(),
-        mailbox: Default::default(),
         subagents: Default::default(),
         version: CONFIG_VERSION,
         sessions_side: Default::default(),
@@ -163,7 +162,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 managed_worktree: None,
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 target_template_id: "podman".into(),
                 resource_allocation: None,
                 additional_mounts: vec![],
@@ -2674,7 +2673,7 @@ fn new_action_requires_project_directory_exactly_for_bare_targets() {
     let action = |target_id: &str, project_directory: Option<PathBuf>| ControllerAction::New {
         review: None,
         no_project_memory: false,
-        no_mailbox: false,
+        no_github_events: false,
         at: None,
         branch: None,
         base: None,
@@ -2738,7 +2737,7 @@ fn new_action_validates_allocation_kind_and_reported_container_limits() {
             ControllerAction::New {
                 review: None,
                 no_project_memory: false,
-                no_mailbox: false,
+                no_github_events: false,
                 at: None,
                 branch: None,
                 base: None,

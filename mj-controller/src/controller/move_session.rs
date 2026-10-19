@@ -1657,7 +1657,7 @@ impl Controller {
             &session.subagents.clone().unwrap_or_default(),
             session.harness_kind,
             self.state.subagents.get(session_id),
-            self.config.agent_mailboxes_enabled_for(session),
+            true,
         ) {
             return Ok(outcome);
         }

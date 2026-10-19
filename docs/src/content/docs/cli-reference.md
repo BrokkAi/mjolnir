@@ -242,7 +242,7 @@ mj new (--workspace <name> | --workspace-id <id>) [--profile <id>] [--target <id
        [--subagent-straightforward <model>] [--subagent-straightforward-effort <effort>]
        [--subagent-subtle <model>] [--subagent-subtle-effort <effort>]
        [--review-model <name>] [--review-effort <name>] [--review-tier quick|extended]
-       [--no-review] [--no-project-memory] [--no-mailbox] [--cpus <count>] [--memory-gib <GiB>]
+       [--no-review] [--no-project-memory] [--no-github-events] [--cpus <count>] [--memory-gib <GiB>]
        [--prompt-file <path>] [<prompt>|-] [--json]
 mj prompt --session <id> [<text>|-] [--prompt-file <path>] [--wait] [--timeout <seconds>]
           [--return-on-input] [--json]
@@ -325,14 +325,9 @@ cannot be combined with a session that runs directly in the selected directory.
   and its prompt, as an evaluation run does. Without the flag the session loads
   the workspace's project memory as before. See
   [project memory](/workspaces-bundles/#what-the-agent-sees).
-- `mj new --no-mailbox` gives the session no agent mailbox, whatever
-  `[mailbox]` says: GitHub watch events are not routed to it, another session's
-  messages to it are refused, and its harness gets no mailbox hook or message
-  tool. Its sub-agents get no mailbox either. The setting applies to this
-  session only; `[mailbox]` and every other session keep their mailbox. The
-  flag cannot turn mailboxes on: with `[mailbox]` or `[jev]` off, no session has
-  one. A message you send yourself with `mj message` still reaches the session
-  as a turn, as it does with mailboxes off.
+- `mj new --no-github-events` prevents the GitHub watcher from registering the session
+  as a delivery target. Its sub-agents inherit the flag. This is the flag's only
+  effect. `[github.watch] enabled` and `[jev] enabled` control GitHub event production.
 - On a container target, `mj new` gives the session the same CPU and memory
   limit that the dashboard and the web viewer select: the size last chosen for
   that host, else 8 CPUs and 32 GiB, capped at the host's totals.

@@ -1558,16 +1558,11 @@ async fn reopen_subagent_admission_after_move(
                 return Ok((false, false));
             };
             let subagent = crate::database::load_subagent(&id)?;
-            // The worker kept the setting it launched with. An unreadable
-            // config must not stop the reconnect, so assume the queue exists;
-            // a worker without one refuses the reopen harmlessly below.
-            let agent_mailboxes_enabled = mj_core::config::Config::load()
-                .map_or(true, |config| config.agent_mailboxes_enabled_for(&session));
             let queue_enabled = crate::controller::move_session::worker_subagent_queue_enabled(
                 &session.subagents.clone().unwrap_or_default(),
                 session.harness_kind,
                 subagent.as_ref(),
-                agent_mailboxes_enabled,
+                true,
             );
             let move_active = crate::database::has_active_in_place_move(&id)?;
             Ok((queue_enabled, move_active))
@@ -1584,8 +1579,7 @@ async fn reopen_subagent_admission_after_move(
         return Ok(());
     }
     match connection.set_subagent_admission(true).await {
-        // The mailbox setting can change after launch. A worker started
-        // without the queue has no gate to reopen.
+        // An older worker started without the queue has no gate to reopen.
         Err(error)
             if error
                 .downcast_ref::<RelayRejected>()
