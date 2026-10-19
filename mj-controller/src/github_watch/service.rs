@@ -25,6 +25,7 @@ use crate::daemon::RuntimeState;
 
 const MAX_CLASSIFICATIONS_PER_POLL: usize = 50;
 const ITEMS_PER_PAGE: usize = 100;
+const MERGE_CLOSE_TOLERANCE_MS: i64 = 5_000;
 const CLASSIFICATION_CONCURRENCY: usize = 4;
 const REPOSITORY_CONCURRENCY: usize = 4;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
@@ -661,6 +662,25 @@ async fn poll_item_timeline(
                 &[],
             )
             .await?;
+        // A merge that lands commits directly, as Merge Marshall does, leaves
+        // only a closed entry in the timeline. Only the pull request itself
+        // records that it merged, so read it when such a close appears.
+        let merged_at = if watch.kind == "pull_request"
+            && has_close_without_merge(&entries, &watch.timeline_at)
+        {
+            api.get_json(
+                &format!(
+                    "repos/{}/{}/pulls/{}",
+                    watch.owner, watch.repo, watch.number
+                ),
+                &[],
+            )
+            .await?["merged_at"]
+                .as_str()
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let comments = if watch.kind == "pull_request" {
             // Use the stored cursor, before either source advances it.
             api.array_pages(
@@ -674,10 +694,10 @@ async fn poll_item_timeline(
         } else {
             Vec::new()
         };
-        Ok::<_, anyhow::Error>((entries, comments, processed_at))
+        Ok::<_, anyhow::Error>((entries, comments, merged_at, processed_at))
     }
     .await;
-    let (entries, comments, processed_at) = match fetched {
+    let (entries, comments, merged_at, processed_at) = match fetched {
         Ok(values) => values,
         Err(error)
             if error
@@ -687,6 +707,7 @@ async fn poll_item_timeline(
             (
                 Vec::new(),
                 Vec::new(),
+                None,
                 error
                     .downcast_ref::<GithubHttpStatus>()
                     .context("missing GitHub HTTP status")?
@@ -701,7 +722,7 @@ async fn poll_item_timeline(
             )));
         }
     };
-    let mapped = map_item_activity(&watch, &entries, &comments)?;
+    let mapped = map_item_activity(&watch, &entries, &comments, merged_at.as_deref())?;
     let mut outbox = Vec::new();
     let mut turn_windows = BTreeMap::new();
     let mut login = None;
@@ -766,8 +787,9 @@ fn map_item_activity(
     watch: &crate::database::GithubItemWatch,
     entries: &[Value],
     comments: &[Value],
+    merged_at: Option<&str>,
 ) -> Result<TimelineMapping> {
-    let mut mapped = map_timeline(watch, entries, Some(&watch.timeline_at))?;
+    let mut mapped = map_timeline(watch, entries, Some(&watch.timeline_at), merged_at)?;
     // Apply the stored boundary to update time, replaying ties.
     // A newly published comment can have an older creation time.
     let comments_to_map = comments
@@ -781,7 +803,7 @@ fn map_item_activity(
         .collect::<Vec<_>>();
     let review_entries =
         [serde_json::json!({"event": "line-commented", "comments": comments_to_map})];
-    let review_mapping = map_timeline(watch, &review_entries, None)?;
+    let review_mapping = map_timeline(watch, &review_entries, None, None)?;
     mapped.events.extend(review_mapping.events);
     for comment in comments {
         let Some(timestamp) = comment["updated_at"]
@@ -811,12 +833,44 @@ fn map_item_activity(
     Ok(mapped)
 }
 
+/// Whether the timeline has a close after the cursor with no merge before it
+/// in the same open interval. Only such a close needs the pull request's
+/// merge time to tell a merge from a close.
+fn has_close_without_merge(entries: &[Value], since: &str) -> bool {
+    let mut merged = false;
+    for entry in entries {
+        match entry["event"].as_str() {
+            Some("merged") => merged = true,
+            Some("reopened") => merged = false,
+            Some("closed")
+                if !merged
+                    && comment_creation_timestamp(entry)
+                        .is_some_and(|at| !timestamp_precedes(at, since)) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// GitHub records the merge time and the closing entry within a second or two
+/// of each other.
+fn same_moment(left: &str, right: &str) -> bool {
+    match (timestamp_millis(left), timestamp_millis(right)) {
+        (Some(left), Some(right)) => (left - right).abs() <= MERGE_CLOSE_TOLERANCE_MS,
+        _ => false,
+    }
+}
+
 /// Entry payloads supply actors, comment text, review state and event IDs.
 /// Watch metadata supplies only the item's identity and display title.
 fn map_timeline(
     watch: &crate::database::GithubItemWatch,
     entries: &[Value],
     since: Option<&str>,
+    merged_at: Option<&str>,
 ) -> Result<TimelineMapping> {
     let mut result = TimelineMapping {
         events: Vec::new(),
@@ -924,13 +978,18 @@ fn map_timeline(
                     if event_type == "closed" && merged {
                         continue;
                     }
-                    let change = match event_type {
-                        "merged" => MailboxPullRequestChange::Merged,
-                        "closed" => MailboxPullRequestChange::ClosedWithoutMerging,
-                        _ => MailboxPullRequestChange::Reopened,
+                    // Compare times so an earlier close, before a reopen and a
+                    // later merge, still reads as a close.
+                    let (suffix, change) = match event_type {
+                        "merged" => ("merged", MailboxPullRequestChange::Merged),
+                        "closed" if merged_at.is_some_and(|at| same_moment(at, timestamp)) => {
+                            ("merged", MailboxPullRequestChange::Merged)
+                        }
+                        "closed" => ("closed", MailboxPullRequestChange::ClosedWithoutMerging),
+                        _ => ("reopened", MailboxPullRequestChange::Reopened),
                     };
                     (
-                        event_type,
+                        suffix,
                         MailboxEventBody::GithubPullRequestLifecycle {
                             change,
                             number: watch.number as u64,
@@ -1721,6 +1780,8 @@ mod tests {
         timeline_after_read: Option<(u64, Value)>,
         bulk_moves_after_feed: Vec<(usize, Vec<usize>, String)>,
         fail_feed_request: Option<usize>,
+        pulls: BTreeMap<u64, Value>,
+        pull_requests: Vec<u64>,
     }
 
     async fn fake_issues(
@@ -1811,6 +1872,18 @@ mod tests {
             data.timelines.entry(target).or_default().push(event);
         }
         response
+    }
+
+    async fn fake_pull(
+        State(fake): State<FakeGithub>,
+        Path((_, _, number)): Path<(String, String, u64)>,
+    ) -> Response {
+        let mut data = fake.data.lock().await;
+        data.pull_requests.push(number);
+        match data.pulls.get(&number) {
+            Some(pull) => Json(pull.clone()).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
     }
 
     async fn fake_review_comments(
@@ -2146,6 +2219,7 @@ mod tests {
                 "/repos/{owner}/{repo}/pulls/{number}/comments",
                 get(fake_review_comments),
             )
+            .route("/repos/{owner}/{repo}/pulls/{number}", get(fake_pull))
             .route(
                 "/user",
                 get(|| async { Json(json!({"login":"watcher-bot"})) }),
@@ -2484,6 +2558,127 @@ mod tests {
         assert_eq!(watch.timeline_at, at(20));
         assert_eq!(watch.review_comments_at, at(30));
         assert_eq!(watch.processed_at, at(40));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: b4bbe4016: Merge Marshall merges left only closed entries, and
+    // agents were told their merged pull requests closed without merging.
+    #[tokio::test]
+    async fn watcher_reports_a_close_at_the_merge_time_as_a_merge() {
+        if !run_isolated_child("watcher_reports_a_close_at_the_merge_time_as_a_merge") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            for n in [11, 12, 13, 14] {
+                crate::database::commit_github_item_classification(
+                    watch_classification(n, &at(1)),
+                    None,
+                )
+                .unwrap();
+                let mut item = github_item(n as u64, n as u64, "synthetic", at(1), true);
+                item["updated_at"] = json!(at(30));
+                data.items.push(item);
+            }
+            data.observed_at = Some(at(90));
+            let closed = |id: i64, seconds: i64| json!({"event":"closed","id":id,"created_at":at(seconds),"actor":{"login":"mergemarshall[bot]"},"commit_id":"abc"});
+            // Merged by landing commits: only a closed entry, one second after the merge time.
+            data.timelines.insert(11, vec![closed(300, 6)]);
+            data.pulls.insert(11, json!({"merged_at": at(5)}));
+            // Closed without merging.
+            data.timelines.insert(12, vec![closed(301, 6)]);
+            data.pulls.insert(12, json!({"merged_at": null}));
+            // Closed, reopened, then merged later: the first close stays a close.
+            data.timelines.insert(13, vec![
+                closed(302, 6),
+                json!({"event":"reopened","id":303,"created_at":at(10),"actor":{"login":"author"}}),
+                json!({"event":"merged","id":304,"created_at":at(20),"actor":{"login":"merger"}}),
+                closed(305, 20),
+            ]);
+            data.pulls.insert(13, json!({"merged_at": at(20)}));
+            // A recorded merge followed by its close needs no pull request read.
+            data.timelines.insert(14, vec![
+                json!({"event":"merged","id":306,"created_at":at(7),"actor":{"login":"merger"}}),
+                closed(307, 7),
+            ]);
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let rows = crate::database::pending_mailbox_events(100).unwrap();
+        let mut changes = rows
+            .iter()
+            .map(|row| {
+                let event: MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+                let MailboxEventBody::GithubPullRequestLifecycle { change, actor, .. } = event.body
+                else {
+                    panic!("unexpected event {}", row.event_key);
+                };
+                (row.event_key.clone(), change, actor)
+            })
+            .collect::<Vec<_>>();
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            changes,
+            vec![
+                (
+                    "github:acme/repo#11:merged:300".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    "mergemarshall[bot]".to_owned(),
+                ),
+                (
+                    "github:acme/repo#12:closed:301".to_owned(),
+                    MailboxPullRequestChange::ClosedWithoutMerging,
+                    "mergemarshall[bot]".to_owned(),
+                ),
+                (
+                    "github:acme/repo#13:closed:302".to_owned(),
+                    MailboxPullRequestChange::ClosedWithoutMerging,
+                    "mergemarshall[bot]".to_owned(),
+                ),
+                (
+                    "github:acme/repo#13:merged:304".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    "merger".to_owned(),
+                ),
+                (
+                    "github:acme/repo#13:reopened:303".to_owned(),
+                    MailboxPullRequestChange::Reopened,
+                    "author".to_owned(),
+                ),
+                (
+                    "github:acme/repo#14:merged:306".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    "merger".to_owned(),
+                ),
+            ]
+        );
+        let mut read = fake.data.lock().await.pull_requests.clone();
+        read.sort_unstable();
+        assert_eq!(read, vec![11, 12, 13]);
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }
@@ -2848,9 +3043,13 @@ mod tests {
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-            let mapped =
-                map_item_activity(&watch, captured["timeline"].as_array().unwrap(), &comments)
-                    .unwrap();
+            let mapped = map_item_activity(
+                &watch,
+                captured["timeline"].as_array().unwrap(),
+                &comments,
+                captured["pull"]["merged_at"].as_str(),
+            )
+            .unwrap();
             for event in mapped.events {
                 let body = serde_json::to_value(&event.body).unwrap();
                 let kind = body["type"].as_str().unwrap().to_owned();
