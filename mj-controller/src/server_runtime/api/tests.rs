@@ -4039,6 +4039,53 @@ async fn legacy_worker_wait_requests_answer_immediately_without_marking_reports(
     assert!(events[0].event_json.contains("ready report"));
 }
 
+// Hard-won: a91e1c736: daemon startup reconciled every parent's reports and
+// exited when a parent's queue was still connecting, restarting in a loop.
+#[tokio::test]
+async fn report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_recovers() {
+    if !isolated_parked_test(
+        "report_reconcile_fails_while_the_parent_queue_connects_and_a_retry_recovers",
+    ) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    store_parent_and_child("child-1");
+    record_finished_child(
+        "child-1",
+        "task-1",
+        "report after the queue connects",
+        3,
+        9,
+        7,
+    );
+    // Every worker's delegation queue starts in this state, so the error is
+    // transient. A caller has to retry it rather than give up.
+    let mut connecting = active_parent_view("working");
+    connecting.snapshot.as_mut().unwrap().subagent_queue_error =
+        Some("delegation queue is connecting".into());
+    let (backend, _) = report_backend(connecting);
+    let error = backend
+        .reconcile_parent_reports("parent-1")
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("connecting"), "{error:#}");
+    assert!(
+        crate::database::pending_mailbox_events(10)
+            .unwrap()
+            .is_empty()
+    );
+
+    let (backend, _) = report_backend(active_parent_view("working"));
+    backend.reconcile_parent_reports("parent-1").await.unwrap();
+    let pending = crate::database::pending_mailbox_events(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0]
+            .event_json
+            .contains("report after the queue connects")
+    );
+}
+
 #[tokio::test]
 async fn report_reconcile_recovers_unreported_finishes_and_ignores_parent_opt_out() {
     if !isolated_parked_test(
