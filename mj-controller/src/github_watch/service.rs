@@ -354,10 +354,14 @@ async fn acquire_repository(
     api: &GithubApi,
     stop: &CancellationToken,
 ) -> Result<()> {
+    // GitHub's `since` is inclusive and offset pages are ordered by update
+    // time. After a full page, every item older than its last timestamp has
+    // been read, so the next read starts at that timestamp. Only a page that
+    // holds nothing newer than `since` itself pages forward by offset, so
+    // each request either advances `since` or reads deeper into one second.
     let mut newest = from.to_owned();
     let mut since = overlap_timestamp(&newest);
     let mut page = 1;
-    let mut tie: Option<String> = None;
     loop {
         if stop.is_cancelled() {
             return Ok(());
@@ -379,8 +383,8 @@ async fn acquire_repository(
         let values = response
             .as_array()
             .context("GitHub issues response is not an array")?;
-        let previous = newest.clone();
         let mut reached_end = false;
+        let mut last: Option<String> = None;
         let mut items = Vec::new();
         for value in values {
             if let Some(item) = parse_github_item(value) {
@@ -391,35 +395,24 @@ async fn acquire_repository(
                 if timestamp_precedes(&newest, &item.updated_at) {
                     newest = item.updated_at.clone();
                 }
+                if last
+                    .as_ref()
+                    .is_none_or(|last| timestamp_precedes(last, &item.updated_at))
+                {
+                    last = Some(item.updated_at.clone());
+                }
                 items.push(item);
             } else {
                 tracing::warn!(%owner, %repo, "GitHub issues feed contains an invalid item; skipping it");
             }
         }
-        let full_second = items.len() == ITEMS_PER_PAGE
-            && items.iter().all(|item| {
-                timestamp_millis(&item.updated_at).map(|ms| ms.div_euclid(1000))
-                    == timestamp_millis(&items[0].updated_at).map(|ms| ms.div_euclid(1000))
-            });
-        if tie.is_none() && full_second {
-            let at = items[0].updated_at.clone();
-            since = overlap_timestamp(&at);
-            tie = Some(at);
-        }
-        let tie_finished = tie.as_ref().is_some_and(|at| {
-            values.len() < ITEMS_PER_PAGE
-                || items
-                    .iter()
-                    .any(|item| timestamp_precedes(at, &item.updated_at))
-        });
-        if let Some(at) = &tie {
-            newest = at.clone();
-        }
+        let short_page = values.len() < ITEMS_PER_PAGE;
         let item_owner = owner.to_owned();
         let item_repo = repo.to_owned();
         // A short page or the first item beyond the bound proves this range
-        // complete, including a gap with no items. Otherwise save the page key.
-        let completed_range = until.filter(|_| reached_end || values.len() < ITEMS_PER_PAGE);
+        // complete, including a gap with no items. Otherwise save the newest
+        // timestamp; restarting from its overlap rereads its whole second.
+        let completed_range = until.filter(|_| reached_end || short_page);
         let through = completed_range.unwrap_or(&newest).to_owned();
         let progress = if until.is_some() {
             crate::database::GithubFeedProgress::Reconciled(through)
@@ -430,20 +423,15 @@ async fn acquire_repository(
             crate::database::record_github_page(item_owner, item_repo, items, progress)
         })
         .await?;
-        if completed_range.is_some() {
+        if completed_range.is_some() || short_page {
             break;
         }
-        if tie_finished {
-            since = newest.clone();
-            tie = None;
-            page = 1;
-        } else if tie.is_some() {
-            page += 1;
-        } else if timestamp_precedes(&previous, &newest) {
-            since = overlap_timestamp(&newest);
-            page = 1;
-        } else {
-            break;
+        match last {
+            Some(last) if timestamp_precedes(&since, &last) => {
+                since = last;
+                page = 1;
+            }
+            _ => page += 1,
         }
     }
     Ok(())
@@ -1739,8 +1727,9 @@ mod tests {
         let mut items = data
             .items
             .iter()
+            // GitHub's `since` includes items updated at exactly that time.
             .filter(|item| {
-                timestamp_precedes(&query["since"], item["updated_at"].as_str().unwrap())
+                !timestamp_precedes(item["updated_at"].as_str().unwrap(), &query["since"])
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -2209,6 +2198,51 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
+    // Hard-won: 5f5e74082: an inclusive `since` refetched a full page straddling two seconds and stopped.
+    #[tokio::test]
+    async fn watcher_pages_past_a_full_page_that_straddles_two_seconds() {
+        if !run_isolated_child("watcher_pages_past_a_full_page_that_straddles_two_seconds") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            data.items = (1..=200)
+                .map(|n| {
+                    let mut item = github_item(n, n, "synthetic", at(1), false);
+                    item["updated_at"] = json!(if n <= 50 { at(1) } else { at(2) });
+                    item
+                })
+                .collect();
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        record_repository("acme", "repo", &cursor, &api, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::database::load_github_seen_items("acme", "repo")
+                .unwrap()
+                .len(),
+            200
+        );
+        assert_eq!(fake.data.lock().await.feed_queries.len(), 3);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
     #[derive(Clone, Copy)]
     enum ReconciliationRecovery {
         OldBacklog,
@@ -2256,7 +2290,9 @@ mod tests {
                 .collect();
             data.items
                 .extend((1..=401).map(|n| github_item(n, n, "synthetic", tied_at.clone(), false)));
-            let request_offset = if prefix_count == 0 { 0 } else { 2 };
+            // Moves land after the tie's second and fourth offset pages. Without a
+            // prefix, the first request jumps to the tie and the second rereads it.
+            let request_offset = if prefix_count == 0 { 1 } else { 2 };
             data.bulk_moves_after_feed = vec![
                 (2 + request_offset, vec![prefix_count], moved_at.clone()),
                 (
