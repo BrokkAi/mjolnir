@@ -3773,15 +3773,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
-    )]
     fn standalone_indexed_children_are_hidden_from_every_history_listing() {
         let _held = tags::testing::lock();
         let (_directory, mut connection) = tags::testing::isolated_index();
         let home = tempfile::tempdir().unwrap();
-        let project = home.path().join("projects/project");
+        // Joined part by part: the index stores the native spelling discovery
+        // produces, and a lookup by path compares that text.
+        let project = home.path().join("projects").join("project");
         std::fs::create_dir_all(&project).unwrap();
         let paths = [
             project.join("00000000-0000-4000-8000-000000000001.jsonl"),

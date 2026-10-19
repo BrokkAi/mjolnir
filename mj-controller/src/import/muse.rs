@@ -781,10 +781,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1294: the transcript fixture records a POSIX working directory"
-    )]
     fn summary_rejects_relative_workspace_and_mixed_session_streams() {
         let mut records = read_records(&session_bytes(false)).unwrap();
         records[0].value["payload"]["record"]["workspace_root"] = json!("relative");
@@ -794,7 +790,8 @@ mod tests {
                 .to_string()
                 .contains("not absolute")
         );
-        records[0].value["payload"]["record"]["workspace_root"] = json!("/work");
+        records[0].value["payload"]["record"]["workspace_root"] =
+            json!(crate::import::test_fixtures::native_cwd("/work"));
         records[1].value["stream"]["id"] = json!("another-session");
         assert!(
             muse_summary_from_records(Path::new("session.jsonl"), &records)

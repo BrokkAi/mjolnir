@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-reporter="$repository_root/scripts/macos-nightly-issue.sh"
+reporter="$repository_root/scripts/nightly-issue.sh"
 test_root="$(mktemp -d)"
 trap 'rm -rf "$test_root"' EXIT
 
@@ -122,8 +122,9 @@ esac
 FAKE_GH
 chmod +x "$fake_bin/gh"
 
-# Canned jobs response: one success, one failure with a failed step, and the
-# in-progress reporter job that triggered this run.
+# Canned jobs response: one success, one failure with a failed step, a failure
+# in the other lane of the same nightly run, and the in-progress reporter job
+# that triggered this run.
 export MJ_TEST_GH_JOBS
 MJ_TEST_GH_JOBS="$(
     jq -cn '{
@@ -135,6 +136,10 @@ MJ_TEST_GH_JOBS="$(
                  {name: "Checkout", conclusion: "success"},
                  {name: "Run tests", conclusion: "failure"},
                  {name: "Upload logs", conclusion: "skipped"}
+             ]},
+            {name: "Windows / Windows (x86_64-pc-windows-msvc)", conclusion: "failure",
+             html_url: "https://example.test/job/4", steps: [
+                 {name: "Run tests on Windows", conclusion: "failure"}
              ]},
             {name: "Report nightly macOS CI result", conclusion: null,
              html_url: "https://example.test/job/3", steps: []}
@@ -151,16 +156,21 @@ sha3='3333333333333333333333333333333333333333'
 sha4='4444444444444444444444444444444444444444'
 sha5='5555555555555555555555555555555555555555'
 
-run_reporter() {
+run_lane_reporter() {
     env \
         PATH="$fake_bin:$PATH" \
-        MACOS_RESULT="$1" \
+        CI_LANE="$1" \
+        LANE_RESULT="$2" \
         GITHUB_REPOSITORY=BrokkAi/mjolnir \
         GITHUB_SERVER_URL=https://github.com \
-        GITHUB_RUN_ID="$2" \
+        GITHUB_RUN_ID="$3" \
         GITHUB_RUN_ATTEMPT=1 \
-        GITHUB_SHA="$3" \
+        GITHUB_SHA="$4" \
         bash "$reporter"
+}
+
+run_reporter() {
+    run_lane_reporter macos "$@"
 }
 
 assert_contains() {
@@ -188,10 +198,15 @@ assert_text_contains() {
 }
 
 tracking_issue() {
-    local numbers
+    local lane="${1:-macos}" title numbers
+    case "$lane" in
+        macos) title='Nightly macOS CI is failing' ;;
+        windows) title='Nightly Windows CI is failing' ;;
+    esac
     numbers="$(
-        jq -r '.[] | select(.pull_request == null and .title == "Nightly macOS CI is failing")
-            | select((.body // "") | contains("<!-- mjolnir-macos-nightly-tracking -->"))
+        jq -r --arg title "$title" --arg marker "<!-- mjolnir-$lane-nightly-tracking -->" '
+            .[] | select(.pull_request == null and .title == $title)
+            | select((.body // "") | contains($marker))
             | .number' "$gh_state"
     )"
     if [[ -z "$numbers" || "$numbers" == *$'\n'* ]]; then
@@ -232,6 +247,10 @@ assert_text_contains "$issue_body" 'https://github.com/BrokkAi/mjolnir/actions/r
 assert_text_contains "$issue_body" '222222222222' 'the new issue body'
 assert_text_contains "$issue_body" 'macOS / macOS (aarch64-apple-darwin)' 'the new issue body'
 assert_text_contains "$issue_body" 'Run tests' 'the new issue body'
+if [[ "$issue_body" == *'Windows / Windows'* ]]; then
+    printf '%s\n' 'the macOS issue body lists a job from the Windows lane' >&2
+    exit 1
+fi
 [[ "$(comment_count "$issue")" == 0 ]]
 
 # 3. A second failure comments on the same issue and creates no new one.
@@ -257,6 +276,28 @@ run_reporter failure 5005 "$sha5" >"$test_root/step5.out"
 assert_text_contains "$(last_comment "$issue")" 'failed again' 'the reopen comment'
 assert_text_contains "$(last_comment "$issue")" 'https://github.com/BrokkAi/mjolnir/actions/runs/5005' 'the reopen comment'
 
+# 5b. The Windows lane keeps its own issue: a failure there creates it with
+# only the Windows job, and leaves the open macOS issue alone.
+run_lane_reporter windows failure 5105 "$sha5" >"$test_root/step5b.out"
+windows_issue="$(tracking_issue windows)"
+[[ "$windows_issue" != "$issue" ]]
+[[ "$(issue_field "$windows_issue" state)" == open ]]
+windows_body="$(issue_field "$windows_issue" body)"
+assert_text_contains "$windows_body" 'Windows / Windows (x86_64-pc-windows-msvc)' 'the Windows issue body'
+assert_text_contains "$windows_body" '.github/workflows/nightly.yml' 'the Windows issue body'
+if [[ "$windows_body" == *'macOS / macOS'* ]]; then
+    printf '%s\n' 'the Windows issue body lists a job from the macOS lane' >&2
+    exit 1
+fi
+[[ "$(issue_field "$issue" state)" == open ]]
+[[ "$(comment_count "$issue")" == 3 ]]
+
+# 5c. A Windows pass closes only the Windows issue.
+run_lane_reporter windows success 5205 "$sha1" >"$test_root/step5c.out"
+[[ "$(issue_field "$windows_issue" state)" == closed ]]
+[[ "$(issue_field "$issue" state)" == open ]]
+[[ "$(comment_count "$issue")" == 3 ]]
+
 # 6. Cancelled and skipped lanes leave the issue alone.
 state_before="$(command cat "$gh_state")"
 run_reporter cancelled 6006 "$sha1" >"$test_root/step6-cancelled.out"
@@ -279,7 +320,8 @@ assert_lacks 'issues/6' "$gh_log"
 # 8. A missing invocation variable fails clearly instead of guessing.
 if env -u GITHUB_RUN_ID \
     PATH="$fake_bin:$PATH" \
-    MACOS_RESULT=failure \
+    CI_LANE=macos \
+    LANE_RESULT=failure \
     GITHUB_REPOSITORY=BrokkAi/mjolnir \
     GITHUB_SERVER_URL=https://github.com \
     GITHUB_RUN_ATTEMPT=1 \
@@ -290,4 +332,11 @@ if env -u GITHUB_RUN_ID \
 fi
 assert_contains 'GITHUB_RUN_ID' "$test_root/step8.out"
 
-printf '%s\n' 'macOS nightly tracking-issue tests passed'
+# 9. An unknown lane fails instead of writing an issue for it.
+if run_lane_reporter linux failure 9009 "$sha1" >"$test_root/step9.out" 2>&1; then
+    printf '%s\n' 'the reporter unexpectedly accepted an unknown lane' >&2
+    exit 1
+fi
+assert_contains 'unknown CI_LANE linux' "$test_root/step9.out"
+
+printf '%s\n' 'nightly tracking-issue tests passed'

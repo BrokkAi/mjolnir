@@ -771,7 +771,8 @@ than a choice dialog.
 
 Muse decides a session's permission profile from its settings file, so
 Mjolnir writes it into the staged Muse settings. With guardian approvals it
-stages `:ask-me`, keeps Muse's sandbox on, selects `promptUnmatched`
+stages `:ask-me`, keeps Muse's sandbox on (removing `--disable-sandbox` from a
+profile's `MUSE_SERVE_ARGS`), selects `promptUnmatched`
 approvals, and turns on muse-acp's auto-review for every session: a second,
 read-only Muse model reviews each approval request with a Codex-style safety
 policy, and a failed or unusable review denies the action. Muse's own

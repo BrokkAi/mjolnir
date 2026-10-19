@@ -240,17 +240,19 @@ pub enum ReviewerRequest {
     },
     /// Report what changed in every workspace repository since `baselines`.
     ///
-    /// A baseline is a Git tree id recorded by an earlier capture, keyed by
-    /// repository root. When that baseline is unavailable, the worker uses
-    /// the baseline pinned before its primary harness started. If neither
-    /// tree is available, coverage starts at this capture rather than
-    /// presenting the whole repository as this turn's work. Capture never
-    /// touches the repository's index or working tree.
+    /// A baseline is the `current_tree` id an earlier capture reported, keyed
+    /// by repository root: a Git tag naming the captured tree and the HEAD it
+    /// was taken at, or a bare tree id from an earlier worker. Either is a
+    /// tree-ish. When that baseline is unavailable, the worker uses the
+    /// baseline pinned before its primary harness started. If neither tree is
+    /// available, coverage starts at this capture rather than presenting the
+    /// whole repository as this turn's work. Capture never touches the
+    /// repository's index or working tree.
     CaptureDelta {
         baselines: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
-    /// Record `trees` as the new review baselines, pinning each so a later
-    /// `git gc` cannot collect it.
+    /// Record `trees`, the `current_tree` ids of a reviewed capture, as the new
+    /// review baselines, pinning each so a later `git gc` cannot collect it.
     AdvanceBaseline {
         trees: std::collections::BTreeMap<std::path::PathBuf, String>,
     },
@@ -261,7 +263,13 @@ pub enum ReviewerRequest {
 #[serde(deny_unknown_fields)]
 pub struct RepoDelta {
     pub root: std::path::PathBuf,
+    /// The tree-ish `patch` is diffed from: the baseline, with any history the
+    /// turn merged in already folded in (see `merged_in`). `None` when there
+    /// is no usable baseline and coverage starts at this capture.
     pub baseline_tree: Option<String>,
+    /// The capture, which a completed review records as the next baseline: a
+    /// Git tag naming the captured tree and the HEAD it was taken at, or a
+    /// bare tree id from an earlier worker. Either is a tree-ish.
     pub current_tree: String,
     /// Unified diff, bounded worker-side; an empty patch means this repository
     /// has nothing to review.
@@ -277,6 +285,11 @@ pub struct RepoDelta {
     /// a worker that predates it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileLineChange>,
+    /// Commits the turn merged in from other lines of history. Their changes
+    /// are part of `baseline_tree`, so `patch` holds only the turn's own work
+    /// and how it resolved those merges. Empty from a worker that predates it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_in: Vec<String>,
 }
 
 /// One changed file's line counts in a review capture.

@@ -632,6 +632,7 @@ async fn a_review_waits_for_the_recovery_copy_instead_of_giving_up() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
 
@@ -692,6 +693,7 @@ async fn a_review_refused_for_another_reason_does_not_wait() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -873,6 +875,7 @@ async fn resolving_a_review_that_has_no_verdict_is_refused() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
 
@@ -955,6 +958,7 @@ async fn a_turn_that_changed_nothing_resolves_without_choosing_a_reviewer() {
             diffstat: "0 files changed".to_owned(),
             changed_lines: 0,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -1025,6 +1029,7 @@ async fn a_capture_the_recovery_copy_refused_is_retried_before_choosing_a_review
             diffstat: "0 files changed".to_owned(),
             changed_lines: 0,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -1161,6 +1166,7 @@ async fn observation_bursts_do_not_drop_the_final_idle_edge() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     starting
@@ -1206,6 +1212,7 @@ async fn persistence_is_nonblocking_ordered_and_drained_on_shutdown() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     tokio::time::timeout(Duration::from_secs(5), open_gate.entered())
@@ -1319,6 +1326,7 @@ async fn a_review_open_at_a_restart_is_reported_by_the_next_daemon_and_keeps_its
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     let _first_request = manager.next().await;
@@ -1622,6 +1630,7 @@ async fn a_failed_review_clears_durable_active_state_and_the_prompt_hold() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -1747,6 +1756,7 @@ async fn a_clean_reviewer_report_resolves_the_review() {
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
 
@@ -1934,6 +1944,7 @@ async fn open_a_review_to_its_first_poll(
             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
             changed_lines: 1,
             files: Vec::new(),
+            merged_in: Vec::new(),
         }],
     }));
     let (_, _, reply) = manager
@@ -2476,6 +2487,7 @@ async fn a_findings_verdict_is_forwarded_without_a_manual_resolve() {
                             diffstat: "1 file changed, 1 insertion(+)".to_owned(),
                             changed_lines: 1,
                             files: Vec::new(),
+                            merged_in: Vec::new(),
                         }],
                     }),
                     ReviewerAction::Start { .. } => Ok(ReviewerOutcome::Started(Box::new(

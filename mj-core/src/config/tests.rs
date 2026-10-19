@@ -768,7 +768,11 @@ fn unconstrained_enforcement_splits_acp_modes_from_launch_controls() {
     );
     assert_eq!(
         muse.launch_argument(),
-        Some(("MUSE_SERVE_ARGS", "--disable-sandbox"))
+        Some(LaunchArgument {
+            variable: "MUSE_SERVE_ARGS",
+            word: "--disable-sandbox",
+            present: true,
+        })
     );
     assert_eq!(
         muse.staged_setting().map(|setting| setting.value),
@@ -803,7 +807,14 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
         muse.launch_environment(),
         Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
     );
-    assert_eq!(muse.launch_argument(), None);
+    assert_eq!(
+        muse.launch_argument(),
+        Some(LaunchArgument {
+            variable: "MUSE_SERVE_ARGS",
+            word: "--disable-sandbox",
+            present: false,
+        })
+    );
     assert_eq!(
         muse.staged_setting().map(|setting| setting.value),
         Some(":ask-me")
@@ -816,6 +827,53 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
             "{kind:?}"
         );
     }
+}
+
+// Hard-won: #1278: guardian Muse kept a stale --disable-sandbox in MUSE_SERVE_ARGS
+#[test]
+fn muse_sandbox_word_converges_with_each_policy_and_keeps_user_flags() {
+    let mut environment = BTreeMap::from([(
+        "MUSE_SERVE_ARGS".to_owned(),
+        "--trust-workspace  --disable-sandbox --log-level debug".to_owned(),
+    )]);
+    let serve_args =
+        |environment: &BTreeMap<String, String>| environment.get("MUSE_SERVE_ARGS").cloned();
+
+    HarnessKind::Muse
+        .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut environment)
+        .unwrap();
+    assert_eq!(
+        serve_args(&environment).as_deref(),
+        Some("--trust-workspace --log-level debug")
+    );
+    HarnessKind::Muse
+        .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+        .unwrap();
+    assert_eq!(
+        serve_args(&environment).as_deref(),
+        Some("--trust-workspace --log-level debug --disable-sandbox")
+    );
+    HarnessKind::Muse
+        .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut environment)
+        .unwrap();
+    assert_eq!(
+        serve_args(&environment).as_deref(),
+        Some("--trust-workspace --log-level debug")
+    );
+
+    // A variable that held only the sandbox word is removed, not left empty.
+    let mut environment = BTreeMap::new();
+    HarnessKind::Muse
+        .configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
+        .unwrap();
+    assert_eq!(
+        serve_args(&environment).as_deref(),
+        Some("--disable-sandbox")
+    );
+    HarnessKind::Muse
+        .configure_execution_environment(ExecutionPolicy::ConfiguredApprovals, &mut environment)
+        .unwrap();
+    assert_eq!(serve_args(&environment), None);
 }
 
 #[test]

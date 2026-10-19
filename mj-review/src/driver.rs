@@ -223,6 +223,7 @@ impl TurnReviewDriver {
                             root: delta.root.clone(),
                             baseline_tree: baseline_tree.clone(),
                             capture_tree: delta.current_tree.clone(),
+                            merged_in: delta.merged_in.clone(),
                         })
                 })
                 .collect(),

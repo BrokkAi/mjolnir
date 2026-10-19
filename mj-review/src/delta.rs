@@ -1,11 +1,13 @@
 //! What a turn changed: capturing it in the worker, and describing it to the
 //! reviewing agents.
 //!
-//! The review target is a pair of Git tree ids per repository -- the baseline
+//! The review target is a pair of Git ids per repository -- the baseline
 //! recorded when the last review completed, and a capture taken the moment the
-//! turn finished -- plus the unified diff between them. Tree ids are content
-//! ids, so a baseline stays valid across a daemon restart, a harness swap, and
-//! a cross-harness resume.
+//! turn finished -- plus the unified diff between them. Each id names a tree and
+//! the HEAD it was taken at; the diff starts from the baseline with whatever
+//! history the turn merged in folded into it, so it shows the turn's own work.
+//! The ids are content ids, so a baseline stays valid across a daemon restart,
+//! a harness swap, and a cross-harness resume.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -188,6 +190,7 @@ mod tests {
             diffstat: summary.diffstat(),
             changed_lines: summary.changed_line_count(),
             files: Vec::new(),
+            merged_in: Vec::new(),
         }
     }
 

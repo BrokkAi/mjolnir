@@ -1,6 +1,6 @@
 use super::*;
 
-use super::test_fixtures::grok_session;
+use super::test_fixtures::{grok_session, native_cwd, native_fixture};
 
 fn container_template() -> mj_core::config::ContainerTemplate {
     mj_core::config::ContainerTemplate {
@@ -157,16 +157,12 @@ fn session_targets_keep_a_cwd_repository_under_a_temporary_directory() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn codex_extracts_only_completed_file_changes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rollout.jsonl");
     fs::write(
             &path,
-            concat!(
+            native_fixture(concat!(
                 r#"{"type":"session_meta","payload":{"cwd":"/work/app","history_mode":"paginated"}}"#,
                 "\n",
                 r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"text":"edit"}]}}}"#,
@@ -175,24 +171,23 @@ fn codex_extracts_only_completed_file_changes() {
                 "\n",
                 r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","status":"failed","changes":{"/work/b.txt":{"type":"add"}}}}}"#,
                 "\n",
-            ),
+            )),
         )
         .unwrap();
     let transcript = read_codex_transcript(&path).unwrap();
-    assert_eq!(transcript.edited_paths, [PathBuf::from("/work/a.txt")]);
+    assert_eq!(
+        transcript.edited_paths,
+        [PathBuf::from(native_cwd("/work/a.txt"))]
+    );
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn claude_prefers_file_history_and_accepts_successful_edit_fallback() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
     fs::write(
             &path,
-            concat!(
+            native_fixture(concat!(
                 r#"{"type":"user","cwd":"/work/app","message":{"content":"edit"}}"#,
                 "\n",
                 r#"{"type":"file-history-delta","trackingPath":"src/lib.rs","backup":{"realParentDir":"/work/app/src"}}"#,
@@ -201,14 +196,14 @@ fn claude_prefers_file_history_and_accepts_successful_edit_fallback() {
                 "\n",
                 r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"ok","content":"done"},{"type":"tool_result","tool_use_id":"bad","is_error":true,"content":"failed"}]}}"#,
                 "\n",
-            ),
+            )),
         )
         .unwrap();
     let transcript = read_claude_transcript(&path).unwrap();
     assert_eq!(
         transcript.edited_paths,
         [
-            PathBuf::from("/work/app/src/lib.rs"),
+            PathBuf::from(native_cwd("/work/app/src/lib.rs")),
             PathBuf::from("relative.txt")
         ]
     );
@@ -524,16 +519,12 @@ fn import_safety_reports_dirty_roots_and_non_git_omissions() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn projects_jsonl_projects_user_and_assistant_text_in_source_order() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
     fs::write(
             &path,
-            concat!(
+            native_fixture(concat!(
                 r#"{"type":"user","cwd":"/work/app","message":{"content":"<mj-project-memory>private</mj-project-memory>\nfirst prompt"}}"#,
                 "\n",
                 r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"first reply"}]}}"#,
@@ -546,12 +537,12 @@ fn projects_jsonl_projects_user_and_assistant_text_in_source_order() {
                 "\n",
                 r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"second "},{"type":"text","text":"reply"}]}}"#,
                 "\n",
-            ),
+            )),
         )
         .unwrap();
 
     let transcript = read_claude_transcript(&path).unwrap();
-    assert_eq!(transcript.cwd, PathBuf::from("/work/app"));
+    assert_eq!(transcript.cwd, PathBuf::from(native_cwd("/work/app")));
     assert_eq!(
         transcript
             .events
@@ -741,10 +732,6 @@ fn isolated_local_source_import_resolves_the_checkout_network_remote() {
 /// is Mjolnir's, not a prompt the user typed.
 // Hard-won: b5ae15db: Codex titled a new session from hidden project memory instead of the user prompt.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
     let uri = mj_core::relay::HIDDEN_PROMPT_CONTEXT_URI;
     let context = format!(
@@ -768,10 +755,10 @@ fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
     let path = directory.path().join("rollout.jsonl");
     fs::write(
         &path,
-        format!(
+        native_fixture(&format!(
             "{}\n{record}\n",
             r#"{"type":"session_meta","payload":{"session_id":"019feb6c-5ffc-7c12-ad99-bdeaeb6be79d","cwd":"/work/app","history_mode":"paginated"}}"#
-        ),
+        )),
     )
     .unwrap();
 
@@ -1061,23 +1048,19 @@ fn stop_sequence_claude_import_produces_idle_raw_project_session() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn codex_paginated_import_ignores_compaction_artifacts() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rollout.jsonl");
     fs::write(
             &path,
-            concat!(
+            native_fixture(concat!(
                 r#"{"type":"session_meta","payload":{"cwd":"/work/app","history_mode":"paginated"}}"#,
                 "\n",
                 r#"{"type":"response_item","payload":{"type":"compaction","encrypted_content":"opaque"}}"#,
                 "\n",
                 r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"prompt after compaction"}]}}}"#,
                 "\n",
-            ),
+            )),
         )
         .unwrap();
     let transcript = read_codex_transcript(&path).unwrap();
@@ -1628,16 +1611,12 @@ fn claude_listing_uses_native_all_projects_limit() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn kimi_wire_projects_user_prompt_and_text_without_thought() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir_all(directory.path().join("agents/main")).unwrap();
     fs::write(
         directory.path().join("state.json"),
-        r#"{"workDir":"/work/app"}"#,
+        native_fixture(r#"{"workDir":"/work/app"}"#),
     )
     .unwrap();
     let wire_path = directory.path().join("agents/main/wire.jsonl");
@@ -1662,7 +1641,7 @@ fn kimi_wire_projects_user_prompt_and_text_without_thought() {
             .timestamp_millis();
 
     let transcript = read_kimi_transcript(directory.path()).unwrap();
-    assert_eq!(transcript.cwd, PathBuf::from("/work/app"));
+    assert_eq!(transcript.cwd, PathBuf::from(native_cwd("/work/app")));
     assert!(matches!(
         &transcript.events[0].event,
         WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
@@ -1696,10 +1675,6 @@ fn kimi_wire_projects_user_prompt_and_text_without_thought() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn grok_chat_history_projects_prompts_thoughts_and_replies() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1718,7 +1693,7 @@ fn grok_chat_history_projects_prompts_thoughts_and_replies() {
         r#"{"type":"assistant","content":"second reply","model_id":"grok-4.6"}"#,
         "\n",
     );
-    let session = grok_session(directory.path(), "/work/app", history);
+    let session = grok_session(directory.path(), &native_cwd("/work/app"), history);
     let expected_fallback = DateTime::<Utc>::from(
         fs::metadata(session.join("chat_history.jsonl"))
             .unwrap()
@@ -1729,7 +1704,7 @@ fn grok_chat_history_projects_prompts_thoughts_and_replies() {
 
     let transcript = read_grok_transcript(&session).unwrap();
 
-    assert_eq!(transcript.cwd, PathBuf::from("/work/app"));
+    assert_eq!(transcript.cwd, PathBuf::from(native_cwd("/work/app")));
     assert!(matches!(
         &transcript.events[0].event,
         WorkerEvent::PromptAccepted { text, .. } if text == "first prompt"
@@ -1768,10 +1743,6 @@ fn grok_chat_history_projects_prompts_thoughts_and_replies() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn grok_reasoning_and_message_chunks_keep_their_own_update_kinds() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1782,7 +1753,7 @@ fn grok_reasoning_and_message_chunks_keep_their_own_update_kinds() {
         r#"{"type":"assistant","content":"done"}"#,
         "\n",
     );
-    let session = grok_session(directory.path(), "/work/app", history);
+    let session = grok_session(directory.path(), &native_cwd("/work/app"), history);
 
     let transcript = read_grok_transcript(&session).unwrap();
 
@@ -1803,10 +1774,6 @@ fn grok_reasoning_and_message_chunks_keep_their_own_update_kinds() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn grok_compaction_before_recoverable_history_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1815,7 +1782,7 @@ fn grok_compaction_before_recoverable_history_is_refused() {
         r#"{"type":"user","content":[{"type":"text","text":"carry on"}]}"#,
         "\n",
     );
-    let session = grok_session(directory.path(), "/work/app", history);
+    let session = grok_session(directory.path(), &native_cwd("/work/app"), history);
 
     let error = read_grok_transcript(&session).unwrap_err();
 
@@ -1826,10 +1793,6 @@ fn grok_compaction_before_recoverable_history_is_refused() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn grok_edited_paths_need_a_completed_search_replace_call() {
     let directory = tempfile::tempdir().unwrap();
     let history = concat!(
@@ -1842,7 +1805,11 @@ fn grok_edited_paths_need_a_completed_search_replace_call() {
         r#"{"type":"tool_result","tool_call_id":"call-3","content":"ok"}"#,
         "\n",
     );
-    let session = grok_session(directory.path(), "/work/app", history);
+    let session = grok_session(
+        directory.path(),
+        &native_cwd("/work/app"),
+        &native_fixture(history),
+    );
 
     let transcript = read_grok_transcript(&session).unwrap();
 
@@ -1850,7 +1817,7 @@ fn grok_edited_paths_need_a_completed_search_replace_call() {
     // and a read is not an edit.
     assert_eq!(
         transcript.edited_paths,
-        [PathBuf::from("/work/app/src/lib.rs")]
+        [PathBuf::from(native_cwd("/work/app/src/lib.rs"))]
     );
 }
 
@@ -1939,10 +1906,6 @@ fn kimi_locator_retains_its_native_session_directory_prefix() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn kimi_listing_matches_native_index_visibility_and_title() {
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("sessions/project");
@@ -1956,18 +1919,20 @@ fn kimi_listing_matches_native_index_visibility_and_title() {
     }
     fs::write(
         visible.join("state.json"),
-        r#"{"workDir":"/work/native","title":"Generated","customTitle":"Native custom title"}"#,
+        native_fixture(
+            r#"{"workDir":"/work/native","title":"Generated","customTitle":"Native custom title"}"#,
+        ),
     )
     .unwrap();
     fs::write(
         archived.join("state.json"),
-        r#"{"workDir":"/work/app","title":"Archived","archived":true}"#,
+        native_fixture(r#"{"workDir":"/work/app","title":"Archived","archived":true}"#),
     )
     .unwrap();
     let index = [
-        json!({"sessionId":"session_visible","sessionDir":visible,"workDir":"/work/index"}),
-        json!({"sessionId":"session_archived","sessionDir":archived,"workDir":"/work/app"}),
-        json!({"sessionId":"session_deleted","sessionDir":deleted,"workDir":"/work/app"}),
+        json!({"sessionId":"session_visible","sessionDir":visible,"workDir":native_cwd("/work/index")}),
+        json!({"sessionId":"session_archived","sessionDir":archived,"workDir":native_cwd("/work/app")}),
+        json!({"sessionId":"session_deleted","sessionDir":deleted,"workDir":native_cwd("/work/app")}),
         json!({"sessionId":"session_deleted","deleted":true}),
     ]
     .into_iter()
@@ -1980,7 +1945,7 @@ fn kimi_listing_matches_native_index_visibility_and_title() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].native_session_id, "session_visible");
     assert_eq!(listed[0].title, "Native custom title");
-    assert_eq!(listed[0].cwd, PathBuf::from("/work/native"));
+    assert_eq!(listed[0].cwd, PathBuf::from(native_cwd("/work/native")));
 }
 
 fn agent_text(event: &WorkerEvent) -> Option<String> {
@@ -2256,10 +2221,6 @@ fn codex_lookup_by_id_reports_a_directory_it_cannot_read() {
 
 // Hard-won: c72b6322: a named Kimi session omitted by its index was wrongly reported as missing.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1294: the transcript fixture records a POSIX working directory"
-)]
 fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
     let directory = tempfile::tempdir().unwrap();
     let session = directory
@@ -2269,7 +2230,7 @@ fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
     fs::create_dir_all(&session).unwrap();
     fs::write(
         session.join("state.json"),
-        r#"{"workDir":"/work/app","title":"Unindexed","archived":true}"#,
+        native_fixture(r#"{"workDir":"/work/app","title":"Unindexed","archived":true}"#),
     )
     .unwrap();
     fs::write(directory.path().join("session_index.jsonl"), "").unwrap();
@@ -2284,7 +2245,7 @@ fn kimi_lookup_by_id_finds_a_session_the_index_hides() {
         located.native_session_id,
         format!("session_{NAMED_LOOKUP_ID}")
     );
-    assert_eq!(located.cwd, PathBuf::from("/work/app"));
+    assert_eq!(located.cwd, PathBuf::from(native_cwd("/work/app")));
 }
 
 #[cfg(unix)]

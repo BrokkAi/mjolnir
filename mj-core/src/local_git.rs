@@ -197,10 +197,16 @@ pub fn canonical_repository(path: &Path) -> Result<PathBuf> {
         );
     }
     let root = String::from_utf8(output.stdout).context("decode Git repository root")?;
-    let root = PathBuf::from(root.trim());
-    let root = std::fs::canonicalize(&root)
-        .with_context(|| format!("canonicalize local repository {}", root.display()))?;
-    main_worktree_root(&root)
+    main_worktree_root(&canonical_git_output_path(Path::new(root.trim()))?)
+}
+
+/// A path on this machine that Git printed, in the one spelling local
+/// repository paths are stored and compared in: what `fs::canonicalize`
+/// returns. Git for Windows prints `C:/Users/...`, which names the same
+/// directory as canonicalize's `\\?\C:\Users\...` but never compares equal.
+pub fn canonical_git_output_path(path: &Path) -> Result<PathBuf> {
+    std::fs::canonicalize(path)
+        .with_context(|| format!("canonicalize local repository path {}", path.display()))
 }
 
 /// Map a repository top level to the top level of its main working tree.
@@ -254,8 +260,16 @@ pub fn resolve_git_path(directory: &Path, output: &str) -> Result<PathBuf> {
         !value.is_empty() && !value.starts_with("--") && lines.next().is_none(),
         "Git returned an invalid path: {output:?}"
     );
+    // Git separates its output with `/`. Parsed on its own rather than joined
+    // as text: inside a verbatim `\\?\` directory `/` is a file name character.
+    let value = Path::new(value);
+    let base = if value.has_root() {
+        None
+    } else {
+        Some(directory.components())
+    };
     let mut common = PathBuf::new();
-    for component in directory.join(value).components() {
+    for component in base.into_iter().flatten().chain(value.components()) {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {

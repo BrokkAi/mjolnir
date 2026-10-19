@@ -271,25 +271,32 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// `relative` under `root` with this platform's separators, the spelling
+    /// discovery produces and the index stores as text.
+    fn under(root: &Path, relative: &str) -> PathBuf {
+        relative
+            .split('/')
+            .fold(root.to_path_buf(), |path, part| path.join(part))
+    }
+
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
-    )]
     fn native_discovery_indexes_parents_and_never_hands_children_to_the_parser() {
         let _held = testing::lock();
         let (_index, mut connection) = testing::isolated_index();
         let home = tempfile::tempdir().unwrap();
         let codex = home.path().join("codex");
         let claude = home.path().join("claude");
-        let parent = codex.join("sessions/rollout-parent.jsonl");
-        let legacy = codex.join("sessions/rollout-legacy.jsonl");
-        let exec_parent = codex.join("sessions/rollout-exec.jsonl");
-        let child = codex.join("sessions/rollout-child.jsonl");
-        let native_parent = claude.join("projects/project/parent.jsonl");
-        let sdk_parent = claude.join("projects/project/sdk-parent.jsonl");
-        let sidechain = claude.join("projects/project/sidechain.jsonl");
-        let nested = claude.join("projects/project/parent/subagents/agent-child.jsonl");
+        let parent = under(&codex, "sessions/rollout-parent.jsonl");
+        let legacy = under(&codex, "sessions/rollout-legacy.jsonl");
+        let exec_parent = under(&codex, "sessions/rollout-exec.jsonl");
+        let child = under(&codex, "sessions/rollout-child.jsonl");
+        let native_parent = under(&claude, "projects/project/parent.jsonl");
+        let sdk_parent = under(&claude, "projects/project/sdk-parent.jsonl");
+        let sidechain = under(&claude, "projects/project/sidechain.jsonl");
+        let nested = under(
+            &claude,
+            "projects/project/parent/subagents/agent-child.jsonl",
+        );
         let message = "\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"quokka transcript\"}}\n";
         write(
             &parent,

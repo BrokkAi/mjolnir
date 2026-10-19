@@ -12,6 +12,8 @@ pub struct RepositoryCapture {
     pub root: PathBuf,
     pub baseline_tree: String,
     pub capture_tree: String,
+    /// Commits the turn merged in, whose changes the baseline already holds.
+    pub merged_in: Vec<String>,
 }
 
 /// Everything about a review pass needed to construct its prompt.
@@ -85,8 +87,16 @@ pub fn review_prompt(job: &ReviewJob) -> String {
         .iter()
         .map(|repository| {
             let root = repository.root.display().to_string();
+            let merged = if repository.merged_in.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\nThe base already includes the changes this turn merged in from {}, so the diff shows only the turn's own work. Where a merged change conflicted with already-reviewed code, the base holds the conflict markers and the diff shows how the turn resolved them.",
+                    repository.merged_in.join(", ")
+                )
+            };
             format!(
-                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff {} {}`",
+                "Repository root: {root}\nRun this exact command: `git -C {} diff --no-ext-diff {} {}`{merged}",
                 shell_quote(&root),
                 repository.baseline_tree,
                 repository.capture_tree
@@ -153,6 +163,7 @@ mod tests {
                 root: PathBuf::from("/workspace/app"),
                 baseline_tree: "baseline123".into(),
                 capture_tree: "capture456".into(),
+                merged_in: Vec::new(),
             }],
             changed_files: "Repository: /workspace/app -- 1 file changed\n  +1 -1 src/lib.rs"
                 .into(),
@@ -173,6 +184,14 @@ mod tests {
         assert!(prompt.contains("Fix the retry behavior"));
         assert!(!prompt.contains("diff --git"));
         assert!(!prompt.contains("<workspace_diff"));
+        assert!(!prompt.contains("merged in from"));
+
+        let mut merged = job();
+        merged.repositories[0].merged_in = vec!["upstream1".into(), "upstream2".into()];
+        let prompt = review_prompt(&merged);
+        assert!(prompt.contains(
+            "diff --no-ext-diff baseline123 capture456`\nThe base already includes the changes this turn merged in from upstream1, upstream2"
+        ));
     }
 
     #[test]

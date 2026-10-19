@@ -381,10 +381,12 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
     Ok(!refs.is_empty())
 }
 
-/// Ref pointing at the tree a completed review advanced its baseline to.
+/// Ref pinning the review point a completed review advanced its baseline to,
+/// for a repository's main worktree; a linked worktree has its own (see
+/// [`review_baseline_ref`]).
 ///
-/// This is the one ref Mjolnir writes into a user's repository, and it earns
-/// its place. A baseline is HEAD's tree plus one blob for each file the
+/// This is the one kind of ref Mjolnir writes into a user's repository, and it
+/// earns its place. A baseline is HEAD's tree plus one blob for each file the
 /// checkout was already dirty with; HEAD's own objects are reachable from the
 /// branch, but those few blobs are reachable from nothing else. A session can
 /// run for days between reviews, so without this ref an ordinary `git gc`
@@ -392,130 +394,652 @@ pub fn has_origin_refs(runner: &dyn GitCommandRunner, repository: &Path) -> Resu
 /// baseline, and that repository's next review would report no coverage
 /// instead of the turn's work.
 ///
+/// The ref names a review point (see [`record_review_point`]); one pinned by an
+/// earlier release names the bare tree. Either resolves with `^{tree}`.
+///
 /// A capture taken during a review is deliberately not pinned. It is consumed
 /// inside that review, and if the review completes it is pinned here as the
 /// new baseline.
 pub const REVIEW_BASELINE_REF: &str = "refs/hel/review-baseline";
 
-/// What a capture starts from before the changed paths are staged on top.
-#[derive(Debug, Clone, Copy)]
-pub enum CaptureBase<'a> {
-    /// The committed tree. Used for a session's starting baseline.
-    Head,
-    /// An earlier capture's tree. Used for a review of one turn's work.
-    Tree(&'a str),
+/// Where linked worktrees pin their review baselines, as
+/// `refs/hel/worktrees/<name>/review-baseline`.
+const WORKTREE_REVIEW_PINS: &str = "refs/hel/worktrees/";
+
+/// The ref that pins the review baseline of the worktree `repository` is.
+///
+/// Every linked worktree shares its repository's refs, so a single name would
+/// give every session on a repository one pin: a new session would take
+/// another's baseline as its own, and each completed review would unpin the
+/// others'. The main worktree keeps [`REVIEW_BASELINE_REF`]; a linked worktree
+/// pins under its name in the repository's `worktrees` directory, which Git
+/// keeps a valid ref component. The pins stay in the shared namespace because
+/// `git gc` keeps only the objects that the worktree it runs in reaches through
+/// `refs/worktree/`; a pin there would protect nothing from a gc run elsewhere.
+pub fn review_baseline_ref(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
+    let (git_dir, common_dir) = git_directories(runner, repository)?;
+    if same_directory(&git_dir, &common_dir)? {
+        return Ok(REVIEW_BASELINE_REF.to_owned());
+    }
+    let name = git_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("name the worktree of {}", git_dir.display()))?;
+    Ok(format!("{WORKTREE_REVIEW_PINS}{name}/review-baseline"))
 }
 
-/// Records `base` plus the current content of `paths` as a Git tree object and
-/// returns its id.
+/// Deletes the review pins of linked worktrees the repository no longer has,
+/// and returns the refs it deleted.
 ///
-/// This is deliberately proportional to `paths` and not to the working tree.
-/// The scratch index is built with `read-tree`, so it has no stat cache and
-/// `git add` reads exactly the paths it is given: every other tracked file is
-/// carried over from `base` without being opened, and an untracked file that
-/// is not named is simply not in the tree. A capture of the whole working tree
-/// would instead hash every untracked file in it, which in a large workspace is
-/// hundreds of thousands of files and object writes.
-///
-/// The staging runs against a scratch index file named by `GIT_INDEX_FILE`, so
-/// the repository's real index, working tree and HEAD are untouched: after this
-/// call `git status` reports exactly what it reported before. `git add -A` with
-/// a pathspec records a deletion as a deletion, and honours the ignore rules,
-/// which is what makes two captures comparable as "what the agent changed".
-pub fn capture_paths(
+/// A pin outlives its worktree, so without this every session in a managed
+/// worktree would leave a ref behind in the user's repository. The pins are
+/// listed before the worktrees, and each is deleted only while it still holds
+/// the listed value. A worktree exists before anything can pin for it, so a
+/// pin that was listed belongs to a worktree that the later listing still
+/// shows unless it was removed; a pin rewritten in between is left alone.
+pub fn remove_departed_worktree_pins(
     runner: &dyn GitCommandRunner,
     repository: &Path,
-    base: CaptureBase<'_>,
-    paths: &[PathBuf],
-) -> Result<String> {
-    let git_dir = git_text(runner, repository, ["rev-parse", "--absolute-git-dir"])
-        .context("locate the Git directory for a review capture")?;
-    let index = tempfile::Builder::new()
-        .prefix("hel-review-index-")
-        .tempfile_in(&git_dir)
-        .with_context(|| format!("create a scratch Git index in {git_dir}"))?;
-    // Git wants to create the index itself; an existing empty file is read as
-    // a corrupt index.
-    let index_path = index.into_temp_path();
-    std::fs::remove_file(&index_path).ok();
-    let scratch = [(
-        OsString::from("GIT_INDEX_FILE"),
-        index_path.as_os_str().to_os_string(),
-    )];
-    let tree = (|| -> Result<String> {
-        let base = match base {
-            CaptureBase::Tree(tree) => tree.to_owned(),
-            CaptureBase::Head => {
-                let head = run_git(
-                    runner,
-                    repository,
-                    ["rev-parse", "--verify", "--quiet", "HEAD"],
-                    &[],
-                )?;
-                ensure!(
-                    head.status == 0 || head.status == 1,
-                    "{}",
-                    git_failure("resolve capture HEAD", &head)
-                );
-                // An unborn branch has no tree to start from.
-                if head.status == 0 {
-                    "HEAD".to_owned()
-                } else {
-                    "--empty".to_owned()
-                }
-            }
+) -> Result<Vec<String>> {
+    let pins = git_text(
+        runner,
+        repository,
+        [
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            WORKTREE_REVIEW_PINS,
+        ],
+    )
+    .context("list the worktree review pins")?;
+    if pins.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, common_dir) = git_directories(runner, repository)?;
+    let worktrees = match std::fs::read_dir(common_dir.join("worktrees")) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<BTreeSet<_>>>()
+            .context("list the repository's worktrees")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(error) => return Err(error).context("list the repository's worktrees"),
+    };
+    let mut removed = Vec::new();
+    for line in pins.lines() {
+        let Some((object, reference)) = line.split_once(' ') else {
+            continue;
         };
+        let Some(name) = reference
+            .strip_prefix(WORKTREE_REVIEW_PINS)
+            .and_then(|rest| rest.strip_suffix("/review-baseline"))
+        else {
+            continue;
+        };
+        if worktrees.contains(std::ffi::OsStr::new(name)) {
+            continue;
+        }
+        git_bytes(
+            runner,
+            repository,
+            ["update-ref", "-d", reference, object],
+            &[],
+            "delete a departed worktree's review pin",
+        )?;
+        removed.push(reference.to_owned());
+    }
+    Ok(removed)
+}
+
+/// The worktree's own Git directory and the repository's common one, which
+/// are the same directory in the main worktree.
+fn git_directories(runner: &dyn GitCommandRunner, repository: &Path) -> Result<(PathBuf, PathBuf)> {
+    let output = git_text(
+        runner,
+        repository,
+        ["rev-parse", "--absolute-git-dir", "--git-common-dir"],
+    )
+    .context("locate the Git directories")?;
+    let mut lines = output.lines();
+    let (Some(git_dir), Some(common_dir)) = (lines.next(), lines.next()) else {
+        bail!("git rev-parse named no common directory: {output}");
+    };
+    // `--git-common-dir` may be relative to the directory Git ran in.
+    Ok((PathBuf::from(git_dir), repository.join(common_dir)))
+}
+
+fn same_directory(left: &Path, right: &Path) -> Result<bool> {
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))
+    };
+    Ok(canonical(left)? == canonical(right)?)
+}
+
+/// A scratch index of its own for one capture or merge, named to Git through
+/// `GIT_INDEX_FILE`, so the repository's real index, working tree and HEAD are
+/// never touched.
+///
+/// The file lives in the Git directory and is removed when this is dropped, on
+/// every exit path; leaving it behind would grow the Git directory by one file
+/// per review.
+struct ScratchIndex {
+    path: tempfile::TempPath,
+}
+
+impl ScratchIndex {
+    fn create(runner: &dyn GitCommandRunner, repository: &Path) -> Result<Self> {
+        let git_dir = git_text(runner, repository, ["rev-parse", "--absolute-git-dir"])
+            .context("locate the Git directory for a review capture")?;
+        let index = tempfile::Builder::new()
+            .prefix("hel-review-index-")
+            .tempfile_in(&git_dir)
+            .with_context(|| format!("create a scratch Git index in {git_dir}"))?;
+        // Git wants to create the index itself; an existing empty file is read
+        // as a corrupt index.
+        let path = index.into_temp_path();
+        std::fs::remove_file(&path).ok();
+        Ok(Self { path })
+    }
+
+    fn env(&self) -> Vec<(OsString, OsString)> {
+        vec![(
+            OsString::from("GIT_INDEX_FILE"),
+            self.path.as_os_str().to_os_string(),
+        )]
+    }
+
+    fn run(
+        &self,
+        runner: &dyn GitCommandRunner,
+        repository: &Path,
+        arguments: impl IntoIterator<Item = impl Into<OsString>>,
+        stdin: Vec<u8>,
+        action: &str,
+    ) -> Result<Vec<u8>> {
         git_success(
             runner,
             repository,
             GitCommand {
-                arguments: ["read-tree", &base]
-                    .into_iter()
-                    .map(OsString::from)
-                    .collect(),
-                stdin: Vec::new(),
-                env: scratch.to_vec(),
+                arguments: arguments.into_iter().map(Into::into).collect(),
+                stdin,
+                env: self.env(),
             },
-            "initialize the scratch index",
+            action,
+        )
+    }
+
+    fn write_tree(&self, runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
+        let output = self.run(
+            runner,
+            repository,
+            ["write-tree"],
+            Vec::new(),
+            "write the review capture tree",
         )?;
-        if !paths.is_empty() {
-            let mut arguments: Vec<OsString> = ["add", "-A", "--"]
+        let tree = trim_output(&output, "decode the review capture tree id")?;
+        ensure!(!tree.is_empty(), "git write-tree produced no tree id");
+        Ok(tree)
+    }
+}
+
+/// Records `start` plus the current content of `paths` as a Git tree object
+/// and returns its id. `start` is the commit or tree to begin from, or `None`
+/// for an unborn branch, which has no tree to start from.
+///
+/// This is deliberately proportional to `paths` and not to the working tree.
+/// The scratch index is built with `read-tree`, so it has no stat cache and
+/// `git add` reads exactly the paths it is given: every other tracked file is
+/// carried over from `start` without being opened, and an untracked file that
+/// is not named is simply not in the tree. A capture of the whole working tree
+/// would instead hash every untracked file in it, which in a large workspace is
+/// hundreds of thousands of files and object writes.
+///
+/// After this call `git status` reports exactly what it reported before.
+/// `git add -A` with a pathspec records a deletion as a deletion, and honours
+/// the ignore rules, which is what makes two captures comparable as "what the
+/// agent changed".
+pub fn capture_paths(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    start: Option<&str>,
+    paths: &[PathBuf],
+) -> Result<String> {
+    let scratch = ScratchIndex::create(runner, repository)?;
+    scratch.run(
+        runner,
+        repository,
+        ["read-tree", start.unwrap_or("--empty")],
+        Vec::new(),
+        "initialize the scratch index",
+    )?;
+    if !paths.is_empty() {
+        scratch.run(
+            runner,
+            repository,
+            ["add", "-A", "--"]
                 .into_iter()
                 .map(OsString::from)
-                .collect();
-            arguments.extend(paths.iter().map(|path| path.as_os_str().to_os_string()));
-            git_success(
+                .chain(paths.iter().map(OsString::from)),
+            Vec::new(),
+            "stage the changed paths into a scratch index",
+        )?;
+    }
+    scratch.write_tree(runner, repository)
+}
+
+/// The tree a review point names, the commit HEAD was at when it was taken,
+/// and the session that took it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewPoint {
+    pub tree: String,
+    /// `None` for an unborn branch, and for a bare tree id pinned by a release
+    /// that did not record HEAD.
+    pub head: Option<String>,
+    /// `None` for a point recorded by a release that did not record it.
+    pub session: Option<String>,
+}
+
+/// Records `tree`, the HEAD it was captured at, and the session that captured
+/// it as one Git object, and returns its id: the id a review hands on as its
+/// capture and later pins as a baseline.
+///
+/// The object is an annotated tag pointing at the tree, with `head <commit>`
+/// and `session <id>` as its message. The tree and its commit are one fact, so
+/// they travel as one id, and the session lets a pin say whose it is. A tag is
+/// still a tree-ish, so `git diff`, `git ls-tree` and `^{tree}` read it exactly
+/// as they read the bare tree ids earlier releases stored, with no change to
+/// the controller's records or the relay protocol. Unlike a commit, a tag
+/// pointing at a tree does not appear in `git log --all`. The fixed tagger and
+/// date make equal captures equal ids.
+pub fn record_review_point(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    tree: &str,
+    head: Option<&str>,
+    session: &str,
+) -> Result<String> {
+    let mut tag = format!(
+        "object {tree}\ntype tree\ntag mjolnir-review-point\n\
+         tagger Mjolnir <mjolnir@localhost> 0 +0000\n\n"
+    );
+    if let Some(head) = head {
+        tag.push_str(&format!("head {head}\n"));
+    }
+    tag.push_str(&format!("session {session}\n"));
+    let output = git_bytes(
+        runner,
+        repository,
+        ["mktag"],
+        tag.as_bytes(),
+        "record the review point",
+    )?;
+    trim_output(&output, "decode the review point id")
+}
+
+/// Reads a review point, or a bare tree id from an earlier release as a point
+/// with no recorded HEAD.
+pub fn read_review_point(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    id: &str,
+) -> Result<ReviewPoint> {
+    let kind = git_bytes(
+        runner,
+        repository,
+        ["cat-file", "-t", id],
+        &[],
+        "read the review point type",
+    )?;
+    match trim_output(&kind, "decode the review point type")?.as_str() {
+        "tree" => Ok(ReviewPoint {
+            tree: id.to_owned(),
+            head: None,
+            session: None,
+        }),
+        "tag" => {
+            let tag = git_bytes(
                 runner,
                 repository,
-                GitCommand {
-                    arguments,
-                    stdin: Vec::new(),
-                    env: scratch.to_vec(),
-                },
-                "stage the changed paths into a scratch index",
+                ["cat-file", "tag", id],
+                &[],
+                "read the review point",
             )?;
+            let tag = String::from_utf8_lossy(&tag);
+            let (header, message) = tag.split_once("\n\n").unwrap_or((&tag, ""));
+            let field = |text: &str, name: &str| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .map(str::to_owned)
+            };
+            ensure!(
+                field(header, "type ").as_deref() == Some("tree"),
+                "review point {id} does not name a tree"
+            );
+            let tree = field(header, "object ")
+                .with_context(|| format!("review point {id} names no object"))?;
+            Ok(ReviewPoint {
+                tree,
+                head: field(message, "head "),
+                session: field(message, "session "),
+            })
         }
-        let output = runner.run(
+        other => bail!("review point {id} is a {other}, not a tag or tree"),
+    }
+}
+
+/// Three-way merges `theirs` into `ours` from their common `ancestor` (`None`
+/// for histories with no common ancestor) and returns the resulting tree.
+///
+/// This is Git's resolve strategy run in a scratch index, and it works on any
+/// Git a worker may have; `git merge-tree --write-tree` needs Git 2.38.
+/// `read-tree -m` settles every path only one side changed. A path both sides
+/// changed as regular files is merged with `git merge-file`, which leaves
+/// conflict markers where the changes overlap. Any other path both sides
+/// changed, and a file `merge-file` cannot merge such as a binary one, keeps
+/// `ours`. There is no rename detection: a file `theirs` renamed while `ours`
+/// changed it ends up under both names.
+pub fn merge_trees(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    ancestor: Option<&str>,
+    ours: &str,
+    theirs: &str,
+) -> Result<String> {
+    let ancestor = match ancestor {
+        Some(ancestor) => ancestor.to_owned(),
+        None => empty_tree_id(runner, repository)?,
+    };
+    let scratch = ScratchIndex::create(runner, repository)?;
+    scratch.run(
+        runner,
+        repository,
+        [
+            "read-tree",
+            "-m",
+            "-i",
+            "--aggressive",
+            &ancestor,
+            ours,
+            theirs,
+        ],
+        Vec::new(),
+        "merge the trees into a scratch index",
+    )?;
+    let unmerged = scratch.run(
+        runner,
+        repository,
+        ["ls-files", "--unmerged", "-z"],
+        Vec::new(),
+        "list the paths both sides changed",
+    )?;
+    let conflicts = unmerged_paths(&unmerged)?;
+    if !conflicts.is_empty() {
+        let resolutions = resolve_conflicts(runner, repository, &conflicts)?;
+        scratch.run(
+            runner,
             repository,
-            &GitCommand {
-                arguments: vec![OsString::from("write-tree")],
-                stdin: Vec::new(),
-                env: scratch.to_vec(),
-            },
+            ["update-index", "-z", "--index-info"],
+            resolutions,
+            "record the resolved paths",
         )?;
-        ensure!(
-            output.status == 0,
-            "{}",
-            git_failure("write the review capture tree", &output)
-        );
-        trim_output(&output.stdout, "decode the review capture tree id")
-    })();
-    // The scratch index is this capture's alone; leaving it behind would grow
-    // the git dir by one file per review.
-    let _ = std::fs::remove_file(&index_path);
-    let tree = tree?;
-    ensure!(!tree.is_empty(), "git write-tree produced no tree id");
-    Ok(tree)
+    }
+    scratch.write_tree(runner, repository)
+}
+
+/// One index entry: its mode and object id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexEntry {
+    mode: String,
+    object: String,
+}
+
+impl IndexEntry {
+    fn is_regular_file(&self) -> bool {
+        self.mode == "100644" || self.mode == "100755"
+    }
+}
+
+/// A path `read-tree -m` left unmerged, with its ancestor, ours and theirs
+/// entries (index stages 1, 2 and 3); a side without the path has no entry.
+#[derive(Debug, Default)]
+struct UnmergedPath {
+    path: Vec<u8>,
+    stages: [Option<IndexEntry>; 3],
+}
+
+impl UnmergedPath {
+    fn ours(&self) -> Option<&IndexEntry> {
+        self.stages[1].as_ref()
+    }
+
+    /// The ancestor, ours and theirs entries when both sides changed the path
+    /// as regular files, which is the one kind of conflict merged by content.
+    fn content_merge(&self) -> Option<(Option<&IndexEntry>, &IndexEntry, &IndexEntry)> {
+        let [ancestor, Some(ours), Some(theirs)] = &self.stages else {
+            return None;
+        };
+        let ancestor = ancestor.as_ref().filter(|entry| entry.is_regular_file());
+        (ours.is_regular_file() && theirs.is_regular_file()).then_some((ancestor, ours, theirs))
+    }
+
+    /// The `update-index -z --index-info` record that settles this path at
+    /// `entry`, or removes it when there is none.
+    fn index_info(&self, entry: Option<&IndexEntry>) -> Vec<u8> {
+        let mut record = match entry {
+            Some(entry) => format!("{} {}\t", entry.mode, entry.object).into_bytes(),
+            // Mode 0 removes every stage of the path. Git checks the object id
+            // only for the repository's id length, which any stage shows.
+            None => {
+                let length = self
+                    .stages
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map_or(40, |entry| entry.object.len());
+                format!("0 {}\t", "0".repeat(length)).into_bytes()
+            }
+        };
+        record.extend_from_slice(&self.path);
+        record.push(0);
+        record
+    }
+}
+
+/// Reads `git ls-files --unmerged -z`: `<mode> <object> <stage>\t<path>\0`,
+/// one record per stage, grouped by path.
+fn unmerged_paths(output: &[u8]) -> Result<Vec<UnmergedPath>> {
+    let mut paths: Vec<UnmergedPath> = Vec::new();
+    for record in output.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("an unmerged index entry has no path")?;
+        let fields = std::str::from_utf8(&record[..tab]).context("decode an unmerged entry")?;
+        let [mode, object, stage] = fields.split(' ').collect::<Vec<_>>()[..] else {
+            bail!("malformed unmerged index entry {fields:?}");
+        };
+        let stage: usize = stage.parse().context("parse an unmerged entry's stage")?;
+        ensure!((1..=3).contains(&stage), "unexpected index stage {stage}");
+        let path = &record[tab + 1..];
+        if paths.last().is_none_or(|last| last.path != path) {
+            paths.push(UnmergedPath {
+                path: path.to_vec(),
+                ..UnmergedPath::default()
+            });
+        }
+        paths.last_mut().expect("pushed above").stages[stage - 1] = Some(IndexEntry {
+            mode: mode.to_owned(),
+            object: object.to_owned(),
+        });
+    }
+    Ok(paths)
+}
+
+/// Settles every unmerged path and returns the `update-index -z --index-info`
+/// input that records the results.
+fn resolve_conflicts(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    conflicts: &[UnmergedPath],
+) -> Result<Vec<u8>> {
+    let blobs = read_blobs(
+        runner,
+        repository,
+        conflicts
+            .iter()
+            .filter_map(UnmergedPath::content_merge)
+            .flat_map(|(ancestor, ours, theirs)| ancestor.into_iter().chain([ours, theirs]))
+            .map(|entry| entry.object.as_str()),
+    )?;
+    let files = tempfile::tempdir().context("create a directory for merging conflicted files")?;
+    let mut index_info = Vec::new();
+    let mut merged = Vec::new();
+    for (number, conflict) in conflicts.iter().enumerate() {
+        let file = match conflict.content_merge() {
+            Some(sides) => merge_file(
+                runner,
+                repository,
+                &files.path().join(number.to_string()),
+                sides,
+                &blobs,
+            )?,
+            None => None,
+        };
+        match file {
+            Some(file) => merged.push((conflict, file)),
+            None => index_info.extend(conflict.index_info(conflict.ours())),
+        }
+    }
+    if merged.is_empty() {
+        return Ok(index_info);
+    }
+    let list = merged
+        .iter()
+        .flat_map(|(_, (_, file))| {
+            let mut line = file.as_os_str().as_encoded_bytes().to_vec();
+            line.push(b'\n');
+            line
+        })
+        .collect::<Vec<_>>();
+    let ids = git_bytes(
+        runner,
+        repository,
+        ["hash-object", "-w", "--no-filters", "--stdin-paths"],
+        &list,
+        "store the merged files",
+    )?;
+    let ids = std::str::from_utf8(&ids).context("decode the merged file ids")?;
+    let ids = ids.lines().collect::<Vec<_>>();
+    ensure!(
+        ids.len() == merged.len(),
+        "git hash-object stored {} of {} merged files",
+        ids.len(),
+        merged.len()
+    );
+    for ((conflict, (mode, _)), object) in merged.into_iter().zip(ids) {
+        let entry = IndexEntry {
+            mode,
+            object: object.to_owned(),
+        };
+        index_info.extend(conflict.index_info(Some(&entry)));
+    }
+    Ok(index_info)
+}
+
+/// Merges one file's three versions with `git merge-file` and returns the
+/// merged file and its mode, or `None` when Git cannot merge it, such as a
+/// binary file.
+fn merge_file(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    stem: &Path,
+    (ancestor, ours, theirs): (Option<&IndexEntry>, &IndexEntry, &IndexEntry),
+    blobs: &BTreeMap<String, Vec<u8>>,
+) -> Result<Option<(String, PathBuf)>> {
+    let write = |side: &str, entry: Option<&IndexEntry>| -> Result<OsString> {
+        let path = stem.with_extension(side);
+        let content = match entry {
+            Some(entry) => blobs
+                .get(&entry.object)
+                .with_context(|| format!("blob {} was not read", entry.object))?
+                .as_slice(),
+            None => &[],
+        };
+        std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
+        Ok(path.into_os_string())
+    };
+    let current = write("ours", Some(ours))?;
+    let mut arguments: Vec<OsString> = ["merge-file", "-q"]
+        .into_iter()
+        .chain(["-L", "reviewed", "-L", "ancestor", "-L", "merged in"])
+        .map(OsString::from)
+        .collect();
+    arguments.extend([
+        current.clone(),
+        write("ancestor", ancestor)?,
+        write("theirs", Some(theirs))?,
+    ]);
+    let output = runner.run(
+        repository,
+        &GitCommand {
+            arguments,
+            stdin: Vec::new(),
+            env: Vec::new(),
+        },
+    )?;
+    // The status is the number of conflicts, capped at 127; anything else is
+    // an error and leaves the file unmerged.
+    if !(0..=127).contains(&output.status) {
+        return Ok(None);
+    }
+    // A mode only one side changed takes that side's mode.
+    let mode = match ancestor {
+        Some(ancestor) if ancestor.mode == ours.mode => theirs.mode.clone(),
+        _ => ours.mode.clone(),
+    };
+    Ok(Some((mode, PathBuf::from(current))))
+}
+
+/// Reads blobs in one `git cat-file --batch`, keyed by object id.
+fn read_blobs<'a>(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    objects: impl Iterator<Item = &'a str>,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let objects = objects.collect::<BTreeSet<_>>();
+    if objects.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let request = objects
+        .iter()
+        .map(|object| format!("{object}\n"))
+        .collect::<String>();
+    let output = git_bytes(
+        runner,
+        repository,
+        ["cat-file", "--batch"],
+        request.as_bytes(),
+        "read the conflicted files",
+    )?;
+    // Each answer is `<id> <type> <size>\n<content>\n`, in request order.
+    let mut blobs = BTreeMap::new();
+    let mut rest = &output[..];
+    for object in objects {
+        let end = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .context("git cat-file --batch ended early")?;
+        let header = std::str::from_utf8(&rest[..end]).context("decode a cat-file header")?;
+        let size: usize = header
+            .rsplit(' ')
+            .next()
+            .and_then(|size| size.parse().ok())
+            .with_context(|| format!("git cat-file could not read {object}: {header}"))?;
+        let content = rest
+            .get(end + 1..end + 1 + size)
+            .context("git cat-file --batch output is truncated")?;
+        blobs.insert(object.to_owned(), content.to_vec());
+        rest = rest.get(end + 2 + size..).unwrap_or_default();
+    }
+    Ok(blobs)
 }
 
 /// Records the working tree, tracked and untracked alike, as a Git tree object
@@ -527,27 +1051,14 @@ pub fn capture_paths(
 /// out, because `git add -A` honours the ignore rules, which is what makes two
 /// captures comparable as "what the agent changed".
 pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -> Result<String> {
-    let git_dir = git_text(runner, repository, ["rev-parse", "--absolute-git-dir"])
-        .context("locate the Git directory for a review capture")?;
-    let index = tempfile::Builder::new()
-        .prefix("hel-review-index-")
-        .tempfile_in(&git_dir)
-        .with_context(|| format!("create a scratch Git index in {git_dir}"))?;
-    // Git wants to create the index itself; an existing empty file is read as
-    // a corrupt index.
-    let index_path = index.into_temp_path();
-    std::fs::remove_file(&index_path).ok();
-    let scratch = [(
-        OsString::from("GIT_INDEX_FILE"),
-        index_path.as_os_str().to_os_string(),
-    )];
+    let scratch = ScratchIndex::create(runner, repository)?;
     let real_index = git_text(
         runner,
         repository,
         ["rev-parse", "--path-format=absolute", "--git-path", "index"],
     )
     .context("locate the real Git index")?;
-    match std::fs::copy(&real_index, &index_path) {
+    match std::fs::copy(&real_index, &scratch.path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let head = run_git(
@@ -562,17 +1073,11 @@ pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -
                 git_failure("resolve capture HEAD", &head)
             );
             let base = if head.status == 0 { "HEAD" } else { "--empty" };
-            git_success(
+            scratch.run(
                 runner,
                 repository,
-                GitCommand {
-                    arguments: ["read-tree", base]
-                        .into_iter()
-                        .map(OsString::from)
-                        .collect(),
-                    stdin: Vec::new(),
-                    env: scratch.to_vec(),
-                },
+                ["read-tree", base],
+                Vec::new(),
                 "initialize the scratch index",
             )?;
         }
@@ -580,41 +1085,14 @@ pub fn capture_worktree_tree(runner: &dyn GitCommandRunner, repository: &Path) -
     }
     // `:/` names the whole working tree even when `repository` is a
     // subdirectory of its checkout; `.` would stage only that subdirectory.
-    let staged = git_success(
+    scratch.run(
         runner,
         repository,
-        GitCommand {
-            arguments: ["add", "-A", "--", ":/"]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            stdin: Vec::new(),
-            env: scratch.to_vec(),
-        },
+        ["add", "-A", "--", ":/"],
+        Vec::new(),
         "stage the working tree into a scratch index",
-    );
-    let tree = staged.and_then(|_| {
-        let output = runner.run(
-            repository,
-            &GitCommand {
-                arguments: vec![OsString::from("write-tree")],
-                stdin: Vec::new(),
-                env: scratch.to_vec(),
-            },
-        )?;
-        ensure!(
-            output.status == 0,
-            "{}",
-            git_failure("write the review capture tree", &output)
-        );
-        trim_output(&output.stdout, "decode the review capture tree id")
-    });
-    // The scratch index is this capture's alone; leaving it behind would grow
-    // the git dir by one file per review.
-    let _ = std::fs::remove_file(&index_path);
-    let tree = tree?;
-    ensure!(!tree.is_empty(), "git write-tree produced no tree id");
-    Ok(tree)
+    )?;
+    scratch.write_tree(runner, repository)
 }
 
 /// Points `reference` at `tree` so the capture survives garbage collection.

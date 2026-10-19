@@ -9,6 +9,26 @@ use serde_json::{Value, json};
 
 pub(crate) const MUSE_ID: &str = "01a08120-6536-7721-8ddf-e0df0e921c2c";
 
+/// `posix`, an absolute path such as `/work/app`, as a native harness on this
+/// machine records it. Import requires a working directory absolute here, and
+/// on Windows that takes a drive; `C:/` needs no escaping inside JSON.
+pub(crate) fn native_cwd(posix: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{posix}")
+    } else {
+        posix.to_owned()
+    }
+}
+
+/// `fixture` with every quoted `/work/...` path made native, as [`native_cwd`].
+pub(crate) fn native_fixture(fixture: &str) -> String {
+    if cfg!(windows) {
+        fixture.replace("\"/work/", "\"C:/work/")
+    } else {
+        fixture.to_owned()
+    }
+}
+
 /// Synthetic `chat_history.jsonl`, modeled on the shape Grok Build writes:
 /// internally tagged items, user content as typed parts, reasoning
 /// summaries beside the assistant turn, and `search_replace` tool calls

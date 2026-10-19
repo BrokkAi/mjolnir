@@ -1,10 +1,10 @@
 name: macOS
 
 # The one macOS job definition. ci.yml calls it for macOS-sensitive changes
-# (listed in .github/macos-ci-paths.txt), and macos-nightly.yml calls it every
-# night and on manual dispatch. Do not add workflow-level concurrency here: in
-# a called workflow, github.workflow is the caller's name, so the group would
-# collide with the caller's own.
+# (listed in .github/macos-ci-paths.txt) and on every release tag, and
+# nightly.yml calls it every night and on manual dispatch. Do not add
+# workflow-level concurrency here: in a called workflow, github.workflow is the
+# caller's name, so the group would collide with the caller's own.
 
 on:
   workflow_call: {}
