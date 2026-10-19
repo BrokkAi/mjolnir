@@ -327,7 +327,7 @@ mod tests {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             *byte = (state >> 24) as u8;
         }
-        for pixel in bytes.chunks_exact_mut(4) {
+        for pixel in bytes.as_chunks_mut::<4>().0 {
             pixel[3] = u8::MAX;
         }
         bytes

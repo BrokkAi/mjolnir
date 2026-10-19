@@ -29,6 +29,9 @@ pub const HARNESS_TURN_TEXT: &str = "Agent continued on its own";
 pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
 /// User replies within an existing turn, rather than prompts that start one.
 pub const ELICITATION_REPLY_ITEM_PREFIX: &str = "elicitation-reply:";
+/// Command ID prefix for another session's message delivered as a prompt,
+/// which the controller does for workers too old to take mailbox messages.
+pub const SESSION_MESSAGE_TURN_COMMAND_PREFIX: &str = "session-message-turn-";
 
 /// Where a tool's compact presentation source came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +511,29 @@ impl ChatEntry {
             || (self.role == ChatRole::System && self.text == SESSION_RESTART_TEXT)
     }
 
+    /// Whether this entry is a message the user wrote, including an answer
+    /// to an agent's question. Prompts that Hel submits on the user's behalf
+    /// are excluded: retries, automatic continuations, forwarded review
+    /// feedback, sub-agent notices, and another session's message delivered
+    /// as a turn. The rules match the ones authorization evidence uses to
+    /// leave out generated prompts.
+    pub fn is_user_authored(&self) -> bool {
+        if self.role != ChatRole::User || crate::continuation::is_generated_prompt_text(&self.text)
+        {
+            return false;
+        }
+        // An entry without a source is a prompt submitted from this client
+        // that the controller has not yet projected.
+        self.source.0.as_ref().is_none_or(|item| {
+            let command_id = item
+                .stable_id
+                .strip_prefix("user:")
+                .unwrap_or(&item.stable_id);
+            !crate::continuation::is_generated_prompt(command_id)
+                && !command_id.starts_with(SESSION_MESSAGE_TURN_COMMAND_PREFIX)
+        })
+    }
+
     pub fn plan(seq: u64, plan: Vec<PlanLine>) -> Self {
         Self {
             start_seq: seq,
@@ -898,6 +924,58 @@ mod tests {
             Some(id) => json!({"content": {"type": "text", "text": text}, "messageId": id}),
             None => json!({"content": {"type": "text", "text": text}}),
         }
+    }
+
+    fn sourced_user_entry(stable_id: &str, text: &str) -> ChatEntry {
+        let mut entry = ChatEntry::plain(1, ChatRole::User, text);
+        entry.source = TranscriptSource(Some(Arc::new(TranscriptItem {
+            stable_id: stable_id.into(),
+            position: 1,
+            latest_content_event_ordinal: None,
+            created_at_ms: 0,
+            last_changed_at_ms: 0,
+            body: TranscriptBody::User {
+                content: vec![json!({"type": "text", "text": text})],
+            },
+        })));
+        entry
+    }
+
+    #[test]
+    fn only_messages_the_user_wrote_are_user_authored() {
+        for (stable_id, text) in [
+            ("user:prompt-7", "fix the build"),
+            ("user:2", "a prompt recovered by position"),
+            ("elicitation-reply:9", "Yes"),
+        ] {
+            assert!(
+                sourced_user_entry(stable_id, text).is_user_authored(),
+                "{stable_id}"
+            );
+        }
+        assert!(ChatEntry::plain(1, ChatRole::User, "not yet projected").is_user_authored());
+        for (stable_id, text) in [
+            ("user:auto-continue-1-1", "Continue."),
+            ("user:quota-retry-4", "Continue."),
+            ("user:server-retry-5", "Continue."),
+            ("user:review-forward-2", "Review findings"),
+            ("user:subagent-input-3", "A sub-agent finished."),
+            (
+                "user:session-message-turn-8",
+                "Message from another session",
+            ),
+            ("user:prompt-9", "[HARNESS NOTE: summarize the request]"),
+            (
+                "user:prompt-10",
+                crate::continuation::PARENT_WAIT_PROMPT_TEXT,
+            ),
+        ] {
+            assert!(
+                !sourced_user_entry(stable_id, text).is_user_authored(),
+                "{stable_id}"
+            );
+        }
+        assert!(!ChatEntry::plain(1, ChatRole::Agent, "a reply").is_user_authored());
     }
 
     // Hard-won: ff088d42: A 15,000-chunk thought made daemon RSS grow from gigabytes of stored JSON into many gigabytes.

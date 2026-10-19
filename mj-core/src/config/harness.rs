@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{Environment, default_true, is_true, validate_id};
-use crate::codex_provider::CodexProvider;
+use crate::codex_provider::{BuiltInCodexProvider, CodexProvider, CodexProviderDefinition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -868,6 +868,22 @@ impl HarnessProfile {
         crate::codex_provider::codex_provider(&self.home, self.codex_profile.as_deref())
     }
 
+    /// The service this profile's harness sends model requests to.
+    pub fn model_service(&self) -> Result<ModelService> {
+        if let Some(service) = ModelService::of_harness(self.kind) {
+            return Ok(service);
+        }
+        Ok(match self.codex_provider()? {
+            None => ModelService::CodexBuiltIn(BuiltInCodexProvider::OpenAi),
+            Some(provider) => match provider.definition {
+                CodexProviderDefinition::BuiltIn(built_in) => ModelService::CodexBuiltIn(built_in),
+                CodexProviderDefinition::Custom(custom) => {
+                    ModelService::CodexCustom(normalized_base_url(&custom.base_url))
+                }
+            },
+        })
+    }
+
     /// The Codex configuration this profile runs with, as staged into every
     /// session home. `None` for another harness, or when there is none.
     pub fn codex_config(&self) -> Result<Option<String>> {
@@ -1124,6 +1140,45 @@ impl HarnessProfile {
             crate::refusal::Refusal::precondition(format!("profile {id:?}: {error:#}")).into()
         })
     }
+}
+
+/// The service a profile's harness sends model requests to, as far as
+/// Mjolnir tells services apart.
+///
+/// A native conversation can continue under another profile only on the same
+/// service. A Codex thread recorded against OpenAI holds items that only
+/// OpenAI interprets, such as encrypted reasoning, and names models that
+/// another provider does not offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelService {
+    /// The harness's own service. Mjolnir does not tell services apart within
+    /// a harness other than Codex.
+    Harness(HarnessKind),
+    /// One of Codex's built-in providers. A profile that names no
+    /// `model_provider` uses OpenAI.
+    CodexBuiltIn(BuiltInCodexProvider),
+    /// A Codex custom provider, identified by its base URL. The table name
+    /// is each profile's own choice, so two profiles can call one service by
+    /// different names.
+    CodexCustom(String),
+}
+
+impl ModelService {
+    /// The service every profile of `kind` uses, when the harness alone
+    /// decides it. `None` for Codex, whose profiles each choose a provider.
+    pub fn of_harness(kind: HarnessKind) -> Option<Self> {
+        (kind != HarnessKind::Codex).then_some(Self::Harness(kind))
+    }
+}
+
+/// A base URL in the form `url` writes it, without a trailing slash, so
+/// spelling differences in the host or a final `/` do not name a different
+/// service. Text that is not a URL is compared as written.
+fn normalized_base_url(base_url: &str) -> String {
+    url::Url::parse(base_url)
+        .map_or_else(|_| base_url.to_owned(), |url| url.to_string())
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 /// How a profile proves it may talk to its service.

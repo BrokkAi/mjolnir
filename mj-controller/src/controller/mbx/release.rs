@@ -851,15 +851,33 @@ mod tests {
         );
     }
 
+    // A wall-clock deadline cannot be ordered after `mbx clean` starts: under
+    // load the script spends longer than a short deadline on its probes, and
+    // the shell is killed before it launches mbx. Cancellation ends the wait
+    // through the same check as the deadline, so the release is cancelled only
+    // once the fake mbx reports that it started, and mbx finishes only after
+    // the release has stopped waiting for it.
     #[test]
-    fn mbx_clean_survives_its_release_deadline_and_is_not_confirmed() {
+    fn mbx_clean_survives_its_interrupted_release_and_is_not_confirmed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Instant;
+
         let sandbox = Sandbox::new(true);
         std::fs::create_dir_all(sandbox.path("tmp")).unwrap();
+        let started = sandbox.path("started");
+        let proceed = sandbox.path("proceed");
+        // The wait for `proceed` is bounded so a failed test leaves no
+        // process behind.
         std::fs::write(
             sandbox.path("bin/mbx"),
             format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'mbx {MBX_VERSION}'; exit 0; }}\n\
-                 sleep 2.3\nprintf done > '{}'/completed\nprintf 'mbx output\\n'\nprintf 'mbx warning\\n' >&2\n",
+                 : > '{}'\nwaited=0\n\
+                 while [ ! -e '{}' ] && [ \"$waited\" -lt 3000 ]; do sleep 0.02; waited=$((waited + 1)); done\n\
+                 printf done > '{}'/completed\nprintf 'mbx output\\n'\nprintf 'mbx warning\\n' >&2\n",
+                started.display(),
+                proceed.display(),
                 sandbox.path("tmp").display()
             ),
         )
@@ -876,14 +894,28 @@ mod tests {
             .env
             .insert("TMPDIR".into(), sandbox.path("tmp").display().to_string());
 
-        let error = CancellableProcessExecutor::new(std::sync::Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
-        ))
-        .execute_cleanup_with_timeout(&command, Duration::from_millis(100))
-        .unwrap_err();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let canceller = {
+            let cancelled = cancelled.clone();
+            let started = started.clone();
+            std::thread::spawn(move || {
+                // Stops early if the release returned without starting mbx.
+                while !started.exists() && !cancelled.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                cancelled.store(true, Ordering::Release);
+            })
+        };
+        let result = CancellableProcessExecutor::new(cancelled.clone())
+            .execute_cleanup_with_timeout(&command, RELEASE_TIMEOUT);
+        cancelled.store(true, Ordering::Release);
+        canceller.join().unwrap();
+        std::fs::write(&proceed, "").unwrap();
 
+        assert!(started.exists(), "the release never started mbx clean");
+        let error = result.unwrap_err();
         assert!(cleanup_was_interrupted(&error), "{error:#}");
-        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while (!sandbox.path("tmp/completed").exists()
             || std::fs::read_dir(sandbox.path("tmp")).unwrap().count() != 1)
             && std::time::Instant::now() < deadline

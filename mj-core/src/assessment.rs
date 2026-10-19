@@ -412,8 +412,10 @@ impl ContextHistory {
 
     /// Drop the oldest user message together with any assistant entries
     /// before the next user message, which answered it or an earlier one.
-    /// The history becomes incomplete. Returns false when no user entry
-    /// remains.
+    /// The history stays complete: every user message still in it is whole,
+    /// and the window is the newest part of the conversation, so a later
+    /// instruction is never dropped before an earlier one. Returns false
+    /// when no user entry remains.
     fn evict_oldest_exchange(&mut self) -> bool {
         let Some(first) = self.messages.iter().position(|m| m.role == "user") else {
             return false;
@@ -427,7 +429,6 @@ impl ContextHistory {
             self.assistant_history_omitted = true;
         }
         self.messages.drain(..end);
-        self.authorization_complete = false;
         true
     }
 
@@ -456,8 +457,8 @@ impl ContextHistory {
         }
         let text = trim_middle(&text);
         // The byte budget is for user text alone. When it is full, the oldest
-        // exchanges give way so the current request is always present; the
-        // history is then incomplete, which already rules out continuation.
+        // exchanges give way so the current request is always present. Only
+        // a message that cannot be carried whole makes the history incomplete.
         while (self.user_bytes() + text.len() > USER_BYTES || self.user_count() >= MAX_MESSAGES)
             && self.evict_oldest_exchange()
         {}
@@ -868,15 +869,15 @@ mod tests {
             .expect("kept");
         assert!(pasted.text.len() < MESSAGE_HEAD_BYTES + MESSAGE_TAIL_BYTES + 100);
         assert!(pasted.text.contains("bytes omitted from the middle"));
-        // Only the user byte budget itself makes the history incomplete, and
-        // then the oldest exchanges give way, never the current request.
+        // A full user budget gives up the oldest exchanges, never the current
+        // request, and the window of whole messages stays complete.
         for i in 0..6 {
             context.user(
                 &format!("paste-{i}"),
                 &[ContentBlock::Text(TextContent::new("y".repeat(USER_BYTES)))],
             );
         }
-        assert!(!context.authorization_complete);
+        assert!(context.authorization_complete);
         assert!(context.user_bytes() <= USER_BYTES);
         assert!(!context.messages.iter().any(|m| m.id == "user:user-command"));
         assert!(context.messages.iter().any(|m| m.id == "user:paste-5"));
@@ -926,7 +927,7 @@ mod tests {
             "u-one-too-many",
             &[ContentBlock::Text(TextContent::new("step 256"))],
         );
-        assert!(!context.authorization_complete);
+        assert!(context.authorization_complete);
         assert_eq!(context.user_count(), MAX_MESSAGES);
         assert!(!context.messages.iter().any(|m| m.id == "user:u0"));
         assert_eq!(

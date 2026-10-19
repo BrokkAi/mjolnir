@@ -26,7 +26,8 @@ pub use scope::{
 };
 pub use scrollbar::{
     ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, centered_offset, centered_unit_offset,
-    clamp_offset_to_last_page, render_scrollbar, scrollbar_geometry,
+    clamp_offset_to_last_page, render_marked_scrollbar, render_scrollbar, scrollbar_geometry,
+    scrollbar_mark_row,
 };
 pub use text_layout::{
     Truncate, input_cursor_visual_position, input_visual_rows, set_input_cursor, truncate_to_cells,

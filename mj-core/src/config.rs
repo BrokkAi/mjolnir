@@ -1047,6 +1047,41 @@ impl Config {
         self.profiles.get(id).filter(|profile| profile.enabled)
     }
 
+    /// Whether a session recorded under `source_profile_id`, running
+    /// `source_kind`, keeps its native conversation when it continues under
+    /// `destination_profile_id`. When it does not, a resume or move gives a
+    /// fresh native session the transcript as compacted text.
+    ///
+    /// The harness must match, and so must the model service, because two
+    /// Codex profiles can point at different providers. Continuity needs
+    /// evidence: when the source profile is gone or now runs another harness,
+    /// only a harness whose service does not depend on the profile continues.
+    pub fn native_continuity(
+        &self,
+        source_kind: HarnessKind,
+        source_profile_id: &str,
+        destination_profile_id: &str,
+    ) -> Result<bool> {
+        let destination = self
+            .profiles
+            .get(destination_profile_id)
+            .with_context(|| format!("unknown profile {destination_profile_id:?}"))?;
+        if destination.kind != source_kind {
+            return Ok(false);
+        }
+        if destination_profile_id == source_profile_id {
+            return Ok(true);
+        }
+        let source_service = match self.profiles.get(source_profile_id) {
+            Some(source) if source.kind == source_kind => Some(source.model_service()?),
+            _ => ModelService::of_harness(source_kind),
+        };
+        let Some(source_service) = source_service else {
+            return Ok(false);
+        };
+        Ok(source_service == destination.model_service()?)
+    }
+
     /// Check what this file itself declares. Whether a profile or target can
     /// start depends on harness homes, secrets and variables outside it, and
     /// is asked of [`HarnessProfile::ensure_ready`] and

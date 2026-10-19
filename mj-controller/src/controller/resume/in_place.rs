@@ -14,8 +14,8 @@ use mj_core::state::{MaterializedSession, SessionState};
 use mj_transcript::projection::materialized_session_from_canonical;
 
 use super::{
-    Controller, RestoreIntoTarget, WorkerRootReset, backend_locator, native_continuity_preserved,
-    now, projection_rebuild_required, restore_projection_after_failed_resume,
+    Controller, RestoreIntoTarget, WorkerRootReset, backend_locator, now,
+    projection_rebuild_required, restore_projection_after_failed_resume,
     utility_handoff_while_cancellable, verify_resume_checkpoint,
 };
 use crate::controller::removable_profile_root;
@@ -25,6 +25,7 @@ use crate::targets::CommandExecutor;
 struct InPlaceRestorePlan {
     verified_archive: super::VerifiedResumeArchive,
     profile: mj_core::config::HarnessProfile,
+    native_continuity: bool,
     target_template: mj_core::config::TargetTemplate,
     previous_profile_root: String,
 }
@@ -209,6 +210,7 @@ impl Controller {
             let InPlaceRestorePlan {
                 verified_archive,
                 profile,
+                native_continuity,
                 target_template,
                 previous_profile_root,
             } = plan;
@@ -223,8 +225,6 @@ impl Controller {
                     .for_launch(profile.kind, false)
                     .parent_role()
                     .is_some();
-            let native_continuity =
-                native_continuity_preserved(profile.kind, archive_manifest.session.harness_kind);
             let (discard_queued_prompts, replay_queue) = match mode {
                 // A move admits its queue only after destination readiness.
                 InPlaceRestoreMode::Move => (true, false),
@@ -455,9 +455,15 @@ impl Controller {
                 )
             })?;
         let previous_profile_root = removable_profile_root(&backend, session_id, source_profile);
+        let native_continuity = self.config.native_continuity(
+            verified_archive.manifest.session.harness_kind,
+            &verified_archive.manifest.session.profile_id,
+            profile_id,
+        )?;
         Ok(InPlaceRestorePlan {
             verified_archive,
             profile,
+            native_continuity,
             target_template,
             previous_profile_root,
         })

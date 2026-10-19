@@ -364,8 +364,10 @@ fn pulse_capture_loop(server: Option<&CString>, stop: &AtomicBool, tx: &AudioSen
             bail!("pa_simple_read failed with PulseAudio error {error_code}: {description}");
         }
         let samples = bytes
-            .chunks_exact(2)
-            .map(|pair| i16::from_ne_bytes([pair[0], pair[1]]) as f32 / i16::MAX as f32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_ne_bytes(*pair) as f32 / i16::MAX as f32)
             .collect();
         tx.try_send(Ok(samples));
     }

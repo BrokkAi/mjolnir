@@ -1815,26 +1815,6 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
     );
 }
 
-/// Resuming into a different harness cannot reload the archived native
-/// session, so the transcript is handed over as the first context instead.
-#[test]
-fn only_the_same_harness_keeps_native_continuity_on_resume() {
-    use mj_core::config::HarnessKind;
-
-    assert!(super::native_continuity_preserved(
-        HarnessKind::Codex,
-        HarnessKind::Codex
-    ));
-    assert!(super::native_continuity_preserved(
-        HarnessKind::Claude,
-        HarnessKind::Claude
-    ));
-    assert!(!super::native_continuity_preserved(
-        HarnessKind::Claude,
-        HarnessKind::Codex
-    ));
-}
-
 #[cfg(unix)]
 const FRESH_NATIVE_RESUME_CHILD: &str = "MJ_TEST_FRESH_NATIVE_RESUME_CHILD";
 

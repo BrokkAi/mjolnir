@@ -11,11 +11,15 @@ pub fn evidence(session: &MaterializedSession) -> Result<ContinuationEvidence> {
 pub fn evidence_from_items(
     items: impl IntoIterator<Item = Result<std::sync::Arc<mj_core::state::TranscriptItem>>>,
 ) -> Result<ContinuationEvidence> {
-    let mut messages = Vec::new();
+    let mut messages: Vec<EvidenceMessage> = Vec::new();
     let mut user_bytes = 0;
     let mut assistant_bytes = 0;
     let mut assistant_history_omitted = false;
-    // Whole recent assistant messages, all real user messages. Reverse then
+    // Where the window ends when the budget stops it: replies older than the
+    // oldest kept user message answered an evicted one and go with it.
+    let mut window = 0;
+    // Whole recent assistant messages and the newest whole real user messages
+    // that fit the budget, the same window the worker keeps live. Reverse then
     // restore chronological order; never turn a clipped instruction into consent.
     for item in items {
         let item = item?;
@@ -45,11 +49,13 @@ pub fn evidence_from_items(
                 ) {
                     break;
                 }
+                let text = mj_core::assessment::trim_middle(&text);
+                if user_bytes + text.len() > mj_core::continuation::USER_BYTES {
+                    assistant_history_omitted |= messages.len() > window;
+                    messages.truncate(window);
+                    break;
+                }
                 user_bytes += text.len();
-                ensure!(
-                    user_bytes <= mj_core::continuation::USER_BYTES,
-                    "user history exceeds evidence budget"
-                );
                 ("user", text)
             }
             TranscriptBody::Agent { chunks, streaming } => {
@@ -72,12 +78,19 @@ pub fn evidence_from_items(
             _ => continue,
         };
         if !text.trim().is_empty() {
-            ensure!(messages.len() < 256, "too many continuation messages");
+            if messages.len() >= mj_core::assessment::MAX_MESSAGES {
+                assistant_history_omitted |= messages.len() > window;
+                messages.truncate(window);
+                break;
+            }
             messages.push(EvidenceMessage {
                 id: item.stable_id.clone(),
                 role: role.into(),
                 text,
             });
+            if role == "user" {
+                window = messages.len();
+            }
         }
     }
     messages.reverse();

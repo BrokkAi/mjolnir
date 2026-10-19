@@ -132,11 +132,7 @@ impl RuntimeHistory {
                 .flat_map(SnapshotMap::values)
             {
                 let view_id = summary.agent.view_id();
-                sync_key(
-                    &mut live.native_agents,
-                    &view_id,
-                    Some(summary).filter(|_| now),
-                );
+                sync_key(&mut live.native_agents, &view_id, now.then_some(summary));
             }
             pending.extend(
                 children

@@ -476,7 +476,7 @@ fn recovery_for(
 }
 
 #[tokio::test]
-async fn quota_classification_survives_exhausted_allowance_and_oversized_authorization() {
+async fn quota_classification_survives_exhausted_allowance_and_unusable_authorization() {
     let mut remote = spawn_remote_session_manager().unwrap();
     remote.targets.send_replace(vec![RelaySessionTarget {
         session_id: "one".into(),
@@ -537,9 +537,11 @@ async fn quota_classification_survives_exhausted_allowance_and_oversized_authori
         http_status: None,
         reset_at: None,
     });
+    // Authorization that depends on non-text content is unusable, so only
+    // the quota message is classified.
     let item = Arc::make_mut(&mut s.materialized.transcript[0]);
     item.body = TranscriptBody::User {
-        content: vec![json!({"type":"text", "text":"x".repeat(40_000)})],
+        content: vec![json!({"type":"image", "data":"", "mimeType":"image/png"})],
     };
     remote
         .publisher
