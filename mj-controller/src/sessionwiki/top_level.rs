@@ -295,6 +295,7 @@ mod tests {
             .fold(root.to_path_buf(), |path, part| path.join(part))
     }
 
+    // Hard-won: 92ae7603: Mjolnir read compressed Codex rollout headers as plain text.
     #[test]
     fn compressed_codex_rollouts_index_parents_and_exclude_children() {
         let _held = testing::lock();
@@ -363,6 +364,7 @@ mod tests {
         assert_eq!(rows[0].native_id.as_deref(), Some(parent_id));
     }
 
+    // Hard-won: 92ae7603: the native filter dropped the history adapter's store methods.
     #[test]
     fn codex_history_survives_preparation_and_prunes_native_and_owned_children() {
         let _held = testing::lock();
@@ -446,6 +448,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 92ae7603: a history key or moved rollout made every listing fail.
     #[test]
     fn missing_sources_use_indexed_kind_and_keep_claude_subagent_paths_hidden() {
         let _held = testing::lock();
