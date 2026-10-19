@@ -4,5 +4,5 @@
 # without a deliberate bump here. Keep `[workspace.package] rust-version` in
 # `Cargo.toml` in step with this channel.
 [toolchain]
-channel = "1.96.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

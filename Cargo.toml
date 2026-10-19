@@ -25,7 +25,7 @@ categories = ["development-tools", "command-line-utilities"]
 # not just what edition 2024 implies. Declaring it makes `cargo install` on an
 # older compiler fail with a clear version message instead of mid-build
 # errors. Bump it in lockstep with `rust-toolchain.toml`.
-rust-version = "1.96"
+rust-version = "1.99"
 
 # Cargo requires a published path dependency to carry a registry version and
 # does not let that version inherit from `[workspace.package]`, so the number
