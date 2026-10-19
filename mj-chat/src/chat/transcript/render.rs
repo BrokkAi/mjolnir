@@ -80,7 +80,15 @@ pub(crate) fn render_transcript(
         top,
         chat.anchor.clone(),
     ) {
-        render_scrollbar(frame, geometry);
+        render_marked_scrollbar(
+            frame,
+            geometry,
+            chat.transcript_scrollbar
+                .marks
+                .iter()
+                .map(|mark| mark.track_row),
+            Style::default().fg(theme::palette().secondary),
+        );
     }
 }
 
@@ -551,6 +559,65 @@ fn render_entry_tracking(
     out
 }
 
+/// Rows an entry is likely to take at `width`, worked out from its text
+/// without rendering it. The scrollbar places entries that have not been
+/// drawn yet with this, and the real count replaces it once one is drawn.
+///
+/// It follows the layout [`render_entry_tracking`] draws: a header row, the
+/// body wrapped beside the role gutter, and a blank row. Markdown and word
+/// wrapping can make the real count differ by a few rows.
+pub(super) fn estimated_entry_rows(
+    entry: &ChatEntry,
+    width: usize,
+    mode: TranscriptRenderMode,
+    tool: ToolView,
+) -> usize {
+    if mode == TranscriptRenderMode::Rich {
+        let events = mailbox_event_lines(entry.role, entry.text.lines());
+        if !events.is_empty() {
+            // One header per closed event, then the blank row.
+            return events.len() + 1;
+        }
+        if let ToolView::Inline { output_lines } = tool
+            && entry.role == ChatRole::Tool
+        {
+            // The call on one row, its clipped output, then the blank row.
+            return inline_output(entry, output_lines).len() + 2;
+        }
+    }
+    // The body is wrapped as plain text by the same wrapper that draws it, so
+    // only Markdown formatting is left out of the count.
+    let content_width = width.saturating_sub(ROLE_GUTTER_WIDTH).max(1);
+    let wrapped = |logical: LogicalLine| {
+        wrap_styled_line(logical.line, content_width, logical.continuation_indent).len()
+    };
+    let body: usize = if entry.role == ChatRole::Plan {
+        entry
+            .plan
+            .iter()
+            .map(|item| {
+                wrapped(LogicalLine {
+                    line: Line::raw(format!("{} {}", theme::glyphs().pending, item.text)),
+                    continuation_indent: 2,
+                    links: Vec::new(),
+                })
+            })
+            .sum()
+    } else {
+        let source = entry_body_source(entry, mode, false);
+        let source = match mode {
+            // Markdown drops the newline that ends the last paragraph.
+            TranscriptRenderMode::Rich => source.trim_end_matches('\n'),
+            TranscriptRenderMode::Raw => &source,
+        };
+        raw_lines(source, Style::default())
+            .into_iter()
+            .map(wrapped)
+            .sum()
+    };
+    body + 2
+}
+
 /// Render event headers and report bodies together so clicks and selection
 /// use the exact row positions that were drawn.
 pub(super) fn render_mailbox_entry(
@@ -749,13 +816,6 @@ pub(super) fn entry_logical_lines(
             .collect();
     }
 
-    let mut details = entry
-        .tool_content
-        .iter()
-        .chain(&entry.tool_diffstats)
-        .chain(&entry.tool_locations)
-        .cloned()
-        .collect::<Vec<_>>();
     if expanded_tool
         && mode == TranscriptRenderMode::Rich
         && let Some(input) = &entry.tool_input
@@ -772,13 +832,37 @@ pub(super) fn entry_logical_lines(
         );
         lines.extend(raw_lines(&input, visual.body_style));
         lines.extend(markdown_lines(
-            &details.join("\n"),
+            &tool_details(entry).join("\n"),
             visual.body_style,
             visual.header_style,
             width,
         ));
         return lines;
     }
+    let source = entry_body_source(entry, mode, expanded_tool);
+    match mode {
+        TranscriptRenderMode::Rich => {
+            markdown_lines(&source, visual.body_style, visual.header_style, width)
+        }
+        TranscriptRenderMode::Raw => raw_lines(&source, visual.body_style),
+    }
+}
+
+/// The tool output, diff stats, and locations an entry's details show.
+fn tool_details(entry: &ChatEntry) -> Vec<String> {
+    entry
+        .tool_content
+        .iter()
+        .chain(&entry.tool_diffstats)
+        .chain(&entry.tool_locations)
+        .cloned()
+        .collect()
+}
+
+/// The text an entry's body is drawn from. Plans and an opened tool call
+/// with arguments draw their own bodies and do not use it.
+fn entry_body_source(entry: &ChatEntry, mode: TranscriptRenderMode, expanded_tool: bool) -> String {
+    let mut details = tool_details(entry);
     if mode == TranscriptRenderMode::Raw
         && let Some(input) = &entry.tool_input
     {
@@ -815,12 +899,7 @@ pub(super) fn entry_logical_lines(
     if entry.leading_omitted {
         source.insert_str(0, "[… earlier content omitted …]\n");
     }
-    match mode {
-        TranscriptRenderMode::Rich => {
-            markdown_lines(&source, visual.body_style, visual.header_style, width)
-        }
-        TranscriptRenderMode::Raw => raw_lines(&source, visual.body_style),
-    }
+    source
 }
 
 /// The mark a transcript header draws for one entry, in the symbol set in

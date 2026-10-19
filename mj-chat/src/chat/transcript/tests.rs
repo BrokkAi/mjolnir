@@ -787,11 +787,12 @@ fn shows(rows: &[String], needle: &str) -> bool {
     rows.iter().any(|row| row.contains(needle))
 }
 
-/// The message bodies on screen, ignoring the title and composer chrome.
+/// The message bodies on screen, ignoring the title and composer chrome and
+/// the scrollbar, whose marks move as the conversation grows.
 fn visible_messages(rows: &[String]) -> Vec<String> {
     rows.iter()
-        .filter(|row| row.contains("│ message "))
-        .cloned()
+        .filter_map(|row| row.split_once("│ message "))
+        .map(|(_, body)| format!("message {}", body.split_whitespace().next().unwrap_or("")))
         .collect()
 }
 
@@ -2897,6 +2898,239 @@ fn scrollbar_mouse(chat: &mut ChatState, kind: MouseEventKind, column: u16, row:
         row,
         modifiers: KeyModifiers::NONE,
     });
+}
+
+fn long_reply(seq: u64) -> ChatEntry {
+    ChatEntry::plain(
+        seq,
+        ChatRole::Agent,
+        (0..100).map(|i| format!("line {i}\n")).collect::<String>(),
+    )
+}
+
+/// The user's messages with long replies, and an automatic continuation
+/// between them that is a user-role prompt the user did not write.
+fn marked_scrollbar_chat() -> ChatState {
+    let mut generated = ChatEntry::plain(3, ChatRole::User, "Continue.");
+    let mut item = (*user_transcript_item(3, "Continue.")).clone();
+    item.stable_id = "user:auto-continue-1-1".into();
+    generated.source = mj_core::transcript::TranscriptSource(Some(Arc::new(item)));
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries = vec![
+        ChatEntry::plain(1, ChatRole::User, "first request"),
+        long_reply(2),
+        generated,
+        long_reply(4),
+        ChatEntry::plain(5, ChatRole::User, "second request"),
+        long_reply(6),
+        long_reply(7),
+    ];
+    chat
+}
+
+fn track_symbol(rows: &[String], geometry: ScrollbarGeometry, row: u16) -> String {
+    rows[usize::from(row)]
+        .chars()
+        .nth(usize::from(geometry.track.x))
+        .map(String::from)
+        .unwrap_or_default()
+}
+
+#[test]
+fn scrollbar_marks_messages_the_user_wrote_but_not_generated_prompts() {
+    let mut chat = marked_scrollbar_chat();
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    let entries: Vec<usize> = chat
+        .transcript_scrollbar
+        .user_messages
+        .iter()
+        .map(|message| message.entry)
+        .collect();
+    assert_eq!(entries, vec![0, 4]);
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
+    let marks = chat.transcript_scrollbar.marks.clone();
+    assert!(!marks.is_empty());
+    for row in geometry.track.y..geometry.track.bottom() {
+        let expected = if row >= geometry.thumb.y && row < geometry.thumb.bottom() {
+            theme::glyphs().scroll_thumb
+        } else if marks.iter().any(|mark| mark.track_row == row) {
+            theme::glyphs().scroll_mark
+        } else {
+            theme::glyphs().scroll_track
+        };
+        assert_eq!(
+            track_symbol(&rows, geometry, row),
+            expected,
+            "track row {row}"
+        );
+    }
+}
+
+#[test]
+fn clicking_a_scrollbar_mark_opens_its_message() {
+    use crossterm::event::MouseButton::Left;
+    let mut chat = marked_scrollbar_chat();
+    drawn_transcript(&mut chat, 60, 24);
+    // Neither message has been drawn yet, so both marks sit at estimated rows.
+    let marks = chat.transcript_scrollbar.marks.clone();
+    let entries: Vec<usize> = marks.iter().map(|mark| mark.entry).collect();
+    assert_eq!(entries, vec![0, 4]);
+    for (mark, text) in marks.iter().zip(["first request", "second request"]) {
+        assert!(chat.render_cache.entries[mark.entry].is_none());
+        let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
+        scrollbar_mouse(
+            &mut chat,
+            MouseEventKind::Down(Left),
+            geometry.track.x,
+            mark.track_row,
+        );
+        let opened = TranscriptAnchor::Row {
+            entry: mark.entry,
+            row: 0,
+        };
+        assert_eq!(chat.anchor, opened);
+        assert!(!chat.transcript_scrollbar_dragging());
+        let rows = drawn_transcript(&mut chat, 60, 24);
+        assert!(rows[2].contains(text), "{rows:#?}");
+        // Return to the opening view for the next mark.
+        chat.set_anchor(TranscriptAnchor::Row { entry: 6, row: 0 });
+        drawn_transcript(&mut chat, 60, 24);
+    }
+}
+
+#[test]
+fn text_estimates_match_the_drawn_rows_of_common_entries() {
+    use mj_core::transcript::{PlanLine, PlanStatus};
+    let mut tool = ChatEntry::plain(5, ChatRole::Tool, "Run cargo test");
+    tool.tool_status = Some(ToolStatus::Completed);
+    tool.tool_summary = Some("cargo test".into());
+    tool.tool_content = vec![(0..30).map(|i| format!("out {i}\n")).collect()];
+    let entries = [
+        ChatEntry::plain(1, ChatRole::User, "fix the build"),
+        ChatEntry::plain(2, ChatRole::Agent, "one\ntwo\nthree"),
+        ChatEntry::plain(3, ChatRole::Agent, "word ".repeat(60)),
+        ChatEntry::plan(
+            4,
+            vec![
+                PlanLine {
+                    text: "first step".into(),
+                    status: PlanStatus::Completed,
+                },
+                PlanLine {
+                    text: "second step".into(),
+                    status: PlanStatus::Pending,
+                },
+            ],
+        ),
+        tool,
+    ];
+    let inline = ToolView::Inline { output_lines: 6 };
+    for width in [40, 80] {
+        for mode in [TranscriptRenderMode::Rich, TranscriptRenderMode::Raw] {
+            for view in [ToolView::Summary, inline] {
+                for entry in &entries {
+                    let drawn =
+                        render_transcript_entry_with_options(entry, width, mode, view).len();
+                    let estimated = estimated_entry_rows(entry, width, mode, view);
+                    assert_eq!(
+                        estimated, drawn,
+                        "{:?} {:?} at width {width} in {mode:?} with {view:?}",
+                        entry.role, entry.text
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn alt_page_keys_jump_between_the_messages_the_user_wrote() {
+    let alt = |code| KeyEvent::new(code, KeyModifiers::ALT);
+    let mut chat = marked_scrollbar_chat();
+    drawn_transcript(&mut chat, 60, 24);
+    // The opening reveal parks a new view on the latest reply.
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 6, row: 0 });
+
+    chat.handle_key(alt(KeyCode::PageUp));
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 4, row: 0 });
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    assert!(rows[2].contains("second request"), "{rows:#?}");
+
+    // The automatic continuation at entry 2 is not a stop.
+    chat.handle_key(alt(KeyCode::PageUp));
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 0, row: 0 });
+    chat.handle_key(alt(KeyCode::PageUp));
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 0, row: 0 });
+
+    // Part way into a reply, the previous stop is the message above it.
+    drawn_transcript(&mut chat, 60, 24);
+    chat.handle_key(key(KeyCode::PageDown));
+    assert!(matches!(
+        chat.anchor,
+        TranscriptAnchor::Row { entry: 1, .. }
+    ));
+    chat.handle_key(alt(KeyCode::PageUp));
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 0, row: 0 });
+
+    chat.handle_key(alt(KeyCode::PageDown));
+    assert_eq!(chat.anchor, TranscriptAnchor::Row { entry: 4, row: 0 });
+    chat.handle_key(alt(KeyCode::PageDown));
+    assert_eq!(chat.anchor, TranscriptAnchor::Bottom);
+}
+
+#[test]
+fn a_conversation_that_fits_has_no_scrollbar_marks() {
+    let mut chat = ChatState::new(&snapshot(), &[]);
+    chat.entries = vec![
+        ChatEntry::plain(1, ChatRole::User, "first request"),
+        ChatEntry::plain(2, ChatRole::Agent, "done"),
+        ChatEntry::plain(3, ChatRole::User, "second request"),
+    ];
+    let rows = drawn_transcript(&mut chat, 60, 24);
+    let geometry = chat.transcript_scrollbar.pointer.geometry().unwrap();
+    assert_eq!(geometry.max_scroll, 0);
+    assert!(chat.transcript_scrollbar.marks.is_empty());
+    for row in geometry.track.y..geometry.track.bottom() {
+        assert_ne!(
+            track_symbol(&rows, geometry, row),
+            theme::glyphs().scroll_mark
+        );
+    }
+}
+
+#[test]
+fn scrollbar_marks_skip_the_thumb_and_merge_runs_into_the_oldest_message() {
+    // A 20-row track over 200 content rows maps 10 content rows to each
+    // track row. The thumb covers track rows 8 and 9.
+    let track = Rect::new(0, 0, 1, 20);
+    let geometry = scrollbar_geometry(track, 200, 80, 20).unwrap();
+    assert_eq!((geometry.thumb.y, geometry.thumb.height), (8, 2));
+    let messages = |rows: &[usize]| -> Vec<UserMessageRow> {
+        rows.iter()
+            .enumerate()
+            .map(|(entry, row)| UserMessageRow { entry, row: *row })
+            .collect()
+    };
+    let marks = |rows: &[usize]| -> Vec<(u16, usize)> {
+        user_message_marks(geometry, 200, &messages(rows))
+            .iter()
+            .map(|mark| (mark.track_row, mark.entry))
+            .collect()
+    };
+    // Separate messages each get a mark.
+    assert_eq!(marks(&[0, 30, 150]), vec![(0, 0), (3, 1), (15, 2)]);
+    // A run of messages on adjacent or equal rows shows only its oldest.
+    assert_eq!(
+        marks(&[30, 35, 40, 50, 70]),
+        vec![(3, 0), (7, 4)],
+        "rows 3, 3, 4, 5 merge; row 7 is two rows below the run"
+    );
+    // Messages under the thumb are on screen and get no mark. The thumb
+    // separates the marks on either side of it.
+    assert_eq!(marks(&[70, 80, 95, 100]), vec![(7, 0), (10, 3)]);
+    // Nothing is marked when all the content fits.
+    let fitting = scrollbar_geometry(track, 20, 0, 20).unwrap();
+    assert!(user_message_marks(fitting, 20, &messages(&[0, 5])).is_empty());
 }
 
 #[test]

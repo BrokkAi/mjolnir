@@ -310,6 +310,15 @@ impl ChatState {
         }
         if modifiers.contains(KeyModifiers::ALT) {
             match code {
+                // One message at a time sits between PgUp's page and
+                // Ctrl+Home's whole conversation. Readline leaves the paging
+                // keys alone, so these never collide with prompt editing.
+                KeyCode::PageUp => {
+                    self.jump_to_user_message(false);
+                }
+                KeyCode::PageDown => {
+                    self.jump_to_user_message(true);
+                }
                 KeyCode::Char('b') | KeyCode::Left => self.move_word(-1),
                 KeyCode::Char('f') | KeyCode::Right => self.move_word(1),
                 KeyCode::Char('d') | KeyCode::Delete => {

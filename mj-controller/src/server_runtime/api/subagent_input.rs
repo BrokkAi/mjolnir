@@ -220,7 +220,10 @@ impl ApiBackend {
             });
         }
 
-        let command_id = format!("session-message-turn-{request_id}");
+        let command_id = format!(
+            "{}{request_id}",
+            mj_core::transcript::SESSION_MESSAGE_TURN_COMMAND_PREFIX
+        );
         if let Some(ordinal) = prompt_acceptance(&target_session_id, &command_id).await? {
             return Ok(crate::server::api::SessionMessageResponse {
                 session_id: target_session_id,

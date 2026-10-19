@@ -233,6 +233,26 @@ pub fn scrollbar_geometry(
     })
 }
 
+/// The track row for a content offset, for a mark drawn on the scrollbar.
+///
+/// `content_length` is the length the geometry was calculated from. Offsets
+/// map in proportion to the whole track, so a mark for a visible row lands on
+/// or next to the thumb. Offsets past the end land on the last row.
+#[must_use]
+pub fn scrollbar_mark_row(
+    geometry: ScrollbarGeometry,
+    content_length: usize,
+    offset: usize,
+) -> u16 {
+    let height = u64::from(geometry.track.height);
+    let row = u64::try_from(offset)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(height)
+        / u64::try_from(content_length.max(1)).unwrap_or(u64::MAX);
+    let row = u16::try_from(row.min(height.saturating_sub(1))).unwrap_or(0);
+    geometry.track.y.saturating_add(row)
+}
+
 /// Paint a scrollbar from previously calculated geometry.
 pub fn render_scrollbar(frame: &mut Frame, geometry: ScrollbarGeometry) {
     for row in geometry.track.y..geometry.track.bottom() {
@@ -248,6 +268,26 @@ pub fn render_scrollbar(frame: &mut Frame, geometry: ScrollbarGeometry) {
             } else {
                 theme::palette().border
             }));
+    }
+}
+
+/// Paint a scrollbar with a mark on each of the given track rows. The thumb
+/// covers any mark under it, and rows outside the track are ignored.
+pub fn render_marked_scrollbar(
+    frame: &mut Frame,
+    geometry: ScrollbarGeometry,
+    marks: impl IntoIterator<Item = u16>,
+    mark_style: Style,
+) {
+    render_scrollbar(frame, geometry);
+    for row in marks {
+        let on_track = row >= geometry.track.y && row < geometry.track.bottom();
+        let on_thumb = row >= geometry.thumb.y && row < geometry.thumb.bottom();
+        if on_track && !on_thumb {
+            frame.buffer_mut()[(geometry.track.x, row)]
+                .set_symbol(theme::glyphs().scroll_mark)
+                .set_style(mark_style);
+        }
     }
 }
 

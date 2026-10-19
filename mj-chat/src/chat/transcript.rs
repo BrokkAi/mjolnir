@@ -28,7 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::components::{
-    ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, render_scrollbar, scrollbar_geometry,
+    ScrollbarDrag, ScrollbarGeometry, ScrollbarPointer, render_marked_scrollbar,
+    scrollbar_geometry, scrollbar_mark_row,
 };
 use crate::theme;
 use agent_client_protocol::schema::v1::{ToolCall, ToolCallContent, ToolKind};
@@ -69,8 +70,6 @@ struct CachedEntry {
     mailbox: Option<RowTrack>,
 }
 
-const SCROLLBAR_DEFAULT_ENTRY_ROWS: usize = 4;
-
 /// The primary transcript scrollbar. Its geometry is rebuilt after every draw.
 /// During a drag, frozen row estimates keep newly rendered history from
 /// shifting the thumb under the pointer.
@@ -82,6 +81,64 @@ pub(super) struct TranscriptScrollbarState {
     metric_mode: TranscriptRenderMode,
     metric_generation: u64,
     estimates: Vec<usize>,
+    /// Text-based row estimates for entries not yet drawn, with the entry
+    /// revision each was made from. Cleared when the width, mode, or tool
+    /// layout changes, or when entries move.
+    text_estimates: Vec<Option<(u64, usize)>>,
+    text_estimate_tools: Option<ToolDisplay>,
+    /// The messages the user wrote, in content order. They are rebuilt and
+    /// frozen with `estimates`.
+    user_messages: Vec<UserMessageRow>,
+    /// The user-message marks drawn on the latest geometry.
+    marks: Vec<UserMessageMark>,
+}
+
+/// A message the user wrote and its estimated first content row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UserMessageRow {
+    entry: usize,
+    row: usize,
+}
+
+/// A user-message mark on the scrollbar track. A click on it opens `entry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UserMessageMark {
+    track_row: u16,
+    entry: usize,
+}
+
+/// Lays out user-message marks on a scrollbar.
+///
+/// There are no marks when all the content fits, and none under the thumb,
+/// because those messages are already on screen. Marks on adjacent or equal
+/// track rows merge into one mark for the oldest message of the run, so
+/// closely spaced messages cannot fill the track. The thumb ends a run.
+fn user_message_marks(
+    geometry: ScrollbarGeometry,
+    content_length: usize,
+    messages: &[UserMessageRow],
+) -> Vec<UserMessageMark> {
+    let mut marks: Vec<UserMessageMark> = Vec::new();
+    if geometry.max_scroll == 0 {
+        return marks;
+    }
+    let thumb = geometry.thumb.y..geometry.thumb.bottom();
+    let mut run_end: Option<u16> = None;
+    for message in messages {
+        let track_row = scrollbar_mark_row(geometry, content_length, message.row);
+        if thumb.contains(&track_row) {
+            continue;
+        }
+        let joins_run = run_end.is_some_and(|end| track_row <= end.saturating_add(1));
+        run_end = Some(track_row);
+        if !joins_run {
+            marks.push(UserMessageMark {
+                track_row,
+                entry: message.entry,
+            });
+        }
+    }
+    marks
 }
 
 impl Default for TranscriptScrollbarState {
@@ -92,6 +149,10 @@ impl Default for TranscriptScrollbarState {
             metric_mode: TranscriptRenderMode::Rich,
             metric_generation: 0,
             estimates: Vec::new(),
+            text_estimates: Vec::new(),
+            text_estimate_tools: None,
+            user_messages: Vec::new(),
+            marks: Vec::new(),
         }
     }
 }
@@ -99,6 +160,7 @@ impl Default for TranscriptScrollbarState {
 impl TranscriptScrollbarState {
     fn clear_geometry(&mut self) {
         self.pointer.clear();
+        self.marks.clear();
     }
 
     pub(super) fn clear(&mut self) {
@@ -106,6 +168,9 @@ impl TranscriptScrollbarState {
         self.metric_width = 0;
         self.metric_generation = 0;
         self.estimates.clear();
+        self.text_estimates.clear();
+        self.text_estimate_tools = None;
+        self.user_messages.clear();
     }
 }
 
@@ -707,6 +772,10 @@ impl ChatState {
             self.transcript_scrollbar.clear_geometry();
             return was_dragging;
         }
+        if let Some(entry) = self.transcript_scrollbar_mark_at(mouse) {
+            self.set_anchor(TranscriptAnchor::Row { entry, row: 0 });
+            return true;
+        }
         match self.transcript_scrollbar.pointer.handle_mouse(mouse) {
             ScrollbarPointer::Ignored => false,
             ScrollbarPointer::Consumed => true,
@@ -715,6 +784,27 @@ impl ChatState {
                 true
             }
         }
+    }
+
+    /// The message a left click on a user-message mark opens. A click starts
+    /// no drag, so a held mark does not seek the track.
+    fn transcript_scrollbar_mark_at(&self, mouse: crossterm::event::MouseEvent) -> Option<usize> {
+        let state = &self.transcript_scrollbar;
+        if state.pointer.is_dragging()
+            || mouse.kind
+                != crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        {
+            return None;
+        }
+        let geometry = state.pointer.geometry()?;
+        if mouse.column != geometry.track.x {
+            return None;
+        }
+        state
+            .marks
+            .iter()
+            .find(|mark| mark.track_row == mouse.row)
+            .map(|mark| mark.entry)
     }
 
     fn set_transcript_scrollbar_target(&mut self, target_scroll: usize) {
@@ -757,25 +847,56 @@ impl ChatState {
             // Newly rendered entries must not move the thumb under a held pointer.
             return;
         }
+        if key_changed || state.text_estimate_tools != Some(self.tool_display) {
+            state.text_estimates.clear();
+            state.text_estimate_tools = Some(self.tool_display);
+        }
         state.metric_width = width;
         state.metric_mode = self.render_mode;
         state.metric_generation = self.render_cache_generation;
-        state.estimates = (0..self.entries.len())
-            .map(|index| {
-                if matches!(
-                    self.render_cache.collapse[index],
-                    EntryCollapse::Hidden | EntryCollapse::Omitted
-                ) {
-                    return 0;
+        state.text_estimates.resize(self.entries.len(), None);
+        state.estimates.clear();
+        let tool_view = self.tool_display.view();
+        for (index, entry) in self.entries.iter().enumerate() {
+            let rows = if matches!(
+                self.render_cache.collapse[index],
+                EntryCollapse::Hidden | EntryCollapse::Omitted
+            ) {
+                0
+            } else if let Some(cached) = self
+                .render_cache
+                .entries
+                .get(index)
+                .and_then(Option::as_ref)
+                .filter(|cached| cached.revision == entry.revision)
+            {
+                cached.lines.len()
+            } else {
+                match state.text_estimates[index] {
+                    Some((revision, rows)) if revision == entry.revision => rows,
+                    _ => {
+                        let rows = estimated_entry_rows(
+                            entry,
+                            usize::from(width),
+                            self.render_mode,
+                            tool_view,
+                        );
+                        state.text_estimates[index] = Some((entry.revision, rows));
+                        rows
+                    }
                 }
-                self.render_cache
-                    .entries
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .filter(|cached| cached.revision == self.entries[index].revision)
-                    .map_or(SCROLLBAR_DEFAULT_ENTRY_ROWS, |cached| cached.lines.len())
-            })
-            .collect();
+            };
+            state.estimates.push(rows);
+        }
+        let mut row = 0usize;
+        state.user_messages.clear();
+        for (entry, (chat_entry, estimate)) in self.entries.iter().zip(&state.estimates).enumerate()
+        {
+            if *estimate > 0 && chat_entry.is_user_authored() {
+                state.user_messages.push(UserMessageRow { entry, row });
+            }
+            row = row.saturating_add(*estimate);
+        }
     }
 
     fn transcript_scrollbar_offset(&self, top: AnchorRow, anchor: TranscriptAnchor) -> usize {
@@ -839,9 +960,9 @@ impl ChatState {
             raw_scroll.min(max_scroll)
         };
         let geometry = scrollbar_geometry(track, total_rows, scroll, viewport_rows)?;
-        self.transcript_scrollbar
-            .pointer
-            .set_geometry(Some(geometry));
+        let state = &mut self.transcript_scrollbar;
+        state.pointer.set_geometry(Some(geometry));
+        state.marks = user_message_marks(geometry, total_rows, &state.user_messages);
         Some(geometry)
     }
 
@@ -1186,6 +1307,38 @@ impl ChatState {
                 .top
                 .anchor(),
         })
+    }
+
+    /// Moves the view to the previous or next message the user wrote, so that
+    /// message starts at the top. Prompts Hel generated and entries the Rich
+    /// mode hides are skipped. Past the newest message the view follows the
+    /// tail again; before the oldest it stays where it is.
+    pub(super) fn jump_to_user_message(&mut self, forward: bool) -> bool {
+        let before = self.anchor.clone();
+        let Some(TranscriptAnchor::Row { entry, row }) = self.resolved_anchor() else {
+            return false;
+        };
+        self.prepare_entry_rows();
+        let is_stop = |index: usize| {
+            self.entries[index].is_user_authored()
+                && !matches!(
+                    self.render_cache.collapse.get(index),
+                    Some(EntryCollapse::Hidden | EntryCollapse::Omitted)
+                )
+        };
+        let target = if forward {
+            (entry + 1..self.entries.len()).find(|index| is_stop(*index))
+        } else {
+            // A message scrolled partly off the top is the first stop back.
+            let limit = if row > 0 { entry + 1 } else { entry };
+            (0..limit).rev().find(|index| is_stop(*index))
+        };
+        self.anchor = match target {
+            Some(entry) => TranscriptAnchor::Row { entry, row: 0 },
+            None if forward => TranscriptAnchor::Bottom,
+            None => return false,
+        };
+        self.anchor != before
     }
 
     pub(super) fn scroll_history_up(&mut self, rows: usize) -> bool {
