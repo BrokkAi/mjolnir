@@ -565,6 +565,8 @@ fn managed_worktree_origin_uses_source_repository_while_checkout_is_retired() {
 fn raw_no_origin_uses_the_canonical_main_repository_root() {
     struct NoOriginExecutor {
         commands: RefCell<Vec<CommandSpec>>,
+        side: String,
+        common: String,
     }
     impl CommandExecutor for NoOriginExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -581,35 +583,42 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
                 .iter()
                 .any(|argument| argument == "--show-toplevel")
             {
-                "/worktrees/project-side\n"
+                format!("{}\n", self.side)
             } else if command
                 .args
                 .iter()
                 .any(|argument| argument == "--git-common-dir")
             {
-                "/projects/project/.git\n"
+                format!("{}\n", self.common)
             } else if command
                 .args
                 .iter()
                 .any(|argument| argument == "--show-prefix")
             {
-                "\n"
+                "\n".to_owned()
             } else {
                 panic!("unexpected command {:?}", command.args);
             };
             Ok(CommandOutput {
                 status: 0,
-                stdout: stdout.as_bytes().to_vec(),
+                stdout: stdout.into_bytes(),
                 stderr: Vec::new(),
             })
         }
     }
 
+    // A local root is made canonical, so the directories Git names exist.
+    let directory = tempfile::tempdir().unwrap();
+    let side = directory.path().join("worktrees").join("project-side");
+    let main = directory.path().join("projects").join("project");
+    std::fs::create_dir_all(&side).unwrap();
+    std::fs::create_dir_all(main.join(".git")).unwrap();
+    let main = main.canonicalize().unwrap();
     let mut config = Config::default();
     config
         .targets
         .insert("localhost".into(), TargetTemplate::LocalBare);
-    let session = raw_session_on("localhost", "/worktrees/project-side");
+    let session = raw_session_on("localhost", &side.to_string_lossy());
     let session_id = session.id.clone();
     let controller = Controller {
         config,
@@ -620,15 +629,17 @@ fn raw_no_origin_uses_the_canonical_main_repository_root() {
     };
     let executor = NoOriginExecutor {
         commands: RefCell::new(Vec::new()),
+        side: side.to_string_lossy().into_owned(),
+        common: main.join(".git").to_string_lossy().into_owned(),
     };
 
     let source = controller
         .resolve_session_project_source(&session_id, &executor)
         .unwrap();
 
-    assert_eq!(source.key, "path:/projects/project");
+    assert_eq!(source.key, format!("path:{}", main.display()));
     assert_eq!(source.short, "project");
-    assert_eq!(source.full, "/projects/project");
+    assert_eq!(source.full, main.display().to_string());
     assert_eq!(executor.commands.borrow().len(), 4);
 }
 
@@ -953,10 +964,6 @@ fn a_checkout_without_a_network_remote_cannot_be_planned_for_a_target() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1298: a local repository path has no single canonical form"
-)]
 fn planning_a_conversion_records_the_checkouts_network_remote() {
     let (checkout, _remote_parent, _remote) = checkout_with_network_remote();
     let session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
@@ -1275,7 +1282,7 @@ fn resume_compatibility_names_a_target_that_is_gone() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "#1298: a local repository path has no single canonical form"
+    ignore = "#1292: a local managed checkout runs mkdir and requires POSIX paths"
 )]
 fn managed_raw_worktree_inherits_upstream_and_cleans_up_owned_artifacts() {
     let repository = committed_repository();

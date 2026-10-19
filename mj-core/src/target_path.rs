@@ -28,8 +28,17 @@ pub fn is_absolute_on_host_or_target(path: &Path) -> bool {
 /// same wherever it is shown or sent. Only a base this controller would call
 /// absolute, with a Windows drive or UNC prefix, is joined as a host path.
 pub fn join(base: &Path, relative: &Path) -> PathBuf {
-    if !cfg!(windows) || base.is_absolute() {
+    if !cfg!(windows) {
         return base.join(relative);
+    }
+    if base.is_absolute() {
+        // Pushed part by part: `relative` is often Git's `/`-separated text,
+        // and a verbatim `\\?\` base would keep a `/` as a file name character.
+        let mut joined = base.to_path_buf();
+        for component in relative.components() {
+            joined.push(component);
+        }
+        return joined;
     }
     // As with `Path::join`, an absolute `relative` replaces the base.
     if is_absolute(relative) {

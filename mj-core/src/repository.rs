@@ -270,12 +270,16 @@ pub fn resolve_directory(
     );
     let text = String::from_utf8(output.stdout).context("decode project Git roots")?;
     let mut roots = text.lines();
-    let checkout_root = PathBuf::from(roots.next().context("Git omitted the checkout root")?);
+    let checkout_root = roots.next().context("Git omitted the checkout root")?;
     anyhow::ensure!(
-        crate::target_path::is_absolute_on_host_or_target(&checkout_root),
-        "Git returned a non-absolute checkout root: {}",
-        checkout_root.display()
+        crate::target_path::is_absolute_on_host_or_target(Path::new(checkout_root)),
+        "Git returned a non-absolute checkout root: {checkout_root}"
     );
+    let checkout_root = if host.is_none() {
+        crate::local_git::canonical_git_output_path(Path::new(checkout_root))?
+    } else {
+        PathBuf::from(checkout_root)
+    };
     let common = crate::local_git::resolve_git_path(
         &directory,
         roots
