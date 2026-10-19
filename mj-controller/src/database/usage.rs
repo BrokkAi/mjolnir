@@ -421,6 +421,7 @@ mod tests {
                 params![turn.command_id, body],
             )?;
         }
+        super::super::schema::restore_github_v84_schema(&connection);
         connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         drop(connection);
         super::super::schema::forget_verified_schema(&path);

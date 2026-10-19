@@ -716,6 +716,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
         }}
     });
     let connection = rusqlite::Connection::open(&path).unwrap();
+    schema::restore_github_v84_schema(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions ADD COLUMN expected_runtime_identity TEXT;
@@ -785,6 +786,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
     let mut record = session("old-session", "project-1");
     save_session_to(&path, &record).unwrap();
     let connection = rusqlite::Connection::open(&path).unwrap();
+    schema::restore_github_v84_schema(&connection);
     connection
         .execute_batch(
         "ALTER TABLE sessions DROP COLUMN checkout_json;
@@ -793,6 +795,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         UPDATE schema_compatibility SET minimum_compatible_version = 53;
         DROP TABLE IF EXISTS subagent_accounting;
         DROP TABLE IF EXISTS session_turn_selections;
+        DROP TABLE IF EXISTS github_seen_items;
         DROP TABLE IF EXISTS github_watch_cursors;
         DROP TABLE IF EXISTS github_watch_classifications;
         DROP TABLE IF EXISTS github_watch_items;
@@ -836,8 +839,8 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert!(watch_columns.contains(&"pull_request_etag".to_owned()));
-    assert!(watch_columns.contains(&"pull_request_state".to_owned()));
+    assert!(watch_columns.contains(&"timeline_at".to_owned()));
+    assert!(watch_columns.contains(&"processed_at".to_owned()));
     assert_eq!(
         connection
             .query_row(
@@ -879,6 +882,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     save_session_to(&database, &old).unwrap();
 
     let connection = rusqlite::Connection::open(&database).unwrap();
+    schema::restore_github_v84_schema(&connection);
     connection
         .execute_batch(
             "ALTER TABLE sessions DROP COLUMN publication_json;
@@ -5649,6 +5653,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
     drop(open(&path).unwrap());
     forget_verified_schema(&path);
     let raw = Connection::open(&path).unwrap();
+    schema::restore_github_v84_schema(&raw);
     raw.execute_batch(
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
@@ -6326,6 +6331,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
 
     // Put the store back at revision 52, whose constraint has no `parked`.
     let raw = Connection::open(&database).unwrap();
+    schema::restore_github_v84_schema(&raw);
     raw.execute_batch(
         "PRAGMA writable_schema = ON;
          UPDATE sqlite_schema
