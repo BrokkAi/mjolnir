@@ -3722,9 +3722,11 @@ async fn a_refused_close_returns_the_session_to_running_and_releases_its_barrier
 #[test]
 fn the_checkpoint_entry_futures_do_not_embed_the_capture_future() {
     // Measured in a debug build: 50000 and 39360 bytes unboxed, 24040 and 72
-    // boxed.
+    // boxed. The wrapper now also carries its relay lease inline (about 4 KiB
+    // with the session's operational state), so its limit only needs to
+    // separate that from an unboxed capture future.
     const ENTRY_LIMIT_BYTES: usize = 32 * 1024;
-    const WRAPPER_LIMIT_BYTES: usize = 4 * 1024;
+    const WRAPPER_LIMIT_BYTES: usize = 8 * 1024;
     let mut controller = Controller {
         config: Default::default(),
         state: State::default(),
