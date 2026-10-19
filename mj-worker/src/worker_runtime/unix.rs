@@ -1433,6 +1433,7 @@ async fn prepare_and_start_harness(
         } else {
             let mut workspace_roots = vec![config.cwd.clone()];
             workspace_roots.extend(reviewer_workspace_directories(&config));
+            let session_id = config.session_id.clone();
             bounded_preparation_step(&budget, async move {
                 let git = crate::review::capture::BoundedGit::new(
                     crate::review::capture::WORKSPACE_STATE_TIMEOUT,
@@ -1441,7 +1442,11 @@ async fn prepare_and_start_harness(
                 tokio::task::spawn_blocking(move || {
                     let repositories =
                         crate::review::capture::discover_repositories(&git, &workspace_roots);
-                    crate::review::capture::initialize_review_baselines(&git, &repositories)
+                    crate::review::capture::initialize_review_baselines(
+                        &git,
+                        &repositories,
+                        &session_id,
+                    )
                 })
                 .await
                 .map_err(|error| {

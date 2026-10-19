@@ -239,7 +239,7 @@ impl BuildStateRelease {
         let workspaces = bundle
             .repositories
             .iter()
-            .map(|repository| root.join(&repository.destination))
+            .map(|repository| mj_core::target_path::join(&root, &repository.destination))
             .collect::<Vec<_>>();
         let legacy_mbx_root = match (&store, &host) {
             (Store::Shared { .. }, CacheHost::Local) => {

@@ -884,7 +884,18 @@ fn delivered_external_events(
     let lines = events
         .iter()
         .filter(|event| event.message_text().is_none())
-        .map(|event| mj_core::mailbox::describe_mailbox_event(event).transcript_line)
+        .map(|event| {
+            let description = mj_core::mailbox::describe_mailbox_event(event);
+            // A child report is the parent's only record of the child's
+            // result, so show the report the agent received, not a summary.
+            match (&event.body, description.body) {
+                (mj_core::mailbox::MailboxEventBody::SubagentFinished { .. }, Some(report)) => {
+                    let report = report.lines().collect::<Vec<_>>().join("\n    ");
+                    format!("{}\n    {report}", description.transcript_line)
+                }
+                _ => description.transcript_line,
+            }
+        })
         .collect::<Vec<_>>();
     close_streams(index, mutation, delivery.recorded_at_ms);
     push_system_with_id(

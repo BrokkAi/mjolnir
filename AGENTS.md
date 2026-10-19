@@ -223,13 +223,16 @@ actually show up; toy-sized fixtures prove nothing about this class of bug.
 
 Unit tests are colocated in module-level `#[cfg(test)]` blocks. `mj-cli/tests/` holds the PTY termination test, and `tests/e2e/` holds the shell/expect harness.
 
-## macOS CI
+## macOS and Windows CI
 
-On check-ins, the macOS runner starts only for macOS-sensitive changes. The
-maintained list is `.github/macos-ci-paths.txt`; files with a macOS cfg gate,
-such as `target_os = "macos"`, match automatically (the list's header names
-every gate). When you add a macOS wrapper or macOS-specific module without
-such a gate, add its path in the same change.
+On check-ins, the macOS and Windows runners start only for changes sensitive
+to that platform; both also run nightly and on every release tag. The
+maintained lists are `.github/macos-ci-paths.txt` and
+`.github/windows-ci-paths.txt`; files with that platform's cfg gate, such as
+`target_os = "macos"` or `cfg(windows)`, match automatically (each list's
+header names every gate). When you add a macOS or Windows wrapper or
+platform-specific module without such a gate, add its path to that list in
+the same change.
 
 ## Harness pins
 

@@ -1,0 +1,70 @@
+name: Nightly
+
+# Nightly and manual runs of the shared macOS and Windows lanes, which
+# ordinary check-ins start only for platform-sensitive changes. A failing lane
+# opens or reopens its own tracking issue ("Nightly macOS CI is failing" or
+# "Nightly Windows CI is failing"), and that lane's next passing run closes
+# it. Only the report jobs can write issues.
+
+on:
+  schedule:
+  - cron: '41 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS
+    uses: ./.github/workflows/macos.yml
+
+  windows:
+    name: Windows
+    uses: ./.github/workflows/windows.yml
+
+  # Scheduled runs test the default branch. A manual dispatch updates the
+  # issues only when it tests master, so a branch dispatch cannot open or close
+  # them. The script takes its decision from its lane's result and ignores
+  # cancelled or skipped runs.
+  report-macos:
+    name: Update the macOS tracking issue
+    needs: macos
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+    - uses: actions/checkout@v6
+    - name: Open, update, or close the tracking issue
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CI_LANE: macos
+        LANE_RESULT: ${{ needs.macos.result }}
+      run: bash scripts/nightly-issue.sh
+
+  report-windows:
+    name: Update the Windows tracking issue
+    needs: windows
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+    - uses: actions/checkout@v6
+    - name: Open, update, or close the tracking issue
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CI_LANE: windows
+        LANE_RESULT: ${{ needs.windows.result }}
+      run: bash scripts/nightly-issue.sh

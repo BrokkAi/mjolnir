@@ -1,0 +1,85 @@
+name: Windows
+
+# The one Windows job definition. ci.yml calls it for Windows-sensitive changes
+# (listed in .github/windows-ci-paths.txt) and on every release tag, and
+# nightly.yml calls it every night and on manual dispatch. Do not add
+# workflow-level concurrency here: in a called workflow, github.workflow is the
+# caller's name, so the group would collide with the caller's own.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: clippy
+        targets: x86_64-pc-windows-msvc
+
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: cli-tests-x86_64-pc-windows-msvc
+        build-paths: |
+          target/debug
+          target/release
+          target/x86_64-pc-windows-msvc/debug
+          target/x86_64-pc-windows-msvc/release
+
+    - name: Run Clippy lints
+      run: cargo clippy --all-targets -- -D warnings
+
+    # Clippy above compiles every test target; this also links them.
+    - name: Compile tests
+      run: cargo test --no-run
+
+    # The controller-side crates whose suites pass on Windows, including the
+    # daemon startup tests that run `mj` against isolated instances and the
+    # ConPTY smoke that renders the dashboard. The worker and checkpoint
+    # crates run only on Linux and macOS hosts. mj-controller tests that still
+    # fail on Windows are ignored there with
+    # `cfg_attr(windows, ignore = "#<issue>: ...")`; the sub-issues of #1261
+    # remove those attributes as they are fixed.
+    - name: Run tests
+      run: >-
+        cargo test -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui
+        -p brokk-mj-client -p brokk-mj-review -p brokk-mj-transcript
+        -p brokk-mjolnir -p brokk-mj-controller
+
+    - name: Test the Windows installer
+      run: node --test scripts/install-ps1.test.mjs
+
+  desktop:
+    name: Desktop shell (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@1.96.0
+      with:
+        components: clippy
+        targets: x86_64-pc-windows-msvc
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: desktop-x86_64-pc-windows-msvc
+        build-paths: |
+          target/debug
+          target/x86_64-pc-windows-msvc
+    - name: Run desktop Clippy lints
+      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
+    - name: Build desktop application
+      run: cargo build --locked -p brokk-mj-desktop
+    - name: Compile desktop tests
+      run: cargo test --locked -p brokk-mj-desktop --no-run

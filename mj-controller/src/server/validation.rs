@@ -206,8 +206,19 @@ pub(super) fn validate_move_mounts(mounts: &[AdditionalMount]) -> Result<(), Api
         ));
     }
     for mount in mounts {
-        for path in [&mount.source, &mount.destination] {
-            if !path.is_absolute()
+        // A source names this controller or an SSH container host; the
+        // destination is always inside the container.
+        for (path, absolute) in [
+            (
+                &mount.source,
+                mj_core::target_path::is_absolute_on_host_or_target(&mount.source),
+            ),
+            (
+                &mount.destination,
+                mj_core::target_path::is_absolute(&mount.destination),
+            ),
+        ] {
+            if !absolute
                 || path
                     .components()
                     .any(|component| component == Component::ParentDir)

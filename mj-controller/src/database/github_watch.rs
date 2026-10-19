@@ -2,12 +2,23 @@
 
 use super::*;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GithubRepoCursor {
-    pub items_watermark_at: Option<String>,
-    pub items_watermark_id: Option<i64>,
-    pub items_etag: Option<String>,
-    pub comments_cursor: Option<String>,
+    pub updated_at: String,
+    pub watch_started_at: String,
+    pub reconciled_through: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GithubSeenItem {
+    pub number: i64,
+    pub kind: String,
+    pub title: String,
+    pub url: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +45,12 @@ pub(crate) struct GithubItemWatch {
     pub title: String,
     pub url: String,
     pub created_at: String,
-    pub pull_request_etag: Option<String>,
-    pub pull_request_state: Option<String>,
+    pub timeline_at: String,
+    pub timeline_id: i64,
+    pub review_comments_at: String,
+    pub review_comments_id: i64,
+    pub processed_at: String,
+    pub recorded_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,54 +59,156 @@ pub(crate) struct GithubSessionTurnWindow {
     pub completed_at_ms: Option<i64>,
 }
 
-pub(crate) fn load_github_repo_cursor(owner: &str, repo: &str) -> Result<Option<GithubRepoCursor>> {
-    let connection = open_reader(&database_path())?;
-    connection
-        .query_row(
-            "SELECT items_watermark_at, items_watermark_id, items_etag, comments_cursor
-             FROM github_watch_cursors WHERE owner=?1 AND repo=?2",
-            params![owner, repo],
-            |row| {
-                Ok(GithubRepoCursor {
-                    items_watermark_at: row.get(0)?,
-                    items_watermark_id: row.get(1)?,
-                    items_etag: row.get(2)?,
-                    comments_cursor: row.get(3)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+#[derive(Debug, Clone)]
+pub(crate) struct GithubClassificationFailure {
+    pub attempts: i64,
+    pub last_attempt_at_ms: i64,
+    pub next_attempt_at_ms: i64,
 }
 
-pub(crate) fn save_github_repo_cursor(
+pub(crate) fn load_github_classification_failures(
     owner: &str,
     repo: &str,
-    cursor: GithubRepoCursor,
+) -> Result<BTreeMap<(i64, String), GithubClassificationFailure>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare("SELECT number, session_id, attempts, last_attempt_at_ms, next_attempt_at_ms FROM github_watch_classification_failures WHERE owner=?1 AND repo=?2")?;
+    statement
+        .query_map(params![owner, repo], |row| {
+            Ok((
+                (row.get(0)?, row.get(1)?),
+                GithubClassificationFailure {
+                    attempts: row.get(2)?,
+                    last_attempt_at_ms: row.get(3)?,
+                    next_attempt_at_ms: row.get(4)?,
+                },
+            ))
+        })?
+        .map(|row| row.map_err(Into::into))
+        .collect()
+}
+
+pub(crate) fn record_github_classification_failure(
+    owner: String,
+    repo: String,
+    number: i64,
+    session_id: String,
 ) -> Result<()> {
-    let owner = owner.to_owned();
-    let repo = repo.to_owned();
-    submit_database_write("save_github_repo_cursor", move |connection| {
-        connection.execute(
-            "INSERT INTO github_watch_cursors(owner, repo, items_watermark_at,
-                    items_watermark_id, items_etag, comments_cursor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(owner, repo) DO UPDATE SET
-                items_watermark_at=excluded.items_watermark_at,
-                items_watermark_id=excluded.items_watermark_id,
-                items_etag=excluded.items_etag,
-                comments_cursor=excluded.comments_cursor",
-            params![
-                owner,
-                repo,
-                cursor.items_watermark_at,
-                cursor.items_watermark_id,
-                cursor.items_etag,
-                cursor.comments_cursor
-            ],
-        )?;
+    submit_database_write("record_github_classification_failure", move |connection| {
+        let tx = connection.transaction()?;
+        if tx.query_row("SELECT EXISTS(SELECT 1 FROM github_watch_classifications WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4)",
+            params![owner,repo,number,session_id], |row| row.get::<_,bool>(0))? {
+            tx.commit()?; return Ok(());
+        }
+        let attempts: i64 = tx.query_row("SELECT attempts FROM github_watch_classification_failures WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4",
+            params![owner, repo, number, session_id], |row| row.get(0)).optional()?.unwrap_or(0_i64).saturating_add(1);
+        let now = mj_core::clock::epoch_millis();
+        let delay_ms = (60_000_i64 * (1_i64 << (attempts - 1).min(6))).min(3_600_000);
+        tx.execute("INSERT INTO github_watch_classification_failures(owner,repo,number,session_id,attempts,last_attempt_at_ms,next_attempt_at_ms)
+            VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(owner,repo,number,session_id) DO UPDATE SET
+            attempts=excluded.attempts,last_attempt_at_ms=excluded.last_attempt_at_ms,next_attempt_at_ms=excluded.next_attempt_at_ms",
+            params![owner,repo,number,session_id,attempts,now,now.saturating_add(delay_ms)])?;
+        tx.commit()?;
         Ok(())
     })
+}
+
+/// Initialize the watch boundary once, before the first network request.
+pub(crate) fn github_repo_cursor(owner: &str, repo: &str) -> Result<GithubRepoCursor> {
+    let owner = owner.to_owned();
+    let repo = repo.to_owned();
+    submit_database_write("github_repo_cursor", move |connection| {
+        let now = Utc::now().to_rfc3339();
+        connection.execute(
+            "INSERT INTO github_watch_cursors(owner, repo, updated_at, watch_started_at, reconciled_through)
+             VALUES (?1, ?2, ?3, ?3, ?3) ON CONFLICT(owner, repo) DO NOTHING",
+            params![owner, repo, now],
+        )?;
+        Ok(connection.query_row(
+            "SELECT updated_at, watch_started_at, reconciled_through FROM github_watch_cursors WHERE owner=?1 AND repo=?2",
+            params![owner, repo],
+            |row| Ok(GithubRepoCursor { updated_at: row.get(0)?, watch_started_at: row.get(1)?, reconciled_through: row.get(2)? }),
+        )?)
+    })
+}
+
+pub(crate) enum GithubFeedProgress {
+    Main(String),
+    Reconciled(String),
+}
+
+/// Recording never depends on classification or delivery. Each page is durable.
+pub(crate) fn record_github_page(
+    owner: String,
+    repo: String,
+    items: Vec<GithubSeenItem>,
+    progress: GithubFeedProgress,
+) -> Result<()> {
+    submit_database_write("record_github_page", move |connection| {
+        let tx = connection.transaction()?;
+        for item in items {
+            tx.execute(
+                "INSERT INTO github_seen_items(owner, repo, number, kind, title, url, author, body, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(owner, repo, number) DO UPDATE SET kind=excluded.kind, title=excluded.title,
+                    url=excluded.url, author=excluded.author, body=excluded.body,
+                    created_at=excluded.created_at, updated_at=excluded.updated_at
+                 WHERE julianday(excluded.updated_at) >= julianday(github_seen_items.updated_at)",
+                params![owner, repo, item.number, item.kind, item.title, item.url, item.author, item.body, item.created_at, item.updated_at],
+            )?;
+        }
+        let (sql, through) = match progress {
+            GithubFeedProgress::Main(through) => (
+                "UPDATE github_watch_cursors SET updated_at=?3 WHERE owner=?1 AND repo=?2
+                 AND julianday(updated_at) <= julianday(?3)",
+                through,
+            ),
+            GithubFeedProgress::Reconciled(through) => (
+                "UPDATE github_watch_cursors SET reconciled_through=?3 WHERE owner=?1 AND repo=?2
+                 AND julianday(reconciled_through) <= julianday(?3)",
+                through,
+            ),
+        };
+        tx.execute(sql, params![owner, repo, through])?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// Claim before requesting pages so failures and restarts cannot exceed the hourly rate.
+pub(crate) fn claim_github_reconciliation(
+    owner: String,
+    repo: String,
+    now_ms: i64,
+) -> Result<bool> {
+    submit_database_write("claim_github_reconciliation", move |connection| {
+        Ok(connection.execute(
+            "UPDATE github_watch_cursors SET last_reconciled_at_ms=?3
+             WHERE owner=?1 AND repo=?2 AND (last_reconciled_at_ms IS NULL OR last_reconciled_at_ms <= ?4)",
+            params![owner, repo, now_ms, now_ms.saturating_sub(3_600_000)],
+        )? != 0)
+    })
+}
+
+pub(crate) fn load_github_seen_items(owner: &str, repo: &str) -> Result<Vec<GithubSeenItem>> {
+    let connection = open_reader(&database_path())?;
+    let mut statement = connection.prepare(
+        "SELECT number, kind, title, url, author, body, created_at, updated_at FROM github_seen_items
+         WHERE owner=?1 AND repo=?2 ORDER BY created_at, number")?;
+    statement
+        .query_map(params![owner, repo], |row| {
+            Ok(GithubSeenItem {
+                number: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                url: row.get(3)?,
+                author: row.get(4)?,
+                body: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?
+        .map(|row| row.map_err(Into::into))
+        .collect()
 }
 
 pub(crate) fn load_github_item_classified_sessions(
@@ -137,6 +254,8 @@ pub(crate) fn commit_github_item_classification(
                 classification.created
             ],
         )?;
+        tx.execute("DELETE FROM github_watch_classification_failures WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4",
+            params![classification.owner, classification.repo, classification.number, classification.session_id])?;
         if inserted == 0 {
             tx.commit()?;
             return Ok(false);
@@ -144,8 +263,8 @@ pub(crate) fn commit_github_item_classification(
         if classification.created {
             tx.execute(
                 "INSERT INTO github_watch_items(owner, repo, number, creator_session_id,
-                        kind, title, url, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                        kind, title, url, created_at, timeline_at, timeline_id, review_comments_at, review_comments_id, processed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, ?8, 0, ?8)
                  ON CONFLICT(owner, repo, number) DO NOTHING",
                 params![
                     classification.owner,
@@ -160,13 +279,12 @@ pub(crate) fn commit_github_item_classification(
             )?;
         }
         if let Some((event_key, event_json, wake)) = event {
-            enqueue_mailbox_event_with(
+            enqueue_github_event(
                 &tx,
                 &event_key,
                 &classification.session_id,
                 &event_json,
                 wake,
-                false,
             )?;
         }
         tx.commit()?;
@@ -181,10 +299,11 @@ pub(crate) fn commit_github_item_classification(
 pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubItemWatch>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
-        "SELECT owner, repo, number, creator_session_id, kind, title, url, created_at,
-                pull_request_etag, pull_request_state
-         FROM github_watch_items WHERE owner=?1 AND repo=?2
-         ORDER BY number, creator_session_id",
+        "SELECT w.owner, w.repo, w.number, w.creator_session_id, w.kind, w.title, w.url, w.created_at,
+                w.timeline_at, w.timeline_id, w.review_comments_at, w.review_comments_id, w.processed_at, s.updated_at
+         FROM github_watch_items w LEFT JOIN github_seen_items s
+           ON w.owner=s.owner AND w.repo=s.repo AND w.number=s.number
+         WHERE w.owner=?1 AND w.repo=?2 ORDER BY w.number",
     )?;
     statement
         .query_map(params![owner, repo], |row| {
@@ -197,47 +316,72 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
                 title: row.get(5)?,
                 url: row.get(6)?,
                 created_at: row.get(7)?,
-                pull_request_etag: row.get(8)?,
-                pull_request_state: row.get(9)?,
+                timeline_at: row.get(8)?,
+                timeline_id: row.get(9)?,
+                review_comments_at: row.get(10)?,
+                review_comments_id: row.get(11)?,
+                processed_at: row.get(12)?,
+                recorded_updated_at: row.get(13)?,
             })
         })?
         .map(|row| row.map_err(Into::into))
         .collect()
 }
 
-pub(crate) fn commit_github_pull_request_status(
-    watch: GithubItemWatch,
-    etag: Option<String>,
-    state: String,
-    event: Option<(String, String)>,
+fn enqueue_github_event(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    target: &str,
+    json: &str,
+    wake: bool,
 ) -> Result<()> {
-    let has_event = event.is_some();
-    submit_database_write("commit_github_pull_request_status", move |connection| {
+    tx.execute(
+        "INSERT INTO mailbox_outbox(event_key, target_session_id, event_json, wake, unpark, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5) ON CONFLICT(event_key) DO NOTHING",
+        params![key, target, json, wake, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+pub(crate) struct GithubItemProgress {
+    pub timeline_at: String,
+    pub timeline_id: i64,
+    pub review_comments_at: String,
+    pub review_comments_id: i64,
+    pub processed_at: String,
+}
+
+/// Only this item's progress advances with its events. A failure cannot roll
+/// back a feed page or another item's deliveries.
+pub(crate) fn commit_github_timeline(
+    watch: GithubItemWatch,
+    progress: GithubItemProgress,
+    events: Vec<(String, String, String, bool)>,
+) -> Result<()> {
+    let has_events = !events.is_empty();
+    submit_database_write("commit_github_timeline", move |connection| {
         let tx = connection.transaction()?;
-        let updated = tx.execute(
-            "UPDATE github_watch_items
-             SET pull_request_etag=?4, pull_request_state=?5
-             WHERE owner=?1 AND repo=?2 AND number=?3 AND kind='pull_request'",
-            params![watch.owner, watch.repo, watch.number, etag, state],
-        )?;
-        ensure!(
-            updated == 1,
-            "GitHub pull request watch disappeared during polling"
-        );
-        if let Some((event_key, event_json)) = event {
-            enqueue_mailbox_event_with(
-                &tx,
-                &event_key,
-                &watch.creator_session_id,
-                &event_json,
-                true,
-                false,
-            )?;
+        for (key, target, json, wake) in events {
+            enqueue_github_event(&tx, &key, &target, &json, wake)?;
         }
+        tx.execute(
+            "UPDATE github_watch_items SET timeline_at=?4, timeline_id=?5, review_comments_at=?6, review_comments_id=?7, processed_at=?8
+             WHERE owner=?1 AND repo=?2 AND number=?3",
+            params![
+                watch.owner,
+                watch.repo,
+                watch.number,
+                progress.timeline_at,
+                progress.timeline_id,
+                progress.review_comments_at,
+                progress.review_comments_id,
+                progress.processed_at
+            ],
+        )?;
         tx.commit()?;
         Ok(())
     })?;
-    if has_event {
+    if has_events {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(())
@@ -380,44 +524,34 @@ pub(crate) fn load_github_watched_repositories() -> Result<Vec<(String, String)>
         .collect()
 }
 
-/// Commit newly observed comments and their cursor together. If the daemon
-/// stops mid-poll, it either retries the events by stable key or keeps the old
-/// cursor; it cannot advance past an event it failed to queue.
-pub(crate) fn commit_github_comment_events(
+#[cfg(test)]
+pub(crate) fn seed_github_retry_due(
     owner: &str,
     repo: &str,
-    comments_cursor: String,
-    events: Vec<(String, String, String, bool)>,
+    number: i64,
+    session_id: &str,
 ) -> Result<()> {
-    let has_events = !events.is_empty();
     let owner = owner.to_owned();
     let repo = repo.to_owned();
-    submit_database_write("commit_github_comment_events", move |connection| {
-        let tx = connection.transaction()?;
-        for (event_key, target_session_id, event_json, wake) in events {
-            tx.execute(
-                "INSERT INTO mailbox_outbox(event_key, target_session_id, event_json, wake, unpark, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5) ON CONFLICT(event_key) DO NOTHING",
-                params![
-                    event_key,
-                    target_session_id,
-                    event_json,
-                    wake,
-                    Utc::now().to_rfc3339()
-                ],
-            )?;
-        }
-        tx.execute(
-            "INSERT INTO github_watch_cursors(owner, repo, comments_cursor)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(owner, repo) DO UPDATE SET comments_cursor=excluded.comments_cursor",
-            params![owner, repo, comments_cursor],
-        )?;
-        tx.commit()?;
+    let session_id = session_id.to_owned();
+    submit_database_write("seed_github_retry_due", move |connection| {
+        connection.execute("UPDATE github_watch_classification_failures SET next_attempt_at_ms=0 WHERE owner=?1 AND repo=?2 AND number=?3 AND session_id=?4",
+            params![owner,repo,number,session_id])?;
         Ok(())
-    })?;
-    if has_events {
-        crate::mailbox_outbox::notify_mailbox_outbox_changed();
-    }
-    Ok(())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Result<()> {
+    let owner = owner.to_owned();
+    let repo = repo.to_owned();
+    let at = at.to_owned();
+    submit_database_write("seed_github_repo_start", move |connection| {
+        connection.execute(
+            "UPDATE github_watch_cursors SET updated_at=?3, watch_started_at=?3,
+            reconciled_through=?3, last_reconciled_at_ms=NULL WHERE owner=?1 AND repo=?2",
+            params![owner, repo, at],
+        )?;
+        Ok(())
+    })
 }

@@ -23,8 +23,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::daemon::RuntimeState;
 
-const MAX_ITEMS_PER_POLL: usize = 50;
+const MAX_CLASSIFICATIONS_PER_POLL: usize = 50;
 const ITEMS_PER_PAGE: usize = 100;
+const MERGE_CLOSE_TOLERANCE_MS: i64 = 5_000;
 const CLASSIFICATION_CONCURRENCY: usize = 4;
 const REPOSITORY_CONCURRENCY: usize = 4;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
@@ -36,12 +37,6 @@ type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Result<GithubItemVerdict>>
 
 #[derive(Clone)]
 struct PollControl(Arc<dyn Fn() -> bool + Send + Sync>);
-
-#[derive(Clone)]
-struct RepositoryPollContext {
-    control: PollControl,
-    multi_repo_sessions: Arc<BTreeSet<String>>,
-}
 
 impl PollControl {
     fn new(enabled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
@@ -122,7 +117,6 @@ async fn run_with_classifier(
         }
         let config = projection.config.github.watch;
         let sessions_by_repo = sessions_by_github_repo(&projection.state);
-        let multi_repo_sessions = Arc::new(multi_repo_session_ids(&projection.state));
         let watched_repositories =
             tokio::task::spawn_blocking(crate::database::load_github_watched_repositories)
                 .await
@@ -141,7 +135,6 @@ async fn run_with_classifier(
                 let config = config.clone();
                 let classifier = classifier.clone();
                 let stop = stop.clone();
-                let multi_repo_sessions = multi_repo_sessions.clone();
                 let poll_state = state.clone();
                 jobs.spawn(async move {
                     let control = PollControl::new(move || {
@@ -150,19 +143,9 @@ async fn run_with_classifier(
                             .config
                             .github_events_enabled()
                     });
-                    let result = poll_repository(
-                        &owner,
-                        &repo,
-                        sessions,
-                        config,
-                        classifier,
-                        stop,
-                        RepositoryPollContext {
-                            control,
-                            multi_repo_sessions,
-                        },
-                    )
-                    .await;
+                    let result =
+                        poll_repository(&owner, &repo, sessions, config, classifier, stop, control)
+                            .await;
                     (owner, repo, result)
                 });
             }
@@ -223,30 +206,6 @@ fn sessions_by_github_repo(
     sessions_by_repo
 }
 
-fn multi_repo_session_ids(state: &mj_core::state::State) -> BTreeSet<String> {
-    state
-        .sessions
-        .values()
-        .filter(|session| session_github_repo_count(session) > 1)
-        .map(|session| session.id.clone())
-        .collect()
-}
-
-fn session_github_repo_count(session: &SessionRecord) -> usize {
-    session
-        .project
-        .iter()
-        .flat_map(|project| project.identities.values())
-        .filter_map(|identity| match identity {
-            RepositoryIdentity::Github(owner, repo) => {
-                Some((owner.to_ascii_lowercase(), repo.to_ascii_lowercase()))
-            }
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
 async fn poll_repository(
     owner: &str,
     repo: &str,
@@ -254,12 +213,8 @@ async fn poll_repository(
     config: GithubWatchConfig,
     classifier: Arc<dyn GithubClassifier>,
     stop: CancellationToken,
-    context: RepositoryPollContext,
+    control: PollControl,
 ) -> Result<()> {
-    let RepositoryPollContext {
-        control,
-        multi_repo_sessions,
-    } = context;
     if stop.is_cancelled() {
         return Ok(());
     }
@@ -290,42 +245,7 @@ async fn poll_repository(
         .await
         .context("resolve GitHub watch credential")?;
     let api = GithubApi::new_with_control(&config.api_base, token, control)?;
-    poll_repository_with_context(
-        owner,
-        repo,
-        sessions,
-        classifier,
-        &multi_repo_sessions,
-        &api,
-        stop,
-    )
-    .await
-}
-
-#[cfg(test)]
-async fn poll_repository_with_api(
-    owner: &str,
-    repo: &str,
-    sessions: Vec<SessionRecord>,
-    classifier: Arc<dyn GithubClassifier>,
-    api: &GithubApi,
-    stop: CancellationToken,
-) -> Result<()> {
-    let multi_repo_sessions = sessions
-        .iter()
-        .filter(|session| session_github_repo_count(session) > 1)
-        .map(|session| session.id.clone())
-        .collect::<BTreeSet<_>>();
-    poll_repository_with_context(
-        owner,
-        repo,
-        sessions,
-        classifier,
-        &multi_repo_sessions,
-        api,
-        stop,
-    )
-    .await
+    poll_repository_with_context(owner, repo, sessions, classifier, &api, stop).await
 }
 
 async fn poll_repository_with_context(
@@ -333,240 +253,293 @@ async fn poll_repository_with_context(
     repo: &str,
     sessions: Vec<SessionRecord>,
     classifier: Arc<dyn GithubClassifier>,
-    multi_repo_sessions: &BTreeSet<String>,
     api: &GithubApi,
     stop: CancellationToken,
 ) -> Result<()> {
-    api.control.check_enabled()?;
-    let watches = blocking_db({
+    let cursor = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || crate::database::load_github_watches(&owner, &repo)
+        move || crate::database::github_repo_cursor(&owner, &repo)
     })
     .await?;
-    if sessions.is_empty() && watches.is_empty() {
+    record_repository(owner, repo, &cursor, api, &stop).await?;
+    if let Err(error) = reconcile_repository(owner, repo, api, &stop, Utc::now()).await {
+        if is_github_events_disabled(&error) {
+            return Err(error);
+        }
+        tracing::warn!(%owner, %repo, %error, "GitHub reconciliation failed; retrying from checkpoint next hour");
+    }
+    // Classification and timeline work have separate durable progress. Neither
+    // one's failure prevents the other from running.
+    let (classification, timeline) = tokio::join!(
+        classify_recorded_items(
+            owner,
+            repo,
+            &sessions,
+            classifier,
+            &cursor.watch_started_at,
+            api,
+            &stop
+        ),
+        poll_repository_timelines(owner, repo, api, &stop),
+    );
+    classification?;
+    timeline
+}
+
+async fn record_repository(
+    owner: &str,
+    repo: &str,
+    cursor: &crate::database::GithubRepoCursor,
+    api: &GithubApi,
+    stop: &CancellationToken,
+) -> Result<()> {
+    acquire_repository(owner, repo, &cursor.updated_at, None, api, stop).await
+}
+
+async fn reconcile_repository(
+    owner: &str,
+    repo: &str,
+    api: &GithubApi,
+    stop: &CancellationToken,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if stop.is_cancelled() {
         return Ok(());
     }
-    let display_repos_by_session = sessions
-        .iter()
-        .filter(|session| session_github_repo_count(session) > 1)
-        .filter_map(|session| {
-            session_github_repo_full_name(session, owner, repo)
-                .map(|full_name| (session.id.clone(), full_name))
-        })
-        .collect::<BTreeMap<_, _>>();
-    poll_repository_items(owner, repo, &sessions, classifier, api, stop.clone()).await?;
-    let watches = blocking_db({
+    api.control.check_enabled()?;
+    // Read the writer's current coverage after main acquisition, not its old snapshot.
+    let cursor = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || crate::database::load_github_watches(&owner, &repo)
+        move || crate::database::github_repo_cursor(&owner, &repo)
     })
     .await?;
-    poll_repository_comments(
+    let mut until = (now - chrono::Duration::hours(1)).to_rfc3339();
+    if timestamp_precedes(&cursor.updated_at, &until) {
+        until = cursor.updated_at;
+    }
+    // Equality must replay the boundary: a crash may leave its tie unfinished.
+    if timestamp_precedes(&until, &cursor.reconciled_through) {
+        return Ok(());
+    }
+    let claimed = blocking_db({
+        let owner = owner.to_owned();
+        let repo = repo.to_owned();
+        move || crate::database::claim_github_reconciliation(owner, repo, now.timestamp_millis())
+    })
+    .await?;
+    if !claimed {
+        return Ok(());
+    }
+    // Re-read every main-feed range once its item timestamps are an hour old.
+    // Page commits retain coverage across pauses, failed requests and crashes.
+    // With offset pages, an item can be missed only if moves within its tied
+    // second disturb both the main read and the later reconciliation read.
+    acquire_repository(
         owner,
         repo,
-        watches,
-        &display_repos_by_session,
-        multi_repo_sessions,
+        &cursor.reconciled_through,
+        Some(&until),
         api,
         stop,
     )
     .await
 }
 
-async fn poll_repository_items(
+async fn acquire_repository(
+    owner: &str,
+    repo: &str,
+    from: &str,
+    until: Option<&str>,
+    api: &GithubApi,
+    stop: &CancellationToken,
+) -> Result<()> {
+    // GitHub's `since` is inclusive and offset pages are ordered by update
+    // time. After a full page, every item older than its last timestamp has
+    // been read, so the next read starts at that timestamp. Only a page that
+    // holds nothing newer than `since` itself pages forward by offset, so
+    // each request either advances `since` or reads deeper into one second.
+    let mut newest = from.to_owned();
+    let mut since = overlap_timestamp(&newest);
+    let mut page = 1;
+    loop {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
+        let response = api
+            .get_json(
+                &format!("repos/{owner}/{repo}/issues"),
+                &[
+                    ("state", "all".into()),
+                    ("sort", "updated".into()),
+                    ("direction", "asc".into()),
+                    ("since", since.clone()),
+                    ("per_page", ITEMS_PER_PAGE.to_string()),
+                    ("page", page.to_string()),
+                ],
+            )
+            .await?;
+        api.control.check_enabled()?;
+        let values = response
+            .as_array()
+            .context("GitHub issues response is not an array")?;
+        let mut reached_end = false;
+        let mut last: Option<String> = None;
+        let mut items = Vec::new();
+        for value in values {
+            if let Some(item) = parse_github_item(value) {
+                if until.is_some_and(|end| timestamp_precedes(end, &item.updated_at)) {
+                    reached_end = true;
+                    continue;
+                }
+                if timestamp_precedes(&newest, &item.updated_at) {
+                    newest = item.updated_at.clone();
+                }
+                if last
+                    .as_ref()
+                    .is_none_or(|last| timestamp_precedes(last, &item.updated_at))
+                {
+                    last = Some(item.updated_at.clone());
+                }
+                items.push(item);
+            } else {
+                tracing::warn!(%owner, %repo, "GitHub issues feed contains an invalid item; skipping it");
+            }
+        }
+        let short_page = values.len() < ITEMS_PER_PAGE;
+        let item_owner = owner.to_owned();
+        let item_repo = repo.to_owned();
+        // A short page or the first item beyond the bound proves this range
+        // complete, including a gap with no items. Otherwise save the newest
+        // timestamp; restarting from its overlap rereads its whole second.
+        let completed_range = until.filter(|_| reached_end || short_page);
+        let through = completed_range.unwrap_or(&newest).to_owned();
+        let progress = if until.is_some() {
+            crate::database::GithubFeedProgress::Reconciled(through)
+        } else {
+            crate::database::GithubFeedProgress::Main(through)
+        };
+        blocking_db(move || {
+            crate::database::record_github_page(item_owner, item_repo, items, progress)
+        })
+        .await?;
+        if completed_range.is_some() || short_page {
+            break;
+        }
+        match last {
+            Some(last) if timestamp_precedes(&since, &last) => {
+                since = last;
+                page = 1;
+            }
+            _ => page += 1,
+        }
+    }
+    Ok(())
+}
+
+async fn classify_recorded_items(
     owner: &str,
     repo: &str,
     sessions: &[SessionRecord],
     classifier: Arc<dyn GithubClassifier>,
+    watch_started_at: &str,
     api: &GithubApi,
-    stop: CancellationToken,
+    stop: &CancellationToken,
 ) -> Result<()> {
-    api.control.check_enabled()?;
-    let old_cursor = blocking_db({
+    let items = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || crate::database::load_github_repo_cursor(&owner, &repo)
+        move || crate::database::load_github_seen_items(&owner, &repo)
     })
     .await?;
-    let first_sight = old_cursor
-        .as_ref()
-        .is_none_or(|cursor| cursor.items_watermark_at.is_none());
-    let cursor = old_cursor.unwrap_or_default();
-    let watermark_id = cursor.items_watermark_id.map(|id| id.max(0) as u64);
-    let response = api
-        .items(
-            owner,
-            repo,
-            cursor.items_watermark_at.as_deref(),
-            watermark_id,
-            cursor.items_etag.as_deref(),
-        )
-        .await?;
-    api.control.check_enabled()?;
-    if first_sight {
-        let max = response
-            .items
-            .iter()
-            .filter_map(parse_github_item)
-            .max_by(|a, b| compare_watermark(&a.created_at, a.id, &b.created_at, b.id));
-        let watermark_at = max
-            .as_ref()
-            .map(|item| item.created_at.clone())
-            .unwrap_or_else(now_rfc3339);
-        let watermark_id = max.map(|item| item.id.min(i64::MAX as u64) as i64);
-        let new_cursor = crate::database::GithubRepoCursor {
-            items_watermark_at: Some(watermark_at),
-            items_watermark_id: watermark_id,
-            items_etag: response.etag,
-            comments_cursor: Some(now_rfc3339()),
-        };
-        blocking_db({
-            let owner = owner.to_owned();
-            let repo = repo.to_owned();
-            move || crate::database::save_github_repo_cursor(&owner, &repo, new_cursor)
-        })
-        .await?;
-        return Ok(());
-    }
-    if response.not_modified {
-        return Ok(());
-    }
-
-    let watermark_at = cursor.items_watermark_at.as_deref();
-    let watermark_id = cursor.items_watermark_id.unwrap_or_default().max(0) as u64;
-    let mut items = response
-        .items
-        .iter()
-        .filter_map(parse_github_item)
-        .filter(|item| {
-            watermark_at.is_none_or(|at| {
-                compare_watermark(&item.created_at, item.id, at, watermark_id)
-                    == std::cmp::Ordering::Greater
-            })
-        })
-        .collect::<Vec<_>>();
-    // The feed is newest-first. Process oldest-first so a bounded poll can
-    // advance only through a contiguous, fully classified prefix.
-    items.sort_by(|a, b| compare_watermark(&a.created_at, a.id, &b.created_at, b.id));
-    let mut classified_items = 0usize;
-    let mut skipped_items = 0usize;
-    let mut last_completed: Option<&GithubApiItem> = None;
-    for (index, item) in items.iter().enumerate() {
+    let failures = blocking_db({
+        let owner = owner.to_owned();
+        let repo = repo.to_owned();
+        move || crate::database::load_github_classification_failures(&owner, &repo)
+    })
+    .await?;
+    let now = mj_core::clock::epoch_millis();
+    let mut pending = Vec::new();
+    for item in items {
         if stop.is_cancelled() {
             return Ok(());
         }
-        if let Err(error) = api.control.check_enabled() {
-            if is_github_events_disabled(&error) {
-                save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false)
-                    .await?;
-                return Ok(());
-            }
-            return Err(error);
+        api.control.check_enabled()?;
+        if !timestamp_precedes(watch_started_at, &item.created_at) {
+            continue;
         }
         let classified = blocking_db({
             let owner = owner.to_owned();
             let repo = repo.to_owned();
-            let number = item.number as i64;
+            let number = item.number;
             move || crate::database::load_github_item_classified_sessions(&owner, &repo, number)
         })
         .await?;
-        let pending = sessions
-            .iter()
-            .filter(|session| !classified.contains(&session.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            last_completed = Some(item);
-            continue;
-        }
-        if classified_items >= MAX_ITEMS_PER_POLL {
-            skipped_items = items.len() - index;
-            break;
-        }
-        let item_owner = owner.to_owned();
-        let item_repo = repo.to_owned();
-        let item = item.clone();
-        let classifier = classifier.clone();
-        let control = api.control.clone();
-        let classification_results = stream::iter(pending)
-            .map(|session| {
-                let owner = item_owner.clone();
-                let repo = item_repo.clone();
-                let item = item.clone();
-                let classifier = classifier.clone();
-                let control = control.clone();
-                async move {
-                    classify_for_session(&owner, &repo, item, session, classifier, control).await
-                }
-            })
-            .buffer_unordered(CLASSIFICATION_CONCURRENCY)
-            .collect::<Vec<Result<()>>>()
-            .await;
-        let classification_result = classification_results
-            .into_iter()
-            .collect::<Result<Vec<_>>>();
-        if let Err(error) = classification_result {
-            if is_github_events_disabled(&error) {
-                save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false)
-                    .await?;
-                return Ok(());
+        for session in sessions {
+            if session.no_github_events
+                || timestamp_precedes(&item.created_at, &session.created_at)
+                || classified.contains(&session.id)
+            {
+                continue;
             }
-            return Err(error);
+            let failure = failures.get(&(item.number, session.id.clone()));
+            if failure.is_some_and(|failure| failure.next_attempt_at_ms > now) {
+                continue;
+            }
+            pending.push((
+                item.clone(),
+                session.clone(),
+                failure.map(|failure| failure.last_attempt_at_ms),
+                failure.map_or(0, |failure| failure.attempts),
+            ));
         }
-        classified_items += 1;
-        last_completed = Some(&items[index]);
     }
-    let partial = skipped_items > 0;
-    if partial {
-        tracing::warn!(%owner, %repo, cap = MAX_ITEMS_PER_POLL, skipped = skipped_items, "GitHub item poll reached its per-repository classification cap; remaining items will be retried");
-    }
-    let max = items
-        .iter()
-        .max_by(|a, b| compare_watermark(&a.created_at, a.id, &b.created_at, b.id));
-    if let Err(error) = api.control.check_enabled() {
-        if is_github_events_disabled(&error) {
-            save_item_progress(owner, repo, &cursor, None, last_completed.cloned(), false).await?;
-            return Ok(());
+    // Each pair owns its retry state. Never-attempted work precedes retries;
+    // eligible retries run oldest-first and never consume the cap in backoff.
+    pending.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| a.0.number.cmp(&b.0.number))
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+    let results = stream::iter(pending.into_iter().take(MAX_CLASSIFICATIONS_PER_POLL)).map(|(item, session, _, attempts)| {
+        let classifier = classifier.clone(); let control = api.control.clone();
+        async move {
+            if stop.is_cancelled() { return Ok(()); }
+            let number = item.number; let session_id = session.id.clone();
+            match classify_for_session(owner, repo, item, session, classifier, control).await {
+                Ok(()) => Ok(()),
+                Err(error) if is_github_events_disabled(&error) => Err(error),
+                Err(error) => {
+                    tracing::warn!(%owner, %repo, number, %session_id, attempt=attempts.saturating_add(1), %error, "GitHub classification failed; retrying with backoff");
+                    let owner = owner.to_owned(); let repo = repo.to_owned();
+                    blocking_db(move || crate::database::record_github_classification_failure(owner, repo, number, session_id)).await
+                }
+            }
         }
-        return Err(error);
+    }).buffer_unordered(CLASSIFICATION_CONCURRENCY).collect::<Vec<Result<()>>>().await;
+    for result in results {
+        result?;
     }
-    save_item_progress(
-        owner,
-        repo,
-        &cursor,
-        response.etag,
-        if partial {
-            last_completed.cloned()
-        } else {
-            max.cloned()
-        },
-        !partial,
-    )
-    .await?;
     Ok(())
 }
 
 async fn classify_for_session(
     owner: &str,
     repo: &str,
-    item: GithubApiItem,
+    item: crate::database::GithubSeenItem,
     session: SessionRecord,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
 ) -> Result<()> {
     let repo_label = format!("{owner}/{repo}");
-    let kind_label = item.kind_label();
-    let display_repo = (session_github_repo_count(&session) > 1).then(|| {
-        session_github_repo_full_name(&session, owner, repo)
-            .unwrap_or_else(|| item.repo_full_name.clone())
-    });
+    let kind = item_kind_from_watch(&item.kind);
     let recent_turns = recent_turns(session.id.clone()).await?;
     let evidence = GithubItemEvidence {
         item: GithubItem {
             repo: repo_label.clone(),
-            kind: item.kind,
-            number: item.number,
+            kind,
+            number: item.number as u64,
             title: item.title.clone(),
             body: item.body,
             author: item.author,
@@ -588,10 +561,10 @@ async fn classify_for_session(
             wake: false,
             created_at_ms: mj_core::clock::epoch_millis().max(0) as u64,
             body: MailboxEventBody::NewGithubItem {
-                kind: item.kind,
-                number: item.number,
+                kind,
+                number: item.number as u64,
                 title: item.title.clone(),
-                repo: display_repo,
+                repo: Some(repo_label.clone()),
             },
         };
         Some((key, serde_json::to_string(&event)?, false))
@@ -601,9 +574,9 @@ async fn classify_for_session(
     let classification = crate::database::GithubItemClassification {
         owner: owner.to_owned(),
         repo: repo.to_owned(),
-        number: item.number as i64,
+        number: item.number,
         session_id: session.id,
-        kind: kind_label.to_owned(),
+        kind: item.kind,
         title: item.title,
         url: item.url,
         created_at: item.created_at,
@@ -612,34 +585,6 @@ async fn classify_for_session(
     };
     blocking_db(move || {
         crate::database::commit_github_item_classification(classification, event).map(|_| ())
-    })
-    .await
-}
-
-async fn save_item_progress(
-    owner: &str,
-    repo: &str,
-    previous: &crate::database::GithubRepoCursor,
-    etag: Option<String>,
-    watermark: Option<GithubApiItem>,
-    completed_all: bool,
-) -> Result<()> {
-    let next_cursor = crate::database::GithubRepoCursor {
-        items_watermark_at: watermark
-            .as_ref()
-            .map(|item| item.created_at.clone())
-            .or_else(|| previous.items_watermark_at.clone()),
-        items_watermark_id: watermark
-            .map(|item| item.id.min(i64::MAX as u64) as i64)
-            .or(previous.items_watermark_id),
-        // Partial progress must fetch again; only a complete feed can reuse its ETag.
-        items_etag: completed_all.then_some(etag).flatten(),
-        comments_cursor: previous.comments_cursor.clone(),
-    };
-    blocking_db({
-        let owner = owner.to_owned();
-        let repo = repo.to_owned();
-        move || crate::database::save_github_repo_cursor(&owner, &repo, next_cursor)
     })
     .await
 }
@@ -657,294 +602,409 @@ async fn recent_turns(session_id: String) -> Result<String> {
     .context("load session turns for GitHub classification")?
 }
 
-async fn poll_repository_comments(
+async fn poll_repository_timelines(
     owner: &str,
     repo: &str,
-    watches: Vec<crate::database::GithubItemWatch>,
-    display_repos_by_session: &BTreeMap<String, String>,
-    multi_repo_sessions: &BTreeSet<String>,
     api: &GithubApi,
-    stop: CancellationToken,
+    stop: &CancellationToken,
 ) -> Result<()> {
-    if watches.is_empty() || stop.is_cancelled() {
-        return Ok(());
-    }
-    api.control.check_enabled()?;
-    let cursor = blocking_db({
+    let watches = blocking_db({
         let owner = owner.to_owned();
         let repo = repo.to_owned();
-        move || crate::database::load_github_repo_cursor(&owner, &repo)
+        move || crate::database::load_github_watches(&owner, &repo)
     })
-    .await?
-    .unwrap_or_default();
-    let Some(since) = cursor.comments_cursor else {
-        let mut initialized = cursor;
-        initialized.comments_cursor = Some(now_rfc3339());
-        api.control.check_enabled()?;
-        return blocking_db({
-            let owner = owner.to_owned();
-            let repo = repo.to_owned();
-            move || crate::database::save_github_repo_cursor(&owner, &repo, initialized)
-        })
-        .await;
-    };
-    let overlapping_since = overlap_timestamp(&since);
-    let mut comments = api
-        .comment_pages(owner, repo, "issues/comments", &overlapping_since)
-        .await?;
-    comments.extend(
-        api.comment_pages(owner, repo, "pulls/comments", &overlapping_since)
-            .await?,
-    );
-    let credential_login = api.credential_login().await?;
-    let mut watches_by_number = BTreeMap::<u64, Vec<crate::database::GithubItemWatch>>::new();
+    .await?;
     for watch in watches {
-        watches_by_number
-            .entry(watch.number as u64)
-            .or_default()
-            .push(watch);
-    }
-    let mut turn_windows_by_session = BTreeMap::new();
-    let mut outbox = Vec::new();
-    let mut newest = None::<String>;
-    for comment in comments {
-        api.control.check_enabled()?;
-        if let Some(timestamp) = comment_timestamp(&comment)
-            && newest
-                .as_ref()
-                .is_none_or(|current| timestamp_precedes(current, timestamp))
-        {
-            newest = Some(timestamp.to_owned());
-        }
-        let Some(number) = comment_item_number(&comment) else {
-            continue;
-        };
-        let Some(item_watches) = watches_by_number.get(&number) else {
-            continue;
-        };
-        let Some(id) = comment["id"].as_u64() else {
-            tracing::warn!(%owner, %repo, number, "ignoring GitHub comment with no numeric id");
-            continue;
-        };
-        let login = comment["user"]["login"].as_str().unwrap_or("unknown");
-        let body = comment["body"].as_str().unwrap_or_default();
-        let body = truncate_utf8(body, MAILBOX_COMMENT_BODY_LIMIT).to_owned();
-        let is_review_comment = comment.get("pull_request_url").is_some();
-        let kind = if is_review_comment {
-            "review-comment"
-        } else {
-            "comment"
-        };
-        let key = format!("github:{owner}/{repo}#{number}:{kind}:{id}");
-        for watch in item_watches {
-            let suppress_wake = authored_during_session_turn(
-                credential_login.as_deref(),
-                comment["user"]["login"].as_str(),
-                comment_creation_timestamp(&comment),
-                &watch.creator_session_id,
-                &mut turn_windows_by_session,
-            )
-            .await;
-            let item_kind = item_kind_from_watch(&watch.kind);
-            let display_repo =
-                display_repo_for_watch(watch, display_repos_by_session, multi_repo_sessions);
-            let event_body = if is_review_comment {
-                MailboxEventBody::GithubReviewComment {
-                    item_kind,
-                    number,
-                    title: watch.title.clone(),
-                    author: login.to_owned(),
-                    body: body.clone(),
-                    repo: display_repo,
-                }
-            } else {
-                MailboxEventBody::GithubComment {
-                    item_kind,
-                    number,
-                    title: watch.title.clone(),
-                    author: login.to_owned(),
-                    body: body.clone(),
-                    repo: display_repo,
-                }
-            };
-            outbox.push(mailbox_outbox_row(
-                key.clone(),
-                watch.creator_session_id.clone(),
-                event_body,
-                !suppress_wake,
-                comment_timestamp_ms(&comment),
-            )?);
-        }
-    }
-
-    let watched_pull_requests = watches_by_number
-        .values()
-        .flat_map(|watches| watches.iter())
-        .filter(|watch| watch.kind == "pull_request")
-        .cloned()
-        .collect::<Vec<_>>();
-    for watch in watched_pull_requests {
         if stop.is_cancelled() {
-            return Ok(());
+            break;
         }
         api.control.check_enabled()?;
-        let response = api
-            .pull_request(
-                owner,
-                repo,
-                watch.number as u64,
-                watch.pull_request_etag.as_deref(),
-            )
-            .await?;
-        api.control.check_enabled()?;
-        let state = if response.not_modified {
-            watch
-                .pull_request_state
-                .as_deref()
-                .context("GitHub returned 304 before a pull request state was stored")?
-                .to_owned()
-        } else {
-            let state = response.value["state"]
-                .as_str()
-                .context("GitHub pull request response has no state")?
-                .to_owned();
-            ensure!(
-                state == "open" || state == "closed",
-                "GitHub pull request response has invalid state {state:?}"
-            );
-            let lifecycle_actor = if let Some(merged_at) = response.value["merged_at"].as_str() {
-                match response.value["merged_by"]["login"]
-                    .as_str()
-                    .filter(|login| !login.is_empty())
-                {
-                    Some(login) => Some(login.to_owned()),
-                    None => {
-                        api.lifecycle_actor_from_events(
-                            owner,
-                            repo,
-                            watch.number as u64,
-                            "merged",
-                            Some("closed"),
-                            Some(merged_at),
-                        )
-                        .await?
-                    }
-                }
-            } else if state == "closed" {
-                let closed_at = response.value["closed_at"]
-                    .as_str()
-                    .context("closed GitHub pull request response has no closing timestamp")?;
-                match response.value["closed_by"]["login"]
-                    .as_str()
-                    .filter(|login| !login.is_empty())
-                {
-                    Some(login) => Some(login.to_owned()),
-                    None => {
-                        api.lifecycle_actor_from_events(
-                            owner,
-                            repo,
-                            watch.number as u64,
-                            "closed",
-                            None,
-                            Some(closed_at),
-                        )
-                        .await?
-                    }
-                }
-            } else if watch.pull_request_state.as_deref() == Some("closed") && state == "open" {
-                api.latest_reopened_actor(owner, repo, watch.number as u64)
-                    .await?
-            } else {
-                None
-            };
-            let event = pull_request_lifecycle_event(
-                owner,
-                repo,
-                &watch,
-                &response.value,
-                watch.pull_request_state.as_deref(),
-                lifecycle_actor.as_deref(),
-                display_repo_for_watch(&watch, display_repos_by_session, multi_repo_sessions),
-            )?;
-            blocking_db({
-                let watch = watch.clone();
-                let state = state.clone();
-                let etag = response.etag.clone();
-                move || {
-                    crate::database::commit_github_pull_request_status(watch, etag, state, event)
-                }
-            })
-            .await?;
-            state
+        let Some(updated_at) = &watch.recorded_updated_at else {
+            continue;
         };
-        if state != "open" {
+        if timestamp_precedes(updated_at, &watch.processed_at) {
             continue;
         }
-        for review in api
-            .array_pages(
-                &format!("repos/{owner}/{repo}/pulls/{}/reviews", watch.number),
+        let number = watch.number;
+        if let Err(error) = poll_item_timeline(watch, api).await {
+            if is_github_events_disabled(&error) {
+                return Err(error);
+            }
+            tracing::warn!(%owner, %repo, number, error=%format!("{error:#}"), "GitHub item timeline failed; will retry next poll");
+        }
+    }
+    Ok(())
+}
+
+async fn poll_item_timeline(
+    watch: crate::database::GithubItemWatch,
+    api: &GithubApi,
+) -> Result<()> {
+    let fetched = async {
+        let (entries, processed_at) = api
+            .array_pages_observed(
+                &format!(
+                    "repos/{}/{}/issues/{}/timeline",
+                    watch.owner, watch.repo, watch.number
+                ),
                 &[],
             )
-            .await?
+            .await?;
+        // A merge that lands commits directly, as Merge Marshall does, leaves
+        // only a closed entry in the timeline. Only the pull request itself
+        // records that it merged, so read it when such a close appears.
+        let merged_at = if watch.kind == "pull_request"
+            && has_close_without_merge(&entries, &watch.timeline_at)
         {
-            api.control.check_enabled()?;
-            let Some(timestamp) = review["submitted_at"].as_str() else {
-                continue;
-            };
-            if timestamp_precedes(timestamp, &overlapping_since) {
-                continue;
-            }
-            let Some(id) = review["id"].as_u64() else {
-                continue;
-            };
-            let login = review["user"]["login"].as_str().unwrap_or("unknown");
-            let body = review["body"].as_str().unwrap_or_default();
-            let review_state = review["state"].as_str().unwrap_or("reviewed");
-            let body = truncate_utf8(body, MAILBOX_COMMENT_BODY_LIMIT).to_owned();
-            let key = format!("github:{owner}/{repo}#{}:review:{id}", watch.number);
-            let suppress_wake = authored_during_session_turn(
-                credential_login.as_deref(),
-                review["user"]["login"].as_str(),
-                comment_creation_timestamp(&review),
-                &watch.creator_session_id,
-                &mut turn_windows_by_session,
+            api.get_json(
+                &format!(
+                    "repos/{}/{}/pulls/{}",
+                    watch.owner, watch.repo, watch.number
+                ),
+                &[],
             )
-            .await;
-            let display_repo =
-                display_repo_for_watch(&watch, display_repos_by_session, multi_repo_sessions);
-            outbox.push(mailbox_outbox_row(
-                key,
-                watch.creator_session_id.clone(),
-                MailboxEventBody::GithubReview {
-                    item_kind: GithubItemKind::PullRequest,
-                    number: watch.number as u64,
-                    title: watch.title.clone(),
-                    author: login.to_owned(),
-                    body,
-                    review_state: Some(review_state.to_owned()),
-                    repo: display_repo,
-                },
-                !suppress_wake,
-                comment_timestamp_ms(&review),
-            )?);
-            if newest
-                .as_ref()
-                .is_none_or(|current| timestamp_precedes(current, timestamp))
-            {
-                newest = Some(timestamp.to_owned());
-            }
-        }
+            .await?["merged_at"]
+                .as_str()
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let comments = if watch.kind == "pull_request" {
+            // Use the stored cursor, before either source advances it.
+            api.array_pages(
+                &format!(
+                    "repos/{}/{}/pulls/{}/comments",
+                    watch.owner, watch.repo, watch.number
+                ),
+                &[("since", overlap_timestamp(&watch.review_comments_at))],
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
+        Ok::<_, anyhow::Error>((entries, comments, merged_at, processed_at))
     }
-    let comments_cursor = newest
-        .filter(|newest| timestamp_precedes(&since, newest))
-        .unwrap_or(since);
+    .await;
+    let (entries, comments, merged_at, processed_at) = match fetched {
+        Ok(values) => values,
+        Err(error)
+            if error
+                .downcast_ref::<GithubHttpStatus>()
+                .is_some_and(|status| matches!(status.status.as_u16(), 404 | 410)) =>
+        {
+            (
+                Vec::new(),
+                Vec::new(),
+                None,
+                error
+                    .downcast_ref::<GithubHttpStatus>()
+                    .context("missing GitHub HTTP status")?
+                    .observed_at
+                    .clone(),
+            )
+        }
+        Err(error) => {
+            return Err(error.context(format!(
+                "GitHub activity {}/{}#{}",
+                watch.owner, watch.repo, watch.number
+            )));
+        }
+    };
+    let mapped = map_item_activity(&watch, &entries, &comments, merged_at.as_deref())?;
+    let mut outbox = Vec::new();
+    let mut turn_windows = BTreeMap::new();
+    let mut login = None;
+    if mapped.events.iter().any(|event| event.author.is_some()) {
+        login = api.credential_login().await?;
+    }
+    for event in mapped.events {
+        api.control.check_enabled()?;
+        let suppress = authored_during_session_turn(
+            login.as_deref(),
+            event.author.as_deref(),
+            Some(&event.timestamp),
+            &watch.creator_session_id,
+            &mut turn_windows,
+        )
+        .await;
+        outbox.push(mailbox_outbox_row(
+            event.key,
+            watch.creator_session_id.clone(),
+            event.body,
+            !suppress,
+            timestamp_millis(&event.timestamp)
+                .context("invalid GitHub timeline timestamp")?
+                .max(0) as u64,
+        )?);
+    }
     api.control.check_enabled()?;
-    let owner = owner.to_owned();
-    let repo = repo.to_owned();
     blocking_db(move || {
-        crate::database::commit_github_comment_events(&owner, &repo, comments_cursor, outbox)
+        crate::database::commit_github_timeline(
+            watch,
+            crate::database::GithubItemProgress {
+                timeline_at: mapped.cursor_at,
+                timeline_id: mapped.cursor_id,
+                review_comments_at: mapped.review_comments_at,
+                review_comments_id: mapped.review_comments_id,
+                processed_at,
+            },
+            outbox,
+        )
     })
     .await
+}
+
+struct TimelineEvent {
+    key: String,
+    timestamp: String,
+    author: Option<String>,
+    body: MailboxEventBody,
+}
+
+struct TimelineMapping {
+    events: Vec<TimelineEvent>,
+    cursor_at: String,
+    cursor_id: i64,
+    review_comments_at: String,
+    review_comments_id: i64,
+}
+
+/// Each source owns its cursor. A later comment read cannot advance the
+/// timeline past an event that appeared after the timeline read.
+fn map_item_activity(
+    watch: &crate::database::GithubItemWatch,
+    entries: &[Value],
+    comments: &[Value],
+    merged_at: Option<&str>,
+) -> Result<TimelineMapping> {
+    let mut mapped = map_timeline(watch, entries, Some(&watch.timeline_at), merged_at)?;
+    // Apply the stored boundary to update time, replaying ties.
+    // A newly published comment can have an older creation time.
+    let comments_to_map = comments
+        .iter()
+        .filter(|comment| {
+            comment["updated_at"]
+                .as_str()
+                .or_else(|| comment_creation_timestamp(comment))
+                .is_some_and(|at| !timestamp_precedes(at, &watch.review_comments_at))
+        })
+        .collect::<Vec<_>>();
+    let review_entries =
+        [serde_json::json!({"event": "line-commented", "comments": comments_to_map})];
+    let review_mapping = map_timeline(watch, &review_entries, None, None)?;
+    mapped.events.extend(review_mapping.events);
+    for comment in comments {
+        let Some(timestamp) = comment["updated_at"]
+            .as_str()
+            .or_else(|| comment_creation_timestamp(comment))
+        else {
+            continue;
+        };
+        let Some(id) = comment["id"].as_i64() else {
+            continue;
+        };
+        if timestamp_millis(timestamp).is_none() {
+            bail!("invalid GitHub review comment timestamp");
+        }
+        if compare_watermark(
+            timestamp,
+            id as u64,
+            &mapped.review_comments_at,
+            mapped.review_comments_id as u64,
+        )
+        .is_gt()
+        {
+            mapped.review_comments_at = timestamp.to_owned();
+            mapped.review_comments_id = id;
+        }
+    }
+    Ok(mapped)
+}
+
+/// Whether the timeline has a close after the cursor with no merge before it
+/// in the same open interval. Only such a close needs the pull request's
+/// merge time to tell a merge from a close.
+fn has_close_without_merge(entries: &[Value], since: &str) -> bool {
+    let mut merged = false;
+    for entry in entries {
+        match entry["event"].as_str() {
+            Some("merged") => merged = true,
+            Some("reopened") => merged = false,
+            Some("closed")
+                if !merged
+                    && comment_creation_timestamp(entry)
+                        .is_some_and(|at| !timestamp_precedes(at, since)) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// GitHub records the merge time and the closing entry within a second or two
+/// of each other.
+fn same_moment(left: &str, right: &str) -> bool {
+    match (timestamp_millis(left), timestamp_millis(right)) {
+        (Some(left), Some(right)) => (left - right).abs() <= MERGE_CLOSE_TOLERANCE_MS,
+        _ => false,
+    }
+}
+
+/// Entry payloads supply actors, comment text, review state and event IDs.
+/// Watch metadata supplies only the item's identity and display title.
+fn map_timeline(
+    watch: &crate::database::GithubItemWatch,
+    entries: &[Value],
+    since: Option<&str>,
+    merged_at: Option<&str>,
+) -> Result<TimelineMapping> {
+    let mut result = TimelineMapping {
+        events: Vec::new(),
+        cursor_at: watch.timeline_at.clone(),
+        cursor_id: watch.timeline_id,
+        review_comments_at: watch.review_comments_at.clone(),
+        review_comments_id: watch.review_comments_id,
+    };
+    let mut merged = false;
+    let repo = Some(format!("{}/{}", watch.owner, watch.repo));
+    let item_kind = item_kind_from_watch(&watch.kind);
+    for entry in entries {
+        let event_type = entry["event"].as_str().unwrap_or_default();
+        // GitHub emits closed after merged, sometimes in a later second.
+        // A reopen starts a new lifecycle interval.
+        if event_type == "merged" {
+            merged = true;
+        }
+        if event_type == "reopened" {
+            merged = false;
+        }
+        let values = if event_type == "line-commented" {
+            entry["comments"]
+                .as_array()
+                .context("GitHub line-commented entry has no comments")?
+                .iter()
+                .collect::<Vec<_>>()
+        } else {
+            vec![entry]
+        };
+        for value in values {
+            let Some(timestamp) = comment_creation_timestamp(value) else {
+                continue;
+            };
+            let Some(id) = value["id"].as_i64() else {
+                continue;
+            };
+            if timestamp_millis(timestamp).is_none() {
+                bail!("invalid GitHub timeline timestamp");
+            }
+            if compare_watermark(
+                timestamp,
+                id as u64,
+                &result.cursor_at,
+                result.cursor_id as u64,
+            )
+            .is_gt()
+            {
+                result.cursor_at = timestamp.to_owned();
+                result.cursor_id = id;
+            }
+            // IDs belong to different GitHub tables. Replay the boundary second
+            // and let the outbox deduplicate, so a lower ID cannot hide an event.
+            if since.is_some_and(|boundary| timestamp_precedes(timestamp, boundary)) {
+                continue;
+            }
+            let author = value["user"]["login"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let body = truncate_utf8(
+                value["body"].as_str().unwrap_or_default(),
+                MAILBOX_COMMENT_BODY_LIMIT,
+            )
+            .to_owned();
+            let (suffix, body, authored) = match event_type {
+                "commented" => (
+                    "comment",
+                    MailboxEventBody::GithubComment {
+                        item_kind,
+                        number: watch.number as u64,
+                        title: watch.title.clone(),
+                        author: author.clone(),
+                        body,
+                        repo: repo.clone(),
+                    },
+                    true,
+                ),
+                "reviewed" => (
+                    "review",
+                    MailboxEventBody::GithubReview {
+                        item_kind,
+                        number: watch.number as u64,
+                        title: watch.title.clone(),
+                        author: author.clone(),
+                        body,
+                        review_state: value["state"].as_str().map(str::to_owned),
+                        repo: repo.clone(),
+                    },
+                    true,
+                ),
+                "line-commented" => (
+                    "review-comment",
+                    MailboxEventBody::GithubReviewComment {
+                        item_kind,
+                        number: watch.number as u64,
+                        title: watch.title.clone(),
+                        author: author.clone(),
+                        body,
+                        repo: repo.clone(),
+                    },
+                    true,
+                ),
+                "merged" | "closed" | "reopened" if watch.kind == "pull_request" => {
+                    if event_type == "closed" && merged {
+                        continue;
+                    }
+                    // Compare times so an earlier close, before a reopen and a
+                    // later merge, still reads as a close.
+                    let (suffix, change) = match event_type {
+                        "merged" => ("merged", MailboxPullRequestChange::Merged),
+                        "closed" if merged_at.is_some_and(|at| same_moment(at, timestamp)) => {
+                            ("merged", MailboxPullRequestChange::Merged)
+                        }
+                        "closed" => ("closed", MailboxPullRequestChange::ClosedWithoutMerging),
+                        _ => ("reopened", MailboxPullRequestChange::Reopened),
+                    };
+                    (
+                        suffix,
+                        MailboxEventBody::GithubPullRequestLifecycle {
+                            change,
+                            number: watch.number as u64,
+                            title: watch.title.clone(),
+                            actor: value["actor"]["login"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            repo: repo.clone(),
+                        },
+                        false,
+                    )
+                }
+                _ => continue,
+            };
+            result.events.push(TimelineEvent {
+                key: format!(
+                    "github:{}/{}#{}:{suffix}:{id}",
+                    watch.owner, watch.repo, watch.number
+                ),
+                timestamp: timestamp.to_owned(),
+                author: authored.then_some(author),
+                body,
+            });
+        }
+    }
+    Ok(result)
 }
 
 async fn authored_during_session_turn(
@@ -1012,76 +1072,6 @@ fn ceil_to_second(timestamp_ms: i64) -> i64 {
     }
 }
 
-fn pull_request_lifecycle_event(
-    owner: &str,
-    repo: &str,
-    watch: &crate::database::GithubItemWatch,
-    pull: &Value,
-    previous_state: Option<&str>,
-    actor_from_events: Option<&str>,
-    display_repo: Option<String>,
-) -> Result<Option<(String, String)>> {
-    let repo_label = format!("{owner}/{repo}");
-    let number = watch.number;
-    let (key, change, actor, timestamp) = if let Some(merged_at) = pull["merged_at"].as_str() {
-        let login = pull["merged_by"]["login"]
-            .as_str()
-            .filter(|login| !login.is_empty())
-            .or(actor_from_events)
-            .unwrap_or_default();
-        (
-            format!("github:{repo_label}#{number}:merged"),
-            MailboxPullRequestChange::Merged,
-            login,
-            merged_at,
-        )
-    } else if pull["state"].as_str() == Some("closed") {
-        let closed_at = pull["closed_at"]
-            .as_str()
-            .context("closed GitHub pull request response has no closing timestamp")?;
-        let login = pull["closed_by"]["login"]
-            .as_str()
-            .filter(|login| !login.is_empty())
-            .or(actor_from_events)
-            .unwrap_or_default();
-        (
-            format!("github:{repo_label}#{number}:closed:{closed_at}"),
-            MailboxPullRequestChange::ClosedWithoutMerging,
-            login,
-            closed_at,
-        )
-    } else if previous_state == Some("closed") && pull["state"].as_str() == Some("open") {
-        let reopened_at = pull["updated_at"]
-            .as_str()
-            .context("reopened GitHub pull request response has no update timestamp")?;
-        let login = actor_from_events.unwrap_or_default();
-        (
-            format!("github:{repo_label}#{number}:reopened:{reopened_at}"),
-            MailboxPullRequestChange::Reopened,
-            login,
-            reopened_at,
-        )
-    } else {
-        return Ok(None);
-    };
-    let event = MailboxEvent {
-        key: key.clone(),
-        source: "github".into(),
-        wake: true,
-        created_at_ms: timestamp_millis(timestamp)
-            .unwrap_or_else(mj_core::clock::epoch_millis)
-            .max(0) as u64,
-        body: MailboxEventBody::GithubPullRequestLifecycle {
-            change,
-            number: number as u64,
-            title: watch.title.clone(),
-            actor: actor.to_owned(),
-            repo: display_repo,
-        },
-    };
-    Ok(Some((key, serde_json::to_string(&event)?)))
-}
-
 fn mailbox_outbox_row(
     key: String,
     target_session_id: String,
@@ -1099,97 +1089,25 @@ fn mailbox_outbox_row(
     Ok((key, target_session_id, serde_json::to_string(&event)?, wake))
 }
 
-#[derive(Debug, Clone)]
-struct GithubApiItem {
-    id: u64,
-    number: u64,
-    kind: GithubItemKind,
-    title: String,
-    body: String,
-    author: String,
-    url: String,
-    repo_full_name: String,
-    created_at: String,
-}
-
-impl GithubApiItem {
-    fn kind_label(&self) -> &'static str {
-        match self.kind {
-            GithubItemKind::Issue => "issue",
-            GithubItemKind::PullRequest => "pull_request",
-        }
-    }
-}
-
-fn parse_github_item(value: &Value) -> Option<GithubApiItem> {
-    let url = value["html_url"].as_str()?.to_owned();
-    let repo_full_name = value["repository"]["full_name"]
-        .as_str()
-        .filter(|name| !name.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| github_repo_full_name_from_url(&url))?;
-    Some(GithubApiItem {
-        id: value["id"].as_u64()?,
-        number: value["number"].as_u64()?,
+fn parse_github_item(value: &Value) -> Option<crate::database::GithubSeenItem> {
+    Some(crate::database::GithubSeenItem {
+        number: value["number"].as_i64()?,
         kind: if value.get("pull_request").is_some() {
-            GithubItemKind::PullRequest
+            "pull_request"
         } else {
-            GithubItemKind::Issue
-        },
-        title: value["title"].as_str()?.to_owned(),
+            "issue"
+        }
+        .to_owned(),
+        title: value["title"].as_str().unwrap_or_default().to_owned(),
         body: value["body"].as_str().unwrap_or_default().to_owned(),
         author: value["user"]["login"]
             .as_str()
-            .unwrap_or("unknown")
+            .unwrap_or_default()
             .to_owned(),
-        url,
-        repo_full_name,
+        url: value["html_url"].as_str().unwrap_or_default().to_owned(),
         created_at: value["created_at"].as_str()?.to_owned(),
+        updated_at: value["updated_at"].as_str()?.to_owned(),
     })
-}
-
-fn github_repo_full_name_from_url(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    let mut segments = parsed.path_segments()?;
-    let owner = segments.next()?;
-    let repo = segments.next()?;
-    (!owner.is_empty() && !repo.is_empty()).then(|| format!("{owner}/{repo}"))
-}
-
-fn session_github_repo_full_name(
-    session: &SessionRecord,
-    owner: &str,
-    repo: &str,
-) -> Option<String> {
-    session
-        .project
-        .iter()
-        .flat_map(|project| project.identities.values())
-        .find_map(|identity| match identity {
-            RepositoryIdentity::Github(identity_owner, identity_repo)
-                if identity_owner.eq_ignore_ascii_case(owner)
-                    && identity_repo.eq_ignore_ascii_case(repo) =>
-            {
-                Some(format!("{identity_owner}/{identity_repo}"))
-            }
-            _ => None,
-        })
-}
-
-fn display_repo_for_watch(
-    watch: &crate::database::GithubItemWatch,
-    display_repos_by_session: &BTreeMap<String, String>,
-    multi_repo_sessions: &BTreeSet<String>,
-) -> Option<String> {
-    display_repos_by_session
-        .get(&watch.creator_session_id)
-        .cloned()
-        .or_else(|| {
-            multi_repo_sessions
-                .contains(&watch.creator_session_id)
-                .then(|| github_repo_full_name_from_url(&watch.url))
-                .flatten()
-        })
 }
 
 fn item_kind_from_watch(kind: &str) -> GithubItemKind {
@@ -1209,17 +1127,6 @@ fn compare_watermark(a_at: &str, a_id: u64, b_at: &str, b_id: u64) -> std::cmp::
     }
 }
 
-fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn comment_timestamp(comment: &Value) -> Option<&str> {
-    comment["updated_at"]
-        .as_str()
-        .or_else(|| comment["submitted_at"].as_str())
-        .or_else(|| comment["created_at"].as_str())
-}
-
 fn comment_creation_timestamp(comment: &Value) -> Option<&str> {
     comment["created_at"]
         .as_str()
@@ -1231,44 +1138,6 @@ fn timestamp_millis(timestamp: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|timestamp| timestamp.timestamp_millis())
-}
-
-fn actor_for_issue_event(
-    events: &[Value],
-    event_type: &str,
-    target_timestamp: Option<&str>,
-) -> Option<String> {
-    let candidates = events
-        .iter()
-        .filter(|event| event["event"] == event_type)
-        .filter_map(|event| {
-            event["actor"]["login"]
-                .as_str()
-                .filter(|login| !login.is_empty())
-                .map(|login| (event, login.to_owned()))
-        })
-        .collect::<Vec<_>>();
-
-    if let Some(target_millis) = target_timestamp.and_then(timestamp_millis)
-        && let Some((_, login)) = candidates
-            .iter()
-            .filter_map(|(event, login)| {
-                timestamp_millis(event["created_at"].as_str()?)
-                    .map(|created_at| (created_at.abs_diff(target_millis), login))
-            })
-            .min_by_key(|(distance, _)| *distance)
-    {
-        return Some(login.clone());
-    }
-
-    candidates
-        .into_iter()
-        .max_by(|(left, _), (right, _)| {
-            left["created_at"]
-                .as_str()
-                .cmp(&right["created_at"].as_str())
-        })
-        .map(|(_, login)| login)
 }
 
 fn timestamp_precedes(timestamp: &str, boundary: &str) -> bool {
@@ -1284,23 +1153,9 @@ fn timestamp_precedes(timestamp: &str, boundary: &str) -> bool {
 fn overlap_timestamp(timestamp: &str) -> String {
     DateTime::parse_from_rfc3339(timestamp)
         .map(|timestamp| {
-            (timestamp - chrono::Duration::seconds(5)).to_rfc3339_opts(SecondsFormat::Millis, true)
+            (timestamp - chrono::Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true)
         })
         .unwrap_or_else(|_| timestamp.to_owned())
-}
-
-fn comment_timestamp_ms(comment: &Value) -> u64 {
-    comment_timestamp(comment)
-        .and_then(timestamp_millis)
-        .map(|timestamp| timestamp.max(0) as u64)
-        .unwrap_or_else(|| mj_core::clock::epoch_millis().max(0) as u64)
-}
-
-fn comment_item_number(comment: &Value) -> Option<u64> {
-    let url = comment["issue_url"]
-        .as_str()
-        .or_else(|| comment["pull_request_url"].as_str())?;
-    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
@@ -1320,12 +1175,6 @@ async fn blocking_db<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .context("GitHub watch database task failed")?
-}
-
-struct GithubPage {
-    items: Vec<Value>,
-    etag: Option<String>,
-    not_modified: bool,
 }
 
 #[derive(Default)]
@@ -1427,87 +1276,16 @@ impl GithubApi {
         })
     }
 
-    async fn items(
-        &self,
-        owner: &str,
-        repo: &str,
-        watermark_at: Option<&str>,
-        watermark_id: Option<u64>,
-        etag: Option<&str>,
-    ) -> Result<GithubPage> {
-        let mut items = Vec::new();
-        let mut next_etag = None;
-        // Keep the URL stable so its ETag remains a valid validator while the
-        // client applies the creation watermark below.
-        for page in 1.. {
-            let query = vec![
-                ("state", "all".to_owned()),
-                ("sort", "created".to_owned()),
-                ("direction", "desc".to_owned()),
-                ("per_page", ITEMS_PER_PAGE.to_string()),
-                ("page", page.to_string()),
-            ];
-            let mut request = self
-                .client
-                .get(format!("{}/repos/{owner}/{repo}/issues", self.base))
-                .query(&query);
-            if page == 1
-                && let Some(etag) = etag
-            {
-                request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-            }
-            let response = self.get(request).await?;
-            if response.not_modified {
-                return Ok(GithubPage {
-                    items: Vec::new(),
-                    etag: etag.map(str::to_owned),
-                    not_modified: true,
-                });
-            }
-            if page == 1 {
-                next_etag = response.etag;
-            }
-            let page_items = response
-                .value
-                .as_array()
-                .context("GitHub issues response is not an array")?;
-            let count = page_items.len();
-            let crossed_watermark = match (watermark_at, watermark_id) {
-                (Some(watermark_at), Some(watermark_id)) => {
-                    page_items.iter().filter_map(parse_github_item).all(|item| {
-                        compare_watermark(&item.created_at, item.id, watermark_at, watermark_id)
-                            != std::cmp::Ordering::Greater
-                    })
-                }
-                _ => false,
-            };
-            items.extend(page_items.iter().cloned());
-            if watermark_at.is_none() || crossed_watermark || count < ITEMS_PER_PAGE {
-                return Ok(GithubPage {
-                    items,
-                    etag: next_etag,
-                    not_modified: false,
-                });
-            }
-        }
-        unreachable!("GitHub issue pagination always returns or fails")
-    }
-
-    async fn comment_pages(
-        &self,
-        owner: &str,
-        repo: &str,
-        endpoint: &str,
-        since: &str,
-    ) -> Result<Vec<Value>> {
-        self.array_pages(
-            &format!("repos/{owner}/{repo}/{endpoint}"),
-            &[("since", since.to_owned())],
-        )
-        .await
-    }
-
     async fn array_pages(&self, path: &str, query: &[(&str, String)]) -> Result<Vec<Value>> {
+        Ok(self.array_pages_observed(path, query).await?.0)
+    }
+
+    async fn array_pages_observed(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<(Vec<Value>, String)> {
+        let mut observed_at = None;
         let mut values = Vec::new();
         for page in 1.. {
             let mut page_query = query.to_vec();
@@ -1524,6 +1302,9 @@ impl GithubApi {
                 !response.not_modified,
                 "unexpected 304 response for paged GitHub request"
             );
+            if observed_at.is_none() {
+                observed_at = Some(response.observed_at);
+            }
             let page_values = response
                 .value
                 .as_array()
@@ -1534,73 +1315,23 @@ impl GithubApi {
                 break;
             }
         }
-        Ok(values)
+        Ok((
+            values,
+            observed_at.context("GitHub paging did not fetch a page")?,
+        ))
     }
 
-    async fn get_json(
-        &self,
-        path: &str,
-        query: &[(&str, String)],
-        etag: Option<&str>,
-    ) -> Result<Value> {
-        let mut request = self
+    async fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
+        let request = self
             .client
             .get(format!("{}/{path}", self.base))
             .query(query);
-        if let Some(etag) = etag {
-            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-        }
         let response = self.get(request).await?;
         ensure!(
             !response.not_modified,
             "unexpected 304 for GitHub resource {path}"
         );
         Ok(response.value)
-    }
-
-    async fn pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        etag: Option<&str>,
-    ) -> Result<GithubResponse> {
-        let mut request = self
-            .client
-            .get(format!("{}/repos/{owner}/{repo}/pulls/{number}", self.base));
-        if let Some(etag) = etag {
-            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-        }
-        self.get(request).await
-    }
-
-    async fn latest_reopened_actor(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Option<String>> {
-        self.lifecycle_actor_from_events(owner, repo, number, "reopened", None, None)
-            .await
-    }
-
-    async fn lifecycle_actor_from_events(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        preferred_event: &str,
-        fallback_event: Option<&str>,
-        timestamp: Option<&str>,
-    ) -> Result<Option<String>> {
-        let events = self
-            .array_pages(&format!("repos/{owner}/{repo}/issues/{number}/events"), &[])
-            .await?;
-        Ok(
-            actor_for_issue_event(&events, preferred_event, timestamp).or_else(|| {
-                fallback_event.and_then(|event| actor_for_issue_event(&events, event, timestamp))
-            }),
-        )
     }
 
     async fn credential_login(&self) -> Result<Option<String>> {
@@ -1615,7 +1346,7 @@ impl GithubApi {
         {
             return Ok(None);
         }
-        let user = self.get_json("user", &[], None).await;
+        let user = self.get_json("user", &[]).await;
         self.control.check_enabled()?;
         let lookup = user.and_then(|user| {
             user["login"]
@@ -1654,21 +1385,29 @@ impl GithubApi {
         self.control.check_enabled()?;
         let response = request.send().await.context("request GitHub REST API")?;
         self.record_rate_limit(&response).await;
-        let status = response.status();
-        let etag = response
+        let observed_at = response
             .headers()
-            .get(reqwest::header::ETAG)
+            .get(reqwest::header::DATE)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
+            .and_then(|date| DateTime::parse_from_rfc2822(date).ok())
+            .map(|date| date.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        // Date may follow the response snapshot, and local clocks may be ahead.
+        let observed_at = (observed_at - chrono::Duration::seconds(30))
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        let status = response.status();
         if status == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(GithubResponse {
                 value: Value::Null,
-                etag,
                 not_modified: true,
+                observed_at,
             });
         }
         if !status.is_success() {
-            bail!("GitHub REST API returned {status}");
+            return Err(anyhow::Error::new(GithubHttpStatus {
+                status,
+                observed_at,
+            }));
         }
         let response = response
             .error_for_status()
@@ -1689,8 +1428,8 @@ impl GithubApi {
         );
         Ok(GithubResponse {
             value: serde_json::from_slice(&bytes).context("decode GitHub REST API response")?,
-            etag,
             not_modified: false,
+            observed_at,
         })
     }
 
@@ -1775,9 +1514,21 @@ pub(crate) fn github_rate_limit_retry_at(
     )
 }
 
+#[derive(Debug)]
+struct GithubHttpStatus {
+    status: reqwest::StatusCode,
+    observed_at: String,
+}
+impl std::fmt::Display for GithubHttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GitHub REST API returned {}", self.status)
+    }
+}
+impl std::error::Error for GithubHttpStatus {}
+
 struct GithubResponse {
+    observed_at: String,
     value: Value,
-    etag: Option<String>,
     not_modified: bool,
 }
 
@@ -1852,18 +1603,11 @@ mod tests {
         let mut session = crate::database::test_session("disable-poll-session", "project");
         session.state = mj_core::state::SessionState::Running;
         crate::database::save_session(&session).unwrap();
-        let old = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
-        crate::database::save_github_repo_cursor(
-            "acme",
-            "repo",
-            crate::database::GithubRepoCursor {
-                items_watermark_at: Some(old.clone()),
-                items_watermark_id: Some(1),
-                items_etag: None,
-                comments_cursor: Some(now_rfc3339()),
-            },
-        )
-        .unwrap();
+        // The feed returns an item newer than this cursor, so recording it
+        // after the opt-out would move the cursor.
+        let before = crate::database::github_repo_cursor("acme", "repo")
+            .unwrap()
+            .updated_at;
 
         let state = DisablePollServer {
             enabled: Arc::new(AtomicBool::new(true)),
@@ -1887,7 +1631,7 @@ mod tests {
             PollControl::new(move || enabled.load(Ordering::SeqCst)),
         )
         .unwrap();
-        let error = poll_repository_with_api(
+        let error = poll_repository_with_context(
             "acme",
             "repo",
             vec![session],
@@ -1905,17 +1649,15 @@ mod tests {
         );
         assert_eq!(state.requests.load(Ordering::SeqCst), 1);
         assert!(is_github_events_disabled(
-            &api.get_json("ping", &[], None).await.unwrap_err()
+            &api.get_json("ping", &[]).await.unwrap_err()
         ));
         assert_eq!(
             state.requests.load(Ordering::SeqCst),
             1,
             "no request follows opt-out"
         );
-        let cursor = crate::database::load_github_repo_cursor("acme", "repo")
-            .unwrap()
-            .unwrap();
-        assert_eq!(cursor.items_watermark_at.as_deref(), Some(old.as_str()));
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        assert_eq!(cursor.updated_at, before);
 
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
@@ -1940,11 +1682,11 @@ mod tests {
             ("reset", "watch-rate-reset-test-token"),
         ] {
             let limited_api = GithubApi::new(&base, Some(token.into())).unwrap();
-            assert!(limited_api.get_json(path, &[], None).await.is_err());
+            assert!(limited_api.get_json(path, &[]).await.is_err());
             let second_repository_api = GithubApi::new(&base, Some(token.into())).unwrap();
             let blocked = tokio::time::timeout(
                 Duration::from_millis(150),
-                second_repository_api.get_json("ok", &[], None),
+                second_repository_api.get_json("ok", &[]),
             )
             .await;
             assert!(
@@ -1954,7 +1696,7 @@ mod tests {
             assert_eq!(state.accepted.load(Ordering::SeqCst), 0);
             tokio::time::timeout(
                 Duration::from_secs(3),
-                second_repository_api.get_json("ok", &[], None),
+                second_repository_api.get_json("ok", &[]),
             )
             .await
             .expect("rate-limit deadline expires")
@@ -1973,32 +1715,6 @@ mod tests {
         assert!(GithubApi::new("http://127.0.0.1:1234", None).is_ok());
         assert!(GithubApi::new("http://localhost:1234", None).is_ok());
         assert!(GithubApi::new("https://api.github.com", None).is_ok());
-    }
-
-    #[derive(Clone)]
-    struct FakeGithub {
-        data: Arc<tokio::sync::Mutex<FakeGithubData>>,
-        not_modified: Arc<AtomicUsize>,
-        pull_not_modified: Arc<AtomicUsize>,
-        user_requests: Arc<AtomicUsize>,
-        review_requests: Arc<AtomicUsize>,
-    }
-
-    #[derive(Clone)]
-    struct FakePull {
-        value: Value,
-        etag: String,
-    }
-
-    #[derive(Clone)]
-    struct FakeGithubData {
-        items: Vec<Value>,
-        comments: Vec<Value>,
-        review_comments: Vec<Value>,
-        reviews: Vec<Value>,
-        etag: String,
-        pulls: BTreeMap<u64, FakePull>,
-        issue_events: BTreeMap<u64, Vec<Value>>,
     }
 
     struct FakeClassifier {
@@ -2032,130 +1748,278 @@ mod tests {
         false
     }
 
-    // Hard-won: 193f015e: whole-second GitHub timestamps can miss turn-window suppression.
-    // Hard-won: #4625: bot merges can omit merged_by and rely on issue-event actors.
+    #[derive(Clone, Default)]
+    struct FakeGithub {
+        data: Arc<tokio::sync::Mutex<FakeGithubData>>,
+    }
+
+    #[derive(Default)]
+    struct FakeGithubData {
+        items: Vec<Value>,
+        timelines: BTreeMap<u64, Vec<Value>>,
+        review_comments: BTreeMap<u64, Vec<Value>>,
+        comment_queries: Vec<(u64, String)>,
+        fail: BTreeSet<u64>,
+        gone: BTreeSet<u64>,
+        feed_queries: Vec<HashMap<String, String>>,
+        timeline_requests: Vec<u64>,
+        observed_at: Option<String>,
+        move_after_feed: Option<(usize, usize, String)>,
+        timeline_after_read: Option<(u64, Value)>,
+        bulk_moves_after_feed: Vec<(usize, Vec<usize>, String)>,
+        fail_feed_request: Option<usize>,
+        pulls: BTreeMap<u64, Value>,
+        pull_requests: Vec<u64>,
+    }
+
+    async fn fake_issues(
+        State(fake): State<FakeGithub>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> Response {
+        let mut data = fake.data.lock().await;
+        data.feed_queries.push(query.clone());
+        if data.fail_feed_request == Some(data.feed_queries.len()) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        assert_eq!(query["state"], "all");
+        assert_eq!(query["sort"], "updated");
+        assert_eq!(query["direction"], "asc");
+        let page: usize = query["page"].parse().unwrap();
+        let mut items = data
+            .items
+            .iter()
+            // GitHub's `since` includes items updated at exactly that time.
+            .filter(|item| {
+                !timestamp_precedes(item["updated_at"].as_str().unwrap(), &query["since"])
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        items.sort_by_key(|item| item["updated_at"].as_str().unwrap().to_owned());
+        let values = items
+            .into_iter()
+            .skip((page - 1) * ITEMS_PER_PAGE)
+            .take(ITEMS_PER_PAGE)
+            .collect::<Vec<_>>();
+        if data
+            .move_after_feed
+            .as_ref()
+            .is_some_and(|(request, _, _)| *request == data.feed_queries.len())
+        {
+            let (_, index, updated_at) = data.move_after_feed.take().unwrap();
+            data.items[index]["updated_at"] = json!(updated_at);
+        }
+        let request = data.feed_queries.len();
+        let moves = std::mem::take(&mut data.bulk_moves_after_feed);
+        for (after, indices, updated_at) in moves {
+            if after == request {
+                for index in indices {
+                    data.items[index]["updated_at"] = json!(updated_at);
+                }
+            } else {
+                data.bulk_moves_after_feed
+                    .push((after, indices, updated_at));
+            }
+        }
+        Json(values).into_response()
+    }
+
+    async fn fake_timeline(
+        State(fake): State<FakeGithub>,
+        Path((_, _, number)): Path<(String, String, u64)>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> Response {
+        let mut data = fake.data.lock().await;
+        data.timeline_requests.push(number);
+        if data.fail.contains(&number) {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        if data.gone.contains(&number) {
+            return StatusCode::GONE.into_response();
+        }
+        let page: usize = query["page"].parse().unwrap();
+        let values = data
+            .timelines
+            .get(&number)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .skip((page - 1) * ITEMS_PER_PAGE)
+            .take(ITEMS_PER_PAGE)
+            .collect::<Vec<_>>();
+        let mut response = Json(values).into_response();
+        if let Some(at) = &data.observed_at {
+            let date = DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string();
+            response
+                .headers_mut()
+                .insert(header::DATE, HeaderValue::from_str(&date).unwrap());
+        }
+        // Make a new event visible only after taking this response snapshot.
+        if let Some((target, event)) = data.timeline_after_read.take() {
+            data.timelines.entry(target).or_default().push(event);
+        }
+        response
+    }
+
+    async fn fake_pull(
+        State(fake): State<FakeGithub>,
+        Path((_, _, number)): Path<(String, String, u64)>,
+    ) -> Response {
+        let mut data = fake.data.lock().await;
+        data.pull_requests.push(number);
+        match data.pulls.get(&number) {
+            Some(pull) => Json(pull.clone()).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn fake_review_comments(
+        State(fake): State<FakeGithub>,
+        Path((_, _, number)): Path<(String, String, u64)>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> Response {
+        let mut data = fake.data.lock().await;
+        data.comment_queries.push((number, query["since"].clone()));
+        let page: usize = query["page"].parse().unwrap();
+        let comments = data
+            .review_comments
+            .get(&number)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|comment| {
+                timestamp_precedes(&query["since"], comment["updated_at"].as_str().unwrap())
+            })
+            .skip((page - 1) * ITEMS_PER_PAGE)
+            .take(ITEMS_PER_PAGE)
+            .collect::<Vec<_>>();
+        Json(comments).into_response()
+    }
+
+    fn watch_classification(
+        number: i64,
+        created_at: &str,
+    ) -> crate::database::GithubItemClassification {
+        crate::database::GithubItemClassification {
+            owner: "acme".into(),
+            repo: "repo".into(),
+            number,
+            session_id: "creator".into(),
+            kind: "pull_request".into(),
+            title: "synthetic PR".into(),
+            url: "https://github.com/acme/repo/pull/1".into(),
+            created_at: created_at.into(),
+            interested: true,
+            created: true,
+        }
+    }
+
+    // Hard-won: 0477819ab: a regenerated merge body rolled back all repository progress.
     #[tokio::test]
-    async fn watcher_persists_interest_creator_watch_comments_and_restart_cursor() {
+    async fn watcher_records_pages_and_retries_items_without_blocking_other_work() {
         if !run_isolated_child(
-            "watcher_persists_interest_creator_watch_comments_and_restart_cursor",
+            "watcher_records_pages_and_retries_items_without_blocking_other_work",
         ) {
             return;
         }
-        let writer = crate::database::install_isolated_test_writer();
-        let now = Utc::now();
-        let old = now - chrono::Duration::minutes(5);
-        let creator_id = "creator-session";
-        let credential = "watcher-lifecycle-integration-token";
-        let mut session = crate::database::test_session(creator_id, "project");
-        session.state = mj_core::state::SessionState::Running;
-        session.project = Some(mj_core::repository::ProjectBundleSnapshot {
-            bundle: mj_core::config::ProjectBundle {
-                primary_repo: "main".into(),
-                repositories: vec![
-                    mj_core::config::ProjectRepository {
-                        id: "main".into(),
-                        github: Some("Acme/Repo".into()),
-                        local: None,
-                        destination: ".".into(),
-                        git_ref: None,
-                    },
-                    mj_core::config::ProjectRepository {
-                        id: "shared".into(),
-                        github: Some("Another/Repository".into()),
-                        local: None,
-                        destination: "shared".into(),
-                        git_ref: None,
-                    },
-                ],
-            },
-            identities: BTreeMap::from([
-                (
-                    "main".into(),
-                    RepositoryIdentity::Github("Acme".into(), "Repo".into()),
-                ),
-                (
-                    "shared".into(),
-                    RepositoryIdentity::Github("Another".into(), "Repository".into()),
-                ),
-            ]),
-            network_sources: BTreeMap::new(),
-        });
-        crate::database::save_session(&session).unwrap();
-        let mut projection = mj_core::state::State::default();
-        projection
-            .sessions
-            .insert(session.id.clone(), session.clone());
-        assert!(sessions_by_github_repo(&projection).contains_key(&("acme".into(), "repo".into())));
-        // A session started with `--no-github-events` is not a delivery target.
-        let mut opted_out = session.clone();
-        opted_out.id = "no-github-events-session".into();
-        opted_out.no_github_events = true;
-        let mut with_opt_out = projection.clone();
-        with_opt_out
-            .sessions
-            .insert(opted_out.id.clone(), opted_out);
-        let targets = &sessions_by_github_repo(&with_opt_out)[&("acme".into(), "repo".into())];
-        assert_eq!(
-            targets
-                .iter()
-                .map(|session| session.id.as_str())
-                .collect::<Vec<_>>(),
-            [creator_id]
-        );
-
-        let fake = FakeGithub {
-            data: Arc::new(tokio::sync::Mutex::new(FakeGithubData {
-                items: vec![github_item(
-                    1,
-                    1,
-                    "old existing issue",
-                    old.to_rfc3339(),
-                    false,
-                )],
-                comments: Vec::new(),
-                review_comments: Vec::new(),
-                reviews: Vec::new(),
-                etag: "\"v1\"".into(),
-                pulls: BTreeMap::new(),
-                issue_events: BTreeMap::new(),
-            })),
-            not_modified: Arc::new(AtomicUsize::new(0)),
-            pull_not_modified: Arc::new(AtomicUsize::new(0)),
-            user_requests: Arc::new(AtomicUsize::new(0)),
-            review_requests: Arc::new(AtomicUsize::new(0)),
-        };
+        let _writer = crate::database::install_isolated_test_writer();
+        let initial = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let parsed = DateTime::parse_from_rfc3339(&initial.watch_started_at).unwrap();
+        let start = DateTime::from_timestamp(parsed.timestamp() + 1, 0).unwrap();
+        let created =
+            (start + chrono::Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let updated =
+            (start + chrono::Duration::seconds(5)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let later =
+            (start + chrono::Duration::seconds(10)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let comment_updated =
+            (start + chrono::Duration::seconds(12)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            // A full page and a partial page share the same update timestamp.
+            data.items = (1..=101)
+                .map(|n| {
+                    let mut item =
+                        github_item(n, n, "interesting synthetic item", created.clone(), true);
+                    item["updated_at"] = json!(updated);
+                    item
+                })
+                .collect();
+            data.observed_at = Some(
+                (DateTime::parse_from_rfc3339(&updated).unwrap() + chrono::Duration::seconds(30))
+                    .to_rfc3339(),
+            );
+            data.fail.insert(1);
+            data.gone.insert(3);
+            // GitHub exposes the review but omits its line comments from the timeline.
+            data.review_comments.insert(2, vec![json!({"id":8,"created_at":updated,"updated_at":updated,"user":{"login":"watcher-bot"},"body":"line comment"})]);
+            data.timelines.insert(2, vec![
+                json!({"event":"merged","id":200,"created_at":updated,"actor":{"login":"merge-bot"}}),
+                json!({"event":"closed","id":201,"created_at":later,"actor":{"login":"merge-bot"}}),
+                json!({"event":"commented","id":10,"created_at":updated,"user":{"login":"watcher-bot"},"body":"original"}),
+                json!({"event":"reviewed","id":9,"submitted_at":updated,"user":{"login":"reviewer"},"state":"approved","body":"review"}),
+            ]);
+        }
+        {
+            let mut data = fake.data.lock().await;
+            let timeline = data.timelines.get_mut(&2).unwrap();
+            let mut first_page = (1000..1100)
+                .map(|id| json!({"event":"labeled","id":id,"created_at":created}))
+                .collect::<Vec<_>>();
+            first_page.append(timeline);
+            *timeline = first_page;
+        }
+        for n in 1..=3 {
+            crate::database::commit_github_item_classification(
+                watch_classification(n, &created),
+                None,
+            )
+            .unwrap();
+        }
+        let mut creator = crate::database::test_session("creator", "project");
+        creator.created_at = initial.watch_started_at.clone();
+        crate::database::save_session(&creator).unwrap();
+        crate::database::seed_github_test_turns(
+            "creator",
+            start.timestamp_millis() - 5000,
+            start.timestamp_millis() - 1000,
+            start.timestamp_millis(),
+        )
+        .unwrap();
+        let mut new_session = crate::database::test_session("new-session", "project");
+        new_session.created_at = later.clone();
+        crate::database::save_session(&new_session).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
             .route("/repos/{owner}/{repo}/issues", get(fake_issues))
-            .route("/repos/{owner}/{repo}/issues/comments", get(fake_comments))
             .route(
-                "/repos/{owner}/{repo}/pulls/comments",
+                "/repos/{owner}/{repo}/issues/{number}/timeline",
+                get(fake_timeline),
+            )
+            .route(
+                "/repos/{owner}/{repo}/pulls/{number}/comments",
                 get(fake_review_comments),
             )
-            .route("/repos/{owner}/{repo}/pulls/{number}", get(fake_pull))
             .route(
-                "/repos/{owner}/{repo}/issues/{number}/events",
-                get(fake_issue_events),
-            )
-            .route("/user", get(fake_user))
-            .route(
-                "/repos/{owner}/{repo}/pulls/{number}/reviews",
-                get(fake_reviews),
+                "/user",
+                get(|| async { Json(json!({"login":"watcher-bot"})) }),
             )
             .with_state(fake.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let api = GithubApi::new(&base, Some("synthetic-watcher-items".into())).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let classifier: Arc<dyn GithubClassifier> = Arc::new(FakeClassifier {
             calls: calls.clone(),
         });
         let stop = CancellationToken::new();
-        let api = GithubApi::new(&base, Some(credential.into())).unwrap();
-
-        poll_repository_with_api(
+        poll_repository_with_context(
             "acme",
             "repo",
-            vec![session.clone()],
+            vec![new_session.clone()],
             classifier.clone(),
             &api,
             stop.clone(),
@@ -2165,570 +2029,1077 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "the first poll only establishes the watermark"
+            "session must not classify items older than itself"
+        );
+        assert_eq!(
+            crate::database::load_github_seen_items("acme", "repo")
+                .unwrap()
+                .len(),
+            101
+        );
+        assert_eq!(
+            crate::database::github_repo_cursor("acme", "repo")
+                .unwrap()
+                .updated_at,
+            updated
+        );
+        let watches = crate::database::load_github_watches("acme", "repo").unwrap();
+        assert_eq!(
+            watches[0].processed_at, created,
+            "failed item keeps its progress"
+        );
+        assert_eq!(watches[1].processed_at, updated);
+        assert_eq!(
+            watches[2].recorded_updated_at.as_deref(),
+            Some(updated.as_str()),
+            "gone item retains its recorded update"
+        );
+        assert_eq!(
+            fake.data.lock().await.comment_queries[0],
+            (2, overlap_timestamp(&created)),
+            "review comments use the stored cursor even when the timeline advances it"
+        );
+        let rows = crate::database::pending_mailbox_events(1000).unwrap();
+        assert_eq!(rows.len(), 4);
+        let events = rows
+            .iter()
+            .map(|row| serde_json::from_str::<MailboxEvent>(&row.event_json).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.body,
+                    MailboxEventBody::GithubPullRequestLifecycle { .. }
+                ))
+                .count(),
+            1
+        );
+        let merge = events
+            .iter()
+            .find(|event| event.key.ends_with(":merged:200"))
+            .unwrap();
+        assert!(
+            matches!(&merge.body, MailboxEventBody::GithubPullRequestLifecycle { actor, repo: Some(repo), .. } if actor == "merge-bot" && repo == "acme/repo")
         );
         assert!(
-            crate::database::pending_mailbox_events(20)
+            !events
+                .iter()
+                .find(|event| event.key.ends_with(":comment:10"))
+                .unwrap()
+                .wake
+        );
+        assert!(
+            !events
+                .iter()
+                .find(|event| event.key.ends_with(":review-comment:8"))
+                .unwrap()
+                .wake
+        );
+        assert!(
+            events
+                .iter()
+                .find(|event| event.key.ends_with(":review:9"))
+                .unwrap()
+                .wake
+        );
+        {
+            let mut data = fake.data.lock().await;
+            data.fail.clear();
+            data.observed_at = Some(
+                (DateTime::parse_from_rfc3339(&later).unwrap() + chrono::Duration::seconds(30))
+                    .to_rfc3339(),
+            );
+            // The cursor boundary can acquire another item with a lower ID.
+            let mut item = github_item(
+                500,
+                102,
+                "interesting boundary item",
+                created.clone(),
+                false,
+            );
+            item["updated_at"] = json!(updated);
+            data.items.push(item);
+            data.items[1]["updated_at"] = json!(later);
+            data.timelines.get_mut(&2).unwrap()[102]["body"] = json!("edited body");
+            data.review_comments.get_mut(&2).unwrap()[0]["body"] = json!("edited line comment");
+            data.review_comments.get_mut(&2).unwrap()[0]["updated_at"] = json!(comment_updated);
+            data.timelines.get_mut(&2).unwrap()[100]["actor"] = json!({"login":"changed-bot"});
+        }
+        // Explicitly replay the same IDs with changed bodies. The first values win.
+        let mut replay = watches[1].clone();
+        replay.timeline_at = created.clone();
+        replay.timeline_id = 0;
+        replay.review_comments_at = created.clone();
+        replay.review_comments_id = 0;
+        replay.recorded_updated_at = Some(updated.clone());
+        poll_item_timeline(replay, &api).await.unwrap();
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![new_session],
+            classifier.clone(),
+            &api,
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::database::load_github_seen_items("acme", "repo")
+                .unwrap()
+                .len(),
+            102
+        );
+        assert_eq!(
+            crate::database::pending_mailbox_events(1000).unwrap(),
+            rows,
+            "repeated keys preserve their original bodies"
+        );
+        assert_eq!(
+            crate::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            later
+        );
+        assert_eq!(
+            crate::database::load_github_watches("acme", "repo").unwrap()[1].review_comments_at,
+            comment_updated,
+            "review comments advance only their own cursor"
+        );
+        assert_eq!(
+            fake.data
+                .lock()
+                .await
+                .comment_queries
+                .iter()
+                .filter(|(number, _)| *number == 2)
+                .count(),
+            3,
+            "the second repository poll fetches the edited line comment again"
+        );
+        // Older sessions process the backlog in bounded batches, independent of feed cursor.
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![creator.clone()],
+            classifier.clone(),
+            &api,
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_CLASSIFICATIONS_PER_POLL);
+        poll_repository_with_context("acme", "repo", vec![creator], classifier, &api, stop)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 99);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    async fn start_fake_github(fake: FakeGithub) -> (GithubApi, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/repos/{owner}/{repo}/issues", get(fake_issues))
+            .route(
+                "/repos/{owner}/{repo}/issues/{number}/timeline",
+                get(fake_timeline),
+            )
+            .route(
+                "/repos/{owner}/{repo}/pulls/{number}/comments",
+                get(fake_review_comments),
+            )
+            .route("/repos/{owner}/{repo}/pulls/{number}", get(fake_pull))
+            .route(
+                "/user",
+                get(|| async { Json(json!({"login":"watcher-bot"})) }),
+            )
+            .with_state(fake);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (GithubApi::new(&base, Some(base.clone())).unwrap(), server)
+    }
+
+    fn fake_classifier() -> Arc<dyn GithubClassifier> {
+        Arc::new(FakeClassifier {
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    // Hard-won: review f2c1683: an item moving between offset pages hid its neighbor.
+    #[tokio::test]
+    async fn watcher_keyset_recording_keeps_items_moving_between_pages() {
+        if !run_isolated_child("watcher_keyset_recording_keeps_items_moving_between_pages") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::parse_from_rfc3339(&cursor.updated_at).unwrap();
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            data.items = (1..=201)
+                .map(|n| {
+                    github_item(
+                        n,
+                        n,
+                        "synthetic",
+                        (start + chrono::Duration::seconds(n as i64)).to_rfc3339(),
+                        false,
+                    )
+                })
+                .collect();
+            data.move_after_feed =
+                Some((1, 0, (start + chrono::Duration::seconds(300)).to_rfc3339()));
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        record_repository("acme", "repo", &cursor, &api, &CancellationToken::new())
+            .await
+            .unwrap();
+        let seen = crate::database::load_github_seen_items("acme", "repo").unwrap();
+        assert_eq!(seen.len(), 201);
+        assert!(
+            seen.iter().any(|item| item.number == 101),
+            "the moving item's neighbor must not be skipped"
+        );
+        assert!(
+            fake.data
+                .lock()
+                .await
+                .feed_queries
+                .iter()
+                .all(|query| query["page"] == "1")
+        );
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: 5f5e74082: an inclusive `since` refetched a full page straddling two seconds and stopped.
+    #[tokio::test]
+    async fn watcher_pages_past_a_full_page_that_straddles_two_seconds() {
+        if !run_isolated_child("watcher_pages_past_a_full_page_that_straddles_two_seconds") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            data.items = (1..=200)
+                .map(|n| {
+                    let mut item = github_item(n, n, "synthetic", at(1), false);
+                    item["updated_at"] = json!(if n <= 50 { at(1) } else { at(2) });
+                    item
+                })
+                .collect();
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        record_repository("acme", "repo", &cursor, &api, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::database::load_github_seen_items("acme", "repo")
+                .unwrap()
+                .len(),
+            200
+        );
+        assert_eq!(fake.data.lock().await.feed_queries.len(), 3);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReconciliationRecovery {
+        OldBacklog,
+        LongPause,
+        FailedPass,
+    }
+
+    async fn check_reconciliation_checkpoint_recovery(scenario: ReconciliationRecovery) {
+        let _writer = crate::database::install_isolated_test_writer();
+        let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap();
+        let origin = now - chrono::Duration::hours(4);
+        let at = |seconds| {
+            (origin + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let (tied_at, moved_at, mut read_at, prefix_count) = match scenario {
+            ReconciliationRecovery::OldBacklog => (at(3600), at(14400), now, 0),
+            ReconciliationRecovery::LongPause => {
+                (at(1), at(2), origin + chrono::Duration::seconds(10802), 0)
+            }
+            ReconciliationRecovery::FailedPass => {
+                (at(5400), at(5401), origin + chrono::Duration::hours(3), 100)
+            }
+        };
+        crate::database::github_repo_cursor("acme", "repo").unwrap();
+        crate::database::seed_github_repo_start("acme", "repo", &at(0)).unwrap();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let mut watch = watch_classification(201, &tied_at);
+        watch.kind = "issue".into();
+        crate::database::commit_github_item_classification(watch, None).unwrap();
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            // Distinct prefix times let the failing pass commit a useful checkpoint
+            // before the timestamp tie containing the skipped item.
+            data.items = (0..prefix_count)
+                .map(|n| {
+                    github_item(
+                        1000 + n as u64,
+                        1000 + n as u64,
+                        "prefix",
+                        at(3600 + n as i64),
+                        false,
+                    )
+                })
+                .collect();
+            data.items
+                .extend((1..=401).map(|n| github_item(n, n, "synthetic", tied_at.clone(), false)));
+            // Moves land after the tie's second and fourth offset pages. Without a
+            // prefix, the first request jumps to the tie and the second rereads it.
+            let request_offset = if prefix_count == 0 { 1 } else { 2 };
+            data.bulk_moves_after_feed = vec![
+                (2 + request_offset, vec![prefix_count], moved_at.clone()),
+                (
+                    4 + request_offset,
+                    (prefix_count + 1..prefix_count + 101).collect(),
+                    moved_at.clone(),
+                ),
+            ];
+            data.observed_at = Some((read_at + chrono::Duration::seconds(30)).to_rfc3339());
+            data.timelines.insert(201, vec![json!({"event":"commented","id":201,"created_at":tied_at,"user":{"login":"other"},"body":"recovered activity"})]);
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        let stop = CancellationToken::new();
+        record_repository("acme", "repo", &cursor, &api, &stop)
+            .await
+            .unwrap();
+        let seen = crate::database::load_github_seen_items("acme", "repo").unwrap();
+        assert_eq!(seen.len(), prefix_count + 400);
+        assert!(!seen.iter().any(|item| item.number == 201));
+        poll_repository_timelines("acme", "repo", &api, &stop)
+            .await
+            .unwrap();
+        assert!(fake.data.lock().await.timeline_requests.is_empty());
+        let main_cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        assert_eq!(main_cursor.updated_at, moved_at);
+        assert_eq!(main_cursor.reconciled_through, at(0));
+        if matches!(scenario, ReconciliationRecovery::FailedPass) {
+            let requests = fake.data.lock().await.feed_queries.len();
+            fake.data.lock().await.fail_feed_request = Some(requests + 2);
+            let error = reconcile_repository("acme", "repo", &api, &stop, read_at)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("503"), "{error:#}");
+            let interrupted = crate::database::github_repo_cursor("acme", "repo").unwrap();
+            assert_eq!(interrupted.updated_at, moved_at);
+            assert_eq!(interrupted.reconciled_through, at(3699));
+            assert!(
+                !crate::database::load_github_seen_items("acme", "repo")
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.number == 201)
+            );
+            let requests = fake.data.lock().await.feed_queries.len();
+            fake.data.lock().await.fail_feed_request = None;
+            reconcile_repository(
+                "acme",
+                "repo",
+                &api,
+                &stop,
+                read_at + chrono::Duration::seconds(3599),
+            )
+            .await
+            .unwrap();
+            assert_eq!(fake.data.lock().await.feed_queries.len(), requests);
+            assert_eq!(
+                crate::database::github_repo_cursor("acme", "repo")
+                    .unwrap()
+                    .reconciled_through,
+                interrupted.reconciled_through
+            );
+            read_at += chrono::Duration::hours(1);
+            reconcile_repository("acme", "repo", &api, &stop, read_at)
+                .await
+                .unwrap();
+            assert_eq!(
+                fake.data.lock().await.feed_queries[requests]["since"],
+                overlap_timestamp(&interrupted.reconciled_through)
+            );
+        } else {
+            // A new reader and a much later clock model catch-up or process restart.
+            reconcile_repository("acme", "repo", &api, &stop, read_at)
+                .await
+                .unwrap();
+        }
+        let seen = crate::database::load_github_seen_items("acme", "repo").unwrap();
+        assert_eq!(seen.len(), prefix_count + 401);
+        assert!(seen.iter().any(|item| item.number == 201));
+        let reconciled = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        assert_eq!(reconciled.updated_at, moved_at);
+        let expected_through = match scenario {
+            ReconciliationRecovery::OldBacklog => at(10800),
+            _ => moved_at,
+        };
+        assert_eq!(
+            timestamp_millis(&reconciled.reconciled_through),
+            timestamp_millis(&expected_through)
+        );
+        assert!(!timestamp_precedes(
+            &(read_at - chrono::Duration::hours(1)).to_rfc3339(),
+            &reconciled.reconciled_through
+        ));
+        poll_repository_timelines("acme", "repo", &api, &stop)
+            .await
+            .unwrap();
+        let events = crate::database::pending_mailbox_events(100).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].event_key.ends_with("#201:comment:201"));
+        if matches!(scenario, ReconciliationRecovery::FailedPass) {
+            // A full tied page can commit exactly the upper bound before its
+            // remaining offset pages fail. Equality must not abandon that tie.
+            let requests = fake.data.lock().await.feed_queries.len();
+            fake.data.lock().await.fail_feed_request = Some(requests + 2);
+            read_at += chrono::Duration::hours(1);
+            reconcile_repository("acme", "repo", &api, &stop, read_at)
+                .await
+                .unwrap_err();
+            let partial_tie = crate::database::github_repo_cursor("acme", "repo").unwrap();
+            assert_eq!(partial_tie.reconciled_through, partial_tie.updated_at);
+            let requests = fake.data.lock().await.feed_queries.len();
+            fake.data.lock().await.fail_feed_request = None;
+            read_at += chrono::Duration::hours(1);
+            reconcile_repository("acme", "repo", &api, &stop, read_at)
+                .await
+                .unwrap();
+            let data = fake.data.lock().await;
+            assert!(data.feed_queries.len() >= requests + 2);
+            assert_eq!(
+                data.feed_queries[requests]["since"],
+                overlap_timestamp(&partial_tie.reconciled_through)
+            );
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: review f2c1683: a catch-up tie was already older than the trailing window.
+    #[tokio::test]
+    async fn watcher_reconciliation_recovers_skips_in_three_hour_old_backlog() {
+        if run_isolated_child("watcher_reconciliation_recovers_skips_in_three_hour_old_backlog") {
+            check_reconciliation_checkpoint_recovery(ReconciliationRecovery::OldBacklog).await;
+        }
+    }
+
+    // Hard-won: review f2c1683: a skipped item aged out while the repository was paused.
+    #[tokio::test]
+    async fn watcher_reconciliation_recovers_skips_after_a_three_hour_pause() {
+        if run_isolated_child("watcher_reconciliation_recovers_skips_after_a_three_hour_pause") {
+            check_reconciliation_checkpoint_recovery(ReconciliationRecovery::LongPause).await;
+        }
+    }
+
+    // Hard-won: review f2c1683: a failed pass lost the next hour's recovery opportunity.
+    #[tokio::test]
+    async fn watcher_reconciliation_resumes_failed_pass_from_durable_checkpoint() {
+        if run_isolated_child("watcher_reconciliation_resumes_failed_pass_from_durable_checkpoint")
+        {
+            check_reconciliation_checkpoint_recovery(ReconciliationRecovery::FailedPass).await;
+        }
+    }
+
+    // Hard-won: review f2c1683: a later line-comment read skipped unseen timeline events.
+    #[tokio::test]
+    async fn watcher_source_cursors_do_not_skip_interleaved_timeline_entries() {
+        if !run_isolated_child("watcher_source_cursors_do_not_skip_interleaved_timeline_entries") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        crate::database::commit_github_item_classification(watch_classification(1, &at(1)), None)
+            .unwrap();
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            let mut item = github_item(1, 1, "synthetic", at(1), true);
+            item["updated_at"] = json!(at(10));
+            data.items.push(item);
+            data.observed_at = Some(at(10));
+            data.timeline_after_read = Some((
+                1,
+                json!({"event":"commented","id":800,"created_at":at(20),"user":{"login":"other"},"body":"arrived after timeline read"}),
+            ));
+            data.review_comments.insert(1,vec![json!({"id":900,"created_at":at(30),"updated_at":at(30),"user":{"login":"other"},"body":"later line comment"})]);
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let watch = crate::database::load_github_watches("acme", "repo")
+            .unwrap()
+            .remove(0);
+        assert_eq!(watch.timeline_at, at(1));
+        assert_eq!(watch.review_comments_at, at(30));
+        {
+            let mut data = fake.data.lock().await;
+            data.items[0]["updated_at"] = json!(at(30));
+            data.observed_at = Some(at(70));
+        }
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let rows = crate::database::pending_mailbox_events(100).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .any(|row| row.event_key.ends_with(":comment:800"))
+        );
+        let watch = crate::database::load_github_watches("acme", "repo")
+            .unwrap()
+            .remove(0);
+        assert_eq!(watch.timeline_at, at(20));
+        assert_eq!(watch.review_comments_at, at(30));
+        assert_eq!(watch.processed_at, at(40));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: b4bbe4016: Merge Marshall merges left only closed entries, and
+    // agents were told their merged pull requests closed without merging.
+    #[tokio::test]
+    async fn watcher_reports_a_close_at_the_merge_time_as_a_merge() {
+        if !run_isolated_child("watcher_reports_a_close_at_the_merge_time_as_a_merge") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            for n in [11, 12, 13, 14] {
+                crate::database::commit_github_item_classification(
+                    watch_classification(n, &at(1)),
+                    None,
+                )
+                .unwrap();
+                let mut item = github_item(n as u64, n as u64, "synthetic", at(1), true);
+                item["updated_at"] = json!(at(30));
+                data.items.push(item);
+            }
+            data.observed_at = Some(at(90));
+            let closed = |id: i64, seconds: i64| json!({"event":"closed","id":id,"created_at":at(seconds),"actor":{"login":"mergemarshall[bot]"},"commit_id":"abc"});
+            // Merged by landing commits: only a closed entry, one second after the merge time.
+            data.timelines.insert(11, vec![closed(300, 6)]);
+            data.pulls.insert(11, json!({"merged_at": at(5)}));
+            // Closed without merging.
+            data.timelines.insert(12, vec![closed(301, 6)]);
+            data.pulls.insert(12, json!({"merged_at": null}));
+            // Closed, reopened, then merged later: the first close stays a close.
+            data.timelines.insert(13, vec![
+                closed(302, 6),
+                json!({"event":"reopened","id":303,"created_at":at(10),"actor":{"login":"author"}}),
+                json!({"event":"merged","id":304,"created_at":at(20),"actor":{"login":"merger"}}),
+                closed(305, 20),
+            ]);
+            data.pulls.insert(13, json!({"merged_at": at(20)}));
+            // A recorded merge followed by its close needs no pull request read.
+            data.timelines.insert(14, vec![
+                json!({"event":"merged","id":306,"created_at":at(7),"actor":{"login":"merger"}}),
+                closed(307, 7),
+            ]);
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let rows = crate::database::pending_mailbox_events(100).unwrap();
+        let mut changes = rows
+            .iter()
+            .map(|row| {
+                let event: MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+                let MailboxEventBody::GithubPullRequestLifecycle { change, actor, .. } = event.body
+                else {
+                    panic!("unexpected event {}", row.event_key);
+                };
+                (row.event_key.clone(), change, actor)
+            })
+            .collect::<Vec<_>>();
+        changes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            changes,
+            vec![
+                (
+                    "github:acme/repo#11:merged:300".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    "mergemarshall[bot]".to_owned(),
+                ),
+                (
+                    "github:acme/repo#12:closed:301".to_owned(),
+                    MailboxPullRequestChange::ClosedWithoutMerging,
+                    "mergemarshall[bot]".to_owned(),
+                ),
+                (
+                    "github:acme/repo#13:closed:302".to_owned(),
+                    MailboxPullRequestChange::ClosedWithoutMerging,
+                    "mergemarshall[bot]".to_owned(),
+                ),
+                (
+                    "github:acme/repo#13:merged:304".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    "merger".to_owned(),
+                ),
+                (
+                    "github:acme/repo#13:reopened:303".to_owned(),
+                    MailboxPullRequestChange::Reopened,
+                    "author".to_owned(),
+                ),
+                (
+                    "github:acme/repo#14:merged:306".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    "merger".to_owned(),
+                ),
+            ]
+        );
+        let mut read = fake.data.lock().await.pull_requests.clone();
+        read.sort_unstable();
+        assert_eq!(read, vec![11, 12, 13]);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: review f2c1683: equality at the processed second suppressed later activity.
+    #[tokio::test]
+    async fn watcher_rechecks_same_second_updates_then_converges() {
+        if !run_isolated_child("watcher_rechecks_same_second_updates_then_converges") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let mut classification = watch_classification(1, &at(1));
+        classification.kind = "issue".into();
+        crate::database::commit_github_item_classification(classification, None).unwrap();
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            let mut item = github_item(1, 1, "synthetic", at(1), false);
+            item["updated_at"] = json!(at(10));
+            data.items.push(item);
+            data.observed_at = Some(at(10));
+            data.timelines.insert(1,vec![json!({"event":"commented","id":1,"created_at":at(10),"user":{"login":"other"},"body":"first"})]);
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            at(-20)
+        );
+        {
+            let mut data = fake.data.lock().await;
+            data.timelines.get_mut(&1).unwrap().push(json!({"event":"commented","id":2,"created_at":at(10),"user":{"login":"other"},"body":"same-second update"}));
+            data.observed_at = Some(at(41));
+        }
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::database::pending_mailbox_events(100).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            fake.data.lock().await.timeline_requests.len(),
+            2,
+            "one extra read catches the update and the later Date ends replay"
+        );
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    // Hard-won: review f2c1683: Date after the snapshot hid an update between them.
+    #[tokio::test]
+    async fn watcher_processed_margin_recovers_updates_between_snapshot_and_date() {
+        if !run_isolated_child(
+            "watcher_processed_margin_recovers_updates_between_snapshot_and_date",
+        ) {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let start = DateTime::from_timestamp(
+            DateTime::parse_from_rfc3339(&cursor.updated_at)
+                .unwrap()
+                .timestamp()
+                + 1,
+            0,
+        )
+        .unwrap();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        let mut watch = watch_classification(1, &at(1));
+        watch.kind = "issue".into();
+        crate::database::commit_github_item_classification(watch, None).unwrap();
+        let fake = FakeGithub::default();
+        {
+            let mut data = fake.data.lock().await;
+            let mut item = github_item(1, 1, "synthetic", at(1), false);
+            item["updated_at"] = json!(at(10));
+            data.items.push(item);
+            data.observed_at = Some(at(12));
+            data.timeline_after_read = Some((
+                1,
+                json!({"event":"commented","id":11,"created_at":at(11),"user":{"login":"other"},"body":"between snapshot and Date"}),
+            ));
+        }
+        let (api, server) = start_fake_github(fake.clone()).await;
+        let stop = CancellationToken::new();
+        poll_repository_with_context(
+            "acme",
+            "repo",
+            vec![],
+            fake_classifier(),
+            &api,
+            stop.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::database::pending_mailbox_events(100)
                 .unwrap()
                 .is_empty()
         );
-        let cursor = crate::database::load_github_repo_cursor("acme", "repo")
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            cursor.items_watermark_at.as_deref(),
-            Some(old.to_rfc3339().as_str())
+            crate::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            at(-18)
         );
-
         {
             let mut data = fake.data.lock().await;
-            data.items = (2..=52)
-                .map(|number| {
-                    let title = match number {
-                        2 => "interesting issue",
-                        51 | 52 => "created pull request",
-                        _ => "ordinary issue",
-                    };
-                    github_item(
-                        number,
-                        number,
-                        title,
-                        (now + chrono::Duration::seconds(number as i64)).to_rfc3339(),
-                        matches!(number, 51 | 52),
-                    )
-                })
-                .chain(std::iter::once(github_item(
-                    1,
-                    1,
-                    "old existing issue",
-                    old.to_rfc3339(),
-                    false,
-                )))
-                .collect();
-            data.etag = "\"v2\"".into();
+            data.items[0]["updated_at"] = json!(at(11));
+            data.observed_at = Some(at(42));
         }
-        poll_repository_with_api(
+        poll_repository_with_context(
             "acme",
             "repo",
-            vec![session.clone()],
-            classifier.clone(),
+            vec![],
+            fake_classifier(),
             &api,
             stop.clone(),
         )
         .await
         .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 50);
-        let watches = crate::database::load_github_watches("acme", "repo").unwrap();
-        assert_eq!(watches.len(), 1);
-        assert_eq!(watches[0].number, 51);
-        let pending = crate::database::pending_mailbox_events(20).unwrap();
-        let interest = pending
-            .iter()
-            .find(|entry| entry.event_key == "github:acme/repo#2:interest:creator-session")
-            .expect("interested session receives a non-waking note");
-        let interest_event: MailboxEvent = serde_json::from_str(&interest.event_json).unwrap();
-        assert!(!interest_event.wake);
-        assert!(matches!(
-            interest_event.body,
-            MailboxEventBody::NewGithubItem {
-                kind: GithubItemKind::Issue,
-                title,
-                repo: Some(repo),
-                ..
-            } if title == "interesting issue" && repo == "Acme/Repo"
-        ));
-        let retry_command_id = crate::mailbox_outbox::mailbox_command_id(&interest.event_key);
-        assert!(
-            !crate::database::enqueue_mailbox_event(
-                &interest.event_key,
-                &interest.target_session_id,
-                &interest.event_json,
-                false,
-                false,
-            )
-            .unwrap()
-        );
-
-        writer.shutdown().unwrap();
-        let writer = crate::database::install_isolated_test_writer();
-        assert_eq!(
-            retry_command_id,
-            crate::mailbox_outbox::mailbox_command_id(&interest.event_key),
-            "an unacknowledged row retains its stable relay identity after restart"
-        );
-        let restarted_api = GithubApi::new(&base, Some(credential.into())).unwrap();
-        poll_repository_with_api(
-            "acme",
-            "repo",
-            vec![session.clone()],
-            classifier.clone(),
-            &restarted_api,
-            stop.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 51);
-        let watches = crate::database::load_github_watches("acme", "repo").unwrap();
-        assert_eq!(watches.len(), 2);
-        assert!(watches.iter().any(|watch| watch.number == 51));
-        assert!(watches.iter().any(|watch| watch.number == 52));
-        assert_eq!(watches[0].creator_session_id, creator_id);
-        let comments_cursor = crate::database::load_github_repo_cursor("acme", "repo")
-            .unwrap()
-            .unwrap()
-            .comments_cursor
+        poll_repository_with_context("acme", "repo", vec![], fake_classifier(), &api, stop)
+            .await
             .unwrap();
-        let cursor_at_ms = timestamp_millis(&comments_cursor).unwrap();
-        let cursor_second_ms = floor_to_second(cursor_at_ms);
-        crate::database::seed_github_test_turns(
-            creator_id,
-            cursor_second_ms - 3_000,
-            cursor_second_ms - 2_000,
-            cursor_second_ms - 500,
-        )
-        .unwrap();
-        let comment_at = |offset_ms: i64| {
-            DateTime::<Utc>::from_timestamp_millis(cursor_second_ms + offset_ms)
-                .unwrap()
-                .to_rfc3339_opts(SecondsFormat::Millis, true)
-        };
-        {
-            let mut data = fake.data.lock().await;
-            data.comments = vec![
-                json!({
-                    "id": 9001,
-                    "issue_url": "http://api/repos/acme/repo/issues/52",
-                    "user": {"login": "reviewer"},
-                    "body": "Please update the changelog.",
-                    "created_at": comment_at(0),
-                    "updated_at": comment_at(0)
-                }),
-                json!({
-                    "id": 9002,
-                    "issue_url": "http://api/repos/acme/repo/issues/52",
-                    "user": {"login": "watcher-bot"},
-                    "body": "agent reply during completed turn",
-                    "created_at": comment_at(-2_500),
-                    "updated_at": comment_at(-2_500)
-                }),
-                json!({
-                    "id": 9003,
-                    "issue_url": "http://api/repos/acme/repo/issues/52",
-                    "user": {"login": "watcher-bot"},
-                    "body": "user reply while idle",
-                    "created_at": comment_at(-1_500),
-                    "updated_at": comment_at(-1_500)
-                }),
-                json!({
-                    "id": 9004,
-                    "issue_url": "http://api/repos/acme/repo/issues/52",
-                    "user": {"login": "watcher-bot"},
-                    "body": "agent reply during active turn",
-                    "created_at": comment_at(-500),
-                    "updated_at": comment_at(-500)
-                }),
-                json!({
-                    "id": 9007,
-                    "issue_url": "http://api/repos/acme/repo/issues/52",
-                    "user": {"login": "watcher-bot"},
-                    "body": "agent reply exactly when the turn ended",
-                    "created_at": comment_at(-2_000),
-                    "updated_at": comment_at(-2_000)
-                }),
-                json!({
-                    "id": 9008,
-                    "issue_url": "http://api/repos/acme/repo/issues/52",
-                    "user": {"login": "watcher-bot"},
-                    "body": "agent reply in the first GitHub timestamp second of the turn",
-                    "created_at": DateTime::<Utc>::from_timestamp_millis(
-                        cursor_second_ms - 1_000
-                    )
-                    .unwrap()
-                    .to_rfc3339_opts(SecondsFormat::Secs, true),
-                    "updated_at": DateTime::<Utc>::from_timestamp_millis(
-                        cursor_second_ms - 1_000
-                    )
-                    .unwrap()
-                    .to_rfc3339_opts(SecondsFormat::Secs, true)
-                }),
-            ];
-            data.review_comments = vec![
-                json!({
-                    "id": 9005,
-                    "pull_request_url": "http://api/repos/acme/repo/pulls/52",
-                    "user": {"login": "reviewer"},
-                    "body": "inline note at the cursor boundary",
-                    "created_at": comment_at(-3_500),
-                    "updated_at": comment_at(-3_500)
-                }),
-                json!({
-                    "id": 9006,
-                    "pull_request_url": "http://api/repos/acme/repo/pulls/52",
-                    "user": {"login": "watcher-bot"},
-                    "body": "agent inline reply during active turn",
-                    "created_at": comment_at(-500),
-                    "updated_at": comment_at(-500)
-                }),
-            ];
-            data.reviews = vec![
-                json!({
-                    "id": 9101,
-                    "user": {"login": "reviewer"},
-                    "body": "approved at the cursor boundary",
-                    "state": "APPROVED",
-                    "submitted_at": comment_at(-3_500)
-                }),
-                json!({
-                    "id": 9102,
-                    "user": {"login": "watcher-bot"},
-                    "body": "approved during active turn",
-                    "state": "APPROVED",
-                    "submitted_at": comment_at(-500)
-                }),
-            ];
-        }
-        let restarted_api = GithubApi::new(&base, Some(credential.into())).unwrap();
-        poll_repository_with_api(
-            "acme",
-            "repo",
-            vec![session.clone()],
-            classifier.clone(),
-            &restarted_api,
-            stop.clone(),
-        )
-        .await
-        .unwrap();
+        let events = crate::database::pending_mailbox_events(100).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].event_key.ends_with(":comment:11"));
+        assert_eq!(fake.data.lock().await.timeline_requests.len(), 2);
         assert_eq!(
-            calls.load(Ordering::SeqCst),
-            51,
-            "persisted classifications are not repeated"
+            crate::database::load_github_watches("acme", "repo").unwrap()[0].processed_at,
+            at(12)
         );
-        assert_eq!(
-            fake.not_modified.load(Ordering::SeqCst),
-            1,
-            "the stored ETag handles 304"
-        );
-        assert_eq!(fake.user_requests.load(Ordering::SeqCst), 1);
-        let pending = crate::database::pending_mailbox_events(100).unwrap();
-        let event = |key: &str| {
-            let row = pending
-                .iter()
-                .find(|entry| entry.event_key == key)
-                .unwrap_or_else(|| panic!("missing mailbox event {key}"));
-            assert_eq!(row.target_session_id, creator_id);
-            serde_json::from_str::<MailboxEvent>(&row.event_json).unwrap()
-        };
-        let reviewer_comment = event("github:acme/repo#52:comment:9001");
-        assert!(reviewer_comment.wake);
-        assert!(matches!(
-            reviewer_comment.body,
-            MailboxEventBody::GithubComment {
-                item_kind: GithubItemKind::PullRequest,
-                author,
-                body,
-                repo: Some(repo),
-                ..
-            } if author == "reviewer" && body == "Please update the changelog." && repo == "Acme/Repo"
-        ));
-        assert!(!event("github:acme/repo#52:comment:9002").wake);
-        assert!(event("github:acme/repo#52:comment:9003").wake);
-        assert!(!event("github:acme/repo#52:comment:9004").wake);
-        assert!(event("github:acme/repo#52:comment:9007").wake);
-        assert!(!event("github:acme/repo#52:comment:9008").wake);
-        let review_comment = event("github:acme/repo#52:review-comment:9005");
-        assert!(review_comment.wake);
-        assert!(matches!(
-            review_comment.body,
-            MailboxEventBody::GithubReviewComment {
-                author,
-                body,
-                repo: Some(repo),
-                ..
-            } if author == "reviewer" && body == "inline note at the cursor boundary" && repo == "Acme/Repo"
-        ));
-        assert!(!event("github:acme/repo#52:review-comment:9006").wake);
-        let review = event("github:acme/repo#52:review:9101");
-        assert!(review.wake);
-        assert!(matches!(
-            review.body,
-            MailboxEventBody::GithubReview {
-                author,
-                body,
-                review_state: Some(state),
-                repo: Some(repo),
-                ..
-            } if author == "reviewer" && body == "approved at the cursor boundary" && state == "APPROVED" && repo == "Acme/Repo"
-        ));
-        assert!(!event("github:acme/repo#52:review:9102").wake);
-
-        let review_requests_before_terminal = fake.review_requests.load(Ordering::SeqCst);
-        let closed_at = comment_at(2_000);
-        let merged_at = comment_at(3_000);
-        {
-            let mut data = fake.data.lock().await;
-            data.pulls.insert(
-                51,
-                FakePull {
-                    value: json!({
-                        "state": "closed",
-                        "closed_at": closed_at,
-                        "updated_at": closed_at,
-                        "closed_by": null
-                    }),
-                    etag: "\"pull-51-v2\"".into(),
-                },
-            );
-            data.pulls.insert(
-                52,
-                FakePull {
-                    value: json!({
-                        "state": "closed",
-                        "closed_at": merged_at,
-                        "merged_at": merged_at,
-                        "updated_at": merged_at,
-                        "merged_by": null
-                    }),
-                    etag: "\"pull-52-v2\"".into(),
-                },
-            );
-            data.issue_events.insert(
-                51,
-                vec![json!({
-                    "event": "closed",
-                    "actor": {"login": "closer"},
-                    "created_at": closed_at
-                })],
-            );
-            data.issue_events.insert(
-                52,
-                vec![json!({
-                    "event": "closed",
-                    "actor": {"login": "mergemarshall[bot]"},
-                    "created_at": merged_at
-                })],
-            );
-            data.comments.push(json!({
-                "id": 9010,
-                "issue_url": "http://api/repos/acme/repo/issues/51",
-                "user": {"login": "reviewer"},
-                "body": "comment after the pull request closed",
-                "created_at": comment_at(5_000),
-                "updated_at": comment_at(5_000)
-            }));
-        }
-        let api = GithubApi::new(&base, Some(credential.into())).unwrap();
-        poll_repository_with_api(
-            "acme",
-            "repo",
-            vec![session.clone()],
-            classifier.clone(),
-            &api,
-            stop.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            fake.review_requests.load(Ordering::SeqCst),
-            review_requests_before_terminal,
-            "closed and merged pull requests stop review polling"
-        );
-        let closed_key = format!("github:acme/repo#51:closed:{closed_at}");
-        let merged_key = "github:acme/repo#52:merged";
-        let pending = crate::database::pending_mailbox_events(100).unwrap();
-        let closed_event = serde_json::from_str::<MailboxEvent>(
-            &pending
-                .iter()
-                .find(|entry| entry.event_key == closed_key)
-                .expect("closed pull request creates an outbox event")
-                .event_json,
-        )
-        .unwrap();
-        let merged_event = serde_json::from_str::<MailboxEvent>(
-            &pending
-                .iter()
-                .find(|entry| entry.event_key == merged_key)
-                .expect("merged pull request creates an outbox event")
-                .event_json,
-        )
-        .unwrap();
-        assert!(closed_event.wake);
-        assert!(matches!(
-            closed_event.body,
-            MailboxEventBody::GithubPullRequestLifecycle {
-                change: MailboxPullRequestChange::ClosedWithoutMerging,
-                actor,
-                repo: Some(repo),
-                ..
-            } if actor == "closer" && repo == "Acme/Repo"
-        ));
-        assert!(merged_event.wake);
-        assert!(matches!(
-            merged_event.body,
-            MailboxEventBody::GithubPullRequestLifecycle {
-                change: MailboxPullRequestChange::Merged,
-                actor,
-                repo: Some(repo),
-                ..
-            } if actor == "mergemarshall[bot]" && repo == "Acme/Repo"
-        ));
-        assert!(
-            pending
-                .iter()
-                .any(|entry| entry.event_key == "github:acme/repo#51:comment:9010")
-        );
-        assert_eq!(
-            merged_event.created_at_ms,
-            timestamp_millis(&merged_at).unwrap().max(0) as u64
-        );
-
-        writer.shutdown().unwrap();
-        let writer = crate::database::install_isolated_test_writer();
-        let pull_304_before_restart_poll = fake.pull_not_modified.load(Ordering::SeqCst);
-        let restarted_api = GithubApi::new(&base, Some(credential.into())).unwrap();
-        poll_repository_with_api(
-            "acme",
-            "repo",
-            vec![session.clone()],
-            classifier.clone(),
-            &restarted_api,
-            stop.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            fake.pull_not_modified.load(Ordering::SeqCst),
-            pull_304_before_restart_poll + 2
-        );
-        let pending = crate::database::pending_mailbox_events(100).unwrap();
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|entry| entry.event_key == closed_key)
-                .count(),
-            1,
-            "restart does not enqueue the closed transition again"
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|entry| entry.event_key == merged_key)
-                .count(),
-            1,
-            "restart does not enqueue the merged transition again"
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|entry| entry.event_key == "github:acme/repo#51:comment:9010")
-                .count(),
-            1,
-            "comments continue to be delivered after a pull request closes"
-        );
-
-        let reopened_at = comment_at(4_000);
-        {
-            let mut data = fake.data.lock().await;
-            data.pulls.insert(
-                51,
-                FakePull {
-                    value: json!({"state": "open", "updated_at": reopened_at}),
-                    etag: "\"pull-51-v3\"".into(),
-                },
-            );
-            data.issue_events.insert(
-                51,
-                vec![json!({
-                    "event": "reopened",
-                    "actor": {"login": "reopener"},
-                    "created_at": reopened_at
-                })],
-            );
-        }
-        let review_requests_before_reopen = fake.review_requests.load(Ordering::SeqCst);
-        poll_repository_with_api(
-            "acme",
-            "repo",
-            vec![session.clone()],
-            classifier.clone(),
-            &restarted_api,
-            stop.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            fake.review_requests.load(Ordering::SeqCst),
-            review_requests_before_reopen + 1,
-            "reviews resume only for the reopened pull request"
-        );
-        let pending = crate::database::pending_mailbox_events(100).unwrap();
-        let reopened = pending
-            .iter()
-            .find(|entry| entry.event_key == format!("github:acme/repo#51:reopened:{reopened_at}"))
-            .expect("reopening a watched pull request is reported once");
-        let reopened_event = serde_json::from_str::<MailboxEvent>(&reopened.event_json).unwrap();
-        assert!(reopened_event.wake);
-        assert!(matches!(
-            reopened_event.body,
-            MailboxEventBody::GithubPullRequestLifecycle {
-                change: MailboxPullRequestChange::Reopened,
-                actor,
-                ..
-            } if actor == "reopener"
-        ));
-
-        let actorless_merged_at = comment_at(6_000);
-        {
-            let mut data = fake.data.lock().await;
-            data.pulls.insert(
-                51,
-                FakePull {
-                    value: json!({
-                        "state": "closed",
-                        "closed_at": actorless_merged_at,
-                        "merged_at": actorless_merged_at,
-                        "updated_at": actorless_merged_at,
-                        "merged_by": null
-                    }),
-                    etag: "\"pull-51-v4\"".into(),
-                },
-            );
-            data.issue_events.remove(&51);
-        }
-        poll_repository_with_api(
-            "acme",
-            "repo",
-            vec![session],
-            classifier,
-            &restarted_api,
-            stop,
-        )
-        .await
-        .unwrap();
-        let actorless_key = "github:acme/repo#51:merged";
-        let pending = crate::database::pending_mailbox_events(100).unwrap();
-        let actorless_event = serde_json::from_str::<MailboxEvent>(
-            &pending
-                .iter()
-                .find(|entry| entry.event_key == actorless_key)
-                .expect("an actorless merge creates a lifecycle event")
-                .event_json,
-        )
-        .unwrap();
-        assert!(matches!(
-            &actorless_event.body,
-            MailboxEventBody::GithubPullRequestLifecycle {
-                change: MailboxPullRequestChange::Merged,
-                actor,
-                ..
-            } if actor.is_empty()
-        ));
-        assert_eq!(
-            mj_core::mailbox::describe_mailbox_event(&actorless_event).transcript_line,
-            "Your PR Acme/Repo#51 was merged."
-        );
-        writer.shutdown().unwrap();
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    struct FailingSessionClassifier(Arc<AtomicBool>);
+    impl GithubClassifier for FailingSessionClassifier {
+        fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
+            Box::pin(async move {
+                if evidence.session.recent_turns.contains("FAIL_PAIR")
+                    && self.0.load(Ordering::SeqCst)
+                {
+                    bail!("permanent session classifier failure");
+                }
+                Ok(GithubItemVerdict {
+                    interested: false,
+                    created: false,
+                })
+            })
+        }
+    }
+
+    // Hard-won: review f2c1683: repeated failures consumed every poll before item 51.
+    #[tokio::test]
+    async fn watcher_classification_backoff_does_not_starve_healthy_sessions() {
+        if !run_isolated_child("watcher_classification_backoff_does_not_starve_healthy_sessions") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let cursor = crate::database::github_repo_cursor("acme", "repo").unwrap();
+        let created = (DateTime::parse_from_rfc3339(&cursor.watch_started_at).unwrap()
+            + chrono::Duration::seconds(1))
+        .to_rfc3339();
+        let items = (1..=51)
+            .map(|n| {
+                parse_github_item(&github_item(n, n, "synthetic", created.clone(), false)).unwrap()
+            })
+            .collect();
+        crate::database::record_github_page(
+            "acme".into(),
+            "repo".into(),
+            items,
+            crate::database::GithubFeedProgress::Main(created),
+        )
+        .unwrap();
+        let mut sessions = Vec::new();
+        for id in ["bad", "healthy"] {
+            let mut session = crate::database::test_session(id, "project");
+            session.created_at = cursor.watch_started_at.clone();
+            crate::database::save_session(&session).unwrap();
+            sessions.push(session);
+        }
+        use mj_core::state::{
+            MaterializedExecutionState, MaterializedSession, TranscriptBody, TranscriptItem,
+        };
+        let materialized = MaterializedSession {
+            session_id: "bad".into(),
+            applied_event_ordinal: 1,
+            applied_event_digest: "1".repeat(64),
+            last_activity_at_ms: Some(1),
+            execution: MaterializedExecutionState::Idle,
+            session_title: None,
+            configuration: Default::default(),
+            transcript: vec![Arc::new(TranscriptItem {
+                stable_id: "user:1".into(),
+                position: 1,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1,
+                last_changed_at_ms: 1,
+                body: TranscriptBody::User {
+                    content: vec![json!({"type":"text","text":"FAIL_PAIR"})],
+                },
+            })],
+            queued_prompts: vec![],
+            pending_elicitations: vec![],
+            active_turn: None,
+            last_turn_outcome: None,
+        };
+        crate::database::save_materialized_session(&materialized).unwrap();
+        assert!(
+            recent_turns("bad".into())
+                .await
+                .unwrap()
+                .contains("FAIL_PAIR")
+        );
+        let failing = Arc::new(AtomicBool::new(true));
+        let classifier: Arc<dyn GithubClassifier> =
+            Arc::new(FailingSessionClassifier(failing.clone()));
+        let api =
+            GithubApi::new("http://127.0.0.1:1", Some("classification-backoff".into())).unwrap();
+        for _ in 0..3 {
+            classify_recorded_items(
+                "acme",
+                "repo",
+                &sessions,
+                classifier.clone(),
+                &cursor.watch_started_at,
+                &api,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            crate::database::load_github_item_classified_sessions("acme", "repo", 51)
+                .unwrap()
+                .contains("healthy")
+        );
+        let failures =
+            crate::database::load_github_classification_failures("acme", "repo").unwrap();
+        assert_eq!(failures.len(), 51);
+        let failure = &failures[&(1, "bad".into())];
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(
+            failure.next_attempt_at_ms - failure.last_attempt_at_ms,
+            60_000
+        );
+        // Retry durable failures beyond the one-hour cap; they never give up.
+        for attempt in 2..=8 {
+            crate::database::seed_github_retry_due("acme", "repo", 1, "bad").unwrap();
+            classify_recorded_items(
+                "acme",
+                "repo",
+                &sessions,
+                classifier.clone(),
+                &cursor.watch_started_at,
+                &api,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            let failures =
+                crate::database::load_github_classification_failures("acme", "repo").unwrap();
+            let failure = &failures[&(1, "bad".into())];
+            assert_eq!(failure.attempts, attempt);
+            assert!(failure.next_attempt_at_ms - failure.last_attempt_at_ms <= 3_600_000);
+        }
+        failing.store(false, Ordering::SeqCst);
+        crate::database::seed_github_retry_due("acme", "repo", 1, "bad").unwrap();
+        classify_recorded_items(
+            "acme",
+            "repo",
+            &sessions,
+            classifier,
+            &cursor.watch_started_at,
+            &api,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !crate::database::load_github_classification_failures("acme", "repo")
+                .unwrap()
+                .contains_key(&(1, "bad".into()))
+        );
+        assert!(
+            crate::database::load_github_item_classified_sessions("acme", "repo", 1)
+                .unwrap()
+                .contains("bad")
+        );
+    }
+
+    /// Run with MJ_GITHUB_DRY_RUN pointing to a private JSON file containing
+    /// {since, items:[{item:<issues entry>, timeline:[<timeline entries>]}]}.
+    /// This entry point never opens a store or sends a request.
+    #[test]
+    #[ignore = "requires private read-only GitHub capture"]
+    fn github_timeline_read_only_dry_run() {
+        let path = std::env::var_os("MJ_GITHUB_DRY_RUN").expect("MJ_GITHUB_DRY_RUN");
+        let capture: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut counts = BTreeMap::<String, usize>::new();
+        let mut examples = Vec::new();
+        for captured in capture["items"].as_array().unwrap() {
+            let item = parse_github_item(&captured["item"]).unwrap();
+            let watch = crate::database::GithubItemWatch {
+                owner: "brokkai".into(),
+                repo: "bifrost-dev".into(),
+                number: item.number,
+                creator_session_id: "dry-run".into(),
+                kind: item.kind,
+                title: item.title,
+                url: item.url,
+                created_at: item.created_at,
+                timeline_at: capture["since"].as_str().unwrap().into(),
+                timeline_id: 0,
+                review_comments_at: capture["since"].as_str().unwrap().into(),
+                review_comments_id: 0,
+                processed_at: String::new(),
+                recorded_updated_at: Some(item.updated_at),
+            };
+            let comments = captured["review_comments"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let mapped = map_item_activity(
+                &watch,
+                captured["timeline"].as_array().unwrap(),
+                &comments,
+                captured["pull"]["merged_at"].as_str(),
+            )
+            .unwrap();
+            for event in mapped.events {
+                let body = serde_json::to_value(&event.body).unwrap();
+                let kind = body["type"].as_str().unwrap().to_owned();
+                *counts.entry(kind.clone()).or_default() += 1;
+                if examples.len() < 12 {
+                    // No titles, comment text, review text, or user logins leave this test.
+                    examples.push(json!({"key":event.key,"type":kind,"at":event.timestamp}));
+                }
+            }
+        }
+        println!(
+            "DRY_RUN {}",
+            json!({"items":capture["items"].as_array().unwrap().len(),"since":capture["since"],"counts":counts,"examples":examples})
+        );
     }
 
     fn github_item(
@@ -2746,7 +3117,8 @@ mod tests {
             "body": "item body",
             "user": {"login": "author"},
             "html_url": format!("https://github.com/acme/repo/issues/{number}"),
-            "created_at": created_at
+            "created_at": created_at,
+            "updated_at": created_at
         });
         if pull_request {
             item["pull_request"] = json!({"url": "https://api.github.com/repos/acme/repo/pulls/3"});
@@ -2779,127 +3151,6 @@ mod tests {
     async fn count_ping(State(state): State<DisablePollServer>) -> Json<Value> {
         state.requests.fetch_add(1, Ordering::SeqCst);
         Json(json!({"ok": true}))
-    }
-
-    async fn fake_issues(
-        State(fake): State<FakeGithub>,
-        headers: HeaderMap,
-        Query(query): Query<BTreeMap<String, String>>,
-    ) -> Response {
-        assert_eq!(query.get("state").map(String::as_str), Some("all"));
-        assert_eq!(query.get("sort").map(String::as_str), Some("created"));
-        assert_eq!(query.get("direction").map(String::as_str), Some("desc"));
-        assert!(!query.contains_key("since"));
-        let data = fake.data.lock().await;
-        if headers
-            .get(header::IF_NONE_MATCH)
-            .and_then(|value| value.to_str().ok())
-            == Some(data.etag.as_str())
-        {
-            fake.not_modified.fetch_add(1, Ordering::SeqCst);
-            return (
-                StatusCode::NOT_MODIFIED,
-                [(header::ETAG, data.etag.clone())],
-            )
-                .into_response();
-        }
-        (
-            StatusCode::OK,
-            [(header::ETAG, data.etag.clone())],
-            Json(data.items.clone()),
-        )
-            .into_response()
-    }
-
-    async fn fake_comments(
-        State(fake): State<FakeGithub>,
-        Query(query): Query<BTreeMap<String, String>>,
-    ) -> Json<Vec<Value>> {
-        let since = query.get("since").expect("comment requests include since");
-        let comments = fake.data.lock().await.comments.clone();
-        Json(comments_after(&comments, since))
-    }
-
-    async fn fake_review_comments(
-        State(fake): State<FakeGithub>,
-        Query(query): Query<BTreeMap<String, String>>,
-    ) -> Json<Vec<Value>> {
-        let since = query
-            .get("since")
-            .expect("review comment requests include since");
-        let comments = fake.data.lock().await.review_comments.clone();
-        Json(comments_after(&comments, since))
-    }
-
-    fn comments_after(comments: &[Value], since: &str) -> Vec<Value> {
-        comments
-            .iter()
-            .filter(|comment| {
-                comment_timestamp(comment)
-                    .is_some_and(|timestamp| timestamp_precedes(since, timestamp))
-            })
-            .cloned()
-            .collect()
-    }
-
-    async fn fake_pull(
-        State(fake): State<FakeGithub>,
-        Path((_owner, _repo, number)): Path<(String, String, u64)>,
-        headers: HeaderMap,
-    ) -> Response {
-        let pull = fake
-            .data
-            .lock()
-            .await
-            .pulls
-            .get(&number)
-            .cloned()
-            .unwrap_or_else(|| FakePull {
-                value: json!({"state": "open"}),
-                etag: format!("\"pull-{number}-v1\""),
-            });
-        if headers
-            .get(header::IF_NONE_MATCH)
-            .and_then(|value| value.to_str().ok())
-            == Some(pull.etag.as_str())
-        {
-            fake.pull_not_modified.fetch_add(1, Ordering::SeqCst);
-            return (StatusCode::NOT_MODIFIED, [(header::ETAG, pull.etag)]).into_response();
-        }
-        (
-            StatusCode::OK,
-            [(header::ETAG, pull.etag)],
-            Json(pull.value),
-        )
-            .into_response()
-    }
-
-    async fn fake_issue_events(
-        State(fake): State<FakeGithub>,
-        Path((_owner, _repo, number)): Path<(String, String, u64)>,
-    ) -> Json<Vec<Value>> {
-        Json(
-            fake.data
-                .lock()
-                .await
-                .issue_events
-                .get(&number)
-                .cloned()
-                .unwrap_or_default(),
-        )
-    }
-
-    async fn fake_reviews(
-        State(fake): State<FakeGithub>,
-        Path((_owner, _repo, _number)): Path<(String, String, u64)>,
-    ) -> Json<Vec<Value>> {
-        fake.review_requests.fetch_add(1, Ordering::SeqCst);
-        Json(fake.data.lock().await.reviews.clone())
-    }
-
-    async fn fake_user(State(fake): State<FakeGithub>) -> Json<Value> {
-        fake.user_requests.fetch_add(1, Ordering::SeqCst);
-        Json(json!({"login": "watcher-bot"}))
     }
 
     async fn rate_limited_retry_after() -> Response {

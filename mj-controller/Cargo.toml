@@ -47,6 +47,7 @@ reqwest = { workspace = true, features = ["blocking", "json", "query", "stream"]
 ring.workspace = true
 rustls.workspace = true
 rusqlite.workspace = true
+ruzstd = "0.9"
 sessionwiki.workspace = true
 semver.workspace = true
 serde = { workspace = true, features = ["rc"] }

@@ -329,6 +329,11 @@ pub(crate) fn prune_mailbox_events_for_missing_sessions() -> Result<usize> {
              )",
             [],
         )?;
+        changed += connection.execute(
+            "DELETE FROM github_watch_classification_failures WHERE session_id NOT IN (
+            SELECT session_id FROM sessions WHERE state <> 'destroyed-with-data-loss')",
+            [],
+        )?;
         Ok(changed)
     })
 }

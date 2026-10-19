@@ -421,14 +421,17 @@ mod tests {
                 params![turn.command_id, body],
             )?;
         }
+        super::super::schema::restore_github_v84_schema(&connection);
         connection.execute_batch("ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; DELETE FROM schema_migrations WHERE version>=82; UPDATE schema_compatibility SET minimum_compatible_version=81; PRAGMA user_version=81;")?;
         drop(connection);
         super::super::schema::forget_verified_schema(&path);
         let connection = open(&path)?;
         let state = super::super::schema::read_schema_state(&connection)?;
         assert_eq!(state.revision, super::super::SCHEMA_VERSION);
-        // Migration 85 preserves revision-84 read/write compatibility.
-        assert_eq!(state.minimum_compatible, Some(84));
+        assert_eq!(
+            state.minimum_compatible,
+            Some(super::super::schema::MINIMUM_COMPATIBLE_VERSION)
+        );
         assert!(state.ensure_supported_by(81).is_err());
         for (turn, before) in turns.iter().zip(before) {
             assert_eq!(session_summary(&connection, &turn.command_id)?, before);

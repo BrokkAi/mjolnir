@@ -2997,19 +2997,16 @@ impl ReviewResidue {
 ///
 /// Releases before this one staged the whole working tree into the user's own
 /// object store and pinned it with two refs, and a capture that was killed
-/// partway left its scratch index behind. Both are the user's to remove, so
-/// this only reads.
+/// partway left its scratch index behind. Linked worktrees pin their baselines
+/// under `refs/hel/worktrees/`. All of it is the user's to remove, so this
+/// only reads.
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
     if !git_dir.exists() {
         return residue;
     }
-    for reference in ["review-baseline", "review-capture"] {
-        if git_dir.join("refs/hel").join(reference).is_file() {
-            residue.refs.push(format!("refs/hel/{reference}"));
-        }
-    }
+    loose_refs(&git_dir.join("refs/hel"), "refs/hel", &mut residue.refs);
     // A packed ref survives `git pack-refs`, which a `git gc` runs.
     if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
         for line in packed.lines() {
@@ -3035,6 +3032,25 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     residue.refs.sort();
     residue.scratch_indexes.sort();
     residue
+}
+
+/// Appends every loose ref stored under `directory`, named from `prefix`.
+fn loose_refs(directory: &Path, prefix: &str, refs: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let reference = format!("{prefix}/{name}");
+        let path = entry.path();
+        if path.is_dir() {
+            loose_refs(&path, &reference, refs);
+        } else if path.is_file() {
+            refs.push(reference);
+        }
+    }
 }
 
 /// The repositories a person works in by hand, where review leftovers are

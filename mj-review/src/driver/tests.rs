@@ -25,6 +25,7 @@ fn changed_delta() -> Vec<RepoDelta> {
             insertions: 1,
             ..Default::default()
         }],
+        merged_in: Vec::new(),
     }]
 }
 
@@ -37,6 +38,7 @@ fn empty_delta() -> Vec<RepoDelta> {
         diffstat: "0 files changed".to_string(),
         changed_lines: 0,
         files: Vec::new(),
+        merged_in: Vec::new(),
     }]
 }
 
@@ -135,6 +137,7 @@ fn a_workspace_with_no_baseline_starts_coverage_rather_than_reviewing_nothing() 
         diffstat: "0 files changed".to_string(),
         changed_lines: 0,
         files: Vec::new(),
+        merged_in: Vec::new(),
     }]);
     assert_eq!(
         driver.phase(),

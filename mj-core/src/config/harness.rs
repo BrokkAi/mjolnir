@@ -93,12 +93,23 @@ pub struct ExecutionEnforcement {
     acp_setting: Option<(&'static str, &'static str)>,
     launch_flag: Option<&'static str>,
     launch_environment: Option<(&'static str, &'static str)>,
-    /// A word appended once to a whitespace-separated argv held in an env var.
-    launch_argument: Option<(&'static str, &'static str)>,
+    /// A word the policy requires present in, or absent from, a
+    /// whitespace-separated argv held in an env var.
+    launch_argument: Option<LaunchArgument>,
     /// Value for the ACP `session/new` `_meta.sandbox.enabled` field.
     session_sandbox: Option<bool>,
     /// A value written into a staged profile file before upload.
     staged_setting: Option<StagedSetting>,
+}
+
+/// One word of the argv a harness reads from an environment variable. Each
+/// policy states whether the word is present, so a map that an earlier policy
+/// or the user's own configuration left with it converges to this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchArgument {
+    pub variable: &'static str,
+    pub word: &'static str,
+    pub present: bool,
 }
 
 /// A setting the controller writes into a staged harness profile because the
@@ -178,9 +189,9 @@ impl ExecutionEnforcement {
         self.launch_environment
     }
 
-    /// An argv word appended to the environment variable that carries the
-    /// harness's own command line, when the policy needs one.
-    pub const fn launch_argument(self) -> Option<(&'static str, &'static str)> {
+    /// An argv word the policy adds to, or removes from, the environment
+    /// variable that carries the harness's own command line.
+    pub const fn launch_argument(self) -> Option<LaunchArgument> {
         self.launch_argument
     }
 
@@ -468,7 +479,11 @@ impl HarnessKind {
                 acp_setting: Some(("auto_review", "on")),
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
-                launch_argument: Some(("MUSE_SERVE_ARGS", "--disable-sandbox")),
+                launch_argument: Some(LaunchArgument {
+                    variable: "MUSE_SERVE_ARGS",
+                    word: "--disable-sandbox",
+                    present: true,
+                }),
                 session_sandbox: None,
                 staged_setting: Some(StagedSetting {
                     file: "settings.json",
@@ -480,7 +495,8 @@ impl HarnessKind {
             // Muse's guardian is muse-acp's auto-review: a read-only Muse
             // reviewer answers each approval, and a failed review denies.
             // `muse serve` refuses Muse's own `:auto-review` profile, so the
-            // staged profile asks and the adapter's reviewer answers.
+            // staged profile asks and the adapter's reviewer answers. The
+            // sandbox stays on even when a profile's MUSE_SERVE_ARGS disables it.
             (Self::Muse, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
                 label: "promptUnmatched / auto-review / :ask-me",
                 acp_mode: Some("promptUnmatched"),
@@ -488,7 +504,11 @@ impl HarnessKind {
                 acp_setting: Some(("auto_review", "on")),
                 launch_flag: None,
                 launch_environment: Some(("MUSE_APPROVAL_MODE", "promptUnmatched")),
-                launch_argument: None,
+                launch_argument: Some(LaunchArgument {
+                    variable: "MUSE_SERVE_ARGS",
+                    word: "--disable-sandbox",
+                    present: false,
+                }),
                 session_sandbox: None,
                 staged_setting: Some(StagedSetting {
                     file: "settings.json",
@@ -601,13 +621,31 @@ impl HarnessKind {
         let Some(enforcement) = self.execution_enforcement(policy) else {
             return Ok(());
         };
-        if let Some((key, argument)) = enforcement.launch_argument() {
-            let args = environment.entry(key.to_owned()).or_default();
-            if !args.split_whitespace().any(|word| word == argument) {
+        if let Some(argument) = enforcement.launch_argument() {
+            let args = environment
+                .get(argument.variable)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let has_word = args.split_whitespace().any(|word| word == argument.word);
+            if argument.present && !has_word {
+                let args = environment.entry(argument.variable.to_owned()).or_default();
                 if !args.is_empty() {
                     args.push(' ');
                 }
-                args.push_str(argument);
+                args.push_str(argument.word);
+            } else if !argument.present && has_word {
+                // The harness splits this variable on whitespace without
+                // quoting, so rejoining the other words keeps their meaning.
+                let rest = args
+                    .split_whitespace()
+                    .filter(|word| *word != argument.word)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if rest.is_empty() {
+                    environment.remove(argument.variable);
+                } else {
+                    environment.insert(argument.variable.to_owned(), rest);
+                }
             }
         }
         if let Some((key, value)) = enforcement.launch_environment() {

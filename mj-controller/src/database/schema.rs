@@ -4,6 +4,11 @@ use std::collections::HashMap;
 
 const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 
+/// Expected compatibility floor shared by migration regressions. Compatible
+/// migrations advance the revision without changing this contract.
+#[cfg(test)]
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 85;
+
 pub(super) struct SchemaState {
     pub(super) revision: i64,
     pub(super) minimum_compatible: Option<i64>,
@@ -1516,9 +1521,59 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking: older daemons address the removed feed and PR-state columns.
+    // Reset progress atomically so existing watches deliver only new activity.
+    if version < 85 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE github_watch_cursors RENAME TO github_watch_cursors_v84;
+             CREATE TABLE github_watch_cursors (
+                 owner TEXT NOT NULL, repo TEXT NOT NULL,
+                 updated_at TEXT NOT NULL, watch_started_at TEXT NOT NULL,
+                 reconciled_through TEXT NOT NULL,
+                 last_reconciled_at_ms INTEGER,
+                 PRIMARY KEY(owner, repo)
+             ) STRICT;
+             INSERT INTO github_watch_cursors(owner, repo, updated_at, watch_started_at, reconciled_through)
+                 SELECT owner, repo, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 FROM github_watch_cursors_v84;
+             INSERT OR IGNORE INTO github_watch_cursors(owner, repo, updated_at, watch_started_at, reconciled_through)
+                 SELECT DISTINCT owner, repo, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 FROM github_watch_items;
+             DROP TABLE github_watch_cursors_v84;
+             ALTER TABLE github_watch_items DROP COLUMN pull_request_etag;
+             ALTER TABLE github_watch_items DROP COLUMN pull_request_state;
+             ALTER TABLE github_watch_items ADD COLUMN timeline_at TEXT NOT NULL DEFAULT '';
+             ALTER TABLE github_watch_items ADD COLUMN timeline_id INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE github_watch_items ADD COLUMN review_comments_at TEXT NOT NULL DEFAULT '';
+             ALTER TABLE github_watch_items ADD COLUMN review_comments_id INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE github_watch_items ADD COLUMN processed_at TEXT NOT NULL DEFAULT '';
+             UPDATE github_watch_items SET timeline_at=(SELECT watch_started_at FROM github_watch_cursors c WHERE c.owner=github_watch_items.owner AND c.repo=github_watch_items.repo),
+                 review_comments_at=(SELECT watch_started_at FROM github_watch_cursors c WHERE c.owner=github_watch_items.owner AND c.repo=github_watch_items.repo),
+                 processed_at=(SELECT watch_started_at FROM github_watch_cursors c WHERE c.owner=github_watch_items.owner AND c.repo=github_watch_items.repo);
+             CREATE TABLE github_seen_items (
+                 owner TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
+                 kind TEXT NOT NULL, title TEXT NOT NULL, url TEXT NOT NULL,
+                 author TEXT NOT NULL, body TEXT NOT NULL,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                 PRIMARY KEY(owner, repo, number)
+             ) STRICT;
+             CREATE TABLE github_watch_classification_failures (
+                 owner TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
+                 session_id TEXT NOT NULL, attempts INTEGER NOT NULL CHECK(attempts > 0),
+                 last_attempt_at_ms INTEGER NOT NULL, next_attempt_at_ms INTEGER NOT NULL,
+                 PRIMARY KEY(owner, repo, number, session_id)
+             ) STRICT;
+             UPDATE schema_compatibility SET minimum_compatible_version=85 WHERE singleton=1;
+             INSERT INTO schema_migrations(version, applied_at) VALUES (85, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version=85;
+             COMMIT;",
+        )?;
+    }
+
     // Compatible: older readers and writers leave this independent receipt
     // table intact; no existing JSON, enum, or update contract changes.
-    if version < 85 {
+    if version < 86 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
              CREATE TABLE IF NOT EXISTS mailbox_reset_frontiers (
@@ -1529,8 +1584,8 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
                  SELECT session_id, applied_event_ordinal FROM materialized_sessions
                  WHERE session_id IN (SELECT session_id FROM sessions);
              INSERT INTO schema_migrations(version, applied_at)
-                 VALUES (85, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-             PRAGMA user_version = 85;
+                 VALUES (86, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 86;
              COMMIT;",
         )?;
     }
@@ -1822,6 +1877,30 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 }
 
 #[cfg(test)]
+pub(super) fn restore_github_v84_schema(connection: &Connection) {
+    if !legacy_schema::table_has_column(connection, "github_watch_items", "timeline_at").unwrap() {
+        return;
+    }
+    connection.execute_batch(
+            "DROP TABLE IF EXISTS github_watch_classification_failures;
+             DROP TABLE IF EXISTS github_seen_items;
+             ALTER TABLE github_watch_cursors RENAME TO github_watch_cursors_new;
+             CREATE TABLE github_watch_cursors (owner TEXT NOT NULL, repo TEXT NOT NULL,
+                items_watermark_at TEXT, items_watermark_id INTEGER, items_etag TEXT, comments_cursor TEXT,
+                PRIMARY KEY(owner, repo)) STRICT;
+             INSERT INTO github_watch_cursors(owner, repo) SELECT owner, repo FROM github_watch_cursors_new;
+             DROP TABLE github_watch_cursors_new;
+             ALTER TABLE github_watch_items DROP COLUMN timeline_at;
+             ALTER TABLE github_watch_items DROP COLUMN timeline_id;
+             ALTER TABLE github_watch_items DROP COLUMN review_comments_at;
+             ALTER TABLE github_watch_items DROP COLUMN review_comments_id;
+             ALTER TABLE github_watch_items DROP COLUMN processed_at;
+             ALTER TABLE github_watch_items ADD COLUMN pull_request_etag TEXT;
+             ALTER TABLE github_watch_items ADD COLUMN pull_request_state TEXT;"
+        ).unwrap();
+}
+
+#[cfg(test)]
 mod reader_tests {
     use super::*;
 
@@ -2040,6 +2119,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("move.sqlite");
         let connection = open_writer(&path).unwrap();
+        restore_github_v84_schema(&connection);
         connection.execute_batch("DROP TABLE retained_move_sources; DELETE FROM schema_migrations WHERE version>=64; UPDATE schema_compatibility SET minimum_compatible_version=63 WHERE singleton=1; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version=63;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
@@ -2204,6 +2284,101 @@ mod reader_tests {
     }
 
     #[test]
+    fn github_timeline_migration_resets_progress_and_keeps_watches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("github-migration.sqlite3");
+        drop(open_writer(&path).unwrap());
+        stamp_schema_version(&path, 84);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "INSERT INTO github_watch_cursors(owner,repo,items_watermark_at,items_watermark_id,items_etag,comments_cursor)
+                 VALUES ('acme','repo','2020-01-01T00:00:00Z',1,'etag','2020-01-01T00:00:00Z');
+             INSERT INTO github_watch_items(owner,repo,number,creator_session_id,kind,title,url,created_at,pull_request_etag,pull_request_state)
+                 VALUES ('acme','repo',42,'creator','pull_request','keep title','https://example.com/42','2020-01-01T00:00:00Z','etag','closed');
+             INSERT INTO github_watch_classifications(owner,repo,number,session_id,kind,title,url,created_at,interested,created)
+                 VALUES ('acme','repo',42,'creator','pull_request','keep title','https://example.com/42','2020-01-01T00:00:00Z',1,1);"
+        ).unwrap();
+        drop(connection);
+        let before = Utc::now().timestamp_millis();
+        let writer = open_writer(&path).unwrap();
+        let (cursor, start): (String, String) = writer
+            .query_row(
+                "SELECT updated_at, watch_started_at FROM github_watch_cursors",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cursor, start);
+        assert_eq!(
+            writer
+                .query_row(
+                    "SELECT reconciled_through FROM github_watch_cursors",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            start
+        );
+        assert_eq!(
+            writer
+                .query_row(
+                    "SELECT last_reconciled_at_ms FROM github_watch_cursors",
+                    [],
+                    |row| row.get::<_, Option<i64>>(0)
+                )
+                .unwrap(),
+            None
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&cursor)
+                .unwrap()
+                .timestamp_millis()
+                >= before
+        );
+        let (title, creator, timeline, processed, id): (String, String, String, String, i64) = writer.query_row(
+            "SELECT title,creator_session_id,timeline_at,processed_at,timeline_id FROM github_watch_items", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).unwrap();
+        assert_eq!(
+            (title.as_str(), creator.as_str()),
+            ("keep title", "creator")
+        );
+        let (comments_at, comments_id): (String, i64) = writer
+            .query_row(
+                "SELECT review_comments_at, review_comments_id FROM github_watch_items",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(comments_at, start);
+        assert_eq!(comments_id, 0);
+        assert_eq!(
+            writer
+                .query_row(
+                    "SELECT count(*) FROM github_watch_classification_failures",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(timeline, start);
+        assert_eq!(processed, start);
+        assert_eq!(id, 0);
+        assert_eq!(writer.query_row("SELECT count(*) FROM github_watch_classifications WHERE created=1 AND interested=1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            writer
+                .query_row("SELECT count(*) FROM github_seen_items", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let state = read_schema_state(&writer).unwrap();
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
+        assert!(state.ensure_supported_by(84).is_err());
+    }
+
+    #[test]
     fn recent_revisions_upgrade_directly_and_preserve_user_data() {
         // Revision 47 was current on 2026-09-23. Keep the exhaustive
         // interruption matrix focused on the last week's migration history.
@@ -2310,6 +2485,7 @@ mod reader_tests {
                 [],
             )
             .unwrap();
+        restore_github_v84_schema(&connection);
         // Restore the previous table definition and migration ledger, retaining
         // a real row so the forward migration proves it copies existing data.
         connection
@@ -2425,10 +2601,6 @@ mod reader_tests {
         );
     }
 
-    /// The oldest executable revision that can still read and write a store at
-    /// `SCHEMA_VERSION`. Migration 84 adds persisted notification-driven parent waits.
-    const MINIMUM_COMPATIBLE_VERSION: i64 = 84;
-
     /// Rewrites a store's recorded schema version the way another build's
     /// migration ladder would, and forgets that this process verified it.
     fn stamp_schema_version(path: &Path, version: i64) {
@@ -2437,13 +2609,16 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
-        if version < 85 {
+        if version < 86 {
             connection
                 .execute_batch("DROP TABLE IF EXISTS mailbox_reset_frontiers;")
                 .unwrap();
         }
         if version < 67 {
             connection.execute_batch("DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET;").unwrap();
+        }
+        if version < 85 {
+            restore_github_v84_schema(&connection);
         }
         // Historical fixtures must remove columns introduced by later revisions.
         if version < 84
@@ -2474,6 +2649,9 @@ mod reader_tests {
                 [version],
             )
             .unwrap();
+        if version >= COMPATIBILITY_METADATA_VERSION {
+            connection.execute("UPDATE schema_compatibility SET minimum_compatible_version=min(minimum_compatible_version, ?1)", [version]).unwrap();
+        }
         if version == 30 {
             connection
                 .execute(
@@ -2500,6 +2678,7 @@ mod reader_tests {
             save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
         }
         let connection = Connection::open(&path).unwrap();
+        restore_github_v84_schema(&connection);
         connection
             .execute_batch(
                 "UPDATE sessions SET mjolnir_subagents = 1 WHERE session_id = 'all';
@@ -2544,6 +2723,7 @@ mod reader_tests {
         let record = super::super::tests::session("steered-session", "project");
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
+        restore_github_v84_schema(&connection);
         connection
             .execute_batch(
                 "DELETE FROM schema_migrations WHERE version >= 48;
@@ -2575,6 +2755,7 @@ mod reader_tests {
         let record = super::super::tests::session("preserved-session", "project");
         save_session_to(&path, &record).unwrap();
         let connection = Connection::open(&path).unwrap();
+        restore_github_v84_schema(&connection);
         connection
             .execute_batch(
                 "ALTER TABLE sessions DROP COLUMN target_runtime_json;
@@ -2605,6 +2786,7 @@ mod reader_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let connection = open_writer(&path).unwrap();
+        restore_github_v84_schema(&connection);
         connection
             .execute_batch(
                 "BEGIN IMMEDIATE;
@@ -2686,7 +2868,7 @@ mod reader_tests {
         let path = directory.path().join("mj.sqlite3");
         let record = super::super::tests::session("mailbox-upgrade", "project");
         save_session_to(&path, &record).unwrap();
-        stamp_schema_version(&path, 84);
+        stamp_schema_version(&path, 85);
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
@@ -2698,7 +2880,7 @@ mod reader_tests {
         let connection = open_writer(&path).unwrap();
         read_schema_state(&connection)
             .unwrap()
-            .ensure_supported_by(84)
+            .ensure_supported_by(MINIMUM_COMPATIBLE_VERSION)
             .unwrap();
         let frontier: u64 = connection
             .query_row(

@@ -6,7 +6,7 @@
 # Files whose old or new content contains a macOS cfg gate
 # (`target_os = "macos"`, `target_vendor = "apple"`, or
 # `not(target_os = "linux")`) are matched automatically by
-# scripts/macos-ci-paths.sh. So list here the paths whose
+# scripts/ci-platform-paths.sh. So list here the paths whose
 # macOS behavior that scan cannot see: modules that wrap macOS behavior
 # without naming it, dependencies, and build and CI inputs.
 #
@@ -14,14 +14,14 @@
 # same change.
 #
 # Everything else is covered by the nightly run in
-# .github/workflows/macos-nightly.yml. Blank lines and `#` lines are ignored.
+# .github/workflows/nightly.yml. Blank lines and `#` lines are ignored.
 
 # CI definitions for the macOS lane and for this filter.
 .github/workflows/*
 .github/actions/*
 .github/macos-ci-paths.txt
-scripts/macos-ci-paths.sh
-scripts/test-macos-ci-paths.sh
+scripts/ci-platform-paths.sh
+scripts/test-ci-platform-paths.sh
 tests/e2e/macos_launch.py
 
 # Toolchain, dependencies, lint config, and build scripts.

@@ -1,0 +1,44 @@
+# The one maintained list of Windows-sensitive paths for CI.
+#
+# Any changed path that matches a pattern below starts the Windows lane
+# immediately in .github/workflows/ci.yml.
+#
+# Files whose old or new content contains a Windows cfg gate (`windows` in a
+# `cfg`, `cfg!`, or `cfg_attr` predicate, `target_os = "windows"`,
+# `target_family = "windows"`, `target_env = "msvc"`, or `not(unix)`) are
+# matched automatically by scripts/ci-platform-paths.sh. So list here the
+# paths whose Windows behavior that scan cannot see: modules that wrap Windows
+# behavior without naming it, dependencies, and build and CI inputs.
+#
+# When you add a new Windows-specific module or wrapper, add its path in the
+# same change.
+#
+# Everything else is covered by the nightly run in
+# .github/workflows/nightly.yml. Blank lines and `#` lines are ignored.
+
+# CI definitions for the Windows lane and for this filter.
+.github/workflows/*
+.github/actions/*
+.github/windows-ci-paths.txt
+scripts/ci-platform-paths.sh
+scripts/test-ci-platform-paths.sh
+
+# Toolchain, dependencies, lint config, and build scripts.
+Cargo.toml
+*/Cargo.toml
+Cargo.lock
+rust-toolchain*
+.cargo/*
+clippy.toml
+build.rs
+*/build.rs
+
+# Native desktop app, built on WebView2 on Windows.
+mj-desktop/*
+
+# PowerShell installer and its test.
+install.ps1
+scripts/install-ps1.test.mjs
+
+# ConPTY dashboard smoke.
+mj-cli/tests/terminal_windows.rs

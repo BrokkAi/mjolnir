@@ -562,12 +562,14 @@ impl ReviewerRole {
             .lock()
             .expect("untracked-at-start lock poisoned")
             .clone();
+        let session_id = self.placement.session_id.clone();
         let repositories = tokio::task::spawn_blocking(move || {
             crate::review::capture::capture_repository_deltas(
                 &mj_checkpoint::archive::SystemGit,
                 &repositories,
                 &baselines,
                 &untracked_at_start,
+                &session_id,
             )
         })
         .await

@@ -1828,14 +1828,15 @@ mod git;
 
 pub(crate) use git::ensure_no_symlink_ancestors;
 pub use git::{
-    CaptureBase, EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner,
-    GitHistoryMode, GitOutput, GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV,
-    NON_INTERACTIVE_GIT_SSH_COMMAND, PushBranchError, PushedBranch, REVIEW_BASELINE_REF,
-    SessionDiff, SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
+    EXPORT_REFUSED_EXIT_CODE, GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode,
+    GitOutput, GitSnapshotProgress, NON_INTERACTIVE_GIT_ENV, NON_INTERACTIVE_GIT_SSH_COMMAND,
+    PushBranchError, PushedBranch, REVIEW_BASELINE_REF, ReviewPoint, SessionDiff,
+    SessionExportError, SystemGit, capture_paths, capture_worktree_tree,
     collect_git_metadata_snapshot, collect_git_snapshot, collect_git_snapshot_with_progress,
-    diff_between_trees, empty_tree_id, has_origin_refs, numstat_between_trees, pin_review_tree,
-    push_branch, remote_workspace_base, restore_git_snapshot, session_diff, session_diff_details,
-    validate_symlink_target,
+    diff_between_trees, empty_tree_id, has_origin_refs, merge_trees, numstat_between_trees,
+    pin_review_tree, push_branch, read_review_point, record_review_point, remote_workspace_base,
+    remove_departed_worktree_pins, restore_git_snapshot, review_baseline_ref, session_diff,
+    session_diff_details, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};

@@ -1,25 +1,40 @@
 #!/usr/bin/env bash
-# Keep one stable tracking issue in sync with the nightly macOS lane result.
-# Inputs (env): MACOS_RESULT (success, failure, cancelled, or skipped),
-# GITHUB_REPOSITORY, GITHUB_SERVER_URL, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT,
-# GITHUB_SHA. Every GitHub call goes through `gh api`, JSON through `jq`.
+# Keep one stable tracking issue per platform lane in sync with that lane's
+# nightly result.
+# Inputs (env): CI_LANE (macos or windows), LANE_RESULT (success, failure,
+# cancelled, or skipped), GITHUB_REPOSITORY, GITHUB_SERVER_URL, GITHUB_RUN_ID,
+# GITHUB_RUN_ATTEMPT, GITHUB_SHA. Every GitHub call goes through `gh api`, JSON
+# through `jq`.
 set -euo pipefail
 
-: "${MACOS_RESULT:?MACOS_RESULT must be set}"
+: "${CI_LANE:?CI_LANE must be set}"
+: "${LANE_RESULT:?LANE_RESULT must be set}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 : "${GITHUB_SERVER_URL:?GITHUB_SERVER_URL must be set}"
 : "${GITHUB_RUN_ID:?GITHUB_RUN_ID must be set}"
 : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT must be set}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 
-title='Nightly macOS CI is failing'
-marker='<!-- mjolnir-macos-nightly-tracking -->'
+# Both lanes run in one nightly workflow. Each lane's jobs are named
+# "<caller job name> / <job name>", so the prefix keeps one lane's issue from
+# reporting the other lane's failures.
+case "$CI_LANE" in
+    macos) lane_name=macOS ;;
+    windows) lane_name=Windows ;;
+    *)
+        printf 'unknown CI_LANE %s; expected macos or windows\n' "$CI_LANE" >&2
+        exit 2
+        ;;
+esac
+title="Nightly $lane_name CI is failing"
+marker="<!-- mjolnir-$CI_LANE-nightly-tracking -->"
+job_prefix="$lane_name / "
 api_root="repos/$GITHUB_REPOSITORY"
 
 # Only a pass or a failure changes the tracking issue; a cancelled or skipped
 # lane tells us nothing about the code.
-if [[ "$MACOS_RESULT" != success && "$MACOS_RESULT" != failure ]]; then
-    printf "macOS lane result is '%s'; leaving the tracking issue unchanged.\n" "$MACOS_RESULT"
+if [[ "$LANE_RESULT" != success && "$LANE_RESULT" != failure ]]; then
+    printf "%s lane result is '%s'; leaving the tracking issue unchanged.\n" "$lane_name" "$LANE_RESULT"
     exit 0
 fi
 
@@ -50,15 +65,16 @@ run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 commit_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
 
 failing_job_field=''
-if [[ "$MACOS_RESULT" == failure ]]; then
+if [[ "$LANE_RESULT" == failure ]]; then
     jobs="$(gh api "$api_root/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100")"
     failing_job_field="$(
-        printf '%s' "$jobs" | jq -r '
+        printf '%s' "$jobs" | jq -r --arg prefix "$job_prefix" '
             def bullet(job):
                 "[\(job.name)](\(job.html_url))"
                 + ([(job.steps // [])[] | select(.conclusion == "failure") | .name] as $steps
                     | if ($steps | length) > 0 then " (failed step: \($steps | join(", ")))" else "" end);
-            [.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out")] as $failed
+            [.jobs[] | select(.name | startswith($prefix))
+                | select(.conclusion == "failure" or .conclusion == "timed_out")] as $failed
             | if ($failed | length) == 0 then
                 "- Failing job: no failed job was reported; see the run"
             elif ($failed | length) == 1 then
@@ -71,7 +87,7 @@ if [[ "$MACOS_RESULT" == failure ]]; then
 fi
 
 result_word=failed
-if [[ "$MACOS_RESULT" == success ]]; then
+if [[ "$LANE_RESULT" == success ]]; then
     result_word=passed
 fi
 details="$(
@@ -84,13 +100,13 @@ details="$(
     printf -- '- Time: %s\n' "$timestamp"
 )"
 
-if [[ "$MACOS_RESULT" == failure ]]; then
+if [[ "$LANE_RESULT" == failure ]]; then
     if [[ -z "$issue_number" ]]; then
         body="$(
             cat <<EOF
 $marker
 
-The scheduled macOS lane in \`.github/workflows/macos-nightly.yml\` failed on the default branch.
+The scheduled $lane_name lane in \`.github/workflows/nightly.yml\` failed on the default branch.
 This issue stays open until a nightly run passes; the workflow closes it then, and later failures reopen it.
 
 Latest failure:
@@ -103,16 +119,16 @@ EOF
     elif [[ "$issue_state" == closed ]]; then
         gh api -X PATCH "$api_root/issues/$issue_number" -f state=open >/dev/null
         gh api -X POST "$api_root/issues/$issue_number/comments" \
-            -f body="$(printf 'The nightly macOS lane failed again.\n\n%s\n' "$details")" >/dev/null
+            -f body="$(printf 'The nightly %s lane failed again.\n\n%s\n' "$lane_name" "$details")" >/dev/null
         printf 'Reopened #%s\n' "$issue_number"
     else
         gh api -X POST "$api_root/issues/$issue_number/comments" \
-            -f body="$(printf 'The nightly macOS lane is still failing.\n\n%s\n' "$details")" >/dev/null
+            -f body="$(printf 'The nightly %s lane is still failing.\n\n%s\n' "$lane_name" "$details")" >/dev/null
         printf 'Commented on #%s\n' "$issue_number"
     fi
 elif [[ -n "$issue_number" && "$issue_state" == open ]]; then
     gh api -X POST "$api_root/issues/$issue_number/comments" \
-        -f body="$(printf 'The nightly macOS lane passed. Closing.\n\n%s\n' "$details")" >/dev/null
+        -f body="$(printf 'The nightly %s lane passed. Closing.\n\n%s\n' "$lane_name" "$details")" >/dev/null
     gh api -X PATCH "$api_root/issues/$issue_number" -f state=closed -f state_reason=completed >/dev/null
     printf 'Closed #%s\n' "$issue_number"
 else

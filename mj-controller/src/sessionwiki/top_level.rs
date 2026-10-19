@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use sessionwiki::adapters::{Adapter, Discovered};
+use sessionwiki::adapters::{Adapter, Discovered, Store};
 use sessionwiki::model::Session;
 
 use mj_core::config::HarnessKind;
@@ -109,12 +109,20 @@ pub(super) fn is_child(
     }
     if let Some(kind @ (HarnessKind::Codex | HarnessKind::Claude)) = harness_for_tool(&row.tool) {
         let path = Path::new(&row.path);
-        let needs_native_classification = kind == HarnessKind::Claude
+        if kind == HarnessKind::Claude
             && path
                 .components()
                 .any(|component| component.as_os_str() == "subagents")
-            || sessionwiki::index::native_id_of(&row.path).is_some();
-        if !needs_native_classification {
+        {
+            return Ok(true);
+        }
+        // Store keys and retained transcripts need not name a file. Their
+        // indexed kind and ownership above remain the classification signals.
+        if sessionwiki::index::native_id_of(&row.path).is_none()
+            || !path
+                .try_exists()
+                .with_context(|| format!("check indexed source {}", path.display()))?
+        {
             return Ok(false);
         }
         return native_is_child(kind, Path::new(&row.path), cache)
@@ -145,6 +153,14 @@ impl Adapter for PreparedFiles {
 
     fn parse(&self, path: &Path) -> Result<Session> {
         self.adapter.parse(path)
+    }
+
+    fn store(&self) -> Option<Store> {
+        self.adapter.store()
+    }
+
+    fn parse_key(&self, key: &str) -> Result<Session> {
+        self.adapter.parse_key(key)
     }
 }
 
@@ -271,25 +287,217 @@ mod tests {
         std::fs::write(path, text).unwrap();
     }
 
+    /// `relative` under `root` with this platform's separators, the spelling
+    /// discovery produces and the index stores as text.
+    fn under(root: &Path, relative: &str) -> PathBuf {
+        relative
+            .split('/')
+            .fold(root.to_path_buf(), |path, part| path.join(part))
+    }
+
+    // Hard-won: 92ae7603: Mjolnir read compressed Codex rollout headers as plain text.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "#1295: SessionWiki reads Windows session paths inconsistently"
-    )]
+    fn compressed_codex_rollouts_index_parents_and_exclude_children() {
+        let _held = testing::lock();
+        let (_index, mut connection) = testing::isolated_index();
+        let home = tempfile::tempdir().unwrap();
+        let parent_id = "019a0000-0000-7000-8000-000000000001";
+        let child_id = "019a0000-0000-7000-8000-000000000002";
+        let parent = home
+            .path()
+            .join("sessions")
+            .join(format!("rollout-{parent_id}.jsonl.zst"));
+        let child = home
+            .path()
+            .join("archived_sessions")
+            .join(format!("rollout-{child_id}.jsonl.zst"));
+        for (path, id, source) in [
+            (&parent, parent_id, serde_json::json!("cli")),
+            (
+                &child,
+                child_id,
+                serde_json::json!({"subagent": {"parent_thread_id": parent_id}}),
+            ),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let text = format!(
+                "{}\n{}\n",
+                serde_json::json!({"type":"session_meta", "payload":{"id":id,"source":source}}),
+                serde_json::json!({"type":"event_msg", "payload":{"type":"user_message","message":"compressed quokka"}})
+            );
+            std::fs::write(
+                path,
+                ruzstd::encoding::compress_to_vec(
+                    text.as_bytes(),
+                    ruzstd::encoding::CompressionLevel::Fastest,
+                ),
+            )
+            .unwrap();
+        }
+        let cache = NativeScanCache::new();
+        let (adapters, excluded) = prepare(
+            vec![
+                Box::new(sessionwiki::adapters::Codex::in_home(home.path())),
+                Box::new(sessionwiki::adapters::Codex::archived_in(home.path())),
+            ],
+            &cache,
+        );
+        assert!(adapters.iter().all(|adapter| !adapter.discover().had_error));
+        assert_eq!(
+            excluded,
+            BTreeSet::from([child.to_string_lossy().into_owned()])
+        );
+        sessionwiki::index::sync_with(&mut connection, &adapters, None).unwrap();
+        let ownership = Snapshot::default();
+        prune(&mut connection, &excluded, &ownership).unwrap();
+        let rows = super::super::query_rows_from(
+            &connection,
+            "",
+            10,
+            &BTreeSet::new(),
+            false,
+            &ownership,
+            &cache,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].native_id.as_deref(), Some(parent_id));
+    }
+
+    // Hard-won: 92ae7603: the native filter dropped the history adapter's store methods.
+    #[test]
+    fn codex_history_survives_preparation_and_prunes_native_and_owned_children() {
+        let _held = testing::lock();
+        let (_index, mut connection) = testing::isolated_index();
+        let home = tempfile::tempdir().unwrap();
+        let history_path = home.path().join("thread_history_1.sqlite");
+        let history = rusqlite::Connection::open(&history_path).unwrap();
+        history
+            .execute_batch(
+                "CREATE TABLE thread_items(thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+            item_id TEXT NOT NULL, rollout_ordinal INTEGER NOT NULL,
+            created_at_ms INTEGER NOT NULL, item_json TEXT NOT NULL,
+            item_type TEXT NOT NULL DEFAULT '', updated_at_ordinal INTEGER NOT NULL DEFAULT 0,
+            started_at_ms INTEGER, completed_at_ms INTEGER,
+            PRIMARY KEY (thread_id, turn_id, item_id));",
+            )
+            .unwrap();
+        let registry = rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        registry
+            .execute_batch(
+                "CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL,
+            cwd TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL,
+            thread_source TEXT, history_mode TEXT NOT NULL DEFAULT 'paginated');",
+            )
+            .unwrap();
+        let parent = "019a0000-0000-7000-8000-000000000001";
+        let native_child = "019a0000-0000-7000-8000-000000000002";
+        let owned_child = "019a0000-0000-7000-8000-000000000003";
+        for (id, source) in [
+            (parent, "cli"),
+            (native_child, "subagent"),
+            (owned_child, "cli"),
+        ] {
+            registry
+                .execute(
+                    "INSERT INTO threads(id, rollout_path, cwd, title, source, thread_source)
+                VALUES (?1, '', '/repo', 'registry title', 'cli', ?2)",
+                    rusqlite::params![id, source],
+                )
+                .unwrap();
+            let item = serde_json::json!({"type":"userMessage", "id":"u", "content":[{"type":"text", "text":"history quokka"}]}).to_string();
+            history.execute("INSERT INTO thread_items(thread_id, turn_id, item_id, rollout_ordinal, created_at_ms, item_json)
+                VALUES (?1, 't1', 'i1', 0, 1790000000000, ?2)", rusqlite::params![id, item]).unwrap();
+        }
+        let ownership = Snapshot {
+            child_native_ids: BTreeSet::from([owned_child.to_owned()]),
+            ..Snapshot::default()
+        };
+        let cache = NativeScanCache::new();
+        for pass in 0..2 {
+            let (adapters, excluded) = prepare(
+                vec![Box::new(sessionwiki::adapters::CodexHistory::in_home(
+                    home.path(),
+                ))],
+                &cache,
+            );
+            assert!(adapters[0].discover().files.is_empty());
+            sessionwiki::index::sync_with(&mut connection, &adapters, None).unwrap();
+            assert_eq!(
+                prune(&mut connection, &excluded, &ownership).unwrap(),
+                2,
+                "pass {pass}"
+            );
+            let rows = super::super::query_rows_from(
+                &connection,
+                "",
+                10,
+                &BTreeSet::new(),
+                false,
+                &ownership,
+                &cache,
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 1, "pass {pass}");
+            assert_eq!(rows[0].native_id.as_deref(), Some(parent));
+            assert!(!rows[0].archived, "pass {pass}");
+            let path: String = connection
+                .query_row("SELECT path FROM files", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(path, format!("{}\u{1f}{parent}", history_path.display()));
+        }
+    }
+
+    // Hard-won: 92ae7603: a history key or moved rollout made every listing fail.
+    #[test]
+    fn missing_sources_use_indexed_kind_and_keep_claude_subagent_paths_hidden() {
+        let _held = testing::lock();
+        let (_index, connection) = testing::isolated_index();
+        let home = tempfile::tempdir().unwrap();
+        testing::index_row(&connection, "missing", "codex");
+        let path = home
+            .path()
+            .join("019a0000-0000-7000-8000-000000000001.jsonl");
+        connection
+            .execute("UPDATE files SET path = ?1", [path.to_string_lossy()])
+            .unwrap();
+        let mut row = sessionwiki::index::recent(&connection, 1, None, None, None, true)
+            .unwrap()
+            .remove(0);
+        let ownership = Snapshot::default();
+        let cache = NativeScanCache::new();
+        assert!(!is_child(&row, &ownership, &cache).unwrap());
+        row.kind = "sub".to_owned();
+        assert!(is_child(&row, &ownership, &cache).unwrap());
+        row.kind = "main".to_owned();
+        row.tool = "claude-code".to_owned();
+        row.path = home
+            .path()
+            .join("subagents")
+            .join("missing.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        assert!(is_child(&row, &ownership, &cache).unwrap());
+    }
+
+    #[test]
     fn native_discovery_indexes_parents_and_never_hands_children_to_the_parser() {
         let _held = testing::lock();
         let (_index, mut connection) = testing::isolated_index();
         let home = tempfile::tempdir().unwrap();
         let codex = home.path().join("codex");
         let claude = home.path().join("claude");
-        let parent = codex.join("sessions/rollout-parent.jsonl");
-        let legacy = codex.join("sessions/rollout-legacy.jsonl");
-        let exec_parent = codex.join("sessions/rollout-exec.jsonl");
-        let child = codex.join("sessions/rollout-child.jsonl");
-        let native_parent = claude.join("projects/project/parent.jsonl");
-        let sdk_parent = claude.join("projects/project/sdk-parent.jsonl");
-        let sidechain = claude.join("projects/project/sidechain.jsonl");
-        let nested = claude.join("projects/project/parent/subagents/agent-child.jsonl");
+        let parent = under(&codex, "sessions/rollout-parent.jsonl");
+        let legacy = under(&codex, "sessions/rollout-legacy.jsonl");
+        let exec_parent = under(&codex, "sessions/rollout-exec.jsonl");
+        let child = under(&codex, "sessions/rollout-child.jsonl");
+        let native_parent = under(&claude, "projects/project/parent.jsonl");
+        let sdk_parent = under(&claude, "projects/project/sdk-parent.jsonl");
+        let sidechain = under(&claude, "projects/project/sidechain.jsonl");
+        let nested = under(
+            &claude,
+            "projects/project/parent/subagents/agent-child.jsonl",
+        );
         let message = "\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"quokka transcript\"}}\n";
         write(
             &parent,

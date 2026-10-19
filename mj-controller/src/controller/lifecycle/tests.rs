@@ -1690,10 +1690,6 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
     if !in_isolated_store("destroying_an_ssh_bare_session_releases_each_repository_on_its_host") {
         return;

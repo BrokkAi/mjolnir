@@ -120,10 +120,6 @@ impl CommandExecutor for UnusedExecutor {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn remote_completion_preserves_home_shorthand_and_trailing_separator() {
     let controller = completion_controller(
         "remote",
@@ -175,10 +171,6 @@ fn bare_ssh_target_completes_over_ssh() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn golden_path_completion() {
     let mut output = String::new();
     let directory = tempfile::tempdir().unwrap();
@@ -202,9 +194,12 @@ fn golden_path_completion() {
                 &UnusedExecutor,
             )
             .unwrap();
+        // The root as it appears inside a JSON string, where a Windows `\` is
+        // escaped.
+        let escaped_root = serde_json::to_string(&root).unwrap();
         let response = serde_json::to_string_pretty(&completion)
             .unwrap()
-            .replace(&root, "/fixture");
+            .replace(escaped_root.trim_matches('"'), "/fixture");
         output.push_str(&format!(
             "=== POST /api/paths/complete: {label} (JSON) ===\n{response}\n\n"
         ));
@@ -442,10 +437,6 @@ fn bundle_creation_combines_sources_with_first_primary_and_stable_collisions() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1298: a local repository path has no single canonical form"
-)]
 fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("app");
@@ -482,10 +473,6 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1298: a local repository path has no single canonical form"
-)]
 fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     let checkout = super::test_support::committed_repository();
     let worktree_parent = tempfile::tempdir().unwrap();

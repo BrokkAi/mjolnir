@@ -413,6 +413,22 @@ silently. If either key is `false`, the watcher stays off. Saving writes only
 `mj new --no-github-events` prevents the GitHub watcher from registering the session
 as a delivery target. Sub-agents inherit the flag. This is the flag's only effect.
 
+The watcher records updated issues and pull requests before processing them.
+At most once an hour, it rereads recorded activity that is at least an hour
+old. Saved progress preserves unfinished ranges across pauses and failed
+requests. An item can still be missed if page movement affects both reads.
+The watcher also overlaps processing times by 30 seconds to allow for response
+timing and clock differences. Repeated event IDs deliver only once.
+Jev classifies new items only for sessions that were already running when the
+item was created. When Jev identifies a session as the creator, that session
+receives new comments, reviews and pull request lifecycle events from the item's
+timeline. Pull request line comments are read separately and saved with the
+timeline events. Each source keeps its own cursor, and both are saved in one
+item transaction. A failed item does not block delivery for other items. Failed
+classifications retry with a delay that grows from one minute to one hour; new
+work is classified before retries. Notices always include the repository name. Comments and reviews
+written by the token owner during that session's turn do not wake it.
+
 ## Automatic continuation `[continuation]`
 
 ```toml
