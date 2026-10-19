@@ -645,6 +645,16 @@ fn managed_git_stdout(
     command_stdout(executor.execute(&command)?, purpose)
 }
 
+/// An absolute path Git printed on `target`: canonical on this machine, so it
+/// compares equal to every other local repository path, and kept as POSIX
+/// text on a remote one.
+fn git_output_path(target: &ManagedWorktreeTarget, path: PathBuf) -> Result<PathBuf> {
+    match target {
+        ManagedWorktreeTarget::Local => mj_core::local_git::canonical_git_output_path(&path),
+        ManagedWorktreeTarget::Ssh { .. } => Ok(path),
+    }
+}
+
 /// Resolve a checkout's stable repository root, collapsing linked worktrees
 /// onto the main worktree when Git exposes the shared `.git` directory.
 fn resolve_git_root(
@@ -720,12 +730,13 @@ fn resolve_git_root(
             "resolve project Git common directory",
         )?,
     )?;
-    if common.file_name() == Some(std::ffi::OsStr::new(".git"))
-        && let Some(main_root) = common.parent()
-    {
-        return Ok(Some(main_root.to_path_buf()));
-    }
-    Ok(Some(root))
+    let repository = match common.parent() {
+        Some(main_root) if common.file_name() == Some(std::ffi::OsStr::new(".git")) => {
+            main_root.to_path_buf()
+        }
+        _ => root,
+    };
+    git_output_path(target, repository).map(Some)
 }
 
 /// Inspect a local launch directory using the same Git error handling and
@@ -1517,13 +1528,16 @@ fn inspect_raw_project(
     target: &ManagedWorktreeTarget,
     selected: &Path,
 ) -> Result<RawProjectInspection> {
-    let repository = PathBuf::from(managed_git_stdout(
-        executor,
+    let repository = git_output_path(
         target,
-        selected,
-        ["rev-parse", "--show-toplevel"],
-        "resolve raw project repository root",
-    )?);
+        PathBuf::from(managed_git_stdout(
+            executor,
+            target,
+            selected,
+            ["rev-parse", "--show-toplevel"],
+            "resolve raw project repository root",
+        )?),
+    )?;
     let prefix = managed_git_stdout(
         executor,
         target,
@@ -1531,23 +1545,31 @@ fn inspect_raw_project(
         ["rev-parse", "--show-prefix"],
         "resolve raw project relative directory",
     )?;
-    let git_dir = PathBuf::from(managed_git_stdout(
-        executor,
+    let git_dir = git_output_path(
         target,
-        selected,
-        ["rev-parse", "--absolute-git-dir"],
-        "resolve raw project Git directory",
-    )?);
-    // Git prints `--absolute-git-dir` with symlinks resolved, so resolve the
-    // relative common directory against Git's spelling of `selected` too.
-    let common_git_dir = mj_core::local_git::resolve_git_path(
-        &target_path::join(&repository, Path::new(&prefix)),
-        &managed_git_stdout(
+        PathBuf::from(managed_git_stdout(
             executor,
             target,
             selected,
-            ["rev-parse", "--git-common-dir"],
-            "resolve raw project common Git directory",
+            ["rev-parse", "--absolute-git-dir"],
+            "resolve raw project Git directory",
+        )?),
+    )?;
+    // Git prints `--absolute-git-dir` with symlinks resolved, so resolve the
+    // relative common directory against Git's spelling of `selected` too. A
+    // linked worktree's common directory is printed absolute, in Git's
+    // spelling, so it is made canonical like `git_dir`.
+    let common_git_dir = git_output_path(
+        target,
+        mj_core::local_git::resolve_git_path(
+            &target_path::join(&repository, Path::new(&prefix)),
+            &managed_git_stdout(
+                executor,
+                target,
+                selected,
+                ["rev-parse", "--git-common-dir"],
+                "resolve raw project common Git directory",
+            )?,
         )?,
     )?;
     let branch_command = managed_git_command(

@@ -437,10 +437,6 @@ fn bundle_creation_combines_sources_with_first_primary_and_stable_collisions() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1298: a local repository path has no single canonical form"
-)]
 fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("app");
@@ -477,10 +473,6 @@ fn bundle_creation_combines_local_and_github_sources_and_rejects_local_aliases()
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1298: a local repository path has no single canonical form"
-)]
 fn selecting_a_linked_checkout_reuses_identity_and_retains_its_push_settings() {
     let checkout = super::test_support::committed_repository();
     let worktree_parent = tempfile::tempdir().unwrap();

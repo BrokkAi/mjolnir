@@ -75,19 +75,19 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // create the missing cache and advance the compatibility floor.
     // Hard-won: 803c9fe1: rewound upgrade fixtures retained the later mailbox failure column.
     // Hard-won: #1302: the old-store fixture must also remove the notification epoch.
-    // Hard-won: 5f5e74082: migration 75 skipped the retained current-shape GitHub watch tables, so migration 85 failed.
+    // Hard-won: 5f5e74082: kept current GitHub watch tables, so migration 85 found no v84 columns to drop.
     connection
         .execute_batch(
-            "DROP TABLE github_watch_classification_failures;
-         DROP TABLE github_seen_items;
-         DROP TABLE github_watch_items;
-         DROP TABLE github_watch_classifications;
-         DROP TABLE github_watch_cursors;
-         ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
+            "ALTER TABLE subagent_sessions DROP COLUMN notification_epoch;
          ALTER TABLE mailbox_outbox DROP COLUMN failure;
          DROP TABLE quota_reset_cache;
          DROP TABLE subagent_accounting;
          DROP TABLE session_turn_selections;
+         DROP TABLE github_watch_classification_failures;
+         DROP TABLE github_seen_items;
+         DROP TABLE github_watch_items;
+         DROP TABLE github_watch_classifications;
+         DROP TABLE github_watch_cursors;
          PRAGMA writable_schema=ON;
          UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '')
              WHERE type='table' AND name='sessions';
