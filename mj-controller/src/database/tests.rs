@@ -265,10 +265,6 @@ fn compatible_migration_preserves_new_data_through_existing_session_writes() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn writer_refuses_rollback_after_observing_a_compatible_migration() {
     for reopen in [false, true] {
         let directory = tempfile::tempdir().unwrap();
@@ -284,7 +280,7 @@ fn writer_refuses_rollback_after_observing_a_compatible_migration() {
             .execute("observe compatible revision", |connection| {
                 connection.execute(
                     "INSERT INTO mount_history(host, source, ordinal) VALUES ('test', ?1, 0)",
-                    [b"/first".as_slice()],
+                    [super::values::path_to_blob(Path::new("/first"))],
                 )?;
                 Ok(())
             })
@@ -1179,10 +1175,6 @@ fn mount_read_only_round_trips_through_both_writers() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn read_write_mounts_survive_an_older_writer_rewriting_session_mounts() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
@@ -1207,15 +1199,28 @@ fn read_write_mounts_survive_an_older_writer_rewriting_session_mounts() {
     // read-only.
     let connection = open(&database).unwrap();
     connection
-        .execute_batch(
-            "DELETE FROM session_mounts WHERE session_id = 'session-1';
-             INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
-                 VALUES ('session-1', 0, CAST('/host/build-cache' AS BLOB),
-                         CAST('/mnt/build-cache' AS BLOB), 0),
-                        ('session-1', 1, CAST('/host/scratch' AS BLOB),
-                         CAST('/mnt/scratch' AS BLOB), 1);",
+        .execute(
+            "DELETE FROM session_mounts WHERE session_id = 'session-1'",
+            [],
         )
         .unwrap();
+    for (ordinal, mount, read_only) in [
+        (0, &record.additional_mounts[0], 0),
+        (1, &record.additional_mounts[1], 1),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO session_mounts(session_id, ordinal, source, destination, read_only)
+                 VALUES ('session-1', ?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    ordinal,
+                    super::values::path_to_blob(&mount.source),
+                    super::values::path_to_blob(&mount.destination),
+                    read_only
+                ],
+            )
+            .unwrap();
+    }
     drop(connection);
 
     let loaded = &load_state_from(&database).unwrap().sessions["session-1"].additional_mounts;

@@ -60,12 +60,12 @@ pub const REVIEWER_PROFILE_DIR: &str = "profile";
 /// one another so staging cannot replace a source another role is copying.
 #[must_use]
 pub fn reviewer_staging_profile_home(worker_root: &Path, generation: u64) -> PathBuf {
-    let root = worker_root.join(REVIEWER_DIR);
-    if generation == 0 {
-        root.join(REVIEWER_PROFILE_DIR)
+    let profile = if generation == 0 {
+        REVIEWER_PROFILE_DIR.to_owned()
     } else {
-        root.join(format!("{REVIEWER_PROFILE_DIR}-{generation}"))
-    }
+        format!("{REVIEWER_PROFILE_DIR}-{generation}")
+    };
+    crate::target_path::join(worker_root, &Path::new(REVIEWER_DIR).join(profile))
 }
 
 /// Who owns the ACP adapter and harness executable selected by a worker.

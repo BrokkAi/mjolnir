@@ -120,10 +120,6 @@ impl CommandExecutor for UnusedExecutor {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn remote_completion_preserves_home_shorthand_and_trailing_separator() {
     let controller = completion_controller(
         "remote",
@@ -175,10 +171,6 @@ fn bare_ssh_target_completes_over_ssh() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1290: a session target path is joined or judged with Windows rules"
-)]
 fn golden_path_completion() {
     let mut output = String::new();
     let directory = tempfile::tempdir().unwrap();
@@ -202,9 +194,12 @@ fn golden_path_completion() {
                 &UnusedExecutor,
             )
             .unwrap();
+        // The root as it appears inside a JSON string, where a Windows `\` is
+        // escaped.
+        let escaped_root = serde_json::to_string(&root).unwrap();
         let response = serde_json::to_string_pretty(&completion)
             .unwrap()
-            .replace(&root, "/fixture");
+            .replace(escaped_root.trim_matches('"'), "/fixture");
         output.push_str(&format!(
             "=== POST /api/paths/complete: {label} (JSON) ===\n{response}\n\n"
         ));

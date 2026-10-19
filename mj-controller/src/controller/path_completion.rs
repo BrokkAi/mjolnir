@@ -87,7 +87,10 @@ fn fold_home(candidate: String, home: Option<&Path>) -> Result<String> {
     let suffix = Path::new(&candidate)
         .strip_prefix(home)
         .context("Completed path is outside the requested home")?;
-    let mut value = Path::new("~").join(suffix).to_string_lossy().into_owned();
+    // `~` is the user's shorthand on any host, so it keeps `/` after it.
+    let mut value = mj_core::target_path::join(Path::new("~"), suffix)
+        .to_string_lossy()
+        .into_owned();
     if candidate.ends_with('/') && !value.ends_with('/') {
         value.push('/');
     }
